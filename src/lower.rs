@@ -83,7 +83,13 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     for item in &src.items {
         match &item.kind {
             ItemKind::Fn(fn_def) => {
-                fns.push(lower_fn(fn_def, source, &fn_table)?);
+                // Functions with parameters cannot be lowered standalone because
+                // their bodies reference parameter names that are only in scope
+                // when inlined at a call site. They are evaluated via the Call
+                // handler in lower_expr instead.
+                if fn_def.params.is_empty() {
+                    fns.push(lower_fn(fn_def, source, &fn_table)?);
+                }
             }
             ItemKind::Struct(_) | ItemKind::Enum(_) => {
                 return Err(LowerError::Unsupported(
