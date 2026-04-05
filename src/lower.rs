@@ -9,15 +9,20 @@
 //! - FLS §6.19: Return expressions — tail expressions lower to `Instr::Ret`.
 //! - FLS §6.2: Literal expressions — `LitInt` lowers to `IrValue::I32`.
 //! - FLS §4.4: Unit type — absent tail / unit type lowers to `IrValue::Unit`.
+//! - FLS §8.1: Let statements — processed into a constant environment.
+//! - FLS §6.3: Path expressions — variable references resolved from env.
 //! - FLS §18.1: Program structure — `lower` produces one `Module` per file.
 //!
-//! # Scope (milestone 1)
+//! # Scope (milestone 3)
 //!
-//! Only the minimum subset needed to lower `fn main() -> i32 { 0 }` is
-//! implemented. Each new milestone will extend this pass by exactly what
-//! that milestone's target program requires.
+//! Extends milestone 2 to support `let` bindings and simple variable
+//! references. The approach remains pure constant-folding: let initializers
+//! must evaluate to a compile-time constant, and path expressions substitute
+//! the bound constant. No stack allocation or virtual registers are needed.
 
-use crate::ast::{BinOp, Block, Expr, ExprKind, ItemKind, SourceFile, TyKind};
+use std::collections::HashMap;
+
+use crate::ast::{BinOp, Block, Expr, ExprKind, ItemKind, SourceFile, StmtKind, TyKind};
 use crate::ir::{Instr, IrFn, IrTy, IrValue, Module};
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -83,7 +88,7 @@ fn lower_fn(fn_def: &crate::ast::FnDef, source: &str) -> Result<IrFn, LowerError
                 "extern / bodyless functions".into(),
             ));
         }
-        Some(block) => lower_block_return(block, &ret_ty)?,
+        Some(block) => lower_block_return(block, &ret_ty, source)?,
     };
 
     Ok(IrFn { name, ret_ty, body })
@@ -111,21 +116,47 @@ fn lower_ty(ty: &crate::ast::Ty, source: &str) -> Result<IrTy, LowerError> {
 
 /// Lower a function body block to a list of IR instructions.
 ///
-/// For milestone 1 the block must have no statements — only a tail
-/// expression (or no tail, for unit-returning functions). The tail lowers
-/// to the single `Ret` instruction.
+/// Processes `let` statements in order, building a constant environment, then
+/// lowers the tail expression (or unit) to the single `Ret` instruction.
 ///
-/// FLS §6.4: Block expressions. FLS §6.19: Return expressions.
-fn lower_block_return(block: &Block, ret_ty: &IrTy) -> Result<Vec<Instr>, LowerError> {
-    if !block.stmts.is_empty() {
-        return Err(LowerError::Unsupported(
-            "statements in function body".into(),
-        ));
+/// FLS §6.4: Block expressions.
+/// FLS §8.1: Let statements — each `let x = expr;` binds `x` to the
+///   constant-folded value of `expr` in the local environment.
+/// FLS §6.19: Return expressions — the tail is the block's return value.
+fn lower_block_return(
+    block: &Block,
+    ret_ty: &IrTy,
+    source: &str,
+) -> Result<Vec<Instr>, LowerError> {
+    // FLS §8.1: Build a constant environment from let statements.
+    // Maps each bound identifier (source text) to its compile-time constant.
+    let mut env: HashMap<String, IrValue> = HashMap::new();
+
+    for stmt in &block.stmts {
+        match &stmt.kind {
+            // FLS §8.1: Let statement with initializer.
+            StmtKind::Let { name, init, .. } => {
+                // A let without an initializer produces an uninitialized place.
+                // We cannot constant-fold an uninitialized value; reject it.
+                // (Use-before-init is caught by the borrow checker in full Rust.)
+                let init_expr = init.as_ref().ok_or_else(|| {
+                    LowerError::Unsupported("let binding without initializer".into())
+                })?;
+                let val = lower_expr(init_expr, ret_ty, source, &env)?;
+                let binding_name = name.text(source).to_owned();
+                env.insert(binding_name, val);
+            }
+            StmtKind::Expr(_) | StmtKind::Empty => {
+                return Err(LowerError::Unsupported(
+                    "expression statements in function body".into(),
+                ));
+            }
+        }
     }
 
     let value = match &block.tail {
         None => IrValue::Unit,
-        Some(expr) => lower_expr(expr, ret_ty)?,
+        Some(expr) => lower_expr(expr, ret_ty, source, &env)?,
     };
 
     Ok(vec![Instr::Ret(value)])
@@ -133,12 +164,17 @@ fn lower_block_return(block: &Block, ret_ty: &IrTy) -> Result<Vec<Instr>, LowerE
 
 /// Lower an expression to an `IrValue`.
 ///
-/// Supports constant integer and unit literals, and constant-folded binary
-/// arithmetic on `i32` operands.
+/// `env` maps in-scope let bindings to their compile-time constant values.
 ///
 /// FLS §6.2: Literal expressions.
+/// FLS §6.3: Path expressions — single-segment paths resolved from `env`.
 /// FLS §6.5: Arithmetic operator expressions.
-fn lower_expr(expr: &Expr, expected_ty: &IrTy) -> Result<IrValue, LowerError> {
+fn lower_expr(
+    expr: &Expr,
+    expected_ty: &IrTy,
+    source: &str,
+    env: &HashMap<String, IrValue>,
+) -> Result<IrValue, LowerError> {
     match (&expr.kind, expected_ty) {
         // FLS §2.4.4.1: Integer literal narrowed to i32.
         (ExprKind::LitInt(n), IrTy::I32) => {
@@ -154,21 +190,32 @@ fn lower_expr(expr: &Expr, expected_ty: &IrTy) -> Result<IrValue, LowerError> {
         // FLS §4.4: Unit literal `()`.
         (ExprKind::Unit, IrTy::Unit) => Ok(IrValue::Unit),
 
+        // FLS §6.3: Path expression — look up a single-segment variable name.
+        //
+        // Multi-segment paths (e.g. `std::i32::MAX`) are not yet supported;
+        // they require name resolution and are deferred to a later milestone.
+        (ExprKind::Path(segments), _) if segments.len() == 1 => {
+            let name = segments[0].text(source);
+            env.get(name).copied().ok_or_else(|| {
+                LowerError::Unsupported(format!(
+                    "variable `{name}` not found (uninitialized, out of scope, or not a compile-time constant)"
+                ))
+            })
+        }
+
         // FLS §6.5: Arithmetic binary operations on constant i32 operands.
         //
         // Both sub-expressions are lowered first; if they both reduce to
         // `IrValue::I32` the operation is folded at compile time. This covers
-        // the milestone-2 target `fn main() -> i32 { 1 + 2 }`.
+        // the milestone-2 target `fn main() -> i32 { 1 + 2 }`, and now also
+        // expressions involving let-bound variables.
         //
         // FLS §6.23: Arithmetic overflow. The FLS states overflow behaviour is
         // implementation-defined. We use wrapping semantics here (matching
         // rustc's debug-mode behaviour) and document that choice.
-        //
-        // Note: non-constant operands (e.g. variables) will require virtual
-        // registers and are handled in a later milestone.
         (ExprKind::Binary { op, lhs, rhs }, IrTy::I32) => {
-            let lhs_val = lower_expr(lhs, expected_ty)?;
-            let rhs_val = lower_expr(rhs, expected_ty)?;
+            let lhs_val = lower_expr(lhs, expected_ty, source, env)?;
+            let rhs_val = lower_expr(rhs, expected_ty, source, env)?;
             match (op, lhs_val, rhs_val) {
                 (BinOp::Add, IrValue::I32(a), IrValue::I32(b)) => {
                     // FLS §6.5.5: Addition operator `+`.

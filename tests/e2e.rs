@@ -254,6 +254,64 @@ fn milestone_2_nested_add() {
 
 // ── Milestone 1 ───────────────────────────────────────────────────────────────
 
+// ── Milestone 3: let bindings ─────────────────────────────────────────────────
+
+/// Milestone 3: `fn main() -> i32 { let x = 42; x }` exits with code 42.
+///
+/// FLS §8.1: Let statement — `let x = 42;` binds identifier `x` to the
+///   value of the initializer expression.
+/// FLS §6.3: Path expression — `x` resolves to the bound value.
+/// FLS §2.4.4.1: 42 is an integer literal.
+#[test]
+fn milestone_3_let_binding() {
+    if !tools_available() {
+        eprintln!(
+            "milestone_3_let_binding: SKIP \
+             (aarch64 cross tools or qemu-aarch64 not found)"
+        );
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("main.rs");
+
+    // FLS §8.1 / §6.3: let binding and variable reference.
+    std::fs::write(&src, "fn main() -> i32 { let x = 42; x }\n").expect("write fixture");
+
+    let exit_code = compile_and_run(&src, dir.path());
+    assert_eq!(exit_code, 42, "expected exit 42 (let x = 42; x), got {exit_code}");
+}
+
+/// Milestone 3 (compound): `fn main() -> i32 { let x = 3; let y = 4; x + y }`
+/// exits with code 7.
+///
+/// Verifies multiple bindings and arithmetic over bound variables.
+///
+/// FLS §8.1: Multiple let statements in sequence.
+/// FLS §6.5.5: Addition of two variable references.
+#[test]
+fn milestone_3_let_bindings_add() {
+    if !tools_available() {
+        eprintln!(
+            "milestone_3_let_bindings_add: SKIP \
+             (aarch64 cross tools or qemu-aarch64 not found)"
+        );
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("main.rs");
+
+    std::fs::write(
+        &src,
+        "fn main() -> i32 { let x = 3; let y = 4; x + y }\n",
+    )
+    .expect("write fixture");
+
+    let exit_code = compile_and_run(&src, dir.path());
+    assert_eq!(exit_code, 7, "expected exit 7 (3+4), got {exit_code}");
+}
+
 /// Milestone 1 (implicit unit): `fn main() {}` exits with code 0.
 ///
 /// FLS §9: "If no return type is specified, the return type is `()`."
