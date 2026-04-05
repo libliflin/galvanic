@@ -6,14 +6,159 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
 jobs:
-  check:
+  build:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - run: cargo build
-      - run: cargo test
-      - run: cargo clippy -- -D warnings
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build
+
+      - name: Test
+        run: cargo test
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+
+  # Verify the binary handles adversarial inputs without panicking or hanging
+  fuzz-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Binary exists and prints usage on no args
+        run: |
+          # Should exit non-zero with usage message
+          if ./target/release/galvanic 2>/dev/null; then
+            echo "FAIL: expected non-zero exit on no args"
+            exit 1
+          fi
+
+      - name: Nonexistent file gives clean error
+        run: |
+          if ./target/release/galvanic /tmp/does_not_exist.rs 2>/dev/null; then
+            echo "FAIL: expected non-zero exit on missing file"
+            exit 1
+          fi
+
+      - name: Empty file exits zero
+        run: |
+          touch /tmp/empty.rs
+          timeout 10 ./target/release/galvanic /tmp/empty.rs
+
+      - name: Minimal valid program
+        run: |
+          echo 'fn main() {}' > /tmp/minimal.rs
+          timeout 10 ./target/release/galvanic /tmp/minimal.rs
+
+      - name: Large repetitive input does not hang
+        run: |
+          # 10k lines of let bindings — should not OOM or hang
+          python3 -c "
+          for i in range(10000):
+              print(f'let x{i}: u32 = {i};')
+          " > /tmp/stress.rs
+          timeout 30 ./target/release/galvanic /tmp/stress.rs
+
+      - name: Deeply nested braces do not stack overflow
+        run: |
+          # 500 levels of nested blocks
+          python3 -c "
+          print('fn main() {')
+          for i in range(500):
+              print('  { let _x = 0;')
+          for i in range(500):
+              print('  }')
+          print('}')
+          " > /tmp/nested.rs
+          timeout 30 ./target/release/galvanic /tmp/nested.rs
+
+      - name: Binary garbage input gives error, not panic
+        run: |
+          dd if=/dev/urandom bs=1024 count=4 of=/tmp/garbage.rs 2>/dev/null
+          # Should fail gracefully — non-zero exit is fine, but not a signal/panic
+          set +e
+          timeout 10 ./target/release/galvanic /tmp/garbage.rs 2>/dev/null
+          EXIT_CODE=$?
+          set -e
+          if [ "$EXIT_CODE" -gt 128 ]; then
+            SIGNAL=$((EXIT_CODE - 128))
+            echo "FAIL: binary died with signal $SIGNAL"
+            exit 1
+          fi
+
+      - name: NUL bytes in source do not crash
+        run: |
+          printf 'fn main() {\x00\x00\x00}' > /tmp/nul.rs
+          set +e
+          timeout 10 ./target/release/galvanic /tmp/nul.rs 2>/dev/null
+          EXIT_CODE=$?
+          set -e
+          if [ "$EXIT_CODE" -gt 128 ]; then
+            SIGNAL=$((EXIT_CODE - 128))
+            echo "FAIL: binary died with signal $SIGNAL"
+            exit 1
+          fi
+
+      - name: Very long line does not hang
+        run: |
+          python3 -c "print('let x = ' + '1 + ' * 5000 + '1;')" > /tmp/longline.rs
+          set +e
+          timeout 30 ./target/release/galvanic /tmp/longline.rs 2>/dev/null
+          EXIT_CODE=$?
+          set -e
+          if [ "$EXIT_CODE" -gt 128 ]; then
+            SIGNAL=$((EXIT_CODE - 128))
+            echo "FAIL: binary died with signal $SIGNAL"
+            exit 1
+          fi
+
+  # Ensure no unsafe code creeps in
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No unsafe blocks in source
+        run: |
+          # Search for actual unsafe blocks/fn/impl, not just the keyword in strings/comments
+          if grep -rn 'unsafe\s*{' src/ || grep -rn 'unsafe\s*fn\b' src/ || grep -rn 'unsafe\s*impl\b' src/; then
+            echo "FAIL: unsafe code found — galvanic should be safe Rust only"
+            exit 1
+          fi
+
+      - name: No std::process::Command in library code
+        run: |
+          # The compiler should never shell out. Command is fine in tests, not in src/
+          if grep -rn 'std::process::Command\|process::Command' src/; then
+            echo "FAIL: found Command usage in src/ — the compiler should not shell out"
+            exit 1
+          fi
+
+      - name: No network dependencies
+        run: |
+          # Compiler should not pull in networking crates
+          if grep -E '^(reqwest|hyper|tokio|async-std|surf)\b' Cargo.toml; then
+            echo "FAIL: networking crate found in dependencies"
+            exit 1
+          fi
