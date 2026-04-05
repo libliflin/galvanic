@@ -19,20 +19,20 @@
 //! - FLS §6.15.2: Loop expressions — simulated at compile time.
 //! - FLS §6.15.3: While loop expressions — simulated at compile time.
 //! - FLS §6.15.6: Break expressions — propagated as `LowerError::Break`.
+//! - FLS §6.15.7: Continue expressions — propagated as `LowerError::Continue`.
 //! - FLS §8.2: Empty statements — no-op.
 //! - FLS §8.3: Expression statements — assignment, while, loop, and if.
 //! - FLS §18.1: Program structure — `lower` produces one `Module` per file.
 //!
-//! # Scope (milestone 8)
+//! # Scope (milestone 9)
 //!
-//! Extends milestone 7 to support `loop` expressions (`loop { body }`) and
-//! `break` / `break value` expressions (FLS §6.15.2, §6.15.6). Loops are
-//! simulated at compile time using the same constant-folding strategy as the
-//! rest of the lowering phase: the body is re-executed until a `break` signal
-//! is encountered. Break values propagate up through `exec_stmts` and
-//! `lower_expr` as `Err(LowerError::Break(value))` until caught by the
-//! enclosing `loop` handler. A step limit of 1000 iterations prevents
-//! non-terminating loops from hanging the compiler.
+//! Extends milestone 8 to support `continue` expressions (FLS §6.15.7) inside
+//! `while` and `loop` bodies. `continue` is propagated up through `exec_stmts`
+//! and `lower_expr` as `Err(LowerError::Continue)` until caught by the
+//! enclosing `while` or `loop` handler. On `continue`, mutations of outer-scope
+//! variables accumulated up to the continue point are propagated back, then the
+//! next iteration begins (re-checking the while condition, or re-running the
+//! loop body).
 //!
 //! Body variables that shadow outer bindings are scoped to the iteration: only
 //! mutations of pre-existing outer variables propagate back after each iteration.
@@ -63,6 +63,18 @@ pub enum LowerError {
     ///
     /// FLS §6.15.6: Break expressions.
     Break(IrValue),
+
+    /// Internal: a `continue` expression was evaluated.
+    ///
+    /// During compile-time loop simulation, `Continue` propagates up through
+    /// `exec_stmts` and `lower_expr` via `?` or explicit matching until
+    /// caught by the enclosing `while` or `loop` handler. On catching it, the
+    /// handler propagates mutations accumulated up to the continue point and
+    /// restarts the next iteration. If it reaches `lower_block_return` it means
+    /// `continue` was used outside any loop — a compile error in well-formed Rust.
+    ///
+    /// FLS §6.15.7: Continue expressions.
+    Continue,
 }
 
 impl std::fmt::Display for LowerError {
@@ -70,6 +82,7 @@ impl std::fmt::Display for LowerError {
         match self {
             LowerError::Unsupported(msg) => write!(f, "not yet supported: {msg}"),
             LowerError::Break(_) => write!(f, "break expression outside of a loop"),
+            LowerError::Continue => write!(f, "continue expression outside of a loop"),
         }
     }
 }
@@ -335,6 +348,17 @@ fn exec_stmts(
                                 }
                                 break 'while_sim;
                             }
+                            // FLS §6.15.7: `continue` skips the remainder of the loop
+                            // body and re-checks the while condition. Propagate mutations
+                            // accumulated up to the continue point, then restart.
+                            Err(LowerError::Continue) => {
+                                for key in &outer_keys {
+                                    if let Some(&val) = body_env.get(key) {
+                                        env.insert(key.clone(), val);
+                                    }
+                                }
+                                continue 'while_sim;
+                            }
                             Err(e) => return Err(e),
                         }
                         // Propagate mutations of outer-scope variables back.
@@ -358,6 +382,16 @@ fn exec_stmts(
                         Some(e) => lower_expr(e, expected_ty, source, env, fn_table)?,
                     };
                     return Err(LowerError::Break(val));
+                }
+
+                // FLS §6.15.7: Continue expression in statement position.
+                //
+                // Propagated as Err(LowerError::Continue) so it travels up
+                // through exec_stmts and lower_expr until caught by the enclosing
+                // while or loop handler. The handler propagates mutations
+                // accumulated up to this point and restarts the next iteration.
+                ExprKind::Continue => {
+                    return Err(LowerError::Continue);
                 }
 
                 _ => {
@@ -640,12 +674,18 @@ fn lower_expr(
                                     ) {
                                         Ok(_) => None, // tail ran without breaking
                                         Err(LowerError::Break(v)) => Some(v),
+                                        // FLS §6.15.7: `continue` in tail position —
+                                        // skip tail, propagate mutations, next iteration.
+                                        Err(LowerError::Continue) => None,
                                         Err(e) => return Err(e),
                                     }
                                 }
                             }
                         }
                         Err(LowerError::Break(v)) => Some(v),
+                        // FLS §6.15.7: `continue` in stmt position — propagate
+                        // mutations accumulated up to this point, restart iteration.
+                        Err(LowerError::Continue) => None,
                         Err(e) => return Err(e),
                     };
                 // Propagate mutations from this iteration back to the outer env.
@@ -678,6 +718,14 @@ fn lower_expr(
             };
             Err(LowerError::Break(val))
         }
+
+        // FLS §6.15.7: Continue expression in tail/value position (never type).
+        //
+        // Propagated as Err(LowerError::Continue) to travel up through
+        // lower_block_value and lower_expr until caught by the enclosing
+        // while or loop handler. If it escapes to lower_block_return, the
+        // program has a `continue` outside any loop (compile error).
+        (ExprKind::Continue, _) => Err(LowerError::Continue),
 
         // Any other combination is not yet supported.
         _ => Err(LowerError::Unsupported("expression".into())),

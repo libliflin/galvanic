@@ -87,6 +87,22 @@ fn loop_returning_value() -> i32 {
     result
 }
 
+// FLS §6.15.7 — Continue expression (milestone 9: compile-time simulation)
+// Sums values 1..=5, skipping 3 via `continue`; returns 12.
+// FLS §6.15.7: "A continue expression terminates the current iteration of the
+// innermost enclosing loop expression." No FLS example provided; this program
+// is derived from the semantic description in §6.15.7.
+fn sum_skipping_three() -> i32 {
+    let mut i = 0;
+    let mut sum = 0;
+    while i < 5 {
+        i = i + 1;
+        if i == 3 { continue; }
+        sum = sum + i;
+    }
+    sum
+}
+
 // FLS §6.12.1 — Call expressions
 fn use_call() -> i32 {
     let three: i32 = add_two(1, 2);
