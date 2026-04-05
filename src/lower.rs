@@ -14,15 +14,19 @@
 //! - FLS §6.17: If expressions — constant-folded when condition is a literal.
 //! - FLS §6.4: Block expressions — evaluated as nested constant scopes.
 //! - FLS §6.12.1: Call expressions — compile-time inlining of constant calls.
+//! - FLS §6.5.1: Assignment expressions — `x = rhs` updates the env binding.
+//! - FLS §6.5.3: Comparison operators — folded when operands are constant i32.
+//! - FLS §8.2: Empty statements — no-op.
+//! - FLS §8.3: Expression statements — assignment only.
 //! - FLS §18.1: Program structure — `lower` produces one `Module` per file.
 //!
-//! # Scope (milestone 5)
+//! # Scope (milestone 6)
 //!
-//! Extends milestone 4 to support function call expressions. Calls are
-//! handled by compile-time inlining: arguments are evaluated as constants,
-//! the callee's parameter names are bound in a fresh environment, and its
-//! body is evaluated. This is a natural extension of the constant-folding
-//! approach used in all prior milestones.
+//! Extends milestone 5 to support mutable let bindings with assignment
+//! (`x = rhs;`) and comparison operators in `if` conditions (`if x < y`).
+//! Both are handled by extending the constant-folding environment: assignment
+//! updates the binding in place, and comparisons are folded once both sides
+//! reduce to `IrValue::I32`.
 //!
 //! Only calls to named functions (single-segment path callees) are supported.
 //! Recursive calls that do not terminate at compile time will loop forever —
@@ -198,10 +202,52 @@ fn lower_block_value(
                 let binding_name = name.text(source).to_owned();
                 env.insert(binding_name, val);
             }
-            StmtKind::Expr(_) | StmtKind::Empty => {
-                return Err(LowerError::Unsupported(
-                    "expression statements in block".into(),
-                ));
+            // FLS §8.2: Empty statement — lone `;` is a no-op.
+            StmtKind::Empty => {}
+
+            // FLS §8.3: Expression statement.
+            //
+            // Only assignment expressions are supported at this milestone.
+            // Other expression statements (bare calls, etc.) are deferred to
+            // a future cycle when side effects and unit-typed returns are
+            // tracked properly.
+            StmtKind::Expr(expr) => {
+                match &expr.kind {
+                    // FLS §6.5.1: Assignment expression `name = rhs`.
+                    //
+                    // The lhs must be a single-segment path naming an in-scope
+                    // let binding. The rhs is evaluated in the current env and
+                    // the binding is updated.
+                    //
+                    // FLS §6.5.1 AMBIGUOUS: the FLS allows arbitrary place
+                    // expressions on the lhs of `=` (field access, indexing,
+                    // deref). This implementation restricts to simple variable
+                    // names; other place expressions are deferred.
+                    ExprKind::Binary { op: BinOp::Assign, lhs, rhs } => {
+                        match &lhs.kind {
+                            ExprKind::Path(segments) if segments.len() == 1 => {
+                                let name = segments[0].text(source).to_owned();
+                                // Infer expected type from the current binding.
+                                let expected_ty = match env.get(&name) {
+                                    Some(IrValue::I32(_)) => IrTy::I32,
+                                    Some(IrValue::Unit) => IrTy::Unit,
+                                    None => return Err(LowerError::Unsupported(format!(
+                                        "assignment to undeclared variable `{name}`"
+                                    ))),
+                                };
+                                let new_val = lower_expr(rhs, &expected_ty, source, &env, fn_table)?;
+                                env.insert(name, new_val);
+                            }
+                            _ => return Err(LowerError::Unsupported(
+                                "assignment to non-variable target \
+                                 (field, index, deref not yet supported)".into(),
+                            )),
+                        }
+                    }
+                    _ => return Err(LowerError::Unsupported(
+                        "expression statement (only assignment `x = expr;` is currently supported)".into(),
+                    )),
+                }
             }
         }
     }
@@ -214,19 +260,42 @@ fn lower_block_value(
 
 /// Evaluate an expression to a compile-time boolean.
 ///
-/// Used to fold `if`/`else` conditions at compile time. Only literal booleans
-/// are supported at this milestone; runtime-variable conditions require branch
-/// instruction emission and are deferred.
+/// Used to fold `if`/`else` conditions at compile time. Supports literal
+/// booleans and comparison operators applied to constant `i32` operands.
 ///
 /// FLS §2.4.7: Boolean literals `true` and `false`.
+/// FLS §6.5.3: Comparison expressions.
 fn lower_expr_as_bool(
     expr: &Expr,
-    _source: &str,
-    _env: &HashMap<String, IrValue>,
+    source: &str,
+    env: &HashMap<String, IrValue>,
+    fn_table: &FnTable<'_>,
 ) -> Result<bool, LowerError> {
     match &expr.kind {
         // FLS §2.4.7: Boolean literals.
         ExprKind::LitBool(b) => Ok(*b),
+
+        // FLS §6.5.3: Comparison operators — folded at compile time when
+        // both operands evaluate to constant `i32` values.
+        //
+        // The lhs and rhs are lowered using the `i32` expected type; boolean
+        // comparison operators applied to non-integer values are deferred.
+        ExprKind::Binary { op, lhs, rhs } => {
+            let lhs_val = lower_expr(lhs, &IrTy::I32, source, env, fn_table)?;
+            let rhs_val = lower_expr(rhs, &IrTy::I32, source, env, fn_table)?;
+            match (op, lhs_val, rhs_val) {
+                (BinOp::Lt, IrValue::I32(a), IrValue::I32(b)) => Ok(a < b),
+                (BinOp::Le, IrValue::I32(a), IrValue::I32(b)) => Ok(a <= b),
+                (BinOp::Gt, IrValue::I32(a), IrValue::I32(b)) => Ok(a > b),
+                (BinOp::Ge, IrValue::I32(a), IrValue::I32(b)) => Ok(a >= b),
+                (BinOp::Eq, IrValue::I32(a), IrValue::I32(b)) => Ok(a == b),
+                (BinOp::Ne, IrValue::I32(a), IrValue::I32(b)) => Ok(a != b),
+                _ => Err(LowerError::Unsupported(
+                    "non-constant or unsupported comparison expression in if condition".into(),
+                )),
+            }
+        }
+
         _ => Err(LowerError::Unsupported(
             "non-constant boolean expression in if condition \
              (runtime branches not yet supported)"
@@ -330,7 +399,7 @@ fn lower_expr(
         // position with a non-unit expected type. We treat absent `else` as
         // returning `IrValue::Unit` and defer the type mismatch to the type checker.
         (ExprKind::If { cond, then_block, else_expr }, _) => {
-            let cond_bool = lower_expr_as_bool(cond, source, env)?;
+            let cond_bool = lower_expr_as_bool(cond, source, env, fn_table)?;
             if cond_bool {
                 // Condition is true: evaluate the then-branch.
                 lower_block_value(then_block, expected_ty, source, env, fn_table)
