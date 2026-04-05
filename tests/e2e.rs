@@ -335,6 +335,101 @@ fn milestone_6_mutate_then_compare() {
     assert_eq!(exit_code, 6, "expected exit 6 (3*2=6, 6>5 so return 6), got {exit_code}");
 }
 
+// ── Milestone 8: loop expressions with break ─────────────────────────────────
+
+/// Milestone 8: simple `loop` with a `break` guarded by an `if`.
+///
+/// The loop increments `i` until the break fires, then `i` is returned.
+///
+/// FLS §6.15.2: Loop expression.
+/// FLS §6.15.6: Break expression (bare `break;`).
+/// FLS §6.17: If expression as loop guard.
+#[test]
+fn milestone_8_loop_break_guard() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 {\n\
+             let mut i = 0;\n\
+             loop {\n\
+                 if i >= 5 { break; }\n\
+                 i = i + 1;\n\
+             }\n\
+             i\n\
+         }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 5, "expected exit 5 (loop break guard), got {exit_code}");
+}
+
+/// Milestone 8: `loop` returning a value via `break value`.
+///
+/// The loop expression itself evaluates to the break operand.
+///
+/// FLS §6.15.2: Loop expression.
+/// FLS §6.15.6: Break expression with value (`break i`).
+#[test]
+fn milestone_8_loop_break_value() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 {\n\
+             let mut i = 0;\n\
+             loop {\n\
+                 i = i + 1;\n\
+                 if i >= 5 { break i; }\n\
+             }\n\
+         }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 5, "expected exit 5 (loop break value), got {exit_code}");
+}
+
+/// Milestone 8: `let` binding initialised by a `loop` expression.
+///
+/// Demonstrates that `loop { break value; }` can be used in value position.
+///
+/// FLS §6.15.2: Loop expression in value position.
+/// FLS §6.15.6: Break with integer literal value.
+/// FLS §8.1: Let statement with loop initializer.
+#[test]
+fn milestone_8_loop_as_let_init() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 {\n\
+             let result = loop { break 42; };\n\
+             result\n\
+         }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 42, "expected exit 42 (loop as let init), got {exit_code}");
+}
+
+/// Milestone 8: `loop` with multiple variables mutated before break.
+///
+/// Verifies that mutations to outer-scope variables inside the loop body
+/// propagate correctly when `break` fires.
+///
+/// FLS §6.15.2: Loop expression.
+/// FLS §6.5.1: Assignment expressions inside loop body.
+#[test]
+fn milestone_8_loop_multi_var() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 {\n\
+             let mut i = 0;\n\
+             let mut sum = 0;\n\
+             loop {\n\
+                 sum = sum + i;\n\
+                 i = i + 1;\n\
+                 if i >= 5 { break; }\n\
+             }\n\
+             sum\n\
+         }\n",
+    ) else {
+        return;
+    };
+    // sum = 0+1+2+3+4 = 10
+    assert_eq!(exit_code, 10, "expected exit 10 (loop multi var), got {exit_code}");
+}
+
 // ── Milestone 7: while loops ─────────────────────────────────────────────────
 
 /// Milestone 7: simple counting loop.

@@ -16,19 +16,23 @@
 //! - FLS §6.12.1: Call expressions — compile-time inlining of constant calls.
 //! - FLS §6.5.1: Assignment expressions — `x = rhs` updates the env binding.
 //! - FLS §6.5.3: Comparison operators — folded when operands are constant i32.
+//! - FLS §6.15.2: Loop expressions — simulated at compile time.
 //! - FLS §6.15.3: While loop expressions — simulated at compile time.
+//! - FLS §6.15.6: Break expressions — propagated as `LowerError::Break`.
 //! - FLS §8.2: Empty statements — no-op.
-//! - FLS §8.3: Expression statements — assignment and while loops.
+//! - FLS §8.3: Expression statements — assignment, while, loop, and if.
 //! - FLS §18.1: Program structure — `lower` produces one `Module` per file.
 //!
-//! # Scope (milestone 7)
+//! # Scope (milestone 8)
 //!
-//! Extends milestone 6 to support `while` loop expressions (`while cond { body }`).
-//! Loops are simulated at compile time using the same constant-folding strategy
-//! as the rest of the lowering phase: the condition is re-evaluated as a boolean
-//! before each iteration, and the body's mutations are applied to the outer
-//! variable environment. A step limit of 1000 iterations prevents infinite loops
-//! from hanging the compiler.
+//! Extends milestone 7 to support `loop` expressions (`loop { body }`) and
+//! `break` / `break value` expressions (FLS §6.15.2, §6.15.6). Loops are
+//! simulated at compile time using the same constant-folding strategy as the
+//! rest of the lowering phase: the body is re-executed until a `break` signal
+//! is encountered. Break values propagate up through `exec_stmts` and
+//! `lower_expr` as `Err(LowerError::Break(value))` until caught by the
+//! enclosing `loop` handler. A step limit of 1000 iterations prevents
+//! non-terminating loops from hanging the compiler.
 //!
 //! Body variables that shadow outer bindings are scoped to the iteration: only
 //! mutations of pre-existing outer variables propagate back after each iteration.
@@ -49,12 +53,23 @@ use crate::ir::{Instr, IrFn, IrTy, IrValue, Module};
 pub enum LowerError {
     /// A language feature used by the program is not yet implemented.
     Unsupported(String),
+    /// Internal: a `break` expression was evaluated.
+    ///
+    /// During compile-time loop simulation, `Break` propagates up through
+    /// `exec_stmts` and `lower_expr` via `?` or explicit matching until
+    /// caught by the enclosing `ExprKind::Loop` handler. If it reaches
+    /// `lower_block_return` it means `break` was used outside any loop —
+    /// a compile error in well-formed Rust.
+    ///
+    /// FLS §6.15.6: Break expressions.
+    Break(IrValue),
 }
 
 impl std::fmt::Display for LowerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LowerError::Unsupported(msg) => write!(f, "not yet supported: {msg}"),
+            LowerError::Break(_) => write!(f, "break expression outside of a loop"),
         }
     }
 }
@@ -194,7 +209,7 @@ fn lower_block_value(
     exec_stmts(&block.stmts, expected_ty, source, &mut env, fn_table)?;
     match &block.tail {
         None => Ok(IrValue::Unit),
-        Some(expr) => lower_expr(expr, expected_ty, source, &env, fn_table),
+        Some(expr) => lower_expr(expr, expected_ty, source, &mut env, fn_table),
     }
 }
 
@@ -293,7 +308,7 @@ fn exec_stmts(
                     let outer_keys: Vec<String> = env.keys().cloned().collect();
                     // Guard against infinite loops.
                     const MAX_ITER: u32 = 1000;
-                    for step in 0..=MAX_ITER {
+                    'while_sim: for step in 0..=MAX_ITER {
                         if step == MAX_ITER {
                             return Err(LowerError::Unsupported(
                                 "while loop exceeded compile-time limit of 1000 \
@@ -308,7 +323,20 @@ fn exec_stmts(
                         }
                         // Run body in a child env derived from the current outer env.
                         let mut body_env = env.clone();
-                        exec_stmts(&body.stmts, expected_ty, source, &mut body_env, fn_table)?;
+                        match exec_stmts(&body.stmts, expected_ty, source, &mut body_env, fn_table) {
+                            Ok(()) => {}
+                            // FLS §6.15.6: `break` exits the while loop; while always
+                            // evaluates to `()`. Propagate mutations up to break point.
+                            Err(LowerError::Break(_)) => {
+                                for key in &outer_keys {
+                                    if let Some(&val) = body_env.get(key) {
+                                        env.insert(key.clone(), val);
+                                    }
+                                }
+                                break 'while_sim;
+                            }
+                            Err(e) => return Err(e),
+                        }
                         // Propagate mutations of outer-scope variables back.
                         for key in &outer_keys {
                             if let Some(&val) = body_env.get(key) {
@@ -318,12 +346,32 @@ fn exec_stmts(
                     }
                 }
 
+                // FLS §6.15.6: Break expression in statement position.
+                //
+                // Propagated as Err(LowerError::Break) so it travels up through
+                // exec_stmts and lower_expr until caught by the enclosing
+                // ExprKind::Loop handler. The break value is evaluated in the
+                // current env using the outer expected type.
+                ExprKind::Break(opt_val) => {
+                    let val = match opt_val {
+                        None => IrValue::Unit,
+                        Some(e) => lower_expr(e, expected_ty, source, env, fn_table)?,
+                    };
+                    return Err(LowerError::Break(val));
+                }
+
                 _ => {
-                    return Err(LowerError::Unsupported(
-                        "expression statement (only assignment `x = expr;` \
-                         and while loops are currently supported)"
-                            .into(),
-                    ))
+                    // General expression statement: evaluate and discard the result.
+                    // Break signals (Err(LowerError::Break)) propagate naturally via `?`.
+                    //
+                    // This handles `if cond { break; }`, block expressions, call
+                    // expressions, and other expressions used as statements.
+                    //
+                    // Note: mutations inside nested expressions evaluated via lower_expr
+                    // (e.g., assignments in if branches) are scoped to lower_expr's
+                    // env clone and do NOT propagate to the outer env. This is a known
+                    // limitation of the compile-time simulation approach.
+                    lower_expr(expr, expected_ty, source, env, fn_table)?;
                 }
             },
         }
@@ -341,7 +389,7 @@ fn exec_stmts(
 fn lower_expr_as_bool(
     expr: &Expr,
     source: &str,
-    env: &HashMap<String, IrValue>,
+    env: &mut HashMap<String, IrValue>,
     fn_table: &FnTable<'_>,
 ) -> Result<bool, LowerError> {
     match &expr.kind {
@@ -390,7 +438,7 @@ fn lower_expr(
     expr: &Expr,
     expected_ty: &IrTy,
     source: &str,
-    env: &HashMap<String, IrValue>,
+    env: &mut HashMap<String, IrValue>,
     fn_table: &FnTable<'_>,
 ) -> Result<IrValue, LowerError> {
     match (&expr.kind, expected_ty) {
@@ -549,6 +597,86 @@ fn lower_expr(
                 ))
             })?;
             lower_block_value(body, &callee_ret_ty, source, &call_env, fn_table)
+        }
+
+        // FLS §6.15.2: Loop expression — execute body repeatedly until break.
+        //
+        // Compile-time simulation: the body is re-executed each iteration.
+        // Mutations to variables that existed before the loop propagate back
+        // after each iteration via the outer_keys tracking mechanism.
+        //
+        // The loop exits when exec_stmts (or the tail expression) returns
+        // Err(LowerError::Break(v)); v becomes the loop expression's value.
+        //
+        // FLS §6.15.2 AMBIGUOUS: The FLS specifies that a `loop` without a
+        // `break` diverges. The step limit below is an implementation choice;
+        // it will become irrelevant once runtime loop codegen is added.
+        (ExprKind::Loop(body), _) => {
+            let outer_keys: Vec<String> = env.keys().cloned().collect();
+            const MAX_ITER: u32 = 1000;
+            for step in 0..=MAX_ITER {
+                if step == MAX_ITER {
+                    return Err(LowerError::Unsupported(
+                        "loop exceeded compile-time limit of 1000 iterations \
+                         (runtime loop support planned for a future milestone)"
+                            .into(),
+                    ));
+                }
+                let mut body_env = env.clone();
+                // Execute loop body statements; Break propagates as Err.
+                let break_val =
+                    match exec_stmts(&body.stmts, expected_ty, source, &mut body_env, fn_table) {
+                        Ok(()) => {
+                            // Statements completed normally; check the tail expression.
+                            match &body.tail {
+                                None => None,
+                                Some(tail_expr) => {
+                                    match lower_expr(
+                                        tail_expr,
+                                        expected_ty,
+                                        source,
+                                        &mut body_env,
+                                        fn_table,
+                                    ) {
+                                        Ok(_) => None, // tail ran without breaking
+                                        Err(LowerError::Break(v)) => Some(v),
+                                        Err(e) => return Err(e),
+                                    }
+                                }
+                            }
+                        }
+                        Err(LowerError::Break(v)) => Some(v),
+                        Err(e) => return Err(e),
+                    };
+                // Propagate mutations from this iteration back to the outer env.
+                for key in &outer_keys {
+                    if let Some(&val) = body_env.get(key) {
+                        env.insert(key.clone(), val);
+                    }
+                }
+                if let Some(v) = break_val {
+                    return Ok(v);
+                }
+                // No break — continue to next iteration.
+            }
+            unreachable!() // Covered by MAX_ITER check above.
+        }
+
+        // FLS §6.15.6: Break expression in tail/value position.
+        //
+        // Propagated as Err(LowerError::Break) to travel up through
+        // lower_block_value and lower_expr until caught by the enclosing
+        // ExprKind::Loop handler. If it escapes to lower_block_return, the
+        // program has a `break` outside any loop (compile error).
+        //
+        // The break value is evaluated using the outer expected type.
+        // For bare `break`, the value is IrValue::Unit.
+        (ExprKind::Break(opt_val), _) => {
+            let val = match opt_val {
+                None => IrValue::Unit,
+                Some(e) => lower_expr(e, expected_ty, source, env, fn_table)?,
+            };
+            Err(LowerError::Break(val))
         }
 
         // Any other combination is not yet supported.

@@ -66,6 +66,27 @@ fn count_to_ten() -> i32 {
     counter
 }
 
+// FLS §6.15.2 — Loop expression (milestone 8: compile-time simulation)
+// FLS §6.15.6 — Break expression
+fn find_first_over_threshold() -> i32 {
+    let mut n = 1;
+    loop {
+        if n > 100 { break; }
+        n = n * 2;
+    }
+    n
+}
+
+// FLS §6.15.2 — Loop as value expression (break with value)
+fn loop_returning_value() -> i32 {
+    let mut i = 0;
+    let result = loop {
+        i = i + 1;
+        if i >= 7 { break i; }
+    };
+    result
+}
+
 // FLS §6.12.1 — Call expressions
 fn use_call() -> i32 {
     let three: i32 = add_two(1, 2);
