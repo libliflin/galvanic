@@ -1,4 +1,6 @@
 /target
 
 # Lathe runtime state
-.lathe/state/
+
+# Lathe session state (ephemeral, engine-managed)
+.lathe/session/

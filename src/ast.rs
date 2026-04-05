@@ -97,11 +97,15 @@ pub struct Item {
 ///
 /// FLS §3: item kinds include functions, structs, enums, unions, traits,
 /// implementations, type aliases, constants, statics, use declarations,
-/// and extern blocks. Only `Fn` is implemented here.
+/// and extern blocks. `Fn`, `Struct`, and `Enum` are implemented here.
 #[derive(Debug)]
 pub enum ItemKind {
     /// A function definition. FLS §9.
     Fn(Box<FnDef>),
+    /// A struct definition. FLS §14.
+    Struct(Box<StructDef>),
+    /// An enum definition. FLS §15.
+    Enum(Box<EnumDef>),
 }
 
 // ── Functions ─────────────────────────────────────────────────────────────────
@@ -158,6 +162,152 @@ pub struct Param {
     /// The declared type.
     pub ty: Ty,
     pub span: Span,
+}
+
+// ── Visibility ────────────────────────────────────────────────────────────────
+
+/// Visibility of an item or field.
+///
+/// FLS §10.2: Visibility and Privacy.
+///
+/// FLS §10.2 NOTE: The FLS defines a fine-grained visibility system including
+/// `pub(crate)`, `pub(super)`, and `pub(in path)`. This implementation handles
+/// only the two common cases: private (default) and `pub`. Restricted
+/// visibility forms are future work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Visibility {
+    /// Default (private) visibility.
+    Private,
+    /// `pub` — visible everywhere in the crate tree.
+    Pub,
+}
+
+// ── Structs ───────────────────────────────────────────────────────────────────
+
+/// A struct definition.
+///
+/// FLS §14: Structs. A struct is a product type with named or positional
+/// fields. Three forms are defined:
+///
+/// - Named-field struct: `struct Foo { x: i32, y: f64 }`
+/// - Tuple struct: `struct Foo(i32, f64);`
+/// - Unit struct: `struct Foo;`
+///
+/// FLS §14 AMBIGUOUS: The spec does not specify whether visibility on the
+/// struct (`pub struct`) and visibility on individual fields interact with
+/// name resolution in a well-defined way for all contexts. This
+/// implementation records visibility but defers enforcement to a future
+/// name-resolution phase.
+#[derive(Debug)]
+pub struct StructDef {
+    /// The struct's visibility.
+    pub vis: Visibility,
+    /// The struct's name.
+    pub name: Span,
+    /// The struct's shape.
+    pub kind: StructKind,
+    /// The span of the entire struct definition.
+    pub span: Span,
+}
+
+/// The three forms a struct body can take.
+///
+/// FLS §14: Struct body forms.
+#[derive(Debug)]
+pub enum StructKind {
+    /// Named-field struct body: `{ field: Type, … }`.
+    ///
+    /// FLS §14.1: A struct with named fields.
+    Named(Vec<NamedField>),
+    /// Tuple-struct body: `(Type, …);`.
+    ///
+    /// FLS §14.2: A struct with positional fields.
+    Tuple(Vec<TupleField>),
+    /// Unit struct: no body, terminated by `;`.
+    ///
+    /// FLS §14.3: A struct with no fields.
+    Unit,
+}
+
+/// A named struct field.
+///
+/// FLS §14.1: `VisibilityModifier? Identifier ":" Type`.
+#[derive(Debug)]
+pub struct NamedField {
+    /// The field's visibility.
+    pub vis: Visibility,
+    /// The field name.
+    pub name: Span,
+    /// The field type.
+    pub ty: Ty,
+    pub span: Span,
+}
+
+/// A tuple struct field.
+///
+/// FLS §14.2: `VisibilityModifier? Type`.
+#[derive(Debug)]
+pub struct TupleField {
+    /// The field's visibility.
+    pub vis: Visibility,
+    /// The field type.
+    pub ty: Ty,
+    pub span: Span,
+}
+
+// ── Enums ─────────────────────────────────────────────────────────────────────
+
+/// An enum definition.
+///
+/// FLS §15: Enumerations. An enum is a sum type: a value is exactly one of
+/// its variants at any given time.
+///
+/// Three variant forms are defined:
+///
+/// - Unit variant:        `Foo`
+/// - Tuple variant:       `Foo(i32, f64)`
+/// - Named-field variant: `Foo { x: i32, y: f64 }`
+///
+/// FLS §15 AMBIGUOUS: The spec does not specify whether visibility on the
+/// enum itself (`pub enum`) interacts with visibility on individual variant
+/// fields in all contexts. This implementation records visibility on the
+/// enum but defers enforcement to a future name-resolution phase.
+#[derive(Debug)]
+pub struct EnumDef {
+    /// The enum's visibility.
+    pub vis: Visibility,
+    /// The enum's name.
+    pub name: Span,
+    /// The enum's variants.
+    pub variants: Vec<EnumVariant>,
+    /// The span of the entire enum definition.
+    pub span: Span,
+}
+
+/// A single variant of an enum.
+///
+/// FLS §15: EnumVariant.
+#[derive(Debug)]
+pub struct EnumVariant {
+    /// The variant name.
+    pub name: Span,
+    /// The variant's shape.
+    pub kind: EnumVariantKind,
+    /// The span of the entire variant.
+    pub span: Span,
+}
+
+/// The three forms an enum variant body can take.
+///
+/// FLS §15: Variant body forms.
+#[derive(Debug)]
+pub enum EnumVariantKind {
+    /// Unit variant: no fields. FLS §15.1: `Identifier`.
+    Unit,
+    /// Tuple variant: positional fields. FLS §15.2: `Identifier "(" TupleField* ")"`.
+    Tuple(Vec<TupleField>),
+    /// Named-field variant. FLS §15.3: `Identifier "{" NamedField* "}"`.
+    Named(Vec<NamedField>),
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
