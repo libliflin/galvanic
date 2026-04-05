@@ -1541,6 +1541,120 @@ mod tests {
         assert!(body.tail.is_some()); // `sum`
     }
 
+    // ── Comparison operators ──────────────────────────────────────────────────
+
+    #[test]
+    fn comparison_less_than() {
+        // FLS §6.7: `<` comparison operator.
+        let src = "fn f(a: i32, b: i32) -> bool { a < b }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
+        assert!(matches!(tail.kind, ExprKind::Binary { op: BinOp::Lt, .. }));
+    }
+
+    #[test]
+    fn comparison_less_equal() {
+        // FLS §6.7: `<=` comparison operator.
+        let src = "fn f(a: i32, b: i32) -> bool { a <= b }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
+        assert!(matches!(tail.kind, ExprKind::Binary { op: BinOp::Le, .. }));
+    }
+
+    #[test]
+    fn comparison_equal() {
+        // FLS §6.7: `==` equality operator.
+        let src = "fn f(a: i32, b: i32) -> bool { a == b }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
+        assert!(matches!(tail.kind, ExprKind::Binary { op: BinOp::Eq, .. }));
+    }
+
+    #[test]
+    fn comparison_not_equal() {
+        // FLS §6.7: `!=` inequality operator.
+        let src = "fn f(a: i32, b: i32) -> bool { a != b }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
+        assert!(matches!(tail.kind, ExprKind::Binary { op: BinOp::Ne, .. }));
+    }
+
+    // ── Logical operators ─────────────────────────────────────────────────────
+
+    #[test]
+    fn logical_and() {
+        // FLS §6.8.1: `&&` logical and.
+        let src = "fn f(a: bool, b: bool) -> bool { a && b }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
+        assert!(matches!(tail.kind, ExprKind::Binary { op: BinOp::And, .. }));
+    }
+
+    #[test]
+    fn logical_or() {
+        // FLS §6.8.2: `||` logical or.
+        let src = "fn f(a: bool, b: bool) -> bool { a || b }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
+        assert!(matches!(tail.kind, ExprKind::Binary { op: BinOp::Or, .. }));
+    }
+
+    #[test]
+    fn comparison_binds_tighter_than_logical_and() {
+        // FLS §6.7–§6.8: comparisons have higher precedence than `&&`.
+        // `a < b && c > d` should parse as `(a < b) && (c > d)`.
+        let src = "fn f() -> bool { a < b && c > d }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
+        // Outer op is `&&`.
+        let ExprKind::Binary { op: BinOp::And, ref lhs, ref rhs } = tail.kind else {
+            panic!("expected And at top level, got {:?}", tail.kind);
+        };
+        // Each side is a comparison.
+        assert!(matches!(lhs.kind, ExprKind::Binary { op: BinOp::Lt, .. }));
+        assert!(matches!(rhs.kind, ExprKind::Binary { op: BinOp::Gt, .. }));
+    }
+
+    // ── Recursive function (integration) ─────────────────────────────────────
+
+    #[test]
+    fn recursive_fibonacci() {
+        // Integration: `fib` exercises comparison, if-else, recursive calls,
+        // and arithmetic in call arguments — the full expression pipeline.
+        //
+        // FLS §6.3.1 (calls), §6.5 (arithmetic), §6.7 (comparison), §6.11 (if).
+        let src = "fn fib(n: u64) -> u64 { if n <= 1 { n } else { fib(n - 1) + fib(n - 2) } }";
+        let sf = parse_ok(src);
+        assert_eq!(sf.items.len(), 1);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        assert_eq!(f.params.len(), 1);
+        let body = f.body.as_ref().unwrap();
+        assert!(body.stmts.is_empty());
+        // Tail is an if-else.
+        let tail = body.tail.as_ref().unwrap();
+        let ExprKind::If { ref cond, ref else_expr, .. } = tail.kind else {
+            panic!("expected If as tail, got {:?}", tail.kind);
+        };
+        // Condition is `n <= 1`.
+        assert!(matches!(cond.kind, ExprKind::Binary { op: BinOp::Le, .. }));
+        // There is an else branch.
+        assert!(else_expr.is_some());
+        // The else expression is a block whose tail is `fib(n-1) + fib(n-2)`.
+        let else_inner = else_expr.as_ref().unwrap();
+        let ExprKind::Block(ref else_block) = else_inner.kind else {
+            panic!("expected else to be a Block, got {:?}", else_inner.kind);
+        };
+        let else_tail = else_block.tail.as_ref().unwrap();
+        assert!(matches!(else_tail.kind, ExprKind::Binary { op: BinOp::Add, .. }));
+    }
+
     // ── Error cases ───────────────────────────────────────────────────────────
 
     #[test]
