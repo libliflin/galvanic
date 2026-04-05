@@ -400,6 +400,104 @@ fn milestone_4_if_with_let() {
     assert_eq!(exit_code, 5, "expected exit 5 (if true {{ let x=5; x }}), got {exit_code}");
 }
 
+// ── Milestone 5: function calls ───────────────────────────────────────────────
+
+/// Milestone 5: calling a zero-argument function.
+///
+/// `fn answer() -> i32 { 42 }  fn main() -> i32 { answer() }` exits with 42.
+///
+/// FLS §6.12.1: Call expression — `answer()` invokes the named function.
+/// FLS §9: Function definitions — `answer` is a callable fn item.
+#[test]
+fn milestone_5_call_no_args() {
+    if !tools_available() {
+        eprintln!(
+            "milestone_5_call_no_args: SKIP \
+             (aarch64 cross tools or qemu-aarch64 not found)"
+        );
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("main.rs");
+
+    // FLS §6.12.1: call expression with no arguments.
+    std::fs::write(
+        &src,
+        "fn answer() -> i32 { 42 }\nfn main() -> i32 { answer() }\n",
+    )
+    .expect("write fixture");
+
+    let exit_code = compile_and_run(&src, dir.path());
+    assert_eq!(exit_code, 42, "expected exit 42 (answer()), got {exit_code}");
+}
+
+/// Milestone 5 (variant): calling a function with one argument.
+///
+/// `fn double(x: i32) -> i32 { x + x }  fn main() -> i32 { double(21) }`
+/// exits with 42.
+///
+/// FLS §6.12.1: Call expression with one argument.
+/// FLS §9: Parameter binding — `x` is bound to the argument value 21.
+/// FLS §6.5.5: Addition of two variable references.
+#[test]
+fn milestone_5_call_with_arg() {
+    if !tools_available() {
+        eprintln!(
+            "milestone_5_call_with_arg: SKIP \
+             (aarch64 cross tools or qemu-aarch64 not found)"
+        );
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("main.rs");
+
+    // FLS §6.12.1 / §9: call with one argument, parameter bound in callee.
+    std::fs::write(
+        &src,
+        "fn double(x: i32) -> i32 { x + x }\nfn main() -> i32 { double(21) }\n",
+    )
+    .expect("write fixture");
+
+    let exit_code = compile_and_run(&src, dir.path());
+    assert_eq!(exit_code, 42, "expected exit 42 (double(21)), got {exit_code}");
+}
+
+/// Milestone 5 (chain): chained calls — main calls add, add calls double.
+///
+/// `fn double(x: i32) -> i32 { x + x }
+///  fn add(a: i32, b: i32) -> i32 { a + b }
+///  fn main() -> i32 { add(double(10), double(11)) }`
+/// exits with 42 (20 + 22).
+///
+/// FLS §6.12.1: Nested call expressions; argument expressions are themselves calls.
+#[test]
+fn milestone_5_call_chained() {
+    if !tools_available() {
+        eprintln!(
+            "milestone_5_call_chained: SKIP \
+             (aarch64 cross tools or qemu-aarch64 not found)"
+        );
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("main.rs");
+
+    // FLS §6.12.1: argument expressions are call expressions themselves.
+    std::fs::write(
+        &src,
+        "fn double(x: i32) -> i32 { x + x }\n\
+         fn add(a: i32, b: i32) -> i32 { a + b }\n\
+         fn main() -> i32 { add(double(10), double(11)) }\n",
+    )
+    .expect("write fixture");
+
+    let exit_code = compile_and_run(&src, dir.path());
+    assert_eq!(exit_code, 42, "expected exit 42 (add(double(10), double(11))), got {exit_code}");
+}
+
 /// Milestone 1 (implicit unit): `fn main() {}` exits with code 0.
 ///
 /// FLS §9: "If no return type is specified, the return type is `()`."

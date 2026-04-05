@@ -36,3 +36,27 @@ fn returns_unit() {
 fn quadratic(a: i32, b: i32, c: i32, x: i32) -> i32 {
     a * x * x + b * x + c
 }
+
+// FLS §6.12.1 — Call expressions.
+// Source: https://rust-lang.github.io/fls/expressions.html#call-expressions
+//
+// A function calling another function with no arguments.
+// The FLS does not provide a minimal example here; this is a derived case
+// from §6.12.1 and §9 illustrating the simplest non-trivial call.
+fn constant_answer() -> i32 {
+    42
+}
+
+fn call_no_args() -> i32 {
+    constant_answer()
+}
+
+// FLS §6.12.1: Call with arguments — argument expressions evaluated left-to-right
+// (FLS §6.12.1 AMBIGUOUS: evaluation order is not explicitly specified).
+fn add_two(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+fn call_with_args() -> i32 {
+    add_two(20, 22)
+}

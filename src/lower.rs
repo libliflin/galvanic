@@ -13,19 +13,24 @@
 //! - FLS §6.3: Path expressions — variable references resolved from env.
 //! - FLS §6.17: If expressions — constant-folded when condition is a literal.
 //! - FLS §6.4: Block expressions — evaluated as nested constant scopes.
+//! - FLS §6.12.1: Call expressions — compile-time inlining of constant calls.
 //! - FLS §18.1: Program structure — `lower` produces one `Module` per file.
 //!
-//! # Scope (milestone 4)
+//! # Scope (milestone 5)
 //!
-//! Extends milestone 3 to support `if`/`else` control flow via constant
-//! folding. The condition must evaluate to a boolean literal at compile time;
-//! the selected branch is then evaluated as a block expression. No branch
-//! instructions are emitted — the compiler selects the live branch statically.
-//! Runtime-variable conditions are deferred to a later milestone.
+//! Extends milestone 4 to support function call expressions. Calls are
+//! handled by compile-time inlining: arguments are evaluated as constants,
+//! the callee's parameter names are bound in a fresh environment, and its
+//! body is evaluated. This is a natural extension of the constant-folding
+//! approach used in all prior milestones.
+//!
+//! Only calls to named functions (single-segment path callees) are supported.
+//! Recursive calls that do not terminate at compile time will loop forever —
+//! runtime call support (stack frames, branch-and-link) is deferred.
 
 use std::collections::HashMap;
 
-use crate::ast::{BinOp, Block, Expr, ExprKind, ItemKind, SourceFile, StmtKind, TyKind};
+use crate::ast::{BinOp, Block, Expr, ExprKind, FnDef, ItemKind, SourceFile, StmtKind, TyKind};
 use crate::ir::{Instr, IrFn, IrTy, IrValue, Module};
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -45,6 +50,16 @@ impl std::fmt::Display for LowerError {
     }
 }
 
+// ── Function table ────────────────────────────────────────────────────────────
+
+/// A map from function name to its AST definition.
+///
+/// Built once from the `SourceFile` at the top of `lower()` and threaded
+/// through all lowering functions so that call expressions can be inlined.
+///
+/// FLS §6.12.1: Call expressions resolve the callee by name lookup.
+type FnTable<'ast> = HashMap<String, &'ast FnDef>;
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 /// Lower a parsed source file to the IR.
@@ -53,12 +68,22 @@ impl std::fmt::Display for LowerError {
 /// lowered to an `IrFn`. Other item kinds (struct, enum) do not produce
 /// code directly and are unsupported at this milestone.
 pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
+    // Build the function table first so calls can be resolved during lowering.
+    // FLS §6.12.1: Call expressions resolve the callee to a function definition.
+    let mut fn_table: FnTable<'_> = HashMap::new();
+    for item in &src.items {
+        if let ItemKind::Fn(fn_def) = &item.kind {
+            let name = fn_def.name.text(source).to_owned();
+            fn_table.insert(name, fn_def.as_ref());
+        }
+    }
+
     let mut fns = Vec::new();
 
     for item in &src.items {
         match &item.kind {
             ItemKind::Fn(fn_def) => {
-                fns.push(lower_fn(fn_def, source)?);
+                fns.push(lower_fn(fn_def, source, &fn_table)?);
             }
             ItemKind::Struct(_) | ItemKind::Enum(_) => {
                 return Err(LowerError::Unsupported(
@@ -76,7 +101,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
 /// Lower a single function definition to an `IrFn`.
 ///
 /// FLS §9: Functions.
-fn lower_fn(fn_def: &crate::ast::FnDef, source: &str) -> Result<IrFn, LowerError> {
+fn lower_fn(fn_def: &FnDef, source: &str, fn_table: &FnTable<'_>) -> Result<IrFn, LowerError> {
     let name = fn_def.name.text(source).to_owned();
 
     // FLS §9: "If no return type is specified, the return type is `()`."
@@ -91,7 +116,7 @@ fn lower_fn(fn_def: &crate::ast::FnDef, source: &str) -> Result<IrFn, LowerError
                 "extern / bodyless functions".into(),
             ));
         }
-        Some(block) => lower_block_return(block, &ret_ty, source)?,
+        Some(block) => lower_block_return(block, &ret_ty, source, fn_table)?,
     };
 
     Ok(IrFn { name, ret_ty, body })
@@ -128,9 +153,10 @@ fn lower_block_return(
     block: &Block,
     ret_ty: &IrTy,
     source: &str,
+    fn_table: &FnTable<'_>,
 ) -> Result<Vec<Instr>, LowerError> {
     let env: HashMap<String, IrValue> = HashMap::new();
-    let value = lower_block_value(block, ret_ty, source, &env)?;
+    let value = lower_block_value(block, ret_ty, source, &env, fn_table)?;
     Ok(vec![Instr::Ret(value)])
 }
 
@@ -147,6 +173,7 @@ fn lower_block_value(
     expected_ty: &IrTy,
     source: &str,
     parent_env: &HashMap<String, IrValue>,
+    fn_table: &FnTable<'_>,
 ) -> Result<IrValue, LowerError> {
     // Clone parent env so inner bindings don't leak out.
     let mut env = parent_env.clone();
@@ -161,7 +188,7 @@ fn lower_block_value(
                 let init_expr = init.as_ref().ok_or_else(|| {
                     LowerError::Unsupported("let binding without initializer".into())
                 })?;
-                let val = lower_expr(init_expr, expected_ty, source, &env)?;
+                let val = lower_expr(init_expr, expected_ty, source, &env, fn_table)?;
                 let binding_name = name.text(source).to_owned();
                 env.insert(binding_name, val);
             }
@@ -175,7 +202,7 @@ fn lower_block_value(
 
     match &block.tail {
         None => Ok(IrValue::Unit),
-        Some(expr) => lower_expr(expr, expected_ty, source, &env),
+        Some(expr) => lower_expr(expr, expected_ty, source, &env, fn_table),
     }
 }
 
@@ -205,15 +232,18 @@ fn lower_expr_as_bool(
 /// Lower an expression to an `IrValue`.
 ///
 /// `env` maps in-scope let bindings to their compile-time constant values.
+/// `fn_table` maps function names to their AST definitions for call inlining.
 ///
 /// FLS §6.2: Literal expressions.
 /// FLS §6.3: Path expressions — single-segment paths resolved from `env`.
 /// FLS §6.5: Arithmetic operator expressions.
+/// FLS §6.12.1: Call expressions — inlined via compile-time evaluation.
 fn lower_expr(
     expr: &Expr,
     expected_ty: &IrTy,
     source: &str,
     env: &HashMap<String, IrValue>,
+    fn_table: &FnTable<'_>,
 ) -> Result<IrValue, LowerError> {
     match (&expr.kind, expected_ty) {
         // FLS §2.4.4.1: Integer literal narrowed to i32.
@@ -254,8 +284,8 @@ fn lower_expr(
         // implementation-defined. We use wrapping semantics here (matching
         // rustc's debug-mode behaviour) and document that choice.
         (ExprKind::Binary { op, lhs, rhs }, IrTy::I32) => {
-            let lhs_val = lower_expr(lhs, expected_ty, source, env)?;
-            let rhs_val = lower_expr(rhs, expected_ty, source, env)?;
+            let lhs_val = lower_expr(lhs, expected_ty, source, env, fn_table)?;
+            let rhs_val = lower_expr(rhs, expected_ty, source, env, fn_table)?;
             match (op, lhs_val, rhs_val) {
                 (BinOp::Add, IrValue::I32(a), IrValue::I32(b)) => {
                     // FLS §6.5.5: Addition operator `+`.
@@ -280,7 +310,7 @@ fn lower_expr(
         // A block expression `{ stmts... tail }` introduces a new scope; bindings
         // from `env` are visible inside but bindings introduced inside do not leak.
         (ExprKind::Block(block), _) => {
-            lower_block_value(block, expected_ty, source, env)
+            lower_block_value(block, expected_ty, source, env, fn_table)
         }
 
         // FLS §6.17: If expression.
@@ -297,14 +327,80 @@ fn lower_expr(
             let cond_bool = lower_expr_as_bool(cond, source, env)?;
             if cond_bool {
                 // Condition is true: evaluate the then-branch.
-                lower_block_value(then_block, expected_ty, source, env)
+                lower_block_value(then_block, expected_ty, source, env, fn_table)
             } else {
                 // Condition is false: evaluate the else-branch (if present).
                 match else_expr {
-                    Some(else_e) => lower_expr(else_e, expected_ty, source, env),
+                    Some(else_e) => lower_expr(else_e, expected_ty, source, env, fn_table),
                     None => Ok(IrValue::Unit),
                 }
             }
+        }
+
+        // FLS §6.12.1: Call expression — compile-time inlining.
+        //
+        // The callee must be a single-segment path naming a function in this
+        // module. Arguments are evaluated as constants, bound to the callee's
+        // parameter names in a fresh environment, and the callee's body is
+        // evaluated in that environment.
+        //
+        // This implements constant inlining rather than runtime call emission.
+        // Runtime calls (stack frames, bl/ret pairs) are deferred to a later
+        // milestone when runtime-variable values are needed.
+        //
+        // FLS §6.12.1 AMBIGUOUS: the spec describes call expressions but does
+        // not specify the evaluation order of arguments. We evaluate left-to-right
+        // following the convention established in §6.5 for binary operands.
+        (ExprKind::Call { callee, args }, _) => {
+            // Resolve the callee to a function name (single-segment path only).
+            let callee_name = match &callee.kind {
+                ExprKind::Path(segments) if segments.len() == 1 => {
+                    segments[0].text(source)
+                }
+                _ => {
+                    return Err(LowerError::Unsupported(
+                        "call to non-path callee (closures, method objects not yet supported)".into(),
+                    ));
+                }
+            };
+
+            // Look up the callee in the module's function table.
+            let callee_def = fn_table.get(callee_name).ok_or_else(|| {
+                LowerError::Unsupported(format!(
+                    "call to undefined or external function `{callee_name}`"
+                ))
+            })?;
+
+            // Arity check.
+            if args.len() != callee_def.params.len() {
+                return Err(LowerError::Unsupported(format!(
+                    "call to `{callee_name}`: expected {} argument(s), got {}",
+                    callee_def.params.len(),
+                    args.len()
+                )));
+            }
+
+            // Evaluate each argument and bind it to the corresponding parameter.
+            // FLS §9: Parameters are irrefutable patterns with declared types.
+            let mut call_env: HashMap<String, IrValue> = HashMap::new();
+            for (param, arg_expr) in callee_def.params.iter().zip(args.iter()) {
+                let param_ty = lower_ty(&param.ty, source)?;
+                let arg_val = lower_expr(arg_expr, &param_ty, source, env, fn_table)?;
+                let param_name = param.name.text(source).to_owned();
+                call_env.insert(param_name, arg_val);
+            }
+
+            // Evaluate the callee's body with the argument environment.
+            let callee_ret_ty = match &callee_def.ret_ty {
+                None => IrTy::Unit,
+                Some(ty) => lower_ty(ty, source)?,
+            };
+            let body = callee_def.body.as_ref().ok_or_else(|| {
+                LowerError::Unsupported(format!(
+                    "call to bodyless (extern) function `{callee_name}`"
+                ))
+            })?;
+            lower_block_value(body, &callee_ret_ty, source, &call_env, fn_table)
         }
 
         // Any other combination is not yet supported.
