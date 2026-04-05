@@ -1,3 +1,6 @@
+#[allow(dead_code)]
+mod lexer;
+
 use std::env;
 use std::path::Path;
 use std::process;
