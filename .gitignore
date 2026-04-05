@@ -1,1 +1,4 @@
 /target
+
+# Lathe runtime state
+.lathe/state/
