@@ -74,7 +74,6 @@ pub fn emit_asm(module: &Module) -> Result<String, CodegenError> {
     let mut out = String::new();
 
     writeln!(out, "    .text")?;
-    writeln!(out, "    .arch aarch64")?;
 
     for func in &module.fns {
         writeln!(out)?;
