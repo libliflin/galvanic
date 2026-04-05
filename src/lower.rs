@@ -11,14 +11,17 @@
 //! - FLS §4.4: Unit type — absent tail / unit type lowers to `IrValue::Unit`.
 //! - FLS §8.1: Let statements — processed into a constant environment.
 //! - FLS §6.3: Path expressions — variable references resolved from env.
+//! - FLS §6.17: If expressions — constant-folded when condition is a literal.
+//! - FLS §6.4: Block expressions — evaluated as nested constant scopes.
 //! - FLS §18.1: Program structure — `lower` produces one `Module` per file.
 //!
-//! # Scope (milestone 3)
+//! # Scope (milestone 4)
 //!
-//! Extends milestone 2 to support `let` bindings and simple variable
-//! references. The approach remains pure constant-folding: let initializers
-//! must evaluate to a compile-time constant, and path expressions substitute
-//! the bound constant. No stack allocation or virtual registers are needed.
+//! Extends milestone 3 to support `if`/`else` control flow via constant
+//! folding. The condition must evaluate to a boolean literal at compile time;
+//! the selected branch is then evaluated as a block expression. No branch
+//! instructions are emitted — the compiler selects the live branch statically.
+//! Runtime-variable conditions are deferred to a later milestone.
 
 use std::collections::HashMap;
 
@@ -116,21 +119,37 @@ fn lower_ty(ty: &crate::ast::Ty, source: &str) -> Result<IrTy, LowerError> {
 
 /// Lower a function body block to a list of IR instructions.
 ///
-/// Processes `let` statements in order, building a constant environment, then
-/// lowers the tail expression (or unit) to the single `Ret` instruction.
+/// Builds a fresh constant environment (no enclosing scope), evaluates the
+/// block, and wraps the result in a single `Ret` instruction.
 ///
 /// FLS §6.4: Block expressions.
-/// FLS §8.1: Let statements — each `let x = expr;` binds `x` to the
-///   constant-folded value of `expr` in the local environment.
 /// FLS §6.19: Return expressions — the tail is the block's return value.
 fn lower_block_return(
     block: &Block,
     ret_ty: &IrTy,
     source: &str,
 ) -> Result<Vec<Instr>, LowerError> {
-    // FLS §8.1: Build a constant environment from let statements.
-    // Maps each bound identifier (source text) to its compile-time constant.
-    let mut env: HashMap<String, IrValue> = HashMap::new();
+    let env: HashMap<String, IrValue> = HashMap::new();
+    let value = lower_block_value(block, ret_ty, source, &env)?;
+    Ok(vec![Instr::Ret(value)])
+}
+
+/// Evaluate a block expression to a compile-time constant value.
+///
+/// Processes `let` statements in order, extending `parent_env` with each new
+/// binding, then evaluates the tail expression (or returns `IrValue::Unit`).
+/// Bindings introduced inside this block do not escape it (block scoping).
+///
+/// FLS §6.4: Block expressions.
+/// FLS §8.1: Let statements — each `let x = expr;` binds `x` in the local env.
+fn lower_block_value(
+    block: &Block,
+    expected_ty: &IrTy,
+    source: &str,
+    parent_env: &HashMap<String, IrValue>,
+) -> Result<IrValue, LowerError> {
+    // Clone parent env so inner bindings don't leak out.
+    let mut env = parent_env.clone();
 
     for stmt in &block.stmts {
         match &stmt.kind {
@@ -142,24 +161,45 @@ fn lower_block_return(
                 let init_expr = init.as_ref().ok_or_else(|| {
                     LowerError::Unsupported("let binding without initializer".into())
                 })?;
-                let val = lower_expr(init_expr, ret_ty, source, &env)?;
+                let val = lower_expr(init_expr, expected_ty, source, &env)?;
                 let binding_name = name.text(source).to_owned();
                 env.insert(binding_name, val);
             }
             StmtKind::Expr(_) | StmtKind::Empty => {
                 return Err(LowerError::Unsupported(
-                    "expression statements in function body".into(),
+                    "expression statements in block".into(),
                 ));
             }
         }
     }
 
-    let value = match &block.tail {
-        None => IrValue::Unit,
-        Some(expr) => lower_expr(expr, ret_ty, source, &env)?,
-    };
+    match &block.tail {
+        None => Ok(IrValue::Unit),
+        Some(expr) => lower_expr(expr, expected_ty, source, &env),
+    }
+}
 
-    Ok(vec![Instr::Ret(value)])
+/// Evaluate an expression to a compile-time boolean.
+///
+/// Used to fold `if`/`else` conditions at compile time. Only literal booleans
+/// are supported at this milestone; runtime-variable conditions require branch
+/// instruction emission and are deferred.
+///
+/// FLS §2.4.7: Boolean literals `true` and `false`.
+fn lower_expr_as_bool(
+    expr: &Expr,
+    _source: &str,
+    _env: &HashMap<String, IrValue>,
+) -> Result<bool, LowerError> {
+    match &expr.kind {
+        // FLS §2.4.7: Boolean literals.
+        ExprKind::LitBool(b) => Ok(*b),
+        _ => Err(LowerError::Unsupported(
+            "non-constant boolean expression in if condition \
+             (runtime branches not yet supported)"
+                .into(),
+        )),
+    }
 }
 
 /// Lower an expression to an `IrValue`.
@@ -232,6 +272,38 @@ fn lower_expr(
                 _ => Err(LowerError::Unsupported(
                     "non-constant or unsupported binary expression".into(),
                 )),
+            }
+        }
+
+        // FLS §6.4: Block expression — evaluate the block as a nested constant scope.
+        //
+        // A block expression `{ stmts... tail }` introduces a new scope; bindings
+        // from `env` are visible inside but bindings introduced inside do not leak.
+        (ExprKind::Block(block), _) => {
+            lower_block_value(block, expected_ty, source, env)
+        }
+
+        // FLS §6.17: If expression.
+        //
+        // At this milestone the condition must be a compile-time boolean literal.
+        // The live branch is selected statically; the dead branch is not evaluated.
+        // This covers `if true { 1 } else { 0 }` and `if false { 1 } else { 0 }`.
+        //
+        // FLS §6.17 AMBIGUOUS: the spec does not explicitly state what happens
+        // when an `if` expression is used without an `else` branch in a value
+        // position with a non-unit expected type. We treat absent `else` as
+        // returning `IrValue::Unit` and defer the type mismatch to the type checker.
+        (ExprKind::If { cond, then_block, else_expr }, _) => {
+            let cond_bool = lower_expr_as_bool(cond, source, env)?;
+            if cond_bool {
+                // Condition is true: evaluate the then-branch.
+                lower_block_value(then_block, expected_ty, source, env)
+            } else {
+                // Condition is false: evaluate the else-branch (if present).
+                match else_expr {
+                    Some(else_e) => lower_expr(else_e, expected_ty, source, env),
+                    None => Ok(IrValue::Unit),
+                }
             }
         }
 

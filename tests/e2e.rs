@@ -312,6 +312,94 @@ fn milestone_3_let_bindings_add() {
     assert_eq!(exit_code, 7, "expected exit 7 (3+4), got {exit_code}");
 }
 
+// ── Milestone 4: if/else control flow ────────────────────────────────────────
+
+/// Milestone 4: `fn main() -> i32 { if true { 1 } else { 0 } }` exits with 1.
+///
+/// FLS §6.17: If expression — `if` selects one of two branches.
+/// FLS §2.4.7: Boolean literal `true`.
+/// FLS §6.4: Block expressions as if/else branches.
+#[test]
+fn milestone_4_if_true() {
+    if !tools_available() {
+        eprintln!(
+            "milestone_4_if_true: SKIP \
+             (aarch64 cross tools or qemu-aarch64 not found)"
+        );
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("main.rs");
+
+    // FLS §6.17: if expression with boolean literal condition.
+    std::fs::write(
+        &src,
+        "fn main() -> i32 { if true { 1 } else { 0 } }\n",
+    )
+    .expect("write fixture");
+
+    let exit_code = compile_and_run(&src, dir.path());
+    assert_eq!(exit_code, 1, "expected exit 1 (if true), got {exit_code}");
+}
+
+/// Milestone 4 (variant): `fn main() -> i32 { if false { 1 } else { 0 } }` exits with 0.
+///
+/// FLS §6.17: If expression — `false` condition selects the else branch.
+/// FLS §2.4.7: Boolean literal `false`.
+#[test]
+fn milestone_4_if_false() {
+    if !tools_available() {
+        eprintln!(
+            "milestone_4_if_false: SKIP \
+             (aarch64 cross tools or qemu-aarch64 not found)"
+        );
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("main.rs");
+
+    std::fs::write(
+        &src,
+        "fn main() -> i32 { if false { 1 } else { 0 } }\n",
+    )
+    .expect("write fixture");
+
+    let exit_code = compile_and_run(&src, dir.path());
+    assert_eq!(exit_code, 0, "expected exit 0 (if false), got {exit_code}");
+}
+
+/// Milestone 4 (compound): if/else with let bindings in branches.
+///
+/// `fn main() -> i32 { if true { let x = 5; x } else { 0 } }` exits with 5.
+///
+/// FLS §6.17: If expression.
+/// FLS §8.1: Let binding inside if branch.
+/// FLS §6.3: Path expression for the bound variable.
+#[test]
+fn milestone_4_if_with_let() {
+    if !tools_available() {
+        eprintln!(
+            "milestone_4_if_with_let: SKIP \
+             (aarch64 cross tools or qemu-aarch64 not found)"
+        );
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("main.rs");
+
+    std::fs::write(
+        &src,
+        "fn main() -> i32 { if true { let x = 5; x } else { 0 } }\n",
+    )
+    .expect("write fixture");
+
+    let exit_code = compile_and_run(&src, dir.path());
+    assert_eq!(exit_code, 5, "expected exit 5 (if true {{ let x=5; x }}), got {exit_code}");
+}
+
 /// Milestone 1 (implicit unit): `fn main() {}` exits with code 0.
 ///
 /// FLS §9: "If no return type is specified, the return type is `()`."
