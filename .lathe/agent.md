@@ -92,9 +92,22 @@ Each cycle:
 1. **Read the snapshot.** What programs can galvanic currently compile end-to-end? What's the next milestone?
 2. **Pick one change.** The change that extends the pipeline furthest toward the next runnable binary. Not the change that adds the most front-end coverage.
 3. **Implement it.** One thing. Usually this means touching multiple phases (parser + IR + codegen) for one language feature — that's fine, that's one vertical slice.
-4. **Add an end-to-end test.** Compile a `.rs` file, run the output (or check the emitted assembly), verify the result. This is the primary test, not a unit test for the parser.
-5. **Validate.** `cargo build`, `cargo test`, `cargo clippy -- -D warnings`. All must pass.
-6. **Write the changelog.** What program can galvanic now compile that it couldn't before?
+4. **Cite the FLS.** Every new type, function, or grammar rule must reference the FLS section it implements. Read the section in `.lathe/refs/fls-pointer.md` to find the right number. If the spec is ambiguous, add an `FLS §X.Y AMBIGUOUS:` comment.
+5. **Add a test fixture derived from the FLS.** Add or extend a file in `tests/fixtures/` with an example from the relevant FLS section. Do NOT invent Rust programs — derive them from spec examples. Comment each example with its FLS section. If the spec doesn't provide an example for this feature, note that explicitly.
+6. **Add an end-to-end test.** Compile a `.rs` file, run the output (or check the emitted assembly), verify the result. The fixture file IS the test input — the `tests/fls_fixtures.rs` harness runs galvanic on each fixture.
+7. **Check performance.** Run `cargo bench --bench throughput` and verify the cycle didn't regress throughput. If throughput dropped, investigate before committing. The benchmark fixtures are the same FLS-derived files — so adding features to those files also adds benchmark coverage. Record the throughput numbers in the changelog.
+8. **Validate.** `cargo build`, `cargo test`, `cargo clippy -- -D warnings`. All must pass.
+9. **Write the changelog.** What program can galvanic now compile that it couldn't before? What FLS sections were consulted? What were the throughput numbers?
+
+### The three invariants of every cycle
+
+Every cycle must maintain these three things:
+
+1. **Spec traceability.** Every piece of implemented behavior must trace to an FLS section. No "I know Rust does X" — find it in the spec or document that the spec is silent. Test programs come from FLS examples, not from the implementer's knowledge of Rust.
+
+2. **Performance measurement.** Throughput must be measured every cycle via `cargo bench`. The benchmarks use FLS-derived fixtures in `tests/fixtures/`. If a cycle adds a language feature, the fixture for that feature gets benchmarked automatically. Regressions must be explained in the changelog.
+
+3. **End-to-end validation.** The strongest test is "does the right binary come out?" Until codegen exists, the bar is "does galvanic accept this FLS-derived program?" Once codegen exists, the bar is "does the emitted binary produce the right answer?"
 
 **The pick bias to resist**: When the parser already handles something, the temptation is to "complete" the parser before moving deeper. Resist. A parser that handles 50 expression types feeding into zero codegen is not progress. A parser that handles 5 expression types feeding into working ARM64 codegen is.
 
@@ -201,13 +214,21 @@ The lathe runs on a session branch. The engine provides branch, PR number, and C
 ## Programs That Now Compile
 - List the `.rs` programs galvanic can now compile end-to-end (if this cycle extended that set)
 
-## FLS Notes
-- Spec sections consulted
+## FLS Traceability
+- Spec sections consulted (with §X.Y numbers)
 - Ambiguities or gaps encountered
-- Cache-line decisions made
+- Which test fixture was added/extended and which FLS example it derives from
+- If no FLS example exists for this feature, note that explicitly
+
+## Performance
+- Lexer throughput: X MiB/s on fls_functions fixture
+- Parser throughput: X MiB/s on fls_functions fixture
+- End-to-end throughput: X MiB/s on fls_functions fixture
+- Any regressions vs. previous cycle? If so, explain why and whether it's acceptable.
+- Cache-line decisions made (if any)
 
 ## Validated
-- How you verified it (cargo build, cargo test, cargo clippy output)
+- How you verified it (cargo build, cargo test, cargo clippy, cargo bench output)
 - End-to-end test results (compiled X, ran it, got expected output)
 
 ## Next
@@ -218,11 +239,13 @@ The lathe runs on a session branch. The engine provides branch, PR number, and C
 
 ## Rules
 
-- **Never skip validation.** `cargo build && cargo test && cargo clippy -- -D warnings` must pass before committing.
+- **Never skip validation.** `cargo build && cargo test && cargo clippy -- -D warnings && cargo bench --bench throughput` must all pass before committing.
 - **Never do two things.** One focused change per cycle.
 - **Never fix higher layers while lower ones are broken.** If tests fail, fix tests before touching code quality.
 - **Never remove tests to make things pass.** The smoke test exists for a reason. Don't delete it.
-- **Respect FLS citations.** Every parser method and AST node has an FLS section reference. New code must cite its section.
+- **Respect FLS citations.** Every parser method and AST node has an FLS section reference. New code must cite its section. Use `.lathe/refs/fls-pointer.md` for correct section numbers.
+- **Derive test programs from the FLS, not from knowledge of Rust.** Test fixtures in `tests/fixtures/` must cite the FLS section their examples come from. If you're writing `let x = 42;` as a test, cite §8.1 (Let Statements) and §2.4.4.1 (Integer Literals). If the spec doesn't have an example, note that.
+- **Measure throughput every cycle.** Run `cargo bench --bench throughput` and record the numbers in the changelog. Explain any regressions.
 - **Preserve the cache-line design.** Token is 8 bytes, Span is 8 bytes — don't add fields that break this without explicit rationale.
 - **Document FLS ambiguities when you find them.** Use the `FLS §X AMBIGUOUS:` comment pattern already established in the code.
 - **If stuck 3+ cycles on the same issue, change approach entirely.** Don't keep retrying the same fix.

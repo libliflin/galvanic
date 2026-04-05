@@ -1,7 +1,3 @@
-mod ast;
-mod lexer;
-mod parser;
-
 use std::env;
 use std::path::Path;
 use std::process;
@@ -30,7 +26,7 @@ fn main() {
         }
     };
 
-    let tokens = match lexer::tokenize(&source) {
+    let tokens = match galvanic::lexer::tokenize(&source) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("error: {e}");
@@ -38,7 +34,7 @@ fn main() {
         }
     };
 
-    let source_file = match parser::parse(&tokens, &source) {
+    let source_file = match galvanic::parser::parse(&tokens, &source) {
         Ok(sf) => sf,
         Err(e) => {
             eprintln!("error: {e}");

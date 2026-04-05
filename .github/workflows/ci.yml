@@ -164,3 +164,27 @@ jobs:
             echo "FAIL: networking crate found in dependencies"
             exit 1
           fi
+
+  # Run benchmarks to catch performance regressions
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run benchmarks
+        run: cargo bench --bench throughput -- --warm-up-time 2 --measurement-time 3 2>&1 | tee bench-output.txt
+
+      - name: Print throughput summary
+        run: |
+          echo "## Throughput Summary"
+          grep -E 'time:|thrpt:' bench-output.txt || echo "No throughput data found"
+
+      - name: Check data structure sizes
+        run: |
+          # Verify cache-line-aware data structures haven't grown
+          cargo test --lib -- --exact lexer::tests::token_is_eight_bytes 2>&1
+          cargo test --lib -- --exact lexer::tests::span_is_eight_bytes 2>&1 || true

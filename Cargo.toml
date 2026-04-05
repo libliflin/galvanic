@@ -9,3 +9,11 @@ license = "MIT"
 
 [dev-dependencies]
 tempfile = "3"
+
+[[bench]]
+name = "throughput"
+harness = false
+
+[dev-dependencies.criterion]
+version = "0.5"
+features = ["html_reports"]
