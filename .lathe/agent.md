@@ -121,24 +121,15 @@ Every cycle must maintain these four things:
 
 ## What Matters Now
 
-Galvanic is in **Stage 3: pipeline works end-to-end, but codegen is a compile-time interpreter.** The lexer, parser, IR, and codegen exist. Galvanic can compile programs through milestones 1–10 and produce running ARM64 binaries with correct exit codes.
+Galvanic's lowering pass (`src/lower.rs`) is a compile-time interpreter, not a compiler. It evaluates everything at compile time and emits only `mov reg, #N; ret`. This violates FLS §6.1.2:37–45 — compile-time evaluation is only for const contexts.
 
-**However, the current implementation violates the FLS.** The lowering pass (`src/lower.rs`) evaluates ALL code at compile time — including non-const functions, while loops, if/else branches, and mutable variables. This is incorrect per FLS §6.1.2:37–45: compile-time evaluation is only permitted in const contexts. The current IR has only one instruction (`Instr::Ret`), and codegen emits only `mov`/`ret`/`bl`/`svc`. There are no branch instructions, no comparisons, no stack operations, no register allocation.
+**Your next step is small.** Pick the simplest existing milestone where the current approach is wrong and fix just that one. Start with `fn main() -> i32 { 1 + 2 }` — it should emit `mov x0, #1; mov x1, #2; add x0, x0, x1; ret`, not `mov x0, #3; ret`. This means:
 
-**The next milestone must introduce runtime codegen.** The IR needs new instruction forms:
+1. Add `Instr::LoadImm`, `Instr::Add`, and their codegen (a few lines each)
+2. Change the lowering for `BinaryOp::Add` to emit those instructions instead of evaluating
+3. Update the test to verify the emitted assembly contains `add`
 
-- `Instr::LoadImm(reg, value)` — load an immediate into a register
-- `Instr::Add(dst, lhs, rhs)` / `Sub` / `Mul` — arithmetic on registers
-- `Instr::Cmp(lhs, rhs)` — compare two registers
-- `Instr::BranchIf(cond, label)` — conditional branch
-- `Instr::Branch(label)` — unconditional branch
-- `Instr::Store(reg, stack_offset)` / `Load` — local variables on the stack
-
-The existing compile-time evaluator in `lower.rs` is valid code — it can become a `const fn` evaluator later. But for now, all non-const code must go through runtime IR emission.
-
-**Suggested approach:** Rewrite `fn main() -> i32 { let mut x = 0; while x < 5 { x = x + 1; } x }` (milestone 7) to emit actual branch and comparison instructions. This is the smallest program that currently "works" via interpretation but must use runtime codegen. The emitted assembly should contain `cmp`, `b.lt` (or similar conditional branch), `add`, and a backward branch for the loop.
-
-This is a significant architectural change — the lowering pass transforms from an evaluator to an IR emitter. The end-to-end tests should be updated to verify that emitted assembly contains expected instruction forms, not just that exit codes are correct.
+That's it. One cycle. Don't plan the whole rewrite — just make arithmetic emit real instructions. The next cycle can do subtraction, the one after can do comparisons, etc. Each cycle adds one or two IR instruction forms.
 
 ---
 
