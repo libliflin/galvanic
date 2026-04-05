@@ -430,6 +430,63 @@ fn milestone_8_loop_multi_var() {
     assert_eq!(exit_code, 10, "expected exit 10 (loop multi var), got {exit_code}");
 }
 
+// ── Milestone 9: continue expressions ───────────────────────────────────────
+
+/// Milestone 9: `continue` inside a `while` loop skips the rest of the body.
+///
+/// Sums 1+2+4+5 (skipping 3 via `continue`), expects 12.
+///
+/// FLS §6.15.7: Continue expression.
+/// FLS §6.15.3: While loop.
+/// FLS §6.17: If expression as the continue guard.
+#[test]
+fn milestone_9_continue_while() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 {\n\
+             let mut i = 0;\n\
+             let mut sum = 0;\n\
+             while i < 5 {\n\
+                 i = i + 1;\n\
+                 if i == 3 { continue; }\n\
+                 sum = sum + i;\n\
+             }\n\
+             sum\n\
+         }\n",
+    ) else {
+        return;
+    };
+    // 1+2+4+5 = 12 (3 is skipped)
+    assert_eq!(exit_code, 12, "expected exit 12 (continue skips 3), got {exit_code}");
+}
+
+/// Milestone 9: `continue` inside a `loop` body skips the rest of the iteration.
+///
+/// Sums 1+2+4+5 (skipping 3 via `continue`), expects 12.
+///
+/// FLS §6.15.7: Continue expression.
+/// FLS §6.15.2: Loop expression.
+/// FLS §6.15.6: Break expression.
+#[test]
+fn milestone_9_continue_loop() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 {\n\
+             let mut i = 0;\n\
+             let mut sum = 0;\n\
+             loop {\n\
+                 i = i + 1;\n\
+                 if i > 5 { break; }\n\
+                 if i == 3 { continue; }\n\
+                 sum = sum + i;\n\
+             }\n\
+             sum\n\
+         }\n",
+    ) else {
+        return;
+    };
+    // 1+2+4+5 = 12 (3 is skipped)
+    assert_eq!(exit_code, 12, "expected exit 12 (continue skips 3), got {exit_code}");
+}
+
 // ── Milestone 7: while loops ─────────────────────────────────────────────────
 
 /// Milestone 7: simple counting loop.
