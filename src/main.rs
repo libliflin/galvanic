@@ -32,6 +32,7 @@ fn main() {
         }
     };
 
+    // ── Lex ───────────────────────────────────────────────────────────────────
     let tokens = match galvanic::lexer::tokenize(&source) {
         Ok(t) => t,
         Err(e) => {
@@ -40,6 +41,7 @@ fn main() {
         }
     };
 
+    // ── Parse ─────────────────────────────────────────────────────────────────
     let source_file = match galvanic::parser::parse(&tokens, &source) {
         Ok(sf) => sf,
         Err(e) => {
@@ -50,24 +52,44 @@ fn main() {
 
     println!("parsed {} item(s)", source_file.items.len());
 
-    // If -o was given, lower to IR, emit assembly, and assemble+link.
+    // ── Lower AST → IR ────────────────────────────────────────────────────────
+    let module = match galvanic::lower::lower(&source_file, &source) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("note: skipping codegen ({e})");
+            return;
+        }
+    };
+
+    // Nothing to compile if there is no entry point.
+    if !module.fns.iter().any(|f| f.name == "main") {
+        return;
+    }
+
+    // ── Emit ARM64 assembly ───────────────────────────────────────────────────
+    let asm = match galvanic::codegen::emit_asm(&module) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("error: {e}");
+            process::exit(1);
+        }
+    };
+
     if let Some(out) = output_path {
-        let program = match galvanic::ir::lower(&source_file, &source) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("error: {e}");
-                process::exit(1);
-            }
-        };
-
-        let asm = galvanic::codegen::emit_asm(&program);
-
+        // If -o was given, assemble and link into a binary.
         if let Err(e) = assemble_and_link(&asm, out) {
             eprintln!("error: {e}");
             process::exit(1);
         }
-
         println!("galvanic: wrote {out}");
+    } else {
+        // Otherwise, write {input_stem}.s alongside the source file.
+        let out_path = source_path.with_extension("s");
+        if let Err(e) = std::fs::write(&out_path, &asm) {
+            eprintln!("error: could not write {}: {e}", out_path.display());
+            process::exit(1);
+        }
+        println!("galvanic: emitted {}", out_path.display());
     }
 }
 

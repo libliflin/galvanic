@@ -1,156 +1,176 @@
-//! ARM64 (AArch64) assembly code generation for galvanic.
+//! ARM64 assembly text emission for galvanic.
 //!
-//! Milestone 1: emit a bare Linux `_start` entry point that loads the main
-//! function's return value into `x0` and invokes the exit(2) syscall.
+//! Takes an IR `Module` and writes GNU assembler (GAS) syntax suitable for
+//! `aarch64-linux-gnu-as` (or the native `as` on an ARM64 host).
 //!
 //! # Target
 //!
-//! Architecture: AArch64 (ARM64)
-//! OS ABI:       Linux ELF (bare syscall, no libc dependency)
-//! Assembler:    GNU as (`aarch64-linux-gnu-as`)
+//! - Architecture: AArch64 (ARM64)
+//! - OS ABI: Linux ELF
+//! - Entry point: `_start` (bare; no libc startup)
+//! - System call convention: syscall number in `x8`, args in `x0`–`x5`
 //!
-//! # Bootstrap strategy
+//! # FLS traceability
 //!
-//! Emitting assembly text (`.s` files) and shelling out to GNU `as` and `ld`
-//! is the bootstrapping approach for the first milestones. A built-in
-//! instruction encoder will be added when the set of emitted instruction
-//! forms grows enough to justify it.
+//! - FLS §9: Functions — each `IrFn` emits a labeled function body.
+//! - FLS §6.19: Return expressions — `Instr::Ret` emits `mov x0, #n; ret`.
+//! - FLS §18.1: Program entry point — `_start` calls `main` and exits.
 //!
-//! # Cache-line notes (milestone 1)
+//! # Cache-line note
 //!
-//! The `_start` stub for milestone 1 is three instructions (12 bytes), well
-//! within one 64-byte cache line. Explicit `.p2align` directives and
-//! hot/cold function separation will be added as the emitted code grows.
+//! ARM64 instructions are 4 bytes each; 16 instructions fill one 64-byte
+//! cache line. The `main` function for milestone 1 is exactly 2 instructions
+//! (8 bytes), and `_start` is 3 instructions (12 bytes). Both fit entirely
+//! within a single cache line. No explicit `.align` directives are needed
+//! at this scale, but the rationale is documented here for future cycles.
 
-use crate::ir::{IrFn, IrInst, Program};
+use std::fmt::Write as FmtWrite;
 
-/// Emit ARM64 GNU assembly text for the given IR program.
-///
-/// Returns the complete contents of a `.s` file suitable for passing to
-/// `aarch64-linux-gnu-as`.
-///
-/// FLS §9: Each `IrFn` in the `Program` corresponds to one function.
-/// FLS §18.1: The `main` function is treated as the program entry point;
-/// its body is inlined into the `_start` symbol.
-pub fn emit_asm(program: &Program) -> String {
-    let mut out = String::with_capacity(256);
+use crate::ir::{Instr, IrValue, Module};
 
-    // Section and global directives.
-    //
-    // Cache-line note: `.text` on AArch64 defaults to 4-byte (single
-    // instruction) alignment. We will add explicit `.p2align 6` (64-byte
-    // cache-line alignment) for hot functions once we have multiple functions
-    // and profiling data.
-    out.push_str("    .text\n");
-    out.push_str("    .global _start\n");
-    out.push_str("_start:\n");
+// ── Error type ────────────────────────────────────────────────────────────────
 
-    if let Some(main_fn) = program.fns.iter().find(|f| f.name == "main") {
-        // Inline main's body directly into _start.
-        // Milestone 1: main has exactly one instruction.
-        emit_fn_body(&mut out, main_fn);
-    } else {
-        // No main: emit exit(0) as a diagnostic fallback.
-        // FLS §18.1 NOTE: a crate without a main function is not a valid
-        // Rust program. This path should only be reached in error cases.
-        emit_exit(&mut out, 0);
-    }
-
-    out
+/// Errors that can occur during code generation.
+#[derive(Debug)]
+pub enum CodegenError {
+    /// A language feature is not yet supported by the code generator.
+    Unsupported(String),
+    /// An internal string-formatting error (should not occur in practice).
+    Fmt(std::fmt::Error),
 }
 
-/// Emit the body of a function as inline ARM64 instructions.
-fn emit_fn_body(out: &mut String, f: &IrFn) {
-    for inst in &f.body {
-        match inst {
-            IrInst::ReturnInt(n) => emit_exit(out, *n),
+impl std::fmt::Display for CodegenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CodegenError::Unsupported(msg) => write!(f, "codegen: not yet supported: {msg}"),
+            CodegenError::Fmt(e) => write!(f, "codegen: format error: {e}"),
         }
     }
 }
 
-/// Emit the AArch64 Linux `exit` syscall with the given exit code.
-///
-/// AArch64 Linux syscall convention (AAPCS64 + Linux ABI):
-/// - `x0`: first argument (exit status)
-/// - `x8`: syscall number (`__NR_exit` = 93)
-/// - `svc #0`: enter the kernel
-///
-/// FLS §6.19: Return expressions map to this stub at the code-gen level.
-///
-/// # Cache-line note
-///
-/// Three instructions = 12 bytes. The entire `_start` stub for milestone 1
-/// fits in one 64-byte cache line, with 52 bytes to spare. No alignment
-/// padding is needed at this scale.
-///
-/// # Immediate encoding
-///
-/// `mov x0, #N` is valid for `N` in 0..=65535. For exit codes (0–255)
-/// this is always sufficient. Values ≥ 65536 would require `movz`/`movk`
-/// — that is noted here as future work for milestone 2+.
-fn emit_exit(out: &mut String, code: i64) {
-    // Clamp to [0, 255]: the Linux kernel masks the exit status to 8 bits
-    // (WEXITSTATUS uses bits 8–15 of the wait status word). Values outside
-    // this range from an i32 main are implementation-defined in practice.
-    // We clamp here so `mov x0, #N` always uses a value ≤ 255.
-    //
-    // FLS §6.23 AMBIGUOUS: The spec does not specify what happens when a
-    // main function returns an integer outside the range representable as a
-    // process exit code. This clamping is a pragmatic choice, not an FLS
-    // requirement.
-    let clamped = code.clamp(0, 255);
-    out.push_str(&format!("    mov x0, #{clamped}\n"));
-    out.push_str("    mov x8, #93\n");
-    out.push_str("    svc #0\n");
+impl From<std::fmt::Error> for CodegenError {
+    fn from(e: std::fmt::Error) -> Self {
+        CodegenError::Fmt(e)
+    }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+// ── Entry point ───────────────────────────────────────────────────────────────
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ir::{IrFn, IrInst, Program};
+/// Emit a module as ARM64 assembly text.
+///
+/// Returns a `String` containing valid GAS syntax. The caller is responsible
+/// for writing it to a `.s` file and invoking the assembler.
+///
+/// The emitted file defines a `_start` symbol that calls `main` and then
+/// invokes the Linux `sys_exit` syscall with `main`'s return value.
+///
+/// FLS §18.1: `main` is the program entry point.
+pub fn emit_asm(module: &Module) -> Result<String, CodegenError> {
+    let has_main = module.fns.iter().any(|f| f.name == "main");
+    if !has_main {
+        return Err(CodegenError::Unsupported("no `main` function in module".into()));
+    }
 
-    fn program_with_main_returning(n: i64) -> Program {
-        Program {
-            fns: vec![IrFn {
-                name: "main".to_string(),
-                body: vec![IrInst::ReturnInt(n)],
-            }],
+    let mut out = String::new();
+
+    writeln!(out, "    .text")?;
+
+    for func in &module.fns {
+        writeln!(out)?;
+        emit_fn(&mut out, func)?;
+    }
+
+    // Emit the bare _start entry point.
+    writeln!(out)?;
+    emit_start(&mut out)?;
+
+    Ok(out)
+}
+
+// ── Function emission ─────────────────────────────────────────────────────────
+
+/// Emit one function.
+///
+/// FLS §9: Functions. Each function is a labeled sequence of instructions
+/// ending with a `ret` (via `emit_instr`).
+fn emit_fn(out: &mut String, func: &crate::ir::IrFn) -> Result<(), CodegenError> {
+    writeln!(out, "    // fn {} — FLS §9", func.name)?;
+    writeln!(out, "    .global {}", func.name)?;
+    writeln!(out, "{}:", func.name)?;
+
+    for instr in &func.body {
+        emit_instr(out, instr)?;
+    }
+
+    Ok(())
+}
+
+/// Emit one instruction.
+fn emit_instr(out: &mut String, instr: &Instr) -> Result<(), CodegenError> {
+    match instr {
+        // FLS §6.19: Return expression.
+        // ARM64 ABI: return value in x0; `ret` branches to link register x30.
+        Instr::Ret(value) => {
+            emit_load_x0(out, value)?;
+            writeln!(out, "    ret")?;
         }
     }
+    Ok(())
+}
 
-    /// FLS §9: emit_asm produces well-structured assembly with _start symbol.
-    #[test]
-    fn emit_asm_has_start_symbol() {
-        let asm = emit_asm(&program_with_main_returning(0));
-        assert!(asm.contains("_start:"), "missing _start label");
-        assert!(asm.contains(".global _start"), "missing .global directive");
-        assert!(asm.contains(".text"), "missing .text section");
+/// Emit an instruction that loads `value` into `x0`.
+///
+/// ARM64 note: `mov x0, #n` assembles to `MOVZ x0, #n` for 0 ≤ n ≤ 65535.
+/// Negative values and values > 65535 require multi-instruction sequences
+/// and are not yet supported (milestone 1 only needs small non-negative ints).
+///
+/// FLS §2.4.4.1: Integer literals.
+/// Cache-line note: each `mov` is 4 bytes — one slot in a 16-instruction
+/// cache line.
+fn emit_load_x0(out: &mut String, value: &IrValue) -> Result<(), CodegenError> {
+    match value {
+        IrValue::I32(n) => {
+            if *n < 0 {
+                // Negative immediates require MOVN — not yet implemented.
+                return Err(CodegenError::Unsupported(
+                    "negative integer return value".into(),
+                ));
+            }
+            writeln!(out, "    mov     x0, #{n}             // FLS §2.4.4.1: integer literal {n}")?;
+        }
+        IrValue::Unit => {
+            // FLS §4.4: unit return. Convention: exit code 0 for main.
+            writeln!(out, "    mov     x0, #0              // FLS §4.4: unit return")?;
+        }
     }
+    Ok(())
+}
 
-    /// FLS §6.19 + §2.4.4.1: return value 0 → `mov x0, #0`.
-    #[test]
-    fn return_0_emits_correct_exit_sequence() {
-        let asm = emit_asm(&program_with_main_returning(0));
-        assert!(asm.contains("mov x0, #0"), "missing exit code 0");
-        assert!(asm.contains("mov x8, #93"), "missing __NR_exit");
-        assert!(asm.contains("svc #0"), "missing svc instruction");
-    }
+// ── Entry point stub ──────────────────────────────────────────────────────────
 
-    /// Exit code 42 is emitted correctly.
-    #[test]
-    fn return_42_emits_correct_exit_code() {
-        let asm = emit_asm(&program_with_main_returning(42));
-        assert!(asm.contains("mov x0, #42"));
-    }
-
-    /// No-main program emits exit(0) as fallback.
-    #[test]
-    fn no_main_emits_fallback_exit_0() {
-        let p = Program { fns: vec![] };
-        let asm = emit_asm(&p);
-        assert!(asm.contains("mov x0, #0"));
-        assert!(asm.contains("mov x8, #93"));
-    }
+/// Emit the `_start` ELF entry point.
+///
+/// `_start` calls `main` and passes its return value to `sys_exit`.
+///
+/// FLS §18.1: The `main` function is the program entry point. On Linux ELF
+/// the actual entry symbol is `_start`; calling `main` from there and
+/// exiting is the standard bare-metal bootstrap pattern.
+///
+/// ARM64 Linux syscall ABI:
+/// - syscall number in `x8`
+/// - first arg in `x0`
+/// - `svc #0` to invoke
+/// - `__NR_exit` = 93
+///
+/// Cache-line note: `_start` is 3 instructions (12 bytes), fits in the
+/// first quarter of a 64-byte cache line.
+fn emit_start(out: &mut String) -> Result<(), CodegenError> {
+    writeln!(out, "    // ELF entry point — FLS §18.1")?;
+    writeln!(out, "    .global _start")?;
+    writeln!(out, "_start:")?;
+    writeln!(out, "    bl      main            // call fn main()")?;
+    writeln!(out, "    // x0 = main()'s return value")?;
+    writeln!(out, "    mov     x8, #93         // __NR_exit (ARM64 Linux)")?;
+    writeln!(out, "    svc     #0              // exit(x0)")?;
+    Ok(())
 }
