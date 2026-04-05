@@ -487,6 +487,65 @@ fn milestone_9_continue_loop() {
     assert_eq!(exit_code, 12, "expected exit 12 (continue skips 3), got {exit_code}");
 }
 
+// ── Milestone 10: return expressions ────────────────────────────────────────
+
+/// Milestone 10: explicit `return` with a value.
+///
+/// FLS §6.19: Return expressions. `return 42` exits the function with 42.
+#[test]
+fn milestone_10_return_value() {
+    let Some(exit_code) = compile_and_run("fn main() -> i32 { return 42; }\n") else {
+        return;
+    };
+    assert_eq!(exit_code, 42, "expected exit 42 (return 42), got {exit_code}");
+}
+
+/// Milestone 10: bare `return` returns unit (exit code 0 for main).
+///
+/// FLS §6.19: Bare `return;` returns the unit value `()`.
+/// FLS §4.4: Unit return from main → exit code 0 by convention.
+#[test]
+fn milestone_10_return_unit() {
+    let Some(exit_code) = compile_and_run("fn main() { return; }\n") else {
+        return;
+    };
+    assert_eq!(exit_code, 0, "expected exit 0 (bare return), got {exit_code}");
+}
+
+/// Milestone 10: early return from inside an if branch.
+///
+/// The `if` branch fires and `return 1` exits the function; the tail
+/// expression `0` is never reached.
+///
+/// FLS §6.19: Return expression in a nested block.
+/// FLS §6.17: If expression as the guard.
+#[test]
+fn milestone_10_early_return() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 { if true { return 1; } 0 }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "expected exit 1 (early return), got {exit_code}");
+}
+
+/// Milestone 10: early return from inside a called function.
+///
+/// The helper `clamp` returns early if x > 10, otherwise returns x.
+///
+/// FLS §6.19: Return inside a callee is caught at the call-site boundary.
+/// FLS §6.12.1: Call expression.
+#[test]
+fn milestone_10_return_in_called_fn() {
+    let Some(exit_code) = compile_and_run(
+        "fn clamp(x: i32) -> i32 { if x > 10 { return 10; } x }\n\
+         fn main() -> i32 { clamp(15) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 10, "expected exit 10 (clamped), got {exit_code}");
+}
+
 // ── Milestone 7: while loops ─────────────────────────────────────────────────
 
 /// Milestone 7: simple counting loop.
