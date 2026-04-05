@@ -20,19 +20,19 @@
 //! - FLS §6.15.3: While loop expressions — simulated at compile time.
 //! - FLS §6.15.6: Break expressions — propagated as `LowerError::Break`.
 //! - FLS §6.15.7: Continue expressions — propagated as `LowerError::Continue`.
+//! - FLS §6.19: Return expressions — propagated as `LowerError::Return`.
 //! - FLS §8.2: Empty statements — no-op.
 //! - FLS §8.3: Expression statements — assignment, while, loop, and if.
 //! - FLS §18.1: Program structure — `lower` produces one `Module` per file.
 //!
-//! # Scope (milestone 9)
+//! # Scope (milestone 10)
 //!
-//! Extends milestone 8 to support `continue` expressions (FLS §6.15.7) inside
-//! `while` and `loop` bodies. `continue` is propagated up through `exec_stmts`
-//! and `lower_expr` as `Err(LowerError::Continue)` until caught by the
-//! enclosing `while` or `loop` handler. On `continue`, mutations of outer-scope
-//! variables accumulated up to the continue point are propagated back, then the
-//! next iteration begins (re-checking the while condition, or re-running the
-//! loop body).
+//! Extends milestone 9 to support explicit `return` expressions (FLS §6.19).
+//! `return expr` and bare `return` propagate as `Err(LowerError::Return(val))`
+//! through `exec_stmts` and `lower_expr` until caught at the function boundary
+//! (`lower_block_return`) or at a call-site inlining boundary (the Call arm of
+//! `lower_expr`). This mirrors the `break`/`continue` propagation pattern and
+//! correctly handles early returns from any nesting depth.
 //!
 //! Body variables that shadow outer bindings are scoped to the iteration: only
 //! mutations of pre-existing outer variables propagate back after each iteration.
@@ -75,6 +75,17 @@ pub enum LowerError {
     ///
     /// FLS §6.15.7: Continue expressions.
     Continue,
+
+    /// Internal: an explicit `return` expression was evaluated.
+    ///
+    /// `return expr` and bare `return` propagate as `Err(LowerError::Return(val))`
+    /// through `exec_stmts` and `lower_expr` until caught at the function
+    /// boundary (`lower_block_return`) or at an inlined call site (the Call arm
+    /// of `lower_expr`). This is the same propagation pattern as `Break`.
+    ///
+    /// FLS §6.19: Return expressions. "A return expression returns the value
+    /// of its operand to the caller of the enclosing function."
+    Return(IrValue),
 }
 
 impl std::fmt::Display for LowerError {
@@ -83,6 +94,7 @@ impl std::fmt::Display for LowerError {
             LowerError::Unsupported(msg) => write!(f, "not yet supported: {msg}"),
             LowerError::Break(_) => write!(f, "break expression outside of a loop"),
             LowerError::Continue => write!(f, "continue expression outside of a loop"),
+            LowerError::Return(_) => write!(f, "return expression outside of a function"),
         }
     }
 }
@@ -199,7 +211,13 @@ fn lower_block_return(
     fn_table: &FnTable<'_>,
 ) -> Result<Vec<Instr>, LowerError> {
     let env: HashMap<String, IrValue> = HashMap::new();
-    let value = lower_block_value(block, ret_ty, source, &env, fn_table)?;
+    // FLS §6.19: An explicit `return` propagates as LowerError::Return; catch
+    // it here at the function boundary and treat it as the function's result.
+    let value = match lower_block_value(block, ret_ty, source, &env, fn_table) {
+        Ok(v) => v,
+        Err(LowerError::Return(v)) => v,
+        Err(e) => return Err(e),
+    };
     Ok(vec![Instr::Ret(value)])
 }
 
@@ -630,7 +648,14 @@ fn lower_expr(
                     "call to bodyless (extern) function `{callee_name}`"
                 ))
             })?;
-            lower_block_value(body, &callee_ret_ty, source, &call_env, fn_table)
+            // FLS §6.19: An explicit `return` inside the callee propagates as
+            // LowerError::Return; catch it at this inlined call boundary so it
+            // does not escape to the caller as an unhandled error.
+            match lower_block_value(body, &callee_ret_ty, source, &call_env, fn_table) {
+                Ok(v) => Ok(v),
+                Err(LowerError::Return(v)) => Ok(v),
+                Err(e) => Err(e),
+            }
         }
 
         // FLS §6.15.2: Loop expression — execute body repeatedly until break.
@@ -726,6 +751,27 @@ fn lower_expr(
         // while or loop handler. If it escapes to lower_block_return, the
         // program has a `continue` outside any loop (compile error).
         (ExprKind::Continue, _) => Err(LowerError::Continue),
+
+        // FLS §6.19: Return expression — propagate as LowerError::Return.
+        //
+        // "A return expression returns the value of its operand to the caller
+        // of the enclosing function item."
+        //
+        // Propagated up through lower_block_value and lower_expr until caught
+        // by lower_block_return (function boundary) or the Call arm of
+        // lower_expr (inlined call boundary). Bare `return` yields Unit.
+        //
+        // FLS §6.19 AMBIGUOUS: the spec does not specify what type a return
+        // expression has when used in a value position (it is a never-type `!`
+        // in full Rust). We ignore the expected_ty here and use the return
+        // value's natural type; type checking is deferred to a later milestone.
+        (ExprKind::Return(opt_val), _) => {
+            let val = match opt_val {
+                None => IrValue::Unit,
+                Some(e) => lower_expr(e, expected_ty, source, env, fn_table)?,
+            };
+            Err(LowerError::Return(val))
+        }
 
         // Any other combination is not yet supported.
         _ => Err(LowerError::Unsupported("expression".into())),
