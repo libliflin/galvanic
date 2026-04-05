@@ -90,47 +90,55 @@ Every cycle, ask: **what's the smallest program galvanic can't yet compile to a 
 Each cycle:
 
 1. **Read the snapshot.** What programs can galvanic currently compile end-to-end? What's the next milestone?
-2. **Pick one change.** The change that extends the pipeline furthest toward the next runnable binary. Not the change that adds the most front-end coverage.
-3. **Implement it.** One thing. Usually this means touching multiple phases (parser + IR + codegen) for one language feature — that's fine, that's one vertical slice.
-4. **Cite the FLS.** Every new type, function, or grammar rule must reference the FLS section it implements. Read the section in `.lathe/refs/fls-pointer.md` to find the right number. If the spec is ambiguous, add an `FLS §X.Y AMBIGUOUS:` comment.
-5. **Add a test fixture derived from the FLS.** Add or extend a file in `tests/fixtures/` with an example from the relevant FLS section. Do NOT invent Rust programs — derive them from spec examples. Comment each example with its FLS section. If the spec doesn't provide an example for this feature, note that explicitly.
-6. **Add an end-to-end test.** Compile a `.rs` file, run the output (or check the emitted assembly), verify the result. The fixture file IS the test input — the `tests/fls_fixtures.rs` harness runs galvanic on each fixture.
-7. **Check performance.** Run `cargo bench --bench throughput` and verify the cycle didn't regress throughput. If throughput dropped, investigate before committing. The benchmark fixtures are the same FLS-derived files — so adding features to those files also adds benchmark coverage. Record the throughput numbers in the changelog.
-8. **Validate.** `cargo build`, `cargo test`, `cargo clippy -- -D warnings`. All must pass.
-9. **Write the changelog.** What program can galvanic now compile that it couldn't before? What FLS sections were consulted? What were the throughput numbers?
+2. **Read `.lathe/refs/fls-constraints.md`.** This lists spec restrictions that constrain codegen. Check whether your planned change respects them. The constraints document is as important as the feature list — features tell you what to build, constraints tell you what NOT to do.
+3. **Pick one change.** The change that extends the pipeline furthest toward the next runnable binary. Not the change that adds the most front-end coverage.
+4. **Check: am I compiling or interpreting?** Before implementing, apply this test: "If I replaced every literal in this program with a function parameter, would my implementation still work?" If not, you are evaluating at compile time, not generating code. Non-const code (any code outside the const contexts listed in FLS §6.1.2:37–45) MUST emit runtime instructions. See the constraints document for the full rule.
+5. **Implement it.** One thing. Usually this means touching multiple phases (parser + IR + codegen) for one language feature — that's fine, that's one vertical slice.
+6. **Cite the FLS.** Every new type, function, or grammar rule must reference the FLS section it implements. Read the section in `.lathe/refs/fls-pointer.md` to find the right number. If the spec is ambiguous, add an `FLS §X.Y AMBIGUOUS:` comment.
+7. **Add a test fixture derived from the FLS.** Add or extend a file in `tests/fixtures/` with an example from the relevant FLS section. Do NOT invent Rust programs — derive them from spec examples. Comment each example with its FLS section. If the spec doesn't provide an example for this feature, note that explicitly.
+8. **Add an end-to-end test.** Compile a `.rs` file, run the output (or check the emitted assembly), verify the result. The fixture file IS the test input — the `tests/fls_fixtures.rs` harness runs galvanic on each fixture. **For any feature involving control flow (loops, branches, comparisons), verify the emitted assembly contains the expected runtime instructions (branch instructions for loops, conditional branches for if/else). An emitted binary that contains only `mov` and `ret` for a program with a while loop is incorrect — it means the loop was evaluated at compile time instead of compiled.**
+9. **Check performance.** Run `cargo bench --bench throughput` and verify the cycle didn't regress throughput. If throughput dropped, investigate before committing. The benchmark fixtures are the same FLS-derived files — so adding features to those files also adds benchmark coverage. Record the throughput numbers in the changelog.
+10. **Validate.** `cargo build`, `cargo test`, `cargo clippy -- -D warnings`. All must pass.
+11. **Write the changelog.** What program can galvanic now compile that it couldn't before? What FLS sections were consulted? What were the throughput numbers?
 
-### The three invariants of every cycle
+### The four invariants of every cycle
 
-Every cycle must maintain these three things:
+Every cycle must maintain these four things:
 
 1. **Spec traceability.** Every piece of implemented behavior must trace to an FLS section. No "I know Rust does X" — find it in the spec or document that the spec is silent. Test programs come from FLS examples, not from the implementer's knowledge of Rust.
 
-2. **Performance measurement.** Throughput must be measured every cycle via `cargo bench`. The benchmarks use FLS-derived fixtures in `tests/fixtures/`. If a cycle adds a language feature, the fixture for that feature gets benchmarked automatically. Regressions must be explained in the changelog.
+2. **Spec constraint compliance.** The FLS defines not just features but restrictions (`.lathe/refs/fls-constraints.md`). The most critical: **compile-time evaluation is only permitted in const contexts (FLS §6.1.2:37–45).** Regular function bodies must emit runtime code. Passing tests with correct exit codes is NOT sufficient to prove compliance — a compile-time interpreter can produce correct outputs for constant-input programs while violating the spec. Always ask: "would this work if the inputs came from a function parameter instead of a literal?"
 
-3. **End-to-end validation.** The strongest test is "does the right binary come out?" Until codegen exists, the bar is "does galvanic accept this FLS-derived program?" Once codegen exists, the bar is "does the emitted binary produce the right answer?"
+3. **Performance measurement.** Throughput must be measured every cycle via `cargo bench`. The benchmarks use FLS-derived fixtures in `tests/fixtures/`. If a cycle adds a language feature, the fixture for that feature gets benchmarked automatically. Regressions must be explained in the changelog.
+
+4. **End-to-end validation.** The strongest test is "does the right binary come out?" The bar is "does the emitted binary produce the right answer AND does the emitted assembly contain the expected instruction forms?" A while loop that emits only `mov x0, #N; ret` has been interpreted, not compiled.
 
 **The pick bias to resist**: When the parser already handles something, the temptation is to "complete" the parser before moving deeper. Resist. A parser that handles 50 expression types feeding into zero codegen is not progress. A parser that handles 5 expression types feeding into working ARM64 codegen is.
+
+**The implementation bias to resist**: When a feature can be implemented by extending the compile-time evaluator without adding new IR instructions or ARM64 instruction forms, that's a signal to stop. If the IR still only has `Instr::Ret` and codegen still only emits `mov`/`ret`/`bl`/`svc`, you are building an interpreter, not a compiler. The next milestone should force new instruction forms.
 
 ---
 
 ## What Matters Now
 
-Galvanic is in **Stage 2: front-end works, no back-end exists.** The lexer tokenizes, the parser handles fn items with expressions, if-else, loops, blocks, let statements. But the pipeline ends at an AST. There is:
+Galvanic is in **Stage 3: pipeline works end-to-end, but codegen is a compile-time interpreter.** The lexer, parser, IR, and codegen exist. Galvanic can compile programs through milestones 1–10 and produce running ARM64 binaries with correct exit codes.
 
-- No intermediate representation
-- No codegen
-- No emitted binary
-- No way to run the output of galvanic
+**However, the current implementation violates the FLS.** The lowering pass (`src/lower.rs`) evaluates ALL code at compile time — including non-const functions, while loops, if/else branches, and mutable variables. This is incorrect per FLS §6.1.2:37–45: compile-time evaluation is only permitted in const contexts. The current IR has only one instruction (`Instr::Ret`), and codegen emits only `mov`/`ret`/`bl`/`svc`. There are no branch instructions, no comparisons, no stack operations, no register allocation.
 
-**The next milestone**: `fn main() -> i32 { 0 }` compiles to an ARM64 binary that runs and exits with code 0.
+**The next milestone must introduce runtime codegen.** The IR needs new instruction forms:
 
-To get there, this cycle (and the next few) should focus on:
+- `Instr::LoadImm(reg, value)` — load an immediate into a register
+- `Instr::Add(dst, lhs, rhs)` / `Sub` / `Mul` — arithmetic on registers
+- `Instr::Cmp(lhs, rhs)` — compare two registers
+- `Instr::BranchIf(cond, label)` — conditional branch
+- `Instr::Branch(label)` — unconditional branch
+- `Instr::Store(reg, stack_offset)` / `Load` — local variables on the stack
 
-1. **A minimal IR** — just enough to represent "return an integer from main." Not a complete IR design — the minimal thing.
-2. **ARM64 codegen** — emit the instructions for "put 0 in x0, call exit" or equivalent. Even emitting raw assembly text that gets assembled by `as` is fine as a first step.
-3. **An end-to-end test** — compile a `.rs` file, run the binary (possibly via QEMU on CI), check the exit code.
+The existing compile-time evaluator in `lower.rs` is valid code — it can become a `const fn` evaluator later. But for now, all non-const code must go through runtime IR emission.
 
-The front-end already handles this program. The parser already handles this program. The work is everything *after* parsing.
+**Suggested approach:** Rewrite `fn main() -> i32 { let mut x = 0; while x < 5 { x = x + 1; } x }` (milestone 7) to emit actual branch and comparison instructions. This is the smallest program that currently "works" via interpretation but must use runtime codegen. The emitted assembly should contain `cmp`, `b.lt` (or similar conditional branch), `add`, and a backward branch for the loop.
+
+This is a significant architectural change — the lowering pass transforms from an evaluator to an IR emitter. The end-to-end tests should be updated to verify that emitted assembly contains expected instruction forms, not just that exit codes are correct.
 
 ---
 
@@ -167,6 +175,8 @@ Each cycle makes exactly one improvement. A "vertical slice" — adding one lang
 - **Designing the complete IR before emitting one instruction.** Start minimal. The IR can grow as the set of compilable programs grows.
 - **Polishing what's already clean.** The code is well-documented and idiomatic. The gap isn't in polish — it's in pipeline depth.
 - **Fidgeting instead of building codegen.** If the cycle doesn't involve emitting or assembling instructions, ask yourself why.
+- **Interpreting instead of compiling.** If your "codegen" evaluates the program at compile time and emits only the final result as an immediate, you have built an interpreter. The spec (FLS §6.1.2:37–45) restricts compile-time evaluation to const contexts. A `while` loop in `fn main()` must emit branch instructions, not simulate iterations and emit the final value. Correct exit codes are necessary but not sufficient — check that the emitted assembly contains the instruction forms the language feature requires (branches for loops, conditional branches for if/else, stack operations for local variables). See `.lathe/refs/fls-constraints.md`.
+- **Fitting the tests instead of implementing the spec.** If your implementation produces correct results for every test case but would fail on valid programs the tests don't cover (e.g., programs with non-constant inputs), you have fitted the tests, not implemented the feature. The spec defines correctness, not the test suite.
 
 When everything looks green, ask: "What's the simplest program galvanic still can't compile?" That's the next cycle.
 

@@ -129,17 +129,18 @@ For the initial milestones:
 
 ---
 
-## What's implemented (as of current state)
+## What's implemented (as of milestone 10)
 
 | Phase | Status | Notes |
 |---|---|---|
 | Lexer | Working | Full token set; Unicode NFC not applied |
 | Parser | Working | fn items, expressions, if-else, loops, let, blocks, calls, field access |
-| IR | Does not exist | **This is the current bottleneck** |
-| Codegen | Does not exist | **This is the current bottleneck** |
-| End-to-end | Does not exist | No program can be compiled to a binary |
+| IR | Exists but minimal | `Module`/`IrFn`/`Instr`/`IrValue`/`IrTy`. Only one instruction: `Instr::Ret(IrValue)` |
+| Lowering | **Incorrect** | Evaluates ALL code at compile time (interpreter). Must be rewritten to emit runtime IR |
+| Codegen | Exists but minimal | Only emits `mov`/`ret`/`bl`/`svc`. No branches, no stack, no register allocation |
+| End-to-end | Working | 30+ e2e tests, correct exit codes. But exit codes are produced by interpretation, not compilation |
 
-The front-end is ahead of the back-end. The next several cycles should focus on IR and codegen, not on widening the parser.
+**The current bottleneck is that lowering interprets instead of compiling.** The IR needs branch, comparison, and stack instructions. Codegen needs to emit them. See `.lathe/refs/fls-constraints.md` for why the current approach violates the FLS.
 
 ---
 
