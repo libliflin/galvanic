@@ -68,7 +68,7 @@ pub enum Instr {
 // ── Values ────────────────────────────────────────────────────────────────────
 
 /// An IR value — a compile-time constant or (future) virtual register.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub enum IrValue {
     /// A 32-bit signed integer constant.
     ///
