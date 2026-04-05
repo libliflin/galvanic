@@ -238,6 +238,60 @@ fn milestone_3_two_let_bindings() {
     assert_eq!(exit_code, 10, "expected exit 10, got {exit_code}");
 }
 
+// ── Milestone 4: if/else control flow ────────────────────────────────────────
+//
+// FLS §6.17: If expressions evaluate the condition at runtime and branch to
+// either the then-block or the else-block. Both branches must produce the same
+// type; the if expression's value is the value of the taken branch.
+//
+// FLS §2.4.7: Boolean literals — `true` = 1, `false` = 0.
+// FLS §6.1.2:37–45: The branch must resolve at runtime, not compile time.
+// Even `if true { 1 } else { 0 }` must emit a `cbz` instruction.
+
+/// Milestone 4: `fn main() -> i32 { if true { 1 } else { 0 } }` exits with 1.
+///
+/// The `true` condition is 1; `cbz` does NOT branch; the then-block runs.
+/// FLS §6.17: If expression with boolean literal condition.
+/// FLS §2.4.7: `true` has value 1.
+#[test]
+fn milestone_4_if_true() {
+    let Some(exit_code) =
+        compile_and_run("fn main() -> i32 { if true { 1 } else { 0 } }\n")
+    else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "expected exit 1 from `if true {{ 1 }} else {{ 0 }}`");
+}
+
+/// Milestone 4 (variant): `fn main() -> i32 { if false { 1 } else { 0 } }` exits with 0.
+///
+/// The `false` condition is 0; `cbz` DOES branch to the else-block.
+/// FLS §6.17: If expression with false condition takes the else branch.
+/// FLS §2.4.7: `false` has value 0.
+#[test]
+fn milestone_4_if_false() {
+    let Some(exit_code) =
+        compile_and_run("fn main() -> i32 { if false { 1 } else { 0 } }\n")
+    else {
+        return;
+    };
+    assert_eq!(exit_code, 0, "expected exit 0 from `if false {{ 1 }} else {{ 0 }}`");
+}
+
+/// Milestone 4 (with let): `fn main() -> i32 { let x = 1; if true { x } else { 0 } }`.
+///
+/// Tests that if/else composes correctly with let bindings.
+/// FLS §6.17: The then-block can contain a path expression.
+/// FLS §8.1: The let binding is stored on the stack before the if.
+#[test]
+fn milestone_4_if_with_let() {
+    let src = "fn main() -> i32 { let x = 7; if true { x } else { 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 7, "expected exit 7, got {exit_code}");
+}
+
 // ── Assembly inspection: runtime instruction verification ────────────────────
 //
 // FLS §6.1.2:37–45: Non-const code must emit runtime instructions.
@@ -300,6 +354,25 @@ fn runtime_nested_add_emits_multiple_add_instructions() {
     assert!(
         add_count >= 2,
         "expected at least 2 `add` instructions for `1 + 2 + 3`, found {add_count}:\n{asm}"
+    );
+}
+
+/// `fn main() -> i32 { if true { 1 } else { 0 } }` must emit `cbz`.
+///
+/// FLS §6.17: If expression must branch at runtime via `cbz`.
+/// FLS §6.1.2:37–45: The condition `true` must not be folded; `cbz` must appear.
+#[test]
+fn runtime_if_emits_cbz() {
+    let asm = compile_to_asm("fn main() -> i32 { if true { 1 } else { 0 } }\n");
+    assert!(
+        asm.contains("cbz"),
+        "expected `cbz` instruction for if condition, got:\n{asm}"
+    );
+    // Must not fold `if true { 1 }` to a constant `mov x0, #1` without branching.
+    // The then-branch result is stored via str/ldr through the phi slot.
+    assert!(
+        asm.contains("str") && asm.contains("ldr"),
+        "expected `str`/`ldr` for phi slot in if expression:\n{asm}"
     );
 }
 

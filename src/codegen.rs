@@ -214,6 +214,33 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32) -> Result<(), Co
                 "    ldr     x{dst}, [sp, #{offset:<15}] // FLS §8.1: load slot {slot}"
             )?;
         }
+
+        // FLS §6.17: Branch target label.
+        // Emits `.L{n}:` — a GAS local label. No machine code is emitted;
+        // the label resolves to the address of the next instruction.
+        // Cache-line note: labels have zero instruction footprint.
+        Instr::Label(n) => {
+            writeln!(out, ".L{n}:                              // FLS §6.17: branch target")?;
+        }
+
+        // FLS §6.17: Unconditional branch.
+        // ARM64: `b .L{n}` — a 4-byte PC-relative branch instruction.
+        // Cache-line note: ARM64 `b` is 4 bytes — one instruction slot.
+        Instr::Branch(n) => {
+            writeln!(out, "    b       .L{n:<24} // FLS §6.17: branch to end")?;
+        }
+
+        // FLS §6.17: Conditional branch on zero (false condition).
+        // ARM64: `cbz x{reg}, .L{label}` — branches if reg == 0 (condition is false).
+        // `cbz` ("compare and branch if zero") is a single 4-byte instruction that
+        // combines the compare and branch, avoiding a separate `cmp` instruction.
+        // Cache-line note: ARM64 `cbz` is 4 bytes — same footprint as `b`.
+        Instr::CondBranch { reg, label } => {
+            writeln!(
+                out,
+                "    cbz     x{reg}, .L{label:<21} // FLS §6.17: branch if false"
+            )?;
+        }
     }
     Ok(())
 }
