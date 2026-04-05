@@ -27,7 +27,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{BinOp, Expr, ExprKind, ItemKind, SourceFile, StmtKind, TyKind};
+use crate::ast::{BinOp, Block, Expr, ExprKind, ItemKind, SourceFile, StmtKind, TyKind};
 use crate::ir::{IrBinOp, Instr, IrFn, IrTy, IrValue, Module};
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -134,8 +134,8 @@ fn lower_ty(ty: &crate::ast::Ty, source: &str) -> Result<IrTy, LowerError> {
 /// Mutable state threaded through the lowering of a single function body.
 ///
 /// Tracks the instruction buffer, virtual register counter, stack slot
-/// counter, and the local variable map. All instructions for one function
-/// are accumulated here and transferred to `IrFn::body` at the end.
+/// counter, label counter, and the local variable map. All instructions for
+/// one function are accumulated here and transferred to `IrFn::body` at the end.
 ///
 /// FLS §8.1: Each `let` binding allocates a new stack slot and registers
 /// the variable name in `locals`. Path expressions consult `locals` to
@@ -147,10 +147,19 @@ struct LowerCtx<'src> {
     /// Next stack slot index. Slot `s` maps to byte offset `s * 8` on the
     /// stack frame. The frame size is rounded up to 16 bytes in codegen.
     next_slot: u8,
+    /// Next label ID for branch targets.
+    ///
+    /// FLS §6.17: if expressions require unique labels for else and end
+    /// targets. Labels are monotonically increasing per function.
+    next_label: u32,
     /// Maps local variable names to their stack slot indices.
     ///
     /// FLS §8.1: Let statements introduce bindings into the current scope.
     /// FLS §6.3: Path expressions are resolved here before emitting Load.
+    ///
+    /// Limitation: this flat map does not model nested scopes. Variables
+    /// introduced inside an if branch remain visible after it. Proper lexical
+    /// scoping is deferred to a future milestone.
     locals: HashMap<&'src str, u8>,
 }
 
@@ -161,6 +170,7 @@ impl<'src> LowerCtx<'src> {
             instrs: Vec::new(),
             next_reg: 0,
             next_slot: 0,
+            next_label: 0,
             locals: HashMap::new(),
         }
     }
@@ -185,6 +195,16 @@ impl<'src> LowerCtx<'src> {
         Ok(s)
     }
 
+    /// Allocate the next unique label ID.
+    ///
+    /// FLS §6.17: Each if expression needs two labels (else and end).
+    /// Labels are function-scoped and monotonically increasing.
+    fn alloc_label(&mut self) -> u32 {
+        let id = self.next_label;
+        self.next_label += 1;
+        id
+    }
+
     /// Ensure `val` is in a virtual register. If it's already a register,
     /// return it. If it's a constant, emit a `LoadImm`.
     fn val_to_reg(&mut self, val: IrValue) -> Result<u8, LowerError> {
@@ -203,24 +223,31 @@ impl<'src> LowerCtx<'src> {
 
     // ── Block lowering ────────────────────────────────────────────────────────
 
-    /// Lower a function body block, appending a final `Ret` instruction.
+    /// Lower a block to a value without emitting `Ret`.
     ///
     /// Processes all statements in order, then lowers the tail expression
-    /// (if any) and emits `Ret`. Emits real runtime instructions throughout.
+    /// and returns its value. Used by `lower_block` (function body) and by
+    /// `lower_expr` for block expressions and if/else branches.
+    ///
+    /// FLS §6.4: Block expressions.
+    /// FLS §6.1.2:37–45: Non-const function bodies must emit runtime code.
+    fn lower_block_to_value(&mut self, block: &Block, ret_ty: &IrTy) -> Result<IrValue, LowerError> {
+        for stmt in &block.stmts {
+            self.lower_stmt(stmt)?;
+        }
+        match &block.tail {
+            None => Ok(IrValue::Unit),
+            Some(tail) => self.lower_expr(tail, ret_ty),
+        }
+    }
+
+    /// Lower a function body block, appending a final `Ret` instruction.
     ///
     /// FLS §6.4: Block expressions.
     /// FLS §6.19: Return expressions — the tail is the block's return value.
     /// FLS §6.1.2:37–45: Non-const function bodies must emit runtime code.
-    fn lower_block(&mut self, block: &crate::ast::Block, ret_ty: &IrTy) -> Result<(), LowerError> {
-        for stmt in &block.stmts {
-            self.lower_stmt(stmt)?;
-        }
-
-        let ret_val = match &block.tail {
-            None => IrValue::Unit,
-            Some(tail) => self.lower_expr(tail, ret_ty)?,
-        };
-
+    fn lower_block(&mut self, block: &Block, ret_ty: &IrTy) -> Result<(), LowerError> {
+        let ret_val = self.lower_block_to_value(block, ret_ty)?;
         self.instrs.push(Instr::Ret(ret_val));
         Ok(())
     }
@@ -279,26 +306,55 @@ impl<'src> LowerCtx<'src> {
     /// Lower an expression to runtime IR instructions.
     ///
     /// Returns the `IrValue` holding the result. Emits `LoadImm`, `BinOp`,
-    /// `Load`, etc. into `self.instrs` as needed.
+    /// `Load`, `Label`, `Branch`, `CondBranch`, etc. into `self.instrs`.
+    ///
+    /// `ret_ty` is the expected type of this expression. Used to select which
+    /// variant of a literal or operator to emit.
     ///
     /// FLS §6.1.2:37–45: All code here emits runtime instructions.
     fn lower_expr(&mut self, expr: &Expr, ret_ty: &IrTy) -> Result<IrValue, LowerError> {
-        match (&expr.kind, ret_ty) {
+        match &expr.kind {
             // FLS §2.4.4.1: Integer literal — materialize as a runtime immediate.
-            (ExprKind::LitInt(n), IrTy::I32) => {
-                if *n > i32::MAX as u128 {
-                    return Err(LowerError::Unsupported(format!(
-                        "integer literal {n} out of range for i32"
-                    )));
+            ExprKind::LitInt(n) => {
+                match ret_ty {
+                    IrTy::I32 => {
+                        if *n > i32::MAX as u128 {
+                            return Err(LowerError::Unsupported(format!(
+                                "integer literal {n} out of range for i32"
+                            )));
+                        }
+                        let n = *n as i32;
+                        let r = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(r, n));
+                        Ok(IrValue::Reg(r))
+                    }
+                    _ => Err(LowerError::Unsupported("integer literal with non-i32 type".into())),
                 }
-                let n = *n as i32;
+            }
+
+            // FLS §2.4.7: Boolean literals — `false` = 0, `true` = 1.
+            //
+            // Booleans are materialized as 0/1 integer immediates. The `CondBranch`
+            // instruction tests for zero, matching `false` semantics naturally.
+            //
+            // FLS §6.1.2:37–45: Even statically-known booleans emit a `mov` at
+            // runtime — no constant folding of `if true { ... }` to the then branch.
+            ExprKind::LitBool(b) => {
                 let r = self.alloc_reg()?;
-                self.instrs.push(Instr::LoadImm(r, n));
+                self.instrs.push(Instr::LoadImm(r, if *b { 1 } else { 0 }));
                 Ok(IrValue::Reg(r))
             }
 
             // FLS §4.4: Unit literal `()`.
-            (ExprKind::Unit, IrTy::Unit) => Ok(IrValue::Unit),
+            ExprKind::Unit => Ok(IrValue::Unit),
+
+            // FLS §6.4: Block expression — lower statements then the tail value.
+            //
+            // A block expression `{ stmt; ...; tail }` evaluates each statement
+            // in order and produces the tail expression's value.
+            ExprKind::Block(block) => {
+                self.lower_block_to_value(block, ret_ty)
+            }
 
             // FLS §6.3: Path expression — a reference to a local variable.
             //
@@ -307,7 +363,7 @@ impl<'src> LowerCtx<'src> {
             //
             // FLS §6.1.2:37–45: The load is a runtime instruction — even if
             // the variable holds a statically-known value, we must load it.
-            (ExprKind::Path(segments), _) if segments.len() == 1 => {
+            ExprKind::Path(segments) if segments.len() == 1 => {
                 let var_name = segments[0].text(self.source);
                 let slot = self.locals.get(var_name).copied().ok_or_else(|| {
                     LowerError::Unsupported(format!("undefined variable `{var_name}`"))
@@ -321,24 +377,109 @@ impl<'src> LowerCtx<'src> {
             //
             // Both operands are lowered recursively, producing LoadImm/BinOp
             // instructions. The result is in a virtual register.
-            (ExprKind::Binary { op, lhs, rhs }, IrTy::I32)
+            ExprKind::Binary { op, lhs, rhs }
                 if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) =>
             {
-                let lhs_val = self.lower_expr(lhs, ret_ty)?;
-                let rhs_val = self.lower_expr(rhs, ret_ty)?;
+                match ret_ty {
+                    IrTy::I32 => {
+                        let lhs_val = self.lower_expr(lhs, ret_ty)?;
+                        let rhs_val = self.lower_expr(rhs, ret_ty)?;
 
-                let lhs_reg = self.val_to_reg(lhs_val)?;
-                let rhs_reg = self.val_to_reg(rhs_val)?;
+                        let lhs_reg = self.val_to_reg(lhs_val)?;
+                        let rhs_reg = self.val_to_reg(rhs_val)?;
 
-                let dst = self.alloc_reg()?;
-                let ir_op = match op {
-                    BinOp::Add => IrBinOp::Add,
-                    BinOp::Sub => IrBinOp::Sub,
-                    BinOp::Mul => IrBinOp::Mul,
-                    _ => unreachable!("matched above"),
-                };
-                self.instrs.push(Instr::BinOp { op: ir_op, dst, lhs: lhs_reg, rhs: rhs_reg });
-                Ok(IrValue::Reg(dst))
+                        let dst = self.alloc_reg()?;
+                        let ir_op = match op {
+                            BinOp::Add => IrBinOp::Add,
+                            BinOp::Sub => IrBinOp::Sub,
+                            BinOp::Mul => IrBinOp::Mul,
+                            _ => unreachable!("matched above"),
+                        };
+                        self.instrs.push(Instr::BinOp { op: ir_op, dst, lhs: lhs_reg, rhs: rhs_reg });
+                        Ok(IrValue::Reg(dst))
+                    }
+                    _ => Err(LowerError::Unsupported("arithmetic on non-i32 type".into())),
+                }
+            }
+
+            // FLS §6.17: If expressions.
+            //
+            // An if expression evaluates the condition, then executes exactly one
+            // of the two branches at runtime. The result value of the taken branch
+            // is the value of the whole expression.
+            //
+            // Lowering strategy:
+            //   1. Allocate a result stack slot (the "phi slot") before either branch.
+            //   2. Lower the condition to a register.
+            //   3. Emit `CondBranch` (cbz): if condition == 0 (false), jump to else.
+            //   4. Lower the then-branch, store its result to the phi slot.
+            //   5. Emit `Branch` (b) to end label.
+            //   6. Emit `Label` for else.
+            //   7. Lower the else-branch (or unit if absent), store result to phi slot.
+            //   8. Emit `Label` for end.
+            //   9. Load from phi slot into a fresh register.
+            //
+            // FLS §6.17: "The type of the if expression is the type of the last
+            // expression in the block." Both branches must have the same type.
+            //
+            // FLS §6.1.2:37–45: The condition and both branches emit runtime
+            // instructions. A `true` condition still emits `mov x0, #1; cbz x0, ...`
+            // — the branch resolves at runtime, not compile time.
+            //
+            // Limitation: this implementation handles the i32-valued case. Unit-
+            // returning if expressions (if without else, or with `-> ()` branches)
+            // are not yet supported and will return Unsupported.
+            ExprKind::If { cond, then_block, else_expr } => {
+                match ret_ty {
+                    IrTy::I32 => {
+                        let else_label = self.alloc_label();
+                        let end_label = self.alloc_label();
+
+                        // Allocate the phi slot before entering either branch so
+                        // both branches write to the same stack location.
+                        // Cache-line note: the phi slot is one 8-byte stack entry;
+                        // it is read exactly once after the if expression completes.
+                        let phi_slot = self.alloc_slot()?;
+
+                        // Lower condition (bool → 0 or 1 in a register).
+                        // We pass IrTy::I32 since booleans are represented as integers.
+                        let cond_val = self.lower_expr(cond, &IrTy::I32)?;
+                        let cond_reg = self.val_to_reg(cond_val)?;
+
+                        // CondBranch: jump to else_label if condition is false (0).
+                        self.instrs.push(Instr::CondBranch { reg: cond_reg, label: else_label });
+
+                        // ── Then branch ───────────────────────────────────────────
+                        let then_val = self.lower_block_to_value(then_block, ret_ty)?;
+                        let then_reg = self.val_to_reg(then_val)?;
+                        self.instrs.push(Instr::Store { src: then_reg, slot: phi_slot });
+                        self.instrs.push(Instr::Branch(end_label));
+
+                        // ── Else branch ───────────────────────────────────────────
+                        self.instrs.push(Instr::Label(else_label));
+                        let else_val = match else_expr {
+                            Some(e) => self.lower_expr(e, ret_ty)?,
+                            None => {
+                                // FLS §6.17: if without else has type `()`. Using it
+                                // where i32 is expected is a type error — unsupported.
+                                return Err(LowerError::Unsupported(
+                                    "if expression without else in i32 context".into(),
+                                ));
+                            }
+                        };
+                        let else_reg = self.val_to_reg(else_val)?;
+                        self.instrs.push(Instr::Store { src: else_reg, slot: phi_slot });
+
+                        // ── End ───────────────────────────────────────────────────
+                        self.instrs.push(Instr::Label(end_label));
+                        let result_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: result_reg, slot: phi_slot });
+                        Ok(IrValue::Reg(result_reg))
+                    }
+                    _ => Err(LowerError::Unsupported(
+                        "if expression with non-i32 return type".into(),
+                    )),
+                }
             }
 
             // Anything else: not yet supported as runtime codegen.

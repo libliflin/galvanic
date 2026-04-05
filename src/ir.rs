@@ -81,6 +81,8 @@ pub enum IrBinOp {
 ///
 /// Grows by exactly the instructions needed for each new milestone program.
 /// Milestone 11 adds `LoadImm` and `BinOp` to emit real arithmetic code.
+/// Milestone 12 adds `Store` and `Load` for let bindings.
+/// Milestone 13 adds `Label`, `Branch`, and `CondBranch` for if/else control flow.
 pub enum Instr {
     /// Return a value to the caller.
     ///
@@ -149,6 +151,50 @@ pub enum Instr {
         dst: u8,
         /// Source stack slot index (byte offset = slot * 8).
         slot: u8,
+    },
+
+    /// Define a branch target label.
+    ///
+    /// `Label(n)` emits `.L{n}:` in the assembly output. Labels are referenced
+    /// by `Branch` and `CondBranch` instructions.
+    ///
+    /// FLS §6.17: if expressions require forward labels for the else and end
+    /// of the conditional. Labels have no runtime cost — they are assembler
+    /// directives that resolve to instruction addresses.
+    ///
+    /// Cache-line note: labels carry no machine code; they do not consume
+    /// space in the instruction stream.
+    Label(u32),
+
+    /// Unconditional branch to a label.
+    ///
+    /// `Branch(n)` → `b .L{n}` on ARM64.
+    ///
+    /// FLS §6.17: After the then-branch of an if expression, the else-branch
+    /// must be skipped via an unconditional branch to the end label.
+    ///
+    /// Cache-line note: ARM64 `b` is a 4-byte instruction.
+    Branch(u32),
+
+    /// Conditional branch: jump to `label` if `reg` is zero (false).
+    ///
+    /// `CondBranch { reg, label }` → `cbz x{reg}, .L{label}` on ARM64.
+    ///
+    /// ARM64 `cbz` ("compare and branch if zero") combines a compare-with-zero
+    /// and a branch in a single 4-byte instruction, avoiding the need for a
+    /// separate `cmp` instruction for boolean conditions.
+    ///
+    /// FLS §6.17: The condition expression of an if is a boolean value. The
+    /// branch jumps to the else block (or past the if body) when the condition
+    /// evaluates to `false` (0). FLS §2.4.7: Boolean literals — `false` = 0,
+    /// `true` = 1.
+    ///
+    /// Cache-line note: ARM64 `cbz` is 4 bytes — same footprint as `b`.
+    CondBranch {
+        /// The virtual register holding the boolean condition (0 = false).
+        reg: u8,
+        /// The label to branch to when `reg` is zero (condition is false).
+        label: u32,
     },
 }
 
