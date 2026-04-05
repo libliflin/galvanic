@@ -506,6 +506,39 @@ pub enum ExprKind {
         args: Vec<Expr>,
     },
 
+    /// A field access expression. FLS §6.3.3.
+    ///
+    /// Example: `point.x`
+    ///
+    /// FLS §6.3.3: A field access expression evaluates the receiver operand
+    /// and then accesses one of its fields.
+    FieldAccess {
+        /// The receiver expression.
+        receiver: Box<Expr>,
+        /// The field name span.
+        field: Span,
+    },
+
+    /// A method call expression. FLS §6.3.2.
+    ///
+    /// Example: `vec.push(1)`, `self.len()`
+    ///
+    /// FLS §6.3.2: A method call expression invokes a method on a receiver.
+    /// The receiver is auto-dereferenced to find an applicable implementation.
+    ///
+    /// FLS §6.3.2 AMBIGUOUS: The spec does not fully specify how many
+    /// auto-deref steps are legal or how they interact with `Deref` trait
+    /// implementations. This implementation parses the syntax only; method
+    /// resolution is deferred to a future type-checking phase.
+    MethodCall {
+        /// The receiver expression.
+        receiver: Box<Expr>,
+        /// The method name span.
+        method: Span,
+        /// The argument expressions.
+        args: Vec<Expr>,
+    },
+
     /// A return expression. FLS §6.12.
     ///
     /// FLS §6.12: `return` without a value returns `()`.
