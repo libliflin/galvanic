@@ -179,7 +179,7 @@ impl<'src> Parser<'src> {
 
         match self.peek_kind() {
             TokenKind::KwFn => {
-                let fn_def = self.parse_fn_def()?;
+                let fn_def = self.parse_fn_def(vis)?;
                 let end = fn_def
                     .body
                     .as_ref()
@@ -232,7 +232,7 @@ impl<'src> Parser<'src> {
     /// are listed in FLS §9 but their interaction rules are not fully
     /// specified. This implementation accepts no qualifiers; encountering
     /// one produces a parse error directing the user to the limitation.
-    fn parse_fn_def(&mut self) -> Result<FnDef, ParseError> {
+    fn parse_fn_def(&mut self, vis: Visibility) -> Result<FnDef, ParseError> {
         self.expect(TokenKind::KwFn)?;
 
         // Function name must be an identifier — keywords are not valid here.
@@ -263,7 +263,7 @@ impl<'src> Parser<'src> {
         // FLS §9: the body must be a block expression.
         let body = Some(self.parse_block()?);
 
-        Ok(FnDef { name, params, ret_ty, body })
+        Ok(FnDef { vis, name, params, ret_ty, body })
     }
 
     /// Parse a struct definition.
@@ -2069,5 +2069,195 @@ mod tests {
         // Enum name without `{`.
         let err = parse_err("enum Foo fn");
         assert!(err.message.contains("OpenBrace"), "{}", err.message);
+    }
+
+    // ── pub fn visibility ─────────────────────────────────────────────────────
+
+    #[test]
+    fn fn_pub_visibility() {
+        // FLS §10.2: `pub` visibility on a function item.
+        let src = "pub fn exported() {}";
+        let sf = parse_ok(src);
+        assert_eq!(sf.items.len(), 1);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        assert_eq!(f.vis, Visibility::Pub);
+        assert_eq!(f.name.text(src), "exported");
+    }
+
+    // ── Bitwise and shift operators ───────────────────────────────────────────
+
+    #[test]
+    fn bitwise_and() {
+        // FLS §6.6.1: bitwise and `&`. Binds tighter than bitwise xor.
+        let src = "fn f(a: u32, b: u32) -> u32 { a & b }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
+        assert!(matches!(tail.kind, ExprKind::Binary { op: BinOp::BitAnd, .. }));
+    }
+
+    #[test]
+    fn bitwise_xor() {
+        // FLS §6.6.2: bitwise xor `^`. Binds tighter than bitwise or.
+        let src = "fn f(a: u32, b: u32) -> u32 { a ^ b }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
+        assert!(matches!(tail.kind, ExprKind::Binary { op: BinOp::BitXor, .. }));
+    }
+
+    #[test]
+    fn bitwise_or() {
+        // FLS §6.6.3: bitwise or `|`.
+        let src = "fn f(a: u32, b: u32) -> u32 { a | b }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
+        assert!(matches!(tail.kind, ExprKind::Binary { op: BinOp::BitOr, .. }));
+    }
+
+    #[test]
+    fn shift_left() {
+        // FLS §6.5.3: left shift `<<`. Binds tighter than additive.
+        let src = "fn f(a: u32, b: u32) -> u32 { a << b }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
+        assert!(matches!(tail.kind, ExprKind::Binary { op: BinOp::Shl, .. }));
+    }
+
+    #[test]
+    fn shift_right() {
+        // FLS §6.5.3: right shift `>>`. Binds tighter than additive.
+        let src = "fn f(a: u32, b: u32) -> u32 { a >> b }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
+        assert!(matches!(tail.kind, ExprKind::Binary { op: BinOp::Shr, .. }));
+    }
+
+    #[test]
+    fn bitwise_precedence_and_over_xor_over_or() {
+        // FLS §6.6: `&` binds tighter than `^`, which binds tighter than `|`.
+        // `a | b ^ c & d` parses as `a | (b ^ (c & d))`.
+        let src = "fn f(a: u32, b: u32, c: u32, d: u32) -> u32 { a | b ^ c & d }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
+        // Outer op is `|`.
+        let ExprKind::Binary { op: BinOp::BitOr, ref rhs, .. } = tail.kind else {
+            panic!("expected BitOr at top, got {:?}", tail.kind);
+        };
+        // RHS of `|` is `^`.
+        let ExprKind::Binary { op: BinOp::BitXor, rhs: ref xor_rhs, .. } = rhs.kind else {
+            panic!("expected BitXor, got {:?}", rhs.kind);
+        };
+        // RHS of `^` is `&`.
+        assert!(matches!(xor_rhs.kind, ExprKind::Binary { op: BinOp::BitAnd, .. }));
+    }
+
+    // ── Assignment expression ─────────────────────────────────────────────────
+
+    #[test]
+    fn assignment_expression() {
+        // FLS §6.9: assignment is right-associative.
+        // `x = 5` in statement position.
+        let src = "fn f() { x = 5; }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        let StmtKind::Expr(ref expr) = body.stmts[0].kind else {
+            panic!("expected expr stmt");
+        };
+        assert!(matches!(expr.kind, ExprKind::Binary { op: BinOp::Assign, .. }));
+    }
+
+    #[test]
+    fn assignment_right_associative() {
+        // FLS §6.9: `a = b = c` parses as `a = (b = c)`.
+        let src = "fn f() { a = b = 0; }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        let StmtKind::Expr(ref expr) = body.stmts[0].kind else {
+            panic!("expected expr stmt");
+        };
+        // Outer is `=`.
+        let ExprKind::Binary { op: BinOp::Assign, ref rhs, .. } = expr.kind else {
+            panic!("expected Assign at top, got {:?}", expr.kind);
+        };
+        // RHS is also an assignment — right-associative.
+        assert!(matches!(rhs.kind, ExprKind::Binary { op: BinOp::Assign, .. }));
+    }
+
+    // ── Remaining unary operators ─────────────────────────────────────────────
+
+    #[test]
+    fn unary_not() {
+        // FLS §6.4.2: logical/bitwise not `!x`.
+        let src = "fn f(x: bool) -> bool { !x }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
+        assert!(matches!(tail.kind, ExprKind::Unary { op: UnaryOp::Not, .. }));
+    }
+
+    #[test]
+    fn unary_deref() {
+        // FLS §6.4.3: dereference `*ptr`.
+        let src = "fn f(p: &i32) -> i32 { *p }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
+        assert!(matches!(tail.kind, ExprKind::Unary { op: UnaryOp::Deref, .. }));
+    }
+
+    #[test]
+    fn mutable_borrow_expression() {
+        // FLS §6.4.4: mutable borrow `&mut x`.
+        let src = "fn f(x: i32) -> &mut i32 { &mut x }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
+        assert!(matches!(tail.kind, ExprKind::Unary { op: UnaryOp::RefMut, .. }));
+    }
+
+    // ── Multi-segment paths ───────────────────────────────────────────────────
+
+    #[test]
+    fn path_with_segments() {
+        // FLS §6.2: a path may contain `::` separators.
+        // `std::mem::size_of` is a two-separator (three-segment) path call.
+        let src = "fn f() -> usize { std::mem::size_of() }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
+        // A call whose callee is a multi-segment path.
+        let ExprKind::Call { ref callee, ref args } = tail.kind else {
+            panic!("expected Call, got {:?}", tail.kind);
+        };
+        assert!(args.is_empty());
+        let ExprKind::Path(ref segs) = callee.kind else {
+            panic!("expected Path callee, got {:?}", callee.kind);
+        };
+        assert_eq!(segs.len(), 3);
+        assert_eq!(segs[0].text(src), "std");
+        assert_eq!(segs[1].text(src), "mem");
+        assert_eq!(segs[2].text(src), "size_of");
+    }
+
+    #[test]
+    fn two_segment_path_expression() {
+        // FLS §6.2: two-segment path in tail position (not a call).
+        let src = "fn f() { Option::None }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
+        let ExprKind::Path(ref segs) = tail.kind else {
+            panic!("expected Path, got {:?}", tail.kind);
+        };
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[0].text(src), "Option");
+        assert_eq!(segs[1].text(src), "None");
     }
 }

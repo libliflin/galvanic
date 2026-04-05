@@ -129,6 +129,10 @@ pub enum ItemKind {
 /// This implementation accepts no qualifiers; they are left for a future cycle.
 #[derive(Debug)]
 pub struct FnDef {
+    /// The item's visibility.
+    ///
+    /// FLS §10.2: Visibility determines where the function can be named.
+    pub vis: Visibility,
     /// The function's name (span of the identifier token).
     pub name: Span,
     /// The function's parameters.
