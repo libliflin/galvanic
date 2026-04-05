@@ -1,93 +1,128 @@
-# Architecture
+# Architecture of galvanic
 
-This skill exists to answer: what does the compiler pipeline look like, what exists today, and what order should phases be built in?
-
----
-
-## Current state (as of initial skeleton)
-
-The entire project is one file: `src/main.rs`. It does the following:
-
-1. Reads `argv[1]` as a source file path.
-2. Prints `"galvanic: compiling {filename}"`.
-3. Exits 0.
-
-No compilation happens. This is a binary scaffold, not a compiler.
+This file exists to answer: "What are the key design decisions in this codebase, and what must be preserved when making changes?"
 
 ---
 
-## Pipeline phases (in order of implementation)
+## The two design goals
 
-The compiler must be built phase by phase. Each phase depends on the previous one. Do not implement a later phase before the earlier one works.
+Every architectural decision in galvanic serves two masters simultaneously:
+1. **FLS fidelity**: each data structure and function maps to a specific FLS section
+2. **Cache-line awareness**: data layout is a first-class concern, not an afterthought
 
-### Phase 1: Lexer (tokenizer)
-- Input: raw source text (`&str` or file contents)
-- Output: a sequence of `Token` values
-- FLS reference: §3 — Lexical structure
-- Key decisions: What is the `Token` type? How are spans represented? How are errors reported?
-- Cache-line angle: `Token` struct layout. If tokens are stored in a `Vec<Token>`, the struct size affects how many fit in a cache line during parsing.
-
-### Phase 2: Parser
-- Input: token stream from the lexer
-- Output: an AST (abstract syntax tree)
-- FLS reference: §5 — Expressions, §6 — Statements, §7 — Items
-- Key decisions: What do AST nodes look like? Owned or arena-allocated? How are parse errors represented?
-- Cache-line angle: AST node layout. Tree traversal patterns are cache-unfriendly by default; this is worth designing around from the start.
-
-### Phase 3: Name resolution / type checking
-- Input: raw AST
-- Output: resolved AST with type annotations
-- FLS reference: §8 — Names, §10 — Type system
-- This phase is where most spec ambiguities tend to surface.
-
-### Phase 4: IR (intermediate representation)
-- Input: type-checked AST
-- Output: a lower-level representation suitable for codegen
-- Decision: what IR? LLVM? MIR-like? Custom? Given the cache-line research angle, a custom IR that makes data layout explicit may be valuable.
-
-### Phase 5: Codegen (ARM64)
-- Input: IR
-- Output: ARM64 assembly or object code
-- This is where the cache-line-aware codegen research question becomes concrete.
+These goals are noted explicitly in the source code. When making changes, check both.
 
 ---
 
-## Module structure (expected, not yet created)
+## Data layout constraints (DO NOT violate without explicit rationale)
 
-As phases are implemented, suggest this layout:
+### Token: 8 bytes
+
+```rust
+// src/lexer.rs
+struct Token {
+    kind: TokenKind,  // u8 (repr(u8))
+    // ...
+}
+```
+
+`Token` is designed to be 8 bytes so 8 tokens fit in one 64-byte cache line. `TokenKind` uses `#[repr(u8)]` to keep the discriminant to 1 byte. The parser's hot token iteration is the beneficiary. **Do not add fields to `Token` that would push it past 8 bytes without documenting the trade-off.**
+
+### Span: 8 bytes
+
+```rust
+pub struct Span {
+    pub start: u32,  // 4 bytes
+    pub len: u32,    // 4 bytes
+}
+```
+
+Exactly 8 bytes. Two `Span`s fit alongside a `Token` in one cache line. This is used for connecting AST nodes back to source for diagnostics. **Do not add fields.**
+
+### AST nodes: Box-based for now, arena-flagged for later
+
+The AST currently uses `Box<T>` for recursive types (e.g., `Box<Expr>` in `ExprKind::Unary`). The source code explicitly documents this as a known cache-inefficiency and flags an arena redesign (`u32` indices into flat `Vec<ExprData>`) as future work. **Do not "improve" this by changing the design. The Arena redesign is a planned future phase, not something to do incrementally.**
+
+---
+
+## Module structure
 
 ```
 src/
-  main.rs          — CLI entry point (exists)
-  lexer.rs         — or lexer/mod.rs when it grows
-  parser.rs        — depends on lexer
-  ast.rs           — AST types, referenced by parser
-  resolve.rs       — name resolution
-  types.rs         — type checker
-  ir.rs            — IR types and lowering
-  codegen/
-    mod.rs
-    arm64.rs       — ARM64 instruction emission
+  main.rs     — CLI entry point: reads args, calls lexer::tokenize, calls parser::parse
+  lexer.rs    — Tokenizer: tokenize(src) -> Result<Vec<Token>, LexError>
+  ast.rs      — AST node types: SourceFile, Item, FnDef, Expr, Stmt, etc.
+  parser.rs   — Parser: parse(tokens, src) -> Result<SourceFile, ParseError>
 ```
 
-Do not create empty module files ahead of their implementation. Create each file when there is code to put in it.
+The pipeline is strictly linear: source text → tokens → AST. There is no IR, no name resolution, no type checking, no codegen yet. The pipeline currently ends after parsing.
 
 ---
 
-## Design constraints
+## FLS citation pattern
 
-- **no_std target**: The README says galvanic implements "core Rust (no_std)". This means no standard library dependencies in the *compiled output* — but galvanic itself (the compiler binary) can and should use `std`. The compiler runs on a host machine with std available.
-- **ARM64 only**: Codegen targets ARM64. No need to design for multiple architectures.
-- **FLS fidelity first**: When the FLS and a pragmatic shortcut diverge, follow the FLS and document the divergence. The research value comes from strict FLS adherence.
-- **Cache-line awareness**: Not a post-hoc optimization pass — a design constraint from the start. When making data structure decisions, think about how the data will be traversed and how that maps to cache lines.
+Every significant type and function includes an FLS section citation. The format is:
+
+```rust
+/// FLS §9: Functions.
+```
+
+For ambiguities:
+```rust
+/// FLS §9 AMBIGUOUS: the spec lists `FunctionQualifiers` but does not
+/// enumerate which qualifier combinations are legal. ...
+```
+
+For notes about non-ASCII or other known gaps:
+```rust
+/// FLS §2.3 NOTE: this implementation handles ASCII correctly; non-ASCII
+/// identifier characters are accepted but NFC normalisation is not yet applied.
+```
+
+**When adding new code, always include the relevant FLS section reference.** This is how galvanic tracks spec coverage and documents what's been verified.
 
 ---
 
-## What "FLS-faithful" means in practice
+## Parser design
 
-When implementing a phase:
-1. Read the relevant FLS sections before writing code.
-2. Structure the code to mirror the spec structure where possible.
-3. Add a comment above each major function or type with the FLS section it implements (e.g., `// FLS §3.2: Integer literals`).
-4. If the spec is silent on something, add a `// FLS §X.Y: AMBIGUOUS — spec does not specify...` comment.
-5. Record every ambiguity in the changelog's `FLS Notes` section.
+Hand-written recursive descent. Each grammar rule maps to one method. Methods:
+- Return `Result<T, ParseError>` — error means "leave cursor at offending token"
+- Use `expect(kind)` to consume a required token or return a descriptive error
+- Use `eat(kind)` to optionally consume a token (returns bool)
+- Use `peek_kind()` to look ahead without consuming
+
+**Precedence climbing** is encoded structurally: `parse_expr` → `parse_assign` → `parse_or` → `parse_and` → `parse_comparison` → ... → `parse_unary` → `parse_primary`. The chain matches the precedence table in the parser module doc.
+
+---
+
+## What's implemented (as of Phase 2)
+
+| FLS Section | Status | Notes |
+|---|---|---|
+| §2 Lexical elements | Complete-ish | Full token set; Unicode NFC not applied |
+| §3 Items | Partial | Only `fn` items; no struct, enum, trait, impl, use, mod |
+| §4 Types | Partial | Path, Unit, Ref; no generics, tuples, arrays, slices |
+| §6 Expressions | Partial | Literals, paths, blocks, unary, binary (all ops), calls, if, return |
+| §8 Statements | Partial | Let, expression statement, empty; no item statements |
+| §9 Functions | Partial | No qualifiers (const, async, unsafe, extern); no where clauses |
+
+---
+
+## What comes next (by FLS section, not yet implemented)
+
+In rough dependency order:
+- §3: `struct`, `enum`, `type`, `use`, `mod`, `impl`, `trait` items
+- §4: Generic type arguments (`Vec<i32>`), tuple types, array/slice types
+- §5: Patterns (struct patterns, tuple patterns, match arms)
+- §6: Method calls, field access, index expressions, closure expressions, loop/while/for
+- §7: Closures
+- §10: Traits
+- §11: Implementations
+- §12–§17: Advanced items
+- Codegen: ARM64 instruction selection, register allocation, cache-line-aware layout
+
+---
+
+## The `no_std` goal
+
+The README mentions "core Rust (`no_std`)". Galvanic itself uses `std` (it reads files, uses process::Command in tests). The `no_std` refers to the **subset of Rust it compiles** — the initial target is no_std Rust programs. The compiler is not itself no_std.

@@ -1,43 +1,43 @@
 # Alignment Summary
 
-Read this before starting cycles. It takes 30 seconds and will save you from cycles that don't matter.
+For William to read before starting lathe cycles. Takes about a minute.
 
 ---
 
 ## Who this serves
 
-- **William (you)** — Researcher and sole maintainer. Wants the compiler pipeline to actually exist so the two research questions (FLS implementability, cache-line-aware codegen) can be answered. Cycles that advance the pipeline are valuable. Cycles that polish the stub are not.
-- **Compiler/Rust researchers** — Will read the code and changelogs as research artifacts. They need FLS citations and ambiguity notes, not just working code.
-- **Spec ambiguity hunters** — Want to see where the FLS breaks down under implementation pressure. Every ambiguity found is a result.
+**William (you)** — The only stakeholder. Galvanic is a research compiler. Nobody else is running it, depending on its API, or waiting on features. Every cycle should serve your ability to answer the two research questions: (1) is the FLS independently implementable, and (2) what does cache-aware codegen actually look like?
+
+There are no external users, no library consumers, no downstream teams. This keeps the alignment simple.
 
 ---
 
-## Key tensions
+## Key tensions I found
 
-**Forward progress vs. FLS fidelity**: The research value requires strict FLS adherence, not just any implementation. The agent is biased toward strict FLS fidelity and explicit ambiguity documentation. Speed doesn't matter; accuracy does.
+**Breadth vs. depth.** You've implemented lexing and parsing of `fn` items with full expression support (Phase 1 and 2 are committed). The FLS has many more sections: structs, enums, traits, impls. The temptation is to keep extending the parser. But the existing code has almost no behavioral tests — the only test is a smoke test that checks the binary runs. I've aligned the agent to prioritize testing what exists before implementing more.
 
-**Cache-line awareness vs. pragmatism**: Cache-line awareness should shape data structure design from the start (token layout, AST node layout), but should never delay getting a phase working. Design thoughtfully, then implement.
-
-**Exploratory research vs. clean code**: This is a research project. Comments explaining *why* (with FLS citations) are more valuable than elegant abstractions that hide the spec-to-code mapping.
+**Cache-line research vs. getting something working.** The Token/Span layout is carefully designed. The AST docs explicitly say "get the FLS mapping right first, not premature optimization" and flag the arena redesign as future work. I've encoded this: the agent preserves the cache-line constraints but doesn't refactor the AST toward arenas prematurely.
 
 ---
 
 ## Current focus
 
-The binary is a stub. The agent's next several cycles should be entirely focused on building the lexer — the first real phase of the compiler. Everything else (parser, AST, codegen) is downstream.
+**Stage 2: Core works, untested.** The lexer and parser exist and compile. The binary runs. But there are zero tests of actual parsing behavior. The agent will prioritize:
 
-The agent should:
-1. Read FLS §3 (lexical structure) before writing any token code.
-2. Implement a `Token` type and a `tokenize()` function.
-3. Test it against real Rust source text (at minimum: keywords, identifiers, integer literals, operators).
-4. Document any FLS ambiguities found.
+1. Parser unit tests — does `fn add(a: i32, b: i32) -> i32 { a + b }` produce the right AST?
+2. Lexer unit tests — does `0xFF` produce `LitInteger`? Does `'a` produce `Lifetime`?
+3. Error case tests — what happens when the parser sees malformed input?
+
+Only after those foundations are in place should the agent move to extending the grammar.
 
 ---
 
 ## What could be wrong
 
-- **Stakeholders I might have missed**: This is a solo research project with a public repo. If galvanic ever gets cited or forked by other researchers, they become a stakeholder the agent isn't currently optimizing for. The README sets expectations correctly ("do not use this"), so this risk is low but worth noting.
-- **FLS version**: The FLS at spec.ferrocene.dev is the assumed reference. If you're working against a specific version of the FLS, add that version number to `.lathe/refs/fls-pointer.md` so the agent knows which spec to follow.
-- **ARM64 host assumption**: The agent will implement ARM64 codegen. If you're running tests on an x86 machine, integration tests for codegen output will need a cross-compilation or emulation setup. The agent doesn't know about this yet — you'll need to add guidance when you get to Phase 5.
-- **`no_std` scope**: The README says "core Rust (no_std)". I've interpreted this as: the compiled programs are `no_std`, but the compiler binary itself uses `std`. If you mean the compiler binary should also be `no_std`, the agent will need to know that — it changes the available tools significantly.
-- **CI is ubuntu-latest**: The CI runs on Linux. If ARM64-specific tests are needed (e.g., running compiled output), the CI will need a runner change (or QEMU). The agent should flag this when it becomes relevant.
+**Branch protection**: I couldn't verify whether `main` is protected on GitHub. If it's not, lathe's pushes could land directly on main without CI. Please check: Settings → Branches → Branch protection rules for `main`. Require PRs and status checks before allowing merges.
+
+**The research questions**: I inferred William's goals from the README. If the research focus has shifted (e.g., you're now more interested in codegen than spec coverage), the agent's priorities should be updated.
+
+**FLS coverage tracking**: There's no explicit tracking of which FLS sections are "done" vs. "stub." The architecture.md skill has a rough table, but it was written from reading the code — it may be incomplete. If you have a more authoritative list of what's implemented, I didn't find it.
+
+**Unicode**: The lexer comment notes that non-ASCII identifiers are accepted but NFC normalization isn't applied. If this is a known gap you're tracking separately (e.g., in an issue), the agent won't know about it.
