@@ -194,6 +194,50 @@ fn milestone_2_nested_add() {
     assert_eq!(exit_code, 6, "expected exit 6 (1+2+3), got {exit_code}");
 }
 
+// ── Milestone 3: let bindings ────────────────────────────────────────────────
+//
+// FLS §8.1: Let statements create local variable bindings. The initializer
+// is evaluated and stored on the stack; path expressions load from the stack.
+// FLS §6.1.2:37–45: All storage and loads are runtime instructions.
+
+/// Milestone 3: `fn main() -> i32 { let x = 42; x }` exits with code 42.
+///
+/// FLS §8.1: Let statement with integer initializer.
+/// FLS §6.3: Path expression reads the local variable.
+#[test]
+fn milestone_3_let_binding_literal() {
+    let Some(exit_code) = compile_and_run("fn main() -> i32 { let x = 42; x }\n") else {
+        return;
+    };
+    assert_eq!(exit_code, 42, "expected exit 42 from `let x = 42; x`, got {exit_code}");
+}
+
+/// Milestone 3 (variant): `fn main() -> i32 { let x = 1 + 2; x }` exits with 3.
+///
+/// FLS §8.1: Let statement initializer can be an arithmetic expression.
+/// FLS §6.5.5: The arithmetic runs at runtime before being stored.
+#[test]
+fn milestone_3_let_binding_arithmetic() {
+    let Some(exit_code) = compile_and_run("fn main() -> i32 { let x = 1 + 2; x }\n") else {
+        return;
+    };
+    assert_eq!(exit_code, 3, "expected exit 3 from `let x = 1 + 2; x`, got {exit_code}");
+}
+
+/// Milestone 3 (two bindings): `fn main() -> i32 { let x = 10; let y = 5; x }`.
+///
+/// Tests that multiple let bindings allocate separate stack slots.
+/// FLS §8.1: Each let statement introduces a distinct binding.
+#[test]
+fn milestone_3_two_let_bindings() {
+    let Some(exit_code) =
+        compile_and_run("fn main() -> i32 { let x = 10; let y = 5; x }\n")
+    else {
+        return;
+    };
+    assert_eq!(exit_code, 10, "expected exit 10, got {exit_code}");
+}
+
 // ── Assembly inspection: runtime instruction verification ────────────────────
 //
 // FLS §6.1.2:37–45: Non-const code must emit runtime instructions.
@@ -256,5 +300,33 @@ fn runtime_nested_add_emits_multiple_add_instructions() {
     assert!(
         add_count >= 2,
         "expected at least 2 `add` instructions for `1 + 2 + 3`, found {add_count}:\n{asm}"
+    );
+}
+
+/// `fn main() -> i32 { let x = 42; x }` must emit `str` and `ldr`.
+///
+/// FLS §8.1: The let statement stores 42 to a stack slot at runtime.
+/// FLS §6.3: The path expression `x` loads from that stack slot at runtime.
+/// FLS §6.1.2:37–45: Neither the store nor the load may be elided.
+#[test]
+fn runtime_let_binding_emits_str_and_ldr() {
+    let asm = compile_to_asm("fn main() -> i32 { let x = 42; x }\n");
+    assert!(
+        asm.contains("str"),
+        "expected `str` instruction for let binding, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("ldr"),
+        "expected `ldr` instruction for path expression, got:\n{asm}"
+    );
+    // The frame setup must subtract from sp.
+    assert!(
+        asm.contains("sub     sp"),
+        "expected `sub sp` for stack frame, got:\n{asm}"
+    );
+    // The frame restore must add back to sp before ret.
+    assert!(
+        asm.contains("add     sp"),
+        "expected `add sp` for stack restore before ret, got:\n{asm}"
     );
 }

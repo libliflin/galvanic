@@ -16,6 +16,8 @@
 //! # FLS traceability
 //!
 //! - FLS §9: Functions — `lower_fn` maps each `FnDef` to an `IrFn`.
+//! - FLS §8.1: Let statements — `lower_stmt` allocates a stack slot and stores.
+//! - FLS §6.3: Path expressions — local variable references load from stack.
 //! - FLS §6.19: Return expressions — tail expressions lower to `Instr::Ret`.
 //! - FLS §2.4.4.1: Integer literal expressions — `LoadImm` materializes them.
 //! - FLS §4.4: Unit type — absent tail / unit type lowers to `IrValue::Unit`.
@@ -23,7 +25,9 @@
 //! - FLS §6.1.2:37–45: Non-const code emits runtime instructions.
 //! - FLS §18.1: Program structure — `lower` produces one `Module` per file.
 
-use crate::ast::{BinOp, Expr, ExprKind, ItemKind, SourceFile, TyKind};
+use std::collections::HashMap;
+
+use crate::ast::{BinOp, Expr, ExprKind, ItemKind, SourceFile, StmtKind, TyKind};
 use crate::ir::{IrBinOp, Instr, IrFn, IrTy, IrValue, Module};
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -96,10 +100,15 @@ fn lower_fn(fn_def: &crate::ast::FnDef, source: &str) -> Result<IrFn, LowerError
                 "extern / bodyless functions".into(),
             ));
         }
-        Some(block) => lower_block_return(block, &ret_ty, source)?,
+        Some(block) => block,
     };
 
-    Ok(IrFn { name, ret_ty, body })
+    let mut ctx = LowerCtx::new(source);
+    ctx.lower_block(body, &ret_ty)?;
+
+    let body_instrs = ctx.instrs;
+    let stack_slots = ctx.next_slot;
+    Ok(IrFn { name, ret_ty, body: body_instrs, stack_slots })
 }
 
 // ── Type lowering ────────────────────────────────────────────────────────────
@@ -120,124 +129,222 @@ fn lower_ty(ty: &crate::ast::Ty, source: &str) -> Result<IrTy, LowerError> {
     }
 }
 
-// ── Block / expression lowering ──────────────────────────────────────────────
+// ── Lowering context ─────────────────────────────────────────────────────────
 
-/// Lower a function body block to a list of IR instructions.
+/// Mutable state threaded through the lowering of a single function body.
 ///
-/// Emits real runtime instructions. No compile-time evaluation.
+/// Tracks the instruction buffer, virtual register counter, stack slot
+/// counter, and the local variable map. All instructions for one function
+/// are accumulated here and transferred to `IrFn::body` at the end.
 ///
-/// FLS §6.4: Block expressions.
-/// FLS §6.19: Return expressions — the tail is the block's return value.
-/// FLS §6.1.2:37–45: Non-const function bodies must emit runtime code.
-fn lower_block_return(
-    block: &crate::ast::Block,
-    ret_ty: &IrTy,
-    source: &str,
-) -> Result<Vec<Instr>, LowerError> {
-    // Statements require runtime stack allocation, variable storage, and
-    // control flow — none of which are implemented yet.
-    if !block.stmts.is_empty() {
-        return Err(LowerError::Unsupported(
-            "statements in function body (runtime variable storage not yet implemented)".into(),
-        ));
-    }
-
-    match &block.tail {
-        // No tail expression: unit return.
-        None => Ok(vec![Instr::Ret(IrValue::Unit)]),
-
-        Some(tail) => {
-            let mut instrs = Vec::new();
-            let mut next_reg: u8 = 0;
-            let result = lower_tail_expr(tail, &mut instrs, &mut next_reg, ret_ty, source)?;
-            instrs.push(Instr::Ret(result));
-            Ok(instrs)
-        }
-    }
+/// FLS §8.1: Each `let` binding allocates a new stack slot and registers
+/// the variable name in `locals`. Path expressions consult `locals` to
+/// find the slot to load from.
+struct LowerCtx<'src> {
+    source: &'src str,
+    instrs: Vec<Instr>,
+    next_reg: u8,
+    /// Next stack slot index. Slot `s` maps to byte offset `s * 8` on the
+    /// stack frame. The frame size is rounded up to 16 bytes in codegen.
+    next_slot: u8,
+    /// Maps local variable names to their stack slot indices.
+    ///
+    /// FLS §8.1: Let statements introduce bindings into the current scope.
+    /// FLS §6.3: Path expressions are resolved here before emitting Load.
+    locals: HashMap<&'src str, u8>,
 }
 
-/// Lower a tail expression to runtime IR instructions.
-///
-/// Returns the IrValue holding the result. Emits LoadImm/BinOp
-/// instructions into `instrs` as needed.
-///
-/// FLS §6.1.2:37–45: All code here emits runtime instructions.
-fn lower_tail_expr(
-    expr: &Expr,
-    instrs: &mut Vec<Instr>,
-    next_reg: &mut u8,
-    ret_ty: &IrTy,
-    _source: &str,
-) -> Result<IrValue, LowerError> {
-    match (&expr.kind, ret_ty) {
-        // FLS §2.4.4.1: Integer literal — materialize as a runtime immediate.
-        (ExprKind::LitInt(n), IrTy::I32) => {
-            if *n > i32::MAX as u128 {
-                return Err(LowerError::Unsupported(format!(
-                    "integer literal {n} out of range for i32"
-                )));
+impl<'src> LowerCtx<'src> {
+    fn new(source: &'src str) -> Self {
+        LowerCtx {
+            source,
+            instrs: Vec::new(),
+            next_reg: 0,
+            next_slot: 0,
+            locals: HashMap::new(),
+        }
+    }
+
+    /// Allocate the next virtual register.
+    fn alloc_reg(&mut self) -> Result<u8, LowerError> {
+        let r = self.next_reg;
+        self.next_reg = self.next_reg.checked_add(1).ok_or_else(|| {
+            LowerError::Unsupported("exceeded 256 virtual registers".into())
+        })?;
+        Ok(r)
+    }
+
+    /// Allocate the next stack slot for a local variable.
+    ///
+    /// FLS §8.1: Each let binding gets one 8-byte slot.
+    fn alloc_slot(&mut self) -> Result<u8, LowerError> {
+        let s = self.next_slot;
+        self.next_slot = self.next_slot.checked_add(1).ok_or_else(|| {
+            LowerError::Unsupported("exceeded 256 stack slots".into())
+        })?;
+        Ok(s)
+    }
+
+    /// Ensure `val` is in a virtual register. If it's already a register,
+    /// return it. If it's a constant, emit a `LoadImm`.
+    fn val_to_reg(&mut self, val: IrValue) -> Result<u8, LowerError> {
+        match val {
+            IrValue::Reg(r) => Ok(r),
+            IrValue::I32(n) => {
+                let r = self.alloc_reg()?;
+                self.instrs.push(Instr::LoadImm(r, n));
+                Ok(r)
             }
-            let n = *n as i32;
-            let r = alloc_reg(next_reg)?;
-            instrs.push(Instr::LoadImm(r, n));
-            Ok(IrValue::Reg(r))
+            IrValue::Unit => Err(LowerError::Unsupported(
+                "unit value used as arithmetic operand".into(),
+            )),
         }
-
-        // FLS §4.4: Unit literal `()`.
-        (ExprKind::Unit, IrTy::Unit) => Ok(IrValue::Unit),
-
-        // FLS §6.5.5: Arithmetic binary operations — emit runtime instructions.
-        //
-        // Both operands are lowered recursively, producing LoadImm/BinOp
-        // instructions. The result is in a virtual register.
-        (ExprKind::Binary { op, lhs, rhs }, IrTy::I32)
-            if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) =>
-        {
-            let lhs_val = lower_tail_expr(lhs, instrs, next_reg, ret_ty, _source)?;
-            let rhs_val = lower_tail_expr(rhs, instrs, next_reg, ret_ty, _source)?;
-
-            let lhs_reg = val_to_reg(lhs_val, instrs, next_reg)?;
-            let rhs_reg = val_to_reg(rhs_val, instrs, next_reg)?;
-
-            let dst = alloc_reg(next_reg)?;
-            let ir_op = match op {
-                BinOp::Add => IrBinOp::Add,
-                BinOp::Sub => IrBinOp::Sub,
-                BinOp::Mul => IrBinOp::Mul,
-                _ => unreachable!("matched above"),
-            };
-            instrs.push(Instr::BinOp { op: ir_op, dst, lhs: lhs_reg, rhs: rhs_reg });
-            Ok(IrValue::Reg(dst))
-        }
-
-        // Anything else: not yet supported as runtime codegen.
-        _ => Err(LowerError::Unsupported(
-            "expression kind in non-const context (runtime codegen not yet implemented)".into(),
-        )),
     }
-}
 
-/// Allocate the next virtual register.
-fn alloc_reg(next_reg: &mut u8) -> Result<u8, LowerError> {
-    let r = *next_reg;
-    *next_reg = next_reg.checked_add(1).ok_or_else(|| {
-        LowerError::Unsupported("exceeded 256 virtual registers".into())
-    })?;
-    Ok(r)
-}
+    // ── Block lowering ────────────────────────────────────────────────────────
 
-/// Ensure a value is in a register. If it already is, return the register.
-/// If it's a constant, emit a LoadImm to put it in one.
-fn val_to_reg(val: IrValue, instrs: &mut Vec<Instr>, next_reg: &mut u8) -> Result<u8, LowerError> {
-    match val {
-        IrValue::Reg(r) => Ok(r),
-        IrValue::I32(n) => {
-            let r = alloc_reg(next_reg)?;
-            instrs.push(Instr::LoadImm(r, n));
-            Ok(r)
+    /// Lower a function body block, appending a final `Ret` instruction.
+    ///
+    /// Processes all statements in order, then lowers the tail expression
+    /// (if any) and emits `Ret`. Emits real runtime instructions throughout.
+    ///
+    /// FLS §6.4: Block expressions.
+    /// FLS §6.19: Return expressions — the tail is the block's return value.
+    /// FLS §6.1.2:37–45: Non-const function bodies must emit runtime code.
+    fn lower_block(&mut self, block: &crate::ast::Block, ret_ty: &IrTy) -> Result<(), LowerError> {
+        for stmt in &block.stmts {
+            self.lower_stmt(stmt)?;
         }
-        IrValue::Unit => Err(LowerError::Unsupported(
-            "unit value used as arithmetic operand".into(),
-        )),
+
+        let ret_val = match &block.tail {
+            None => IrValue::Unit,
+            Some(tail) => self.lower_expr(tail, ret_ty)?,
+        };
+
+        self.instrs.push(Instr::Ret(ret_val));
+        Ok(())
+    }
+
+    // ── Statement lowering ────────────────────────────────────────────────────
+
+    /// Lower one statement to runtime IR instructions.
+    ///
+    /// FLS §8: Statements.
+    fn lower_stmt(&mut self, stmt: &crate::ast::Stmt) -> Result<(), LowerError> {
+        match &stmt.kind {
+            // FLS §8.1: Let statement — allocate a stack slot and store the
+            // initializer value. The variable name is registered in `locals`
+            // so that later path expressions can emit a Load.
+            //
+            // FLS §6.1.2:37–45: The store is a runtime instruction; the
+            // initializer is evaluated at runtime, not compile time.
+            StmtKind::Let { name, ty: _, init } => {
+                let init_expr = init.as_ref().ok_or_else(|| {
+                    LowerError::Unsupported("uninitialized let binding (no initializer)".into())
+                })?;
+
+                // Lower the initializer. We assume i32 for numeric expressions.
+                // Type inference is future work; this is sufficient for milestone 3.
+                //
+                // FLS §8.1 AMBIGUOUS: the spec does not describe how type
+                // inference resolves the type of the initializer in the absence
+                // of a type annotation. We default to i32 for integer-producing
+                // expressions.
+                let val = self.lower_expr(init_expr, &IrTy::I32)?;
+                let src = self.val_to_reg(val)?;
+
+                let slot = self.alloc_slot()?;
+                let var_name = name.text(self.source);
+                self.locals.insert(var_name, slot);
+                self.instrs.push(Instr::Store { src, slot });
+
+                Ok(())
+            }
+
+            // Expression statements — evaluate and discard.
+            // Not yet supported at this milestone.
+            StmtKind::Expr(_) => {
+                Err(LowerError::Unsupported(
+                    "expression statements (assignment, calls, etc.) not yet implemented".into(),
+                ))
+            }
+
+            // FLS §8.2: Empty statements are no-ops.
+            StmtKind::Empty => Ok(()),
+        }
+    }
+
+    // ── Expression lowering ──────────────────────────────────────────────────
+
+    /// Lower an expression to runtime IR instructions.
+    ///
+    /// Returns the `IrValue` holding the result. Emits `LoadImm`, `BinOp`,
+    /// `Load`, etc. into `self.instrs` as needed.
+    ///
+    /// FLS §6.1.2:37–45: All code here emits runtime instructions.
+    fn lower_expr(&mut self, expr: &Expr, ret_ty: &IrTy) -> Result<IrValue, LowerError> {
+        match (&expr.kind, ret_ty) {
+            // FLS §2.4.4.1: Integer literal — materialize as a runtime immediate.
+            (ExprKind::LitInt(n), IrTy::I32) => {
+                if *n > i32::MAX as u128 {
+                    return Err(LowerError::Unsupported(format!(
+                        "integer literal {n} out of range for i32"
+                    )));
+                }
+                let n = *n as i32;
+                let r = self.alloc_reg()?;
+                self.instrs.push(Instr::LoadImm(r, n));
+                Ok(IrValue::Reg(r))
+            }
+
+            // FLS §4.4: Unit literal `()`.
+            (ExprKind::Unit, IrTy::Unit) => Ok(IrValue::Unit),
+
+            // FLS §6.3: Path expression — a reference to a local variable.
+            //
+            // A single-segment path is a local variable reference. Emits a
+            // `Load` instruction to read the value from its stack slot at runtime.
+            //
+            // FLS §6.1.2:37–45: The load is a runtime instruction — even if
+            // the variable holds a statically-known value, we must load it.
+            (ExprKind::Path(segments), _) if segments.len() == 1 => {
+                let var_name = segments[0].text(self.source);
+                let slot = self.locals.get(var_name).copied().ok_or_else(|| {
+                    LowerError::Unsupported(format!("undefined variable `{var_name}`"))
+                })?;
+                let dst = self.alloc_reg()?;
+                self.instrs.push(Instr::Load { dst, slot });
+                Ok(IrValue::Reg(dst))
+            }
+
+            // FLS §6.5.5: Arithmetic binary operations — emit runtime instructions.
+            //
+            // Both operands are lowered recursively, producing LoadImm/BinOp
+            // instructions. The result is in a virtual register.
+            (ExprKind::Binary { op, lhs, rhs }, IrTy::I32)
+                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) =>
+            {
+                let lhs_val = self.lower_expr(lhs, ret_ty)?;
+                let rhs_val = self.lower_expr(rhs, ret_ty)?;
+
+                let lhs_reg = self.val_to_reg(lhs_val)?;
+                let rhs_reg = self.val_to_reg(rhs_val)?;
+
+                let dst = self.alloc_reg()?;
+                let ir_op = match op {
+                    BinOp::Add => IrBinOp::Add,
+                    BinOp::Sub => IrBinOp::Sub,
+                    BinOp::Mul => IrBinOp::Mul,
+                    _ => unreachable!("matched above"),
+                };
+                self.instrs.push(Instr::BinOp { op: ir_op, dst, lhs: lhs_reg, rhs: rhs_reg });
+                Ok(IrValue::Reg(dst))
+            }
+
+            // Anything else: not yet supported as runtime codegen.
+            _ => Err(LowerError::Unsupported(
+                "expression kind in non-const context (runtime codegen not yet implemented)".into(),
+            )),
+        }
     }
 }

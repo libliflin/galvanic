@@ -89,29 +89,74 @@ pub fn emit_asm(module: &Module) -> Result<String, CodegenError> {
 
 // ── Function emission ─────────────────────────────────────────────────────────
 
+/// Compute the ARM64 stack frame size for a given number of 8-byte slots.
+///
+/// ARM64 ABI requires the stack pointer to be 16-byte aligned at all times.
+/// We round up the raw byte count to the next multiple of 16.
+///
+/// Cache-line note: each 8-byte slot occupies one half of a 128-bit
+/// (16-byte) alignment unit; two slots fill one aligned unit perfectly.
+fn frame_size(stack_slots: u8) -> u32 {
+    if stack_slots == 0 {
+        return 0;
+    }
+    let raw = stack_slots as u32 * 8;
+    // Round up to 16-byte alignment.
+    (raw + 15) & !15
+}
+
 /// Emit one function.
 ///
 /// FLS §9: Functions. Each function is a labeled sequence of instructions
 /// ending with a `ret` (via `emit_instr`).
+///
+/// If the function has local variables (`stack_slots > 0`) the prologue
+/// subtracts from `sp` to reserve space, and the epilogue (emitted as part
+/// of each `Ret` instruction) restores `sp` before returning.
+///
+/// Cache-line note: `sub sp, sp, #N` is one 4-byte instruction — the frame
+/// setup occupies one slot in the first cache line of the function body.
 fn emit_fn(out: &mut String, func: &crate::ir::IrFn) -> Result<(), CodegenError> {
     writeln!(out, "    // fn {} — FLS §9", func.name)?;
     writeln!(out, "    .global {}", func.name)?;
     writeln!(out, "{}:", func.name)?;
 
+    let fsize = frame_size(func.stack_slots);
+
+    if fsize > 0 {
+        // FLS §8.1: allocate stack space for local variables.
+        // ARM64: SP must remain 16-byte aligned (ABI requirement).
+        writeln!(
+            out,
+            "    sub     sp, sp, #{fsize:<14} // FLS §8.1: frame for {} slot(s)",
+            func.stack_slots
+        )?;
+    }
+
     for instr in &func.body {
-        emit_instr(out, instr)?;
+        emit_instr(out, instr, fsize)?;
     }
 
     Ok(())
 }
 
 /// Emit one instruction.
-fn emit_instr(out: &mut String, instr: &Instr) -> Result<(), CodegenError> {
+///
+/// `frame_size` is passed so that `Ret` can restore `sp` before branching.
+fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32) -> Result<(), CodegenError> {
     match instr {
         // FLS §6.19: Return expression.
         // ARM64 ABI: return value in x0; `ret` branches to link register x30.
+        // If the function has a stack frame, restore sp before returning so
+        // the caller's stack is intact.
         Instr::Ret(value) => {
             emit_load_x0(out, value)?;
+            if frame_size > 0 {
+                writeln!(
+                    out,
+                    "    add     sp, sp, #{frame_size:<14} // FLS §8.1: restore stack frame"
+                )?;
+            }
             writeln!(out, "    ret")?;
         }
 
@@ -127,7 +172,7 @@ fn emit_instr(out: &mut String, instr: &Instr) -> Result<(), CodegenError> {
             }
             writeln!(
                 out,
-                "    mov     x{reg}, #{n}             // FLS §2.4.4.1: load imm {n}"
+                "    mov     x{reg}, #{n:<19} // FLS §2.4.4.1: load imm {n}"
             )?;
         }
 
@@ -144,6 +189,29 @@ fn emit_instr(out: &mut String, instr: &Instr) -> Result<(), CodegenError> {
             writeln!(
                 out,
                 "    {mnemonic:<7} x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: {mnemonic}"
+            )?;
+        }
+
+        // FLS §8.1: Store a virtual register to a stack slot.
+        // ARM64: `str x{src}, [sp, #{offset}]` — offset = slot * 8.
+        // Cache-line note: 8-byte slots keep stores naturally aligned;
+        // two slots fill one 16-byte aligned pair.
+        Instr::Store { src, slot } => {
+            let offset = *slot as u32 * 8;
+            writeln!(
+                out,
+                "    str     x{src}, [sp, #{offset:<15}] // FLS §8.1: store slot {slot}"
+            )?;
+        }
+
+        // FLS §8.1 / FLS §6.3: Load a stack slot into a virtual register.
+        // ARM64: `ldr x{dst}, [sp, #{offset}]` — offset = slot * 8.
+        // Cache-line note: naturally aligned 8-byte loads hit L1 in one cycle.
+        Instr::Load { dst, slot } => {
+            let offset = *slot as u32 * 8;
+            writeln!(
+                out,
+                "    ldr     x{dst}, [sp, #{offset:<15}] // FLS §8.1: load slot {slot}"
             )?;
         }
     }

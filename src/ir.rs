@@ -49,6 +49,16 @@ pub struct IrFn {
     /// For milestone 1 this is always `[Instr::Ret(value)]`. Basic blocks
     /// and control flow instructions will be added in later milestones.
     pub body: Vec<Instr>,
+    /// Number of 8-byte stack slots allocated for local variables.
+    ///
+    /// FLS §8.1: Let statements introduce local variable bindings that
+    /// require storage on the stack. Each slot is 8 bytes; the total frame
+    /// size is rounded up to 16-byte alignment for the ARM64 ABI.
+    ///
+    /// Cache-line note: stack slots map to 8-byte chunks — one slot per
+    /// half cache-line entry. Future register-allocation passes may
+    /// eliminate some stack slots entirely.
+    pub stack_slots: u8,
 }
 
 // ── Instructions ──────────────────────────────────────────────────────────────
@@ -107,6 +117,38 @@ pub enum Instr {
         lhs: u8,
         /// Right-hand operand register.
         rhs: u8,
+    },
+
+    /// Store a virtual register to a stack slot.
+    ///
+    /// `Store { src, slot }` → `str x{src}, [sp, #{slot * 8}]` on ARM64.
+    ///
+    /// FLS §8.1: Let statement initializers are stored to the local's stack
+    /// slot. FLS §6.1.2:37–45: This is a runtime store instruction, not a
+    /// compile-time constant.
+    ///
+    /// Cache-line note: ARM64 `str` is 4 bytes. Each slot is 8 bytes,
+    /// so up to 8 slots fit in a single 64-byte cache line on the stack.
+    Store {
+        /// Source register holding the value to store.
+        src: u8,
+        /// Destination stack slot index (byte offset = slot * 8).
+        slot: u8,
+    },
+
+    /// Load a stack slot into a virtual register.
+    ///
+    /// `Load { dst, slot }` → `ldr x{dst}, [sp, #{slot * 8}]` on ARM64.
+    ///
+    /// FLS §8.1: Reading a local variable binding accesses its stack slot.
+    /// FLS §6.3: Path expressions referring to a local variable lower to Load.
+    ///
+    /// Cache-line note: ARM64 `ldr` is 4 bytes. Stack slots are 8 bytes each.
+    Load {
+        /// Destination register to receive the loaded value.
+        dst: u8,
+        /// Source stack slot index (byte offset = slot * 8).
+        slot: u8,
     },
 }
 
