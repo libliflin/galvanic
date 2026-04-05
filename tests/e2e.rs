@@ -334,3 +334,71 @@ fn milestone_6_mutate_then_compare() {
     };
     assert_eq!(exit_code, 6, "expected exit 6 (3*2=6, 6>5 so return 6), got {exit_code}");
 }
+
+// ── Milestone 7: while loops ─────────────────────────────────────────────────
+
+/// Milestone 7: simple counting loop.
+///
+/// The while loop increments `i` until `i < 5` is false, then returns `i`.
+///
+/// FLS §6.15.3: While loop expression.
+/// FLS §6.5.3: Comparison operator `<` as the loop condition.
+/// FLS §6.5.1: Assignment `i = i + 1` advances the counter.
+#[test]
+fn milestone_7_while_count() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 { let mut i = 0; while i < 5 { i = i + 1; } i }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 5, "expected exit 5 (count to 5), got {exit_code}");
+}
+
+/// Milestone 7 (accumulator): sum 0..5 via a while loop.
+///
+/// Demonstrates that while loop bodies can update multiple variables.
+///
+/// FLS §6.15.3: While loop expression.
+/// FLS §8.3: Multiple expression statements in the loop body.
+#[test]
+fn milestone_7_while_sum() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 {\n\
+             let mut i = 0;\n\
+             let mut sum = 0;\n\
+             while i < 5 {\n\
+                 sum = sum + i;\n\
+                 i = i + 1;\n\
+             }\n\
+             sum\n\
+         }\n",
+    ) else {
+        return;
+    };
+    // 0 + 1 + 2 + 3 + 4 = 10
+    assert_eq!(exit_code, 10, "expected exit 10 (sum 0..5), got {exit_code}");
+}
+
+/// Milestone 7 (early exit): while body guards with if.
+///
+/// Combines while loop and if expression: loop until a comparison fires,
+/// then the final value reflects the result.
+///
+/// FLS §6.15.3: While loop.
+/// FLS §6.17: If expression inside the loop body.
+#[test]
+fn milestone_7_while_with_if() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 {\n\
+             let mut x = 1;\n\
+             while x < 64 {\n\
+                 x = x * 2;\n\
+             }\n\
+             x\n\
+         }\n",
+    ) else {
+        return;
+    };
+    // 1 → 2 → 4 → 8 → 16 → 32 → 64 (loop exits when x = 64)
+    assert_eq!(exit_code, 64, "expected exit 64 (doubling loop), got {exit_code}");
+}
