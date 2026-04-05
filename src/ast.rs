@@ -1,0 +1,451 @@
+//! Abstract syntax tree for galvanic.
+//!
+// All fields are consumed by the parser's test suite and will be used by later
+// compiler phases (name resolution, type checking, codegen). Suppress the
+// dead-code lint for this module rather than sprinkling allows throughout.
+#![allow(dead_code)]
+//!
+//! Each node type corresponds to a section of the Ferrocene Language
+//! Specification (FLS). Citations are embedded in the type documentation.
+//!
+//! # Cache-line design note
+//!
+//! AST nodes currently use `Box<T>` for recursive types. `Box` means every
+//! recursive field dereference is a potential cache miss — the child node may
+//! live anywhere on the heap. An arena design (`u32` indices into a flat
+//! `Vec<ExprData>`) would keep sequential traversal in cache. That redesign is
+//! flagged here as future work; the research value of the first implementation
+//! is in getting the FLS mapping right, not in premature optimization.
+//!
+//! The one place where layout *is* controlled today is [`Span`]: 8 bytes,
+//! two per cache line slot alongside a `Token`. All other structs accept
+//! Rust's default layout for now.
+
+// ── Span ─────────────────────────────────────────────────────────────────────
+
+/// A byte-range span into the source text.
+///
+/// Spans connect AST nodes back to source locations for diagnostics.
+///
+/// # Layout (8 bytes)
+///
+/// ```text
+/// offset 0 │ start: u32  — first byte of the span  (4 bytes)
+/// offset 4 │ len:   u32  — byte count of the span  (4 bytes)
+/// ```
+///
+/// FLS §1: source text is a sequence of Unicode scalar values encoded in UTF-8.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Span {
+    /// Byte offset of the first character.
+    pub start: u32,
+    /// Byte length of the span.
+    pub len: u32,
+}
+
+impl Span {
+    pub fn new(start: u32, len: u32) -> Self {
+        Span { start, len }
+    }
+
+    /// Extend this span to cover everything up to and including `other`.
+    ///
+    /// `other` must lie at or after `self` in the source text.
+    pub fn to(self, other: Span) -> Span {
+        let end = other.start + other.len;
+        Span {
+            start: self.start,
+            len: end.saturating_sub(self.start),
+        }
+    }
+
+    /// Return the source text covered by this span.
+    pub fn text<'src>(&self, src: &'src str) -> &'src str {
+        let start = self.start as usize;
+        &src[start..start + self.len as usize]
+    }
+}
+
+// ── Source file ───────────────────────────────────────────────────────────────
+
+/// The top-level source file — a sequence of items.
+///
+/// FLS §18.1: A Rust source file is a sequence of Unicode scalar values
+/// in UTF-8 encoding. At the syntactic level it consists of a (possibly
+/// empty) list of items.
+///
+/// FLS §3: Items are the top-level constituents of a crate.
+#[derive(Debug)]
+pub struct SourceFile {
+    pub items: Vec<Item>,
+    pub span: Span,
+}
+
+// ── Items ─────────────────────────────────────────────────────────────────────
+
+/// A top-level item.
+///
+/// FLS §3: An item is a component of a crate. Items can be nested inside
+/// modules. The parser currently handles only function items.
+#[derive(Debug)]
+pub struct Item {
+    pub kind: ItemKind,
+    pub span: Span,
+}
+
+/// The kind of a top-level item.
+///
+/// FLS §3: item kinds include functions, structs, enums, unions, traits,
+/// implementations, type aliases, constants, statics, use declarations,
+/// and extern blocks. Only `Fn` is implemented here.
+#[derive(Debug)]
+pub enum ItemKind {
+    /// A function definition. FLS §9.
+    Fn(Box<FnDef>),
+}
+
+// ── Functions ─────────────────────────────────────────────────────────────────
+
+/// A function definition.
+///
+/// FLS §9: Functions.
+///
+/// Grammar (abridged — qualifiers and where clauses omitted):
+/// ```text
+/// FunctionDeclaration ::=
+///     "fn" Identifier "(" FunctionParameters? ")"
+///     FunctionReturnType?
+///     BlockExpression
+/// ```
+///
+/// FLS §9 AMBIGUOUS: the spec lists `FunctionQualifiers` (`const`, `async`,
+/// `unsafe`, `extern`) but does not fully enumerate which qualifier
+/// combinations are legal. For example, `const async fn` is currently
+/// rejected by rustc but the FLS does not state this constraint explicitly.
+/// This implementation accepts no qualifiers; they are left for a future cycle.
+#[derive(Debug)]
+pub struct FnDef {
+    /// The function's name (span of the identifier token).
+    pub name: Span,
+    /// The function's parameters.
+    pub params: Vec<Param>,
+    /// The declared return type.
+    ///
+    /// FLS §9: "If no return type is specified, the return type is `()`."
+    pub ret_ty: Option<Ty>,
+    /// The function body.
+    ///
+    /// FLS §9: The body is required for non-trait, non-extern functions.
+    /// `None` is reserved for future use in trait/extern contexts.
+    pub body: Option<Block>,
+}
+
+/// A function parameter.
+///
+/// FLS §9.2: A function parameter yields a set of bindings that bind matched
+/// input values to names at the call site.
+///
+/// FLS §9.2 AMBIGUOUS: the spec allows arbitrary irrefutable patterns in
+/// parameter position (e.g., `(a, b): (i32, i32)`, `_: i32`). The extent
+/// of patterns valid in parameter position is not independently listed in §9
+/// — the reader must cross-reference §5 (Patterns) and infer which patterns
+/// are irrefutable. This implementation supports only `name: Type` and the
+/// `self` family; full pattern parameters are future work.
+#[derive(Debug)]
+pub struct Param {
+    /// The parameter name (simple identifier).
+    pub name: Span,
+    /// The declared type.
+    pub ty: Ty,
+    pub span: Span,
+}
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+/// A type expression.
+///
+/// FLS §4: Types. This initial implementation handles only the most common
+/// forms: named types (paths), the unit type, and reference types.
+#[derive(Debug)]
+pub struct Ty {
+    pub kind: TyKind,
+    pub span: Span,
+}
+
+/// The kind of a type expression.
+///
+/// FLS §4: Type kinds.
+///
+/// Many type forms are not yet represented: tuple types (§4.4), array types
+/// (§4.5), slice types (§4.6), function pointer types (§4.9), trait objects
+/// (§4.10), impl-Trait types (§4.11), and generic type arguments (`Vec<i32>`).
+#[derive(Debug)]
+pub enum TyKind {
+    /// A named type (a path). FLS §4.1, §14.
+    ///
+    /// Each element of the `Vec` is the span of one path segment identifier.
+    /// Examples: `i32` → `[Span("i32")]`, `std::vec::Vec` → three spans.
+    Path(Vec<Span>),
+
+    /// The unit type `()`. FLS §4.4.
+    ///
+    /// FLS §4.4: The unit type has exactly one value, also written `()`.
+    Unit,
+
+    /// A reference type `&T` or `&mut T`. FLS §4.8.
+    ///
+    /// FLS §4.8 NOTE: References may carry a lifetime (`&'a T`). Lifetime
+    /// parameters in type position are not yet parsed; they are future work.
+    Ref {
+        mutable: bool,
+        inner: Box<Ty>,
+    },
+}
+
+// ── Blocks ────────────────────────────────────────────────────────────────────
+
+/// A block expression `{ stmts* expr? }`.
+///
+/// FLS §6.10: A block expression sequences statements and evaluates to the
+/// value of its tail expression (if present) or to `()` otherwise.
+///
+/// FLS §6.10 NOTE: The spec says the tail expression is the *last element*
+/// of the block when it is an expression without a trailing semicolon. This
+/// requires the parser to distinguish `expr;` (statement) from `expr` (tail)
+/// at the syntactic level — the distinction is purely syntactic.
+#[derive(Debug)]
+pub struct Block {
+    pub stmts: Vec<Stmt>,
+    /// The tail expression — the block's value. Absent means the block is `()`.
+    pub tail: Option<Box<Expr>>,
+    pub span: Span,
+}
+
+// ── Statements ────────────────────────────────────────────────────────────────
+
+/// A statement.
+///
+/// FLS §8: A statement is a component of a block expression.
+#[derive(Debug)]
+pub struct Stmt {
+    pub kind: StmtKind,
+    pub span: Span,
+}
+
+/// The kind of a statement.
+///
+/// FLS §8: Statement kinds include empty statements, item statements,
+/// let statements, and expression statements.
+#[derive(Debug)]
+pub enum StmtKind {
+    /// A let binding. FLS §8.1.
+    ///
+    /// Grammar: `"let" Pattern (":" Type)? ("=" Expression)? ";"`
+    ///
+    /// FLS §8.1 NOTE: the pattern can be any irrefutable pattern. This
+    /// implementation restricts to a simple identifier (and `_`). Tuple
+    /// and struct patterns in let position are future work.
+    Let {
+        name: Span,
+        ty: Option<Ty>,
+        init: Option<Box<Expr>>,
+    },
+
+    /// An expression followed by `;`. FLS §8.3.
+    ///
+    /// FLS §8.3: An expression statement evaluates an expression and discards
+    /// the result. The result type is not constrained to `()`.
+    Expr(Box<Expr>),
+
+    /// An empty statement (lone `;`). FLS §8.2.
+    Empty,
+}
+
+// ── Expressions ───────────────────────────────────────────────────────────────
+
+/// An expression.
+///
+/// FLS §6: Expressions.
+///
+/// # Cache-line note
+///
+/// `Expr` uses `Box<Expr>` in recursive variants (`Binary`, `Unary`, etc.).
+/// This means each recursive dereference is a potential cache miss. An
+/// arena-based design — all `ExprKind` data in a flat `Vec`, addressed by
+/// `u32` indices — would be more cache-friendly for tree traversal. The
+/// trade-off is API complexity. This is flagged as a future redesign.
+#[derive(Debug)]
+pub struct Expr {
+    pub kind: ExprKind,
+    pub span: Span,
+}
+
+/// The kind of an expression.
+///
+/// FLS §6: Expression kinds.
+#[derive(Debug)]
+pub enum ExprKind {
+    /// An integer literal. FLS §6.1.1.
+    ///
+    /// The value is stored as `u128` (the widest integer type). Type-checking
+    /// will narrow it to the inferred or suffixed type.
+    ///
+    /// FLS §6.1.1 NOTE: the spec says integer literals must not exceed the
+    /// maximum value of their type, but this constraint is not enforced at
+    /// the lexical or parse level — it is a type-checking concern.
+    LitInt(u128),
+
+    /// A float literal. FLS §6.1.2.
+    ///
+    /// The raw text is preserved via the span; converting to `f64` here would
+    /// be lossy and premature. The type checker will resolve the suffix.
+    LitFloat,
+
+    /// A boolean literal. FLS §6.1.3.
+    LitBool(bool),
+
+    /// A string literal (regular, raw, byte, or C). FLS §6.1.4.
+    ///
+    /// Escape processing is deferred; the raw source text is in the span.
+    LitStr,
+
+    /// A character literal. FLS §6.1.5.
+    ///
+    /// Escape processing is deferred.
+    LitChar,
+
+    /// The unit value `()`. FLS §6.3.3.
+    ///
+    /// FLS §6.3.3: `()` is a tuple expression with zero elements. Its type
+    /// and value are both the unit type `()`.
+    Unit,
+
+    /// A path expression resolving to a variable, function, or constant.
+    ///
+    /// FLS §6.2: A path expression is a path that resolves to a place or
+    /// value. Each `Span` in the `Vec` is one path segment.
+    Path(Vec<Span>),
+
+    /// A block expression. FLS §6.10.
+    Block(Box<Block>),
+
+    /// A unary operator expression. FLS §6.4.
+    Unary {
+        op: UnaryOp,
+        operand: Box<Expr>,
+    },
+
+    /// A binary operator expression. FLS §6.5–§6.9.
+    Binary {
+        op: BinOp,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
+
+    /// A function call expression. FLS §6.3.1.
+    ///
+    /// FLS §6.3.1 NOTE: the spec distinguishes call expressions (any callee)
+    /// from method call expressions (`receiver.method(args)`). Method calls
+    /// are not yet implemented.
+    Call {
+        callee: Box<Expr>,
+        args: Vec<Expr>,
+    },
+
+    /// A return expression. FLS §6.12.
+    ///
+    /// FLS §6.12: `return` without a value returns `()`.
+    Return(Option<Box<Expr>>),
+
+    /// An if (or if-else) expression. FLS §6.11.
+    ///
+    /// FLS §6.11 AMBIGUOUS: the spec does not explicitly state the type of an
+    /// `if` expression without an `else` branch. The Rust reference says it
+    /// must be `()`, but the FLS leaves this implicit. This implementation
+    /// allows such expressions; the type checker will enforce the constraint.
+    If {
+        cond: Box<Expr>,
+        then_block: Box<Block>,
+        /// `Some(expr)` for `else`/`else if`. The expr is either a `Block` or
+        /// another `If` expression.
+        else_expr: Option<Box<Expr>>,
+    },
+}
+
+// ── Operators ─────────────────────────────────────────────────────────────────
+
+/// Unary operators.
+///
+/// FLS §6.4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnaryOp {
+    /// Arithmetic negation `-`. FLS §6.4.1.
+    Neg,
+    /// Logical/bitwise not `!`. FLS §6.4.2.
+    Not,
+    /// Dereference `*`. FLS §6.4.3.
+    Deref,
+    /// Shared borrow `&`. FLS §6.4.4.
+    Ref,
+    /// Mutable borrow `&mut`. FLS §6.4.4.
+    RefMut,
+}
+
+/// Binary operators, ordered by precedence group (lowest to highest).
+///
+/// FLS §6.5–§6.9.
+///
+/// FLS NOTE: The FLS does not assign numeric precedence levels; precedence
+/// is encoded structurally in the grammar. The ordering here is documentation
+/// only — actual precedence is enforced by the recursive descent call chain
+/// in the parser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinOp {
+    // Assignment — FLS §6.9 (lowest precedence among binops)
+    /// `=`
+    Assign,
+
+    // Logical — FLS §6.8
+    /// `||`
+    Or,
+    /// `&&`
+    And,
+
+    // Comparison — FLS §6.7
+    /// `==`
+    Eq,
+    /// `!=`
+    Ne,
+    /// `<`
+    Lt,
+    /// `>`
+    Gt,
+    /// `<=`
+    Le,
+    /// `>=`
+    Ge,
+
+    // Bitwise — FLS §6.6
+    /// `|`
+    BitOr,
+    /// `^`
+    BitXor,
+    /// `&`
+    BitAnd,
+    /// `<<`
+    Shl,
+    /// `>>`
+    Shr,
+
+    // Arithmetic — FLS §6.5
+    /// `+`
+    Add,
+    /// `-`
+    Sub,
+    /// `*`
+    Mul,
+    /// `/`
+    Div,
+    /// `%`
+    Rem,
+}
