@@ -72,10 +72,12 @@ jobs:
 
       - name: Large repetitive input does not hang
         run: |
-          # 10k lines of let bindings — should not OOM or hang
+          # 10k lines of let bindings inside a function — should not OOM or hang
           python3 -c "
+          print('fn main() {')
           for i in range(10000):
-              print(f'let x{i}: u32 = {i};')
+              print(f'    let x{i}: u32 = {i};')
+          print('}')
           " > /tmp/stress.rs
           timeout 30 ./target/release/galvanic /tmp/stress.rs
 
