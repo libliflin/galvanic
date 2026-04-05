@@ -30,8 +30,8 @@
 //! reference and is consistent with rustc's behaviour.
 
 use crate::ast::{
-    BinOp, Block, Expr, ExprKind, FnDef, Item, ItemKind, Param, SourceFile, Span, Stmt,
-    StmtKind, Ty, TyKind, UnaryOp,
+    BinOp, Block, Expr, ExprKind, FnDef, Item, ItemKind, NamedField, Param, SourceFile, Span,
+    Stmt, StmtKind, StructDef, StructKind, Ty, TyKind, TupleField, UnaryOp, Visibility,
 };
 use crate::lexer::{Token, TokenKind};
 
@@ -167,9 +167,14 @@ impl<'src> Parser<'src> {
 
     /// Parse one item.
     ///
-    /// FLS §3: Item kinds. Only function items (`fn`) are implemented.
+    /// FLS §3: Item kinds. Function and struct items are implemented.
+    ///
+    /// FLS §10.2: An optional `pub` visibility modifier may precede an item.
     fn parse_item(&mut self) -> Result<Item, ParseError> {
         let start = self.current_span();
+
+        // Optional visibility modifier.
+        let vis = self.parse_visibility();
 
         match self.peek_kind() {
             TokenKind::KwFn => {
@@ -182,9 +187,26 @@ impl<'src> Parser<'src> {
                 let span = start.to(end);
                 Ok(Item { kind: ItemKind::Fn(Box::new(fn_def)), span })
             }
+            TokenKind::KwStruct => {
+                let struct_def = self.parse_struct_def(vis)?;
+                let span = start.to(struct_def.span);
+                Ok(Item { kind: ItemKind::Struct(Box::new(struct_def)), span })
+            }
             kind => Err(self.error(format!(
-                "expected item (fn, …), found {kind:?}"
+                "expected item (fn, struct, …), found {kind:?}"
             ))),
+        }
+    }
+
+    /// Consume an optional `pub` keyword and return the visibility.
+    ///
+    /// FLS §10.2: Visibility. Only bare `pub` is handled; restricted forms
+    /// (`pub(crate)`, `pub(super)`, `pub(in path)`) are not yet implemented.
+    fn parse_visibility(&mut self) -> Visibility {
+        if self.eat(TokenKind::KwPub) {
+            Visibility::Pub
+        } else {
+            Visibility::Private
         }
     }
 
@@ -236,6 +258,130 @@ impl<'src> Parser<'src> {
         let body = Some(self.parse_block()?);
 
         Ok(FnDef { name, params, ret_ty, body })
+    }
+
+    /// Parse a struct definition.
+    ///
+    /// FLS §14: Structs.
+    ///
+    /// Grammar:
+    /// ```text
+    /// StructDeclaration ::=
+    ///     "struct" Identifier
+    ///     ( "{" NamedField* "}"          -- named-field struct
+    ///     | "(" TupleField* ")" ";"      -- tuple struct
+    ///     | ";"                          -- unit struct
+    ///     )
+    /// ```
+    ///
+    /// FLS §14 NOTE: Generic type parameters and where clauses on structs are
+    /// not yet implemented. They are future work.
+    fn parse_struct_def(&mut self, vis: Visibility) -> Result<StructDef, ParseError> {
+        let start = self.current_span();
+        self.expect(TokenKind::KwStruct)?;
+
+        // Struct name must be an identifier.
+        if self.peek_kind() != TokenKind::Ident {
+            return Err(self.error(format!(
+                "expected struct name (identifier), found {:?}",
+                self.peek_kind()
+            )));
+        }
+        let name = self.current_span();
+        self.advance();
+
+        let (kind, end) = match self.peek_kind() {
+            // Named-field struct: `struct Foo { … }`
+            TokenKind::OpenBrace => {
+                self.advance(); // eat `{`
+                let fields = self.parse_named_fields()?;
+                let end = self.current_span();
+                self.expect(TokenKind::CloseBrace)?;
+                (StructKind::Named(fields), end)
+            }
+            // Tuple struct: `struct Foo(…);`
+            TokenKind::OpenParen => {
+                self.advance(); // eat `(`
+                let fields = self.parse_tuple_fields()?;
+                self.expect(TokenKind::CloseParen)?;
+                let end = self.current_span();
+                self.expect(TokenKind::Semi)?;
+                (StructKind::Tuple(fields), end)
+            }
+            // Unit struct: `struct Foo;`
+            TokenKind::Semi => {
+                let end = self.current_span();
+                self.advance(); // eat `;`
+                (StructKind::Unit, end)
+            }
+            kind => {
+                return Err(self.error(format!(
+                    "expected `{{`, `(`, or `;` after struct name, found {kind:?}"
+                )));
+            }
+        };
+
+        let span = start.to(end);
+        Ok(StructDef { vis, name, kind, span })
+    }
+
+    /// Parse the named fields of a struct body `{ field: Type, … }`.
+    ///
+    /// FLS §14.1: Named fields.
+    fn parse_named_fields(&mut self) -> Result<Vec<NamedField>, ParseError> {
+        let mut fields = Vec::new();
+
+        while self.peek_kind() != TokenKind::CloseBrace
+            && self.peek_kind() != TokenKind::Eof
+        {
+            let start = self.current_span();
+            let vis = self.parse_visibility();
+
+            if self.peek_kind() != TokenKind::Ident {
+                return Err(self.error(format!(
+                    "expected field name (identifier), found {:?}",
+                    self.peek_kind()
+                )));
+            }
+            let name = self.current_span();
+            self.advance();
+
+            self.expect(TokenKind::Colon)?;
+            let ty = self.parse_ty()?;
+            let end = ty.span;
+
+            fields.push(NamedField { vis, name, ty, span: start.to(end) });
+
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+        }
+
+        Ok(fields)
+    }
+
+    /// Parse the tuple fields of a tuple-struct body `(Type, …)`.
+    ///
+    /// FLS §14.2: Tuple fields.
+    fn parse_tuple_fields(&mut self) -> Result<Vec<TupleField>, ParseError> {
+        let mut fields = Vec::new();
+
+        while self.peek_kind() != TokenKind::CloseParen
+            && self.peek_kind() != TokenKind::Eof
+        {
+            let start = self.current_span();
+            let vis = self.parse_visibility();
+            let ty = self.parse_ty()?;
+            let end = ty.span;
+
+            fields.push(TupleField { vis, ty, span: start.to(end) });
+
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+        }
+
+        Ok(fields)
     }
 
     /// Parse the parameter list between the `(` and `)`.
@@ -1041,7 +1187,7 @@ fn strip_int_suffix(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{ExprKind, ItemKind, StmtKind, TyKind};
+    use crate::ast::{ExprKind, ItemKind, StmtKind, StructKind, TyKind, Visibility};
     use crate::lexer::tokenize;
 
     /// Parse `src` into a SourceFile, panicking on error.
@@ -1071,7 +1217,7 @@ mod tests {
         // FLS §9: minimal function with no parameters and no return type.
         let sf = parse_ok("fn main() {}");
         assert_eq!(sf.items.len(), 1);
-        let ItemKind::Fn(ref f) = sf.items[0].kind;
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         assert_eq!(f.name.text("fn main() {}"), "main");
         assert!(f.params.is_empty());
         assert!(f.ret_ty.is_none());
@@ -1085,7 +1231,7 @@ mod tests {
         // FLS §9: function with return type annotation.
         let src = "fn answer() -> i32 {}";
         let sf = parse_ok(src);
-        let ItemKind::Fn(ref f) = sf.items[0].kind;
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         assert!(f.ret_ty.is_some());
         let TyKind::Path(ref segs) = f.ret_ty.as_ref().unwrap().kind else {
             panic!("expected path type");
@@ -1098,7 +1244,7 @@ mod tests {
         // FLS §9.2: function parameters.
         let src = "fn add(a: i32, b: i32) -> i32 { a }";
         let sf = parse_ok(src);
-        let ItemKind::Fn(ref f) = sf.items[0].kind;
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         assert_eq!(f.params.len(), 2);
         assert_eq!(f.params[0].name.text(src), "a");
         assert_eq!(f.params[1].name.text(src), "b");
@@ -1109,7 +1255,7 @@ mod tests {
         // FLS §9.2: trailing comma in parameter list is allowed.
         let src = "fn f(x: i32,) {}";
         let sf = parse_ok(src);
-        let ItemKind::Fn(ref f) = sf.items[0].kind;
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         assert_eq!(f.params.len(), 1);
     }
 
@@ -1127,7 +1273,7 @@ mod tests {
         // FLS §4.4: unit return type `()`.
         let src = "fn f() -> () {}";
         let sf = parse_ok(src);
-        let ItemKind::Fn(ref f) = sf.items[0].kind;
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         assert!(matches!(f.ret_ty.as_ref().unwrap().kind, TyKind::Unit));
     }
 
@@ -1136,7 +1282,7 @@ mod tests {
         // FLS §4.8: reference type `&i32`.
         let src = "fn f(x: &i32) {}";
         let sf = parse_ok(src);
-        let ItemKind::Fn(ref f) = sf.items[0].kind;
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         assert!(matches!(f.params[0].ty.kind, TyKind::Ref { mutable: false, .. }));
     }
 
@@ -1145,7 +1291,7 @@ mod tests {
         // FLS §4.8: mutable reference type `&mut i32`.
         let src = "fn f(x: &mut i32) {}";
         let sf = parse_ok(src);
-        let ItemKind::Fn(ref f) = sf.items[0].kind;
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         assert!(matches!(f.params[0].ty.kind, TyKind::Ref { mutable: true, .. }));
     }
 
@@ -1156,7 +1302,7 @@ mod tests {
         // FLS §8.1: let with initializer.
         let src = "fn f() { let x = 42; }";
         let sf = parse_ok(src);
-        let ItemKind::Fn(ref f) = sf.items[0].kind;
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         let body = f.body.as_ref().unwrap();
         assert_eq!(body.stmts.len(), 1);
         assert!(matches!(body.stmts[0].kind, StmtKind::Let { .. }));
@@ -1167,7 +1313,7 @@ mod tests {
         // FLS §8.1: let with type annotation and initializer.
         let src = "fn f() { let x: i32 = 42; }";
         let sf = parse_ok(src);
-        let ItemKind::Fn(ref f) = sf.items[0].kind;
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         let body = f.body.as_ref().unwrap();
         let StmtKind::Let { ty, init, .. } = &body.stmts[0].kind else {
             panic!("expected let");
@@ -1181,7 +1327,7 @@ mod tests {
         // FLS §8.1: let without initializer (declaration only).
         let src = "fn f() { let x: i32; }";
         let sf = parse_ok(src);
-        let ItemKind::Fn(ref f) = sf.items[0].kind;
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         let body = f.body.as_ref().unwrap();
         let StmtKind::Let { init, .. } = &body.stmts[0].kind else {
             panic!("expected let");
@@ -1196,7 +1342,7 @@ mod tests {
         // FLS §6.10: tail expression is the block's value.
         let src = "fn f() -> i32 { 42 }";
         let sf = parse_ok(src);
-        let ItemKind::Fn(ref f) = sf.items[0].kind;
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         let body = f.body.as_ref().unwrap();
         assert!(body.stmts.is_empty());
         assert!(matches!(body.tail.as_ref().unwrap().kind, ExprKind::LitInt(42)));
@@ -1207,7 +1353,7 @@ mod tests {
         // FLS §6.5: arithmetic addition.
         let src = "fn f() -> i32 { a + b }";
         let sf = parse_ok(src);
-        let ItemKind::Fn(ref f) = sf.items[0].kind;
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
         assert!(matches!(tail.kind, ExprKind::Binary { op: BinOp::Add, .. }));
     }
@@ -1218,7 +1364,7 @@ mod tests {
         // `1 + 2 * 3` should parse as `1 + (2 * 3)`.
         let src = "fn f() -> i32 { 1 + 2 * 3 }";
         let sf = parse_ok(src);
-        let ItemKind::Fn(ref f) = sf.items[0].kind;
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
         // Outer op is Add.
         let ExprKind::Binary { op: BinOp::Add, ref rhs, .. } = tail.kind else {
@@ -1233,7 +1379,7 @@ mod tests {
         // FLS §6.3.1: call expression.
         let src = "fn f() { foo(1, 2); }";
         let sf = parse_ok(src);
-        let ItemKind::Fn(ref f) = sf.items[0].kind;
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         let body = f.body.as_ref().unwrap();
         let StmtKind::Expr(ref expr) = body.stmts[0].kind else {
             panic!("expected expr stmt");
@@ -1249,7 +1395,7 @@ mod tests {
         // FLS §6.12: return expression with a value.
         let src = "fn f() -> i32 { return 0; }";
         let sf = parse_ok(src);
-        let ItemKind::Fn(ref f) = sf.items[0].kind;
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         let body = f.body.as_ref().unwrap();
         let StmtKind::Expr(ref ret) = body.stmts[0].kind else {
             panic!("expected expr stmt");
@@ -1262,7 +1408,7 @@ mod tests {
         // FLS §6.12: bare `return;` returns `()`.
         let src = "fn f() { return; }";
         let sf = parse_ok(src);
-        let ItemKind::Fn(ref f) = sf.items[0].kind;
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         let body = f.body.as_ref().unwrap();
         let StmtKind::Expr(ref ret) = body.stmts[0].kind else {
             panic!("expected expr stmt");
@@ -1276,7 +1422,7 @@ mod tests {
         // tail expression (evaluates to `()`). No trailing `;` is required.
         let src = "fn f() { if x { y; } }";
         let sf = parse_ok(src);
-        let ItemKind::Fn(ref f) = sf.items[0].kind;
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         let body = f.body.as_ref().unwrap();
         // No statements — the if is the tail.
         assert!(body.stmts.is_empty(), "expected no stmts, got {:?}", body.stmts.len());
@@ -1290,7 +1436,7 @@ mod tests {
         // when more content follows. Here the if is followed by a let stmt.
         let src = "fn f() { if x { y; } let z = 1; }";
         let sf = parse_ok(src);
-        let ItemKind::Fn(ref f) = sf.items[0].kind;
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         let body = f.body.as_ref().unwrap();
         assert_eq!(body.stmts.len(), 2); // if-stmt + let-stmt
         let StmtKind::Expr(ref e) = body.stmts[0].kind else {
@@ -1304,7 +1450,7 @@ mod tests {
         // FLS §6.11: if-else expression.
         let src = "fn f() -> i32 { if cond { 1 } else { 0 } }";
         let sf = parse_ok(src);
-        let ItemKind::Fn(ref f) = sf.items[0].kind;
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
         assert!(matches!(tail.kind, ExprKind::If { else_expr: Some(_), .. }));
     }
@@ -1314,7 +1460,7 @@ mod tests {
         // FLS §6.11: else-if chain.
         let src = "fn f() -> i32 { if a { 1 } else if b { 2 } else { 3 } }";
         let sf = parse_ok(src);
-        let ItemKind::Fn(ref f) = sf.items[0].kind;
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
         let ExprKind::If { else_expr: Some(ref else_e), .. } = tail.kind else {
             panic!("expected if with else");
@@ -1328,7 +1474,7 @@ mod tests {
         // FLS §6.3.3: `()` is the unit value.
         let src = "fn f() -> () { () }";
         let sf = parse_ok(src);
-        let ItemKind::Fn(ref f) = sf.items[0].kind;
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
         assert!(matches!(tail.kind, ExprKind::Unit));
     }
@@ -1338,7 +1484,7 @@ mod tests {
         // FLS §6.1.3: boolean literals.
         let src = "fn f() -> bool { true }";
         let sf = parse_ok(src);
-        let ItemKind::Fn(ref f) = sf.items[0].kind;
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
         assert!(matches!(tail.kind, ExprKind::LitBool(true)));
     }
@@ -1348,7 +1494,7 @@ mod tests {
         // FLS §6.4.1: unary negation.
         let src = "fn f() -> i32 { -1 }";
         let sf = parse_ok(src);
-        let ItemKind::Fn(ref f) = sf.items[0].kind;
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
         assert!(matches!(tail.kind, ExprKind::Unary { op: UnaryOp::Neg, .. }));
     }
@@ -1358,7 +1504,7 @@ mod tests {
         // FLS §6.4.4: shared borrow `&x`.
         let src = "fn f(x: i32) -> &i32 { &x }";
         let sf = parse_ok(src);
-        let ItemKind::Fn(ref f) = sf.items[0].kind;
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
         assert!(matches!(tail.kind, ExprKind::Unary { op: UnaryOp::Ref, .. }));
     }
@@ -1368,7 +1514,7 @@ mod tests {
         // FLS §2.4: hex integer literal.
         let src = "fn f() -> i32 { 0xFF }";
         let sf = parse_ok(src);
-        let ItemKind::Fn(ref f) = sf.items[0].kind;
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
         assert!(matches!(tail.kind, ExprKind::LitInt(255)));
     }
@@ -1378,7 +1524,7 @@ mod tests {
         // FLS §2.4: integer suffix is stripped before value parsing.
         let src = "fn f() -> u32 { 42u32 }";
         let sf = parse_ok(src);
-        let ItemKind::Fn(ref f) = sf.items[0].kind;
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
         assert!(matches!(tail.kind, ExprKind::LitInt(42)));
     }
@@ -1388,7 +1534,7 @@ mod tests {
         // Integration: function with params, local binding, and tail expression.
         let src = "fn add(a: i32, b: i32) -> i32 { let sum = a + b; sum }";
         let sf = parse_ok(src);
-        let ItemKind::Fn(ref f) = sf.items[0].kind;
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         assert_eq!(f.params.len(), 2);
         let body = f.body.as_ref().unwrap();
         assert_eq!(body.stmts.len(), 1); // the let
@@ -1416,5 +1562,168 @@ mod tests {
         // An expression at top level is not an item.
         let err = parse_err("42");
         assert!(err.message.contains("expected item"), "{}", err.message);
+    }
+
+    // ── Struct items ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn struct_unit() {
+        // FLS §14.3: unit struct with no fields.
+        let src = "struct Foo;";
+        let sf = parse_ok(src);
+        assert_eq!(sf.items.len(), 1);
+        let ItemKind::Struct(ref s) = sf.items[0].kind else {
+            panic!("expected Struct item");
+        };
+        assert_eq!(s.name.text(src), "Foo");
+        assert!(matches!(s.kind, StructKind::Unit));
+        assert_eq!(s.vis, Visibility::Private);
+    }
+
+    #[test]
+    fn struct_unit_pub() {
+        // FLS §10.2: `pub` visibility modifier.
+        let src = "pub struct Marker;";
+        let sf = parse_ok(src);
+        let ItemKind::Struct(ref s) = sf.items[0].kind else {
+            panic!("expected Struct item");
+        };
+        assert_eq!(s.name.text(src), "Marker");
+        assert_eq!(s.vis, Visibility::Pub);
+        assert!(matches!(s.kind, StructKind::Unit));
+    }
+
+    #[test]
+    fn struct_named_empty() {
+        // FLS §14.1: named-field struct with no fields.
+        let src = "struct Empty {}";
+        let sf = parse_ok(src);
+        let ItemKind::Struct(ref s) = sf.items[0].kind else {
+            panic!("expected Struct item");
+        };
+        assert_eq!(s.name.text(src), "Empty");
+        let StructKind::Named(ref fields) = s.kind else {
+            panic!("expected Named struct");
+        };
+        assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn struct_named_fields() {
+        // FLS §14.1: named-field struct with two fields.
+        let src = "struct Point { x: i32, y: i32 }";
+        let sf = parse_ok(src);
+        let ItemKind::Struct(ref s) = sf.items[0].kind else {
+            panic!("expected Struct item");
+        };
+        let StructKind::Named(ref fields) = s.kind else {
+            panic!("expected Named struct");
+        };
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].name.text(src), "x");
+        assert_eq!(fields[1].name.text(src), "y");
+        // Both fields are private by default.
+        assert_eq!(fields[0].vis, Visibility::Private);
+        // Both fields have path type `i32`.
+        assert!(matches!(fields[0].ty.kind, TyKind::Path(_)));
+    }
+
+    #[test]
+    fn struct_named_trailing_comma() {
+        // Trailing comma after the last field is allowed.
+        let src = "struct Pair { a: i32, b: f64, }";
+        let sf = parse_ok(src);
+        let ItemKind::Struct(ref s) = sf.items[0].kind else {
+            panic!("expected Struct item");
+        };
+        let StructKind::Named(ref fields) = s.kind else {
+            panic!("expected Named struct");
+        };
+        assert_eq!(fields.len(), 2);
+    }
+
+    #[test]
+    fn struct_named_pub_field() {
+        // FLS §10.2: individual fields may be `pub`.
+        let src = "struct Rect { pub width: u32, pub height: u32 }";
+        let sf = parse_ok(src);
+        let ItemKind::Struct(ref s) = sf.items[0].kind else {
+            panic!("expected Struct item");
+        };
+        let StructKind::Named(ref fields) = s.kind else {
+            panic!("expected Named struct");
+        };
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].vis, Visibility::Pub);
+        assert_eq!(fields[1].vis, Visibility::Pub);
+    }
+
+    #[test]
+    fn struct_tuple() {
+        // FLS §14.2: tuple struct with two positional fields.
+        let src = "struct Pair(i32, f64);";
+        let sf = parse_ok(src);
+        let ItemKind::Struct(ref s) = sf.items[0].kind else {
+            panic!("expected Struct item");
+        };
+        let StructKind::Tuple(ref fields) = s.kind else {
+            panic!("expected Tuple struct");
+        };
+        assert_eq!(fields.len(), 2);
+        assert!(matches!(fields[0].ty.kind, TyKind::Path(_)));
+        assert!(matches!(fields[1].ty.kind, TyKind::Path(_)));
+        assert_eq!(fields[0].vis, Visibility::Private);
+    }
+
+    #[test]
+    fn struct_tuple_pub_field() {
+        // FLS §10.2: tuple struct fields may be `pub`.
+        let src = "struct Newtype(pub i32);";
+        let sf = parse_ok(src);
+        let ItemKind::Struct(ref s) = sf.items[0].kind else {
+            panic!("expected Struct item");
+        };
+        let StructKind::Tuple(ref fields) = s.kind else {
+            panic!("expected Tuple struct");
+        };
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].vis, Visibility::Pub);
+    }
+
+    #[test]
+    fn struct_and_fn_mixed() {
+        // Multiple items of different kinds in one source file.
+        // (Struct-expression syntax in fn bodies is not yet implemented,
+        // so we use a simple fn body here.)
+        let src = "struct Flag; fn check() {}";
+        let sf = parse_ok(src);
+        assert_eq!(sf.items.len(), 2);
+        assert!(matches!(sf.items[0].kind, ItemKind::Struct(_)));
+        assert!(matches!(sf.items[1].kind, ItemKind::Fn(_)));
+    }
+
+    #[test]
+    fn error_struct_missing_name() {
+        // `struct` keyword without a name.
+        let err = parse_err("struct {}");
+        assert!(err.message.contains("expected struct name"), "{}", err.message);
+    }
+
+    #[test]
+    fn error_struct_missing_body() {
+        // Struct name with no body delimiter.
+        let err = parse_err("struct Foo fn");
+        assert!(
+            err.message.contains("expected `{`") || err.message.contains("{"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn error_struct_tuple_missing_semicolon() {
+        // Tuple struct body without terminating `;`.
+        let err = parse_err("struct Pair(i32, i32)");
+        assert!(err.message.contains("Semi"), "{}", err.message);
     }
 }
