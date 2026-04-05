@@ -272,3 +272,65 @@ fn milestone_5_call_chained() {
         "expected exit 42 (add(double(10), double(11))), got {exit_code}"
     );
 }
+
+// ── Milestone 6: mutable bindings and comparisons ────────────────────────────
+
+/// Milestone 6: mutable let binding with sequential assignment.
+///
+/// Demonstrates that `x = expr;` expression statements update the binding.
+///
+/// FLS §8.1: Let statement (`let mut`).
+/// FLS §8.3: Expression statement.
+/// FLS §6.5.1: Assignment operator `=`.
+#[test]
+fn milestone_6_mutation() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 { let mut x = 0; x = x + 1; x = x + 1; x }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 2, "expected exit 2 (0+1+1), got {exit_code}");
+}
+
+/// Milestone 6 (variant): accumulate a sum through sequential assignments.
+///
+/// FLS §8.3: Multiple expression statements.
+/// FLS §6.5.5: Arithmetic operators `+`.
+#[test]
+fn milestone_6_accumulate() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 { let mut sum = 0; sum = sum + 3; sum = sum + 7; sum }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 10, "expected exit 10 (0+3+7), got {exit_code}");
+}
+
+/// Milestone 6: `if` condition using a comparison of two mutable variables.
+///
+/// FLS §6.5.3: Comparison expression `<`.
+/// FLS §6.17: If expression.
+/// FLS §8.1: `let mut` bindings.
+#[test]
+fn milestone_6_comparison_if() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 { let mut x = 2; let mut y = 5; if x < y { x } else { y } }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 2, "expected exit 2 (x < y, return x), got {exit_code}");
+}
+
+/// Milestone 6 (compound): mutation followed by comparison.
+///
+/// FLS §6.5.1: Assignment updates a variable.
+/// FLS §6.5.3: Updated value is compared in `if` condition.
+#[test]
+fn milestone_6_mutate_then_compare() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 { let mut x = 3; x = x * 2; if x > 5 { x } else { 0 } }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 6, "expected exit 6 (3*2=6, 6>5 so return 6), got {exit_code}");
+}

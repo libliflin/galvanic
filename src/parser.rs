@@ -708,6 +708,10 @@ impl<'src> Parser<'src> {
         let start = self.current_span();
         self.expect(TokenKind::KwLet)?;
 
+        // Optional `mut` keyword — FLS §8.1.
+        // Mutability is parsed but not yet enforced (no borrow checker yet).
+        self.eat(TokenKind::KwMut);
+
         // Pattern: identifier or `_`.
         if self.peek_kind() != TokenKind::Ident
             && self.peek_kind() != TokenKind::Underscore
