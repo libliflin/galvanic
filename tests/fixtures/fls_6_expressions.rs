@@ -57,10 +57,7 @@ fn classify_age(age: i32) -> i32 {
     }
 }
 
-// FLS §6.15.2 / §6.15.3 — Loop and while expressions
-// NOTE: `let mut` and assignment now parse and lower correctly (milestone 6).
-// The `while` loop itself is still not supported in codegen — lowering stops
-// at the while expression and galvanic gracefully skips codegen for this fn.
+// FLS §6.15.3 — While loop expressions (milestone 7: compile-time simulation)
 fn count_to_ten() -> i32 {
     let mut counter = 0;
     while counter < 10 {

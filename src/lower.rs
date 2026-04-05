@@ -16,17 +16,22 @@
 //! - FLS §6.12.1: Call expressions — compile-time inlining of constant calls.
 //! - FLS §6.5.1: Assignment expressions — `x = rhs` updates the env binding.
 //! - FLS §6.5.3: Comparison operators — folded when operands are constant i32.
+//! - FLS §6.15.3: While loop expressions — simulated at compile time.
 //! - FLS §8.2: Empty statements — no-op.
-//! - FLS §8.3: Expression statements — assignment only.
+//! - FLS §8.3: Expression statements — assignment and while loops.
 //! - FLS §18.1: Program structure — `lower` produces one `Module` per file.
 //!
-//! # Scope (milestone 6)
+//! # Scope (milestone 7)
 //!
-//! Extends milestone 5 to support mutable let bindings with assignment
-//! (`x = rhs;`) and comparison operators in `if` conditions (`if x < y`).
-//! Both are handled by extending the constant-folding environment: assignment
-//! updates the binding in place, and comparisons are folded once both sides
-//! reduce to `IrValue::I32`.
+//! Extends milestone 6 to support `while` loop expressions (`while cond { body }`).
+//! Loops are simulated at compile time using the same constant-folding strategy
+//! as the rest of the lowering phase: the condition is re-evaluated as a boolean
+//! before each iteration, and the body's mutations are applied to the outer
+//! variable environment. A step limit of 1000 iterations prevents infinite loops
+//! from hanging the compiler.
+//!
+//! Body variables that shadow outer bindings are scoped to the iteration: only
+//! mutations of pre-existing outer variables propagate back after each iteration.
 //!
 //! Only calls to named functions (single-segment path callees) are supported.
 //! Recursive calls that do not terminate at compile time will loop forever —
@@ -34,7 +39,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{BinOp, Block, Expr, ExprKind, FnDef, ItemKind, SourceFile, StmtKind, TyKind};
+use crate::ast::{BinOp, Block, Expr, ExprKind, FnDef, ItemKind, SourceFile, Stmt, StmtKind, TyKind};
 use crate::ir::{Instr, IrFn, IrTy, IrValue, Module};
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -172,8 +177,7 @@ fn lower_block_return(
 
 /// Evaluate a block expression to a compile-time constant value.
 ///
-/// Processes `let` statements in order, extending `parent_env` with each new
-/// binding, then evaluates the tail expression (or returns `IrValue::Unit`).
+/// Processes statements via `exec_stmts`, then evaluates the tail expression.
 /// Bindings introduced inside this block do not escape it (block scoping).
 ///
 /// FLS §6.4: Block expressions.
@@ -187,75 +191,144 @@ fn lower_block_value(
 ) -> Result<IrValue, LowerError> {
     // Clone parent env so inner bindings don't leak out.
     let mut env = parent_env.clone();
-
-    for stmt in &block.stmts {
-        match &stmt.kind {
-            // FLS §8.1: Let statement with initializer.
-            StmtKind::Let { name, init, .. } => {
-                // A let without an initializer produces an uninitialized place.
-                // We cannot constant-fold an uninitialized value; reject it.
-                // (Use-before-init is caught by the borrow checker in full Rust.)
-                let init_expr = init.as_ref().ok_or_else(|| {
-                    LowerError::Unsupported("let binding without initializer".into())
-                })?;
-                let val = lower_expr(init_expr, expected_ty, source, &env, fn_table)?;
-                let binding_name = name.text(source).to_owned();
-                env.insert(binding_name, val);
-            }
-            // FLS §8.2: Empty statement — lone `;` is a no-op.
-            StmtKind::Empty => {}
-
-            // FLS §8.3: Expression statement.
-            //
-            // Only assignment expressions are supported at this milestone.
-            // Other expression statements (bare calls, etc.) are deferred to
-            // a future cycle when side effects and unit-typed returns are
-            // tracked properly.
-            StmtKind::Expr(expr) => {
-                match &expr.kind {
-                    // FLS §6.5.1: Assignment expression `name = rhs`.
-                    //
-                    // The lhs must be a single-segment path naming an in-scope
-                    // let binding. The rhs is evaluated in the current env and
-                    // the binding is updated.
-                    //
-                    // FLS §6.5.1 AMBIGUOUS: the FLS allows arbitrary place
-                    // expressions on the lhs of `=` (field access, indexing,
-                    // deref). This implementation restricts to simple variable
-                    // names; other place expressions are deferred.
-                    ExprKind::Binary { op: BinOp::Assign, lhs, rhs } => {
-                        match &lhs.kind {
-                            ExprKind::Path(segments) if segments.len() == 1 => {
-                                let name = segments[0].text(source).to_owned();
-                                // Infer expected type from the current binding.
-                                let expected_ty = match env.get(&name) {
-                                    Some(IrValue::I32(_)) => IrTy::I32,
-                                    Some(IrValue::Unit) => IrTy::Unit,
-                                    None => return Err(LowerError::Unsupported(format!(
-                                        "assignment to undeclared variable `{name}`"
-                                    ))),
-                                };
-                                let new_val = lower_expr(rhs, &expected_ty, source, &env, fn_table)?;
-                                env.insert(name, new_val);
-                            }
-                            _ => return Err(LowerError::Unsupported(
-                                "assignment to non-variable target \
-                                 (field, index, deref not yet supported)".into(),
-                            )),
-                        }
-                    }
-                    _ => return Err(LowerError::Unsupported(
-                        "expression statement (only assignment `x = expr;` is currently supported)".into(),
-                    )),
-                }
-            }
-        }
-    }
-
+    exec_stmts(&block.stmts, expected_ty, source, &mut env, fn_table)?;
     match &block.tail {
         None => Ok(IrValue::Unit),
         Some(expr) => lower_expr(expr, expected_ty, source, &env, fn_table),
     }
+}
+
+/// Execute a slice of statements, updating `env` in place.
+///
+/// This is the core statement-processing loop. It is called by
+/// `lower_block_value` for function bodies and by the while-loop simulator
+/// for loop body iterations. Taking `env` as `&mut` allows while body
+/// mutations (assignments to outer-scope variables) to propagate back.
+///
+/// FLS §8: Statements.
+/// FLS §8.1: Let statements.
+/// FLS §8.2: Empty statements.
+/// FLS §8.3: Expression statements — assignment (`x = rhs`) and while loops.
+fn exec_stmts(
+    stmts: &[Stmt],
+    expected_ty: &IrTy,
+    source: &str,
+    env: &mut HashMap<String, IrValue>,
+    fn_table: &FnTable<'_>,
+) -> Result<(), LowerError> {
+    for stmt in stmts {
+        match &stmt.kind {
+            // FLS §8.1: Let statement with initializer.
+            //
+            // A let without an initializer produces an uninitialized place.
+            // We cannot constant-fold an uninitialized value; reject it.
+            // (Use-before-init is caught by the borrow checker in full Rust.)
+            StmtKind::Let { name, init, .. } => {
+                let init_expr = init.as_ref().ok_or_else(|| {
+                    LowerError::Unsupported("let binding without initializer".into())
+                })?;
+                let val = lower_expr(init_expr, expected_ty, source, env, fn_table)?;
+                let binding_name = name.text(source).to_owned();
+                env.insert(binding_name, val);
+            }
+
+            // FLS §8.2: Empty statement — lone `;` is a no-op.
+            StmtKind::Empty => {}
+
+            // FLS §8.3: Expression statement.
+            StmtKind::Expr(expr) => match &expr.kind {
+                // FLS §6.5.1: Assignment expression `name = rhs`.
+                //
+                // The lhs must be a single-segment path naming an in-scope
+                // let binding. The rhs is evaluated in the current env and
+                // the binding is updated.
+                //
+                // FLS §6.5.1 AMBIGUOUS: the FLS allows arbitrary place
+                // expressions on the lhs of `=` (field access, indexing,
+                // deref). This implementation restricts to simple variable
+                // names; other place expressions are deferred.
+                ExprKind::Binary { op: BinOp::Assign, lhs, rhs } => {
+                    match &lhs.kind {
+                        ExprKind::Path(segments) if segments.len() == 1 => {
+                            let name = segments[0].text(source).to_owned();
+                            // Infer expected type from the current binding.
+                            let assign_ty = match env.get(&name) {
+                                Some(IrValue::I32(_)) => IrTy::I32,
+                                Some(IrValue::Unit) => IrTy::Unit,
+                                None => {
+                                    return Err(LowerError::Unsupported(format!(
+                                        "assignment to undeclared variable `{name}`"
+                                    )))
+                                }
+                            };
+                            let new_val =
+                                lower_expr(rhs, &assign_ty, source, env, fn_table)?;
+                            env.insert(name, new_val);
+                        }
+                        _ => {
+                            return Err(LowerError::Unsupported(
+                                "assignment to non-variable target \
+                                 (field, index, deref not yet supported)"
+                                    .into(),
+                            ))
+                        }
+                    }
+                }
+
+                // FLS §6.15.3: While loop expression — simulate at compile time.
+                //
+                // The condition is re-evaluated before each iteration using the
+                // current outer env. The body runs in a child env (inner let
+                // bindings are scoped to the iteration); mutations to
+                // pre-existing outer variables are propagated back after each
+                // iteration.
+                //
+                // FLS §6.15.3 AMBIGUOUS: The FLS specifies the semantics of
+                // while loops at runtime but does not define how a compiler
+                // should handle loops during compile-time evaluation. The step
+                // limit below is a practical implementation choice; it will
+                // become irrelevant once runtime loop codegen is added.
+                ExprKind::While { cond, body } => {
+                    // Snapshot outer keys so inner let-bindings don't escape.
+                    let outer_keys: Vec<String> = env.keys().cloned().collect();
+                    // Guard against infinite loops.
+                    const MAX_ITER: u32 = 1000;
+                    for step in 0..=MAX_ITER {
+                        if step == MAX_ITER {
+                            return Err(LowerError::Unsupported(
+                                "while loop exceeded compile-time limit of 1000 \
+                                 iterations (runtime loop support planned for a \
+                                 future milestone)"
+                                    .into(),
+                            ));
+                        }
+                        // Re-evaluate condition in the current outer env.
+                        if !lower_expr_as_bool(cond, source, env, fn_table)? {
+                            break;
+                        }
+                        // Run body in a child env derived from the current outer env.
+                        let mut body_env = env.clone();
+                        exec_stmts(&body.stmts, expected_ty, source, &mut body_env, fn_table)?;
+                        // Propagate mutations of outer-scope variables back.
+                        for key in &outer_keys {
+                            if let Some(&val) = body_env.get(key) {
+                                env.insert(key.clone(), val);
+                            }
+                        }
+                    }
+                }
+
+                _ => {
+                    return Err(LowerError::Unsupported(
+                        "expression statement (only assignment `x = expr;` \
+                         and while loops are currently supported)"
+                            .into(),
+                    ))
+                }
+            },
+        }
+    }
+    Ok(())
 }
 
 /// Evaluate an expression to a compile-time boolean.
