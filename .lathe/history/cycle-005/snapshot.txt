@@ -1,0 +1,290 @@
+# Project Snapshot
+Generated: Sun Apr  5 15:39:13 EDT 2026
+
+## Git Status
+
+## Recent Commits (last 10)
+94547b8 lathe: cycle cleanup (agent left uncommitted changes)
+379f9ca Milestone 4: if/else control flow — fn main() -> i32 { if true { 1 } else { 0 } } compiles
+dc47b78 lathe: cycle cleanup (agent left uncommitted changes)
+a595453 Milestone 3: let bindings — fn main() -> i32 { let x = 42; x } compiles
+82a53ad lathe: cycle cleanup (agent left uncommitted changes)
+bba1fb8 Milestone 2: constant-fold arithmetic — fn main() -> i32 { 1 + 2 } compiles
+fe1b236 lathe: cycle cleanup (agent left uncommitted changes)
+65c65f1 Milestone 1: IR + ARM64 codegen — fn main() -> i32 { 0 } compiles to a running binary
+fae530f Add FLS-derived test fixtures, criterion benchmarks, and spec traceability
+3179219 .lathe: shift to vertical slices — end-to-end binaries over horizontal phases
+
+## Cargo.toml
+[package]
+name = "galvanic"
+version = "0.1.0"
+edition = "2024"
+description = "Clean-room ARM64 Rust compiler built from the Ferrocene Language Specification with cache-line-aware codegen"
+license = "MIT"
+
+[dependencies]
+
+[dev-dependencies]
+
+## Build
+```
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.01s
+OK — builds clean
+```
+
+## Tests
+```
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running unittests src/lib.rs (target/debug/deps/galvanic-862c3363ac261051)
+
+running 139 tests
+test lexer::tests::bare_underscore_is_underscore_token ... ok
+test lexer::tests::binary_integer ... ok
+test lexer::tests::block_comment_skipped ... ok
+test lexer::tests::byte_literal ... ok
+test lexer::tests::char_escape_sequences ... ok
+test lexer::tests::byte_string_literal ... ok
+test lexer::tests::c_string_literal ... ok
+test lexer::tests::char_literals ... ok
+test lexer::tests::compound_punctuation ... ok
+test lexer::tests::decimal_integer ... ok
+test lexer::tests::delimiters ... ok
+test lexer::tests::double_underscore_is_ident ... ok
+test lexer::tests::empty_source_gives_eof ... ok
+test lexer::tests::float_with_decimal ... ok
+test lexer::tests::float_with_exponent ... ok
+test lexer::tests::float_with_suffix ... ok
+test lexer::tests::function_signature ... ok
+test lexer::tests::hex_integer ... ok
+test lexer::tests::integer_dot_method_call ... ok
+test lexer::tests::integer_with_suffix ... ok
+test lexer::tests::keyword_prefix_is_ident ... ok
+test lexer::tests::let_binding ... ok
+test lexer::tests::lifetime ... ok
+test lexer::tests::line_comment_skipped ... ok
+test lexer::tests::no_std_attribute ... ok
+test lexer::tests::octal_integer ... ok
+test lexer::tests::plain_identifiers ... ok
+test lexer::tests::raw_byte_string_literal ... ok
+test lexer::tests::raw_string_literal ... ok
+test lexer::tests::reserved_keywords ... ok
+test lexer::tests::simple_punctuation ... ok
+test lexer::tests::span_is_correct ... ok
+test lexer::tests::strict_keywords ... ok
+test lexer::tests::string_escape_sequences ... ok
+test lexer::tests::string_literal ... ok
+test lexer::tests::struct_definition ... ok
+test lexer::tests::surrogate_unicode_escape_is_error ... ok
+test lexer::tests::token_align_is_four ... ok
+test lexer::tests::token_is_eight_bytes ... ok
+test lexer::tests::unterminated_block_comment_is_error ... ok
+test lexer::tests::unterminated_string_is_error ... ok
+test lexer::tests::weak_keywords ... ok
+test lexer::tests::whitespace_between_tokens ... ok
+test parser::tests::assignment_expression ... ok
+test parser::tests::assignment_right_associative ... ok
+test parser::tests::binary_add ... ok
+test parser::tests::bitwise_and ... ok
+test parser::tests::bitwise_or ... ok
+test parser::tests::bitwise_precedence_and_over_xor_over_or ... ok
+test parser::tests::bitwise_xor ... ok
+test parser::tests::boolean_literals ... ok
+test parser::tests::borrow_expression ... ok
+test parser::tests::break_with_value ... ok
+test parser::tests::break_without_value ... ok
+test parser::tests::call_expression ... ok
+test parser::tests::comparison_binds_tighter_than_logical_and ... ok
+test parser::tests::comparison_equal ... ok
+test parser::tests::comparison_less_equal ... ok
+test parser::tests::comparison_less_than ... ok
+test parser::tests::comparison_not_equal ... ok
+test parser::tests::continue_expression ... ok
+test parser::tests::empty_source_file ... ok
+test parser::tests::enum_and_fn_mixed ... ok
+test parser::tests::enum_empty ... ok
+test parser::tests::enum_mixed_variants ... ok
+test parser::tests::enum_named_variant ... ok
+test parser::tests::enum_pub_visibility ... ok
+test parser::tests::enum_tuple_variant ... ok
+test parser::tests::enum_unit_trailing_comma ... ok
+test parser::tests::enum_unit_variant ... ok
+test parser::tests::error_dot_without_ident ... ok
+test parser::tests::error_enum_missing_name ... ok
+test parser::tests::error_enum_missing_open_brace ... ok
+test parser::tests::error_for_missing_in ... ok
+test parser::tests::error_missing_fn_name ... ok
+test parser::tests::error_missing_open_brace ... ok
+test parser::tests::error_non_item_at_top_level ... ok
+test parser::tests::error_struct_missing_body ... ok
+test parser::tests::error_struct_missing_name ... ok
+test parser::tests::error_struct_tuple_missing_semicolon ... ok
+test parser::tests::field_access_chained ... ok
+test parser::tests::field_access_simple ... ok
+test parser::tests::fn_empty_body ... ok
+test parser::tests::fn_pub_visibility ... ok
+test parser::tests::fn_trailing_comma_in_params ... ok
+test parser::tests::fn_with_params ... ok
+test parser::tests::fn_with_return_type ... ok
+test parser::tests::for_loop_as_stmt ... ok
+test parser::tests::for_loop_simple ... ok
+test parser::tests::for_loop_with_body ... ok
+test parser::tests::full_function ... ok
+test parser::tests::if_else_if_chain ... ok
+test parser::tests::if_then_as_stmt ... ok
+test parser::tests::if_then_as_tail ... ok
+test parser::tests::if_then_else ... ok
+test parser::tests::integer_literal_hex ... ok
+test parser::tests::integer_literal_with_suffix ... ok
+test parser::tests::let_with_init ... ok
+test parser::tests::let_with_type_and_init ... ok
+test parser::tests::let_without_init ... ok
+test parser::tests::logical_and ... ok
+test parser::tests::logical_or ... ok
+test parser::tests::loop_as_stmt ... ok
+test parser::tests::loop_empty_body ... ok
+test parser::tests::loop_with_body ... ok
+test parser::tests::method_call_chained ... ok
+test parser::tests::method_call_mixed_with_field ... ok
+test parser::tests::method_call_no_args ... ok
+test parser::tests::method_call_with_args ... ok
+test parser::tests::multiple_fns ... ok
+test parser::tests::mutable_borrow_expression ... ok
+test parser::tests::operator_precedence_mul_over_add ... ok
+test parser::tests::path_with_segments ... ok
+test parser::tests::recursive_fibonacci ... ok
+test parser::tests::return_with_value ... ok
+test parser::tests::return_without_value ... ok
+test parser::tests::shift_left ... ok
+test parser::tests::shift_right ... ok
+test parser::tests::struct_and_fn_mixed ... ok
+test parser::tests::struct_named_empty ... ok
+test parser::tests::struct_named_fields ... ok
+test parser::tests::struct_named_pub_field ... ok
+test parser::tests::struct_named_trailing_comma ... ok
+test parser::tests::struct_tuple ... ok
+test parser::tests::struct_tuple_pub_field ... ok
+test parser::tests::struct_unit ... ok
+test parser::tests::struct_unit_pub ... ok
+test parser::tests::tail_expression ... ok
+test parser::tests::two_segment_path_expression ... ok
+test parser::tests::type_mut_ref ... ok
+test parser::tests::type_ref ... ok
+test parser::tests::type_unit ... ok
+test parser::tests::unary_deref ... ok
+test parser::tests::unary_negate ... ok
+test parser::tests::unary_not ... ok
+test parser::tests::unit_literal ... ok
+test parser::tests::while_loop_as_stmt ... ok
+test parser::tests::while_loop_simple ... ok
+test parser::tests::while_loop_with_condition_expr ... ok
+
+test result: ok. 139 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/galvanic-01a864114033e174)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/e2e.rs (target/debug/deps/e2e-a5b3eba1e4b95ab7)
+
+running 12 tests
+test milestone_1_main_returns_nonzero ... ok
+test milestone_1_main_returns_zero ... ok
+test milestone_1_main_unit_return ... ok
+test milestone_2_mul ... ok
+test milestone_2_add ... ok
+test milestone_2_nested_add ... ok
+test milestone_2_sub ... ok
+test milestone_3_let_binding ... ok
+test milestone_3_let_bindings_add ... ok
+test milestone_4_if_false ... ok
+test milestone_4_if_true ... ok
+test milestone_4_if_with_let ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/fls_fixtures.rs (target/debug/deps/fls_fixtures-88fcaf806084ecba)
+
+running 3 tests
+test fls_2_4_literals ... ok
+test fls_9_functions ... ok
+test fls_6_expressions ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running tests/smoke.rs (target/debug/deps/smoke-4b24f927169d195e)
+
+running 1 test
+test empty_file_exits_zero ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests galvanic
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+```
+
+## Clippy
+```
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+```
+
+## Rust Files
+./benches/throughput.rs
+./src/ast.rs
+./src/codegen.rs
+./src/ir.rs
+./src/lexer.rs
+./src/lib.rs
+./src/lower.rs
+./src/main.rs
+./src/parser.rs
+./tests/e2e.rs
+./tests/fixtures/fls_2_4_literals.rs
+./tests/fixtures/fls_6_expressions.rs
+./tests/fixtures/fls_9_functions.rs
+./tests/fls_fixtures.rs
+./tests/smoke.rs
+
+## TODOs
+(none)
+
+## Test Count
+155 test functions
+
+
+## CI/CD Status
+
+### Primary PR: #8 (branch: lathe/20260405-150620)
+```
+(could not fetch checks)
+```
+
+### PR State
+```
+{"mergeStateStatus":"DIRTY","mergeable":"CONFLICTING","number":8,"state":"OPEN"}
+```
+
+### All Open PRs (by current user)
+```
+#8 [lathe/20260405-150620] state:OPEN checks:none
+```
+
+### CI Configuration
+Workflows found:
+.github/workflows/ci.yml
+
+### Recent Workflow Runs
+```
+#24008382306 completed/success event:push branch:main at:2026-04-05T19:05:56
+#24008326167 completed/success event:pull_request branch:lathe/20260405-145055 at:2026-04-05T19:02:51
+#24008321575 completed/success event:pull_request branch:lathe/20260405-145055 at:2026-04-05T19:02:35
+#24008033372 completed/success event:push branch:main at:2026-04-05T18:45:58
+#24007668691 completed/success event:push branch:main at:2026-04-05T18:25:00
+```
+
