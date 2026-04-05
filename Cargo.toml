@@ -1,0 +1,11 @@
+[package]
+name = "galvanic"
+version = "0.1.0"
+edition = "2024"
+description = "Clean-room ARM64 Rust compiler built from the Ferrocene Language Specification with cache-line-aware codegen"
+license = "MIT"
+
+[dependencies]
+
+[dev-dependencies]
+tempfile = "3"
