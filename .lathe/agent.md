@@ -4,67 +4,84 @@ A lathe turns continuously, removing a little material each pass until the final
 
 ---
 
+## The Core Approach: Vertical Slices
+
+**Galvanic grows end-to-end, not phase-by-phase.**
+
+Do NOT build the entire lexer, then the entire parser, then the entire IR, then codegen. Instead: pick the smallest Rust program that galvanic can't yet compile to a running ARM64 binary, and make it work — all the way through the pipeline. Then pick the next smallest program.
+
+Each cycle should try to extend what galvanic can **actually compile and run**. A compiler that can emit a working binary for `fn main() -> i32 { 0 }` is more valuable than a parser that handles every expression type but produces no output.
+
+The milestone sequence looks like:
+
+1. `fn main() -> i32 { 0 }` → emits ARM64, runs, exits 0
+2. `fn main() -> i32 { 1 + 2 }` → arithmetic works
+3. `fn main() -> i32 { let x = 42; x }` → let bindings work
+4. `fn main() -> i32 { if true { 1 } else { 0 } }` → control flow works
+5. Two functions, one calls the other → function calls work
+6. ... and so on, each step widening the subset
+
+**CI should compile the test programs and run them.** Not just "does the parser accept this" — "does the emitted binary produce the right answer." That's the bar.
+
+When the front-end (lexer/parser) already handles something but codegen doesn't, the cycle should extend codegen, not add more front-end features. The pipeline advances as a unit.
+
+---
+
 ## Stakeholders
 
 ### William (researcher / sole maintainer)
 
 William built galvanic to answer two specific questions: (1) Is the FLS actually independently implementable? (2) What does a compiler look like when cache-line alignment drives every decision from the start, not as a late optimization?
 
-**First encounter**: He opens the repo after stepping away for a few days. He runs `cargo test`, sees one smoke test pass, and wonders: "Is any of my actual parsing logic correct, or have I been building on untested foundations?"
+**First encounter**: He opens the repo after stepping away. He runs `cargo test` and wants to see: galvanic compiled these programs and they ran correctly. Not "the parser accepted them" — they *ran*.
 
-**What success looks like**: Every implemented FLS section has tests that exercise the code with inputs matching real Rust syntax. When he discovers an FLS ambiguity, there is a test capturing it. When he adds a new grammar rule, there are existing tests to guard against regression. The compiler grows one section at a time, each section tested before the next begins.
+**What success looks like**: Each cycle extends the set of programs galvanic can compile to valid ARM64 binaries. The test suite compiles real `.rs` files and runs the output. Research questions get answered because the full pipeline encounters real trade-offs.
 
-**What builds trust**: Tests that would actually catch bugs — not just "does the binary run," but "does `fn add(a: i32, b: i32) -> i32 { a + b }` parse into the correct AST shape." Changelog entries that document FLS ambiguities discovered. Code that reflects the spec structure he chose.
+**What builds trust**: End-to-end tests that compile a `.rs` file, produce a binary, run it, and check the exit code or output. Changelog entries that document FLS ambiguities and cache-line decisions encountered while building *codegen*, not just parsing.
 
-**What would make him leave**: Cycles that polish doc comments without testing the logic underneath. Changes to code he understands well without preserving his patterns. Accumulated test debt that makes it unclear what actually works.
+**What would make him leave**: Cycles that keep widening the parser without ever emitting a single instruction. A compiler that can parse everything but compile nothing. Building horizontally when vertical progress is what matters.
 
-**Where the project currently fails him**: The parser has zero behavioral tests. It handles `fn` items with full expression parsing — binary operators, calls, if-else, blocks, let statements — but the only test is a smoke test that checks the binary exits 0. If there's a bug in expression parsing, there is nothing to catch it.
+**Where the project currently fails him**: The pipeline ends at parsing. There is no IR, no codegen, no emitted binary. The lexer and parser are ahead of where they need to be — the bottleneck is everything *after* parsing.
 
 ---
 
 ### Validation infrastructure
 
-CI exists: `.github/workflows/ci.yml` runs `cargo build`, `cargo test`, and `cargo clippy -- -D warnings` on every push and pull request to main. This is a solid foundation. It catches build failures and clippy warnings automatically. What it does **not** catch: behavioral correctness. The test suite has one test. CI passing means "it compiled and ran" — not "the parser is correct."
+CI runs `cargo build`, `cargo test`, `cargo clippy -- -D warnings`, plus a fuzz-smoke job that tests adversarial inputs and an audit job that checks for unsafe code and forbidden dependencies.
 
-**The lathe's changes are only as trustworthy as the tests that exercise them.** Every cycle that adds parsing logic without adding tests for that logic is borrowing against future debugging debt.
+**The next CI evolution**: As galvanic starts emitting binaries, CI should compile test programs and run them (on ARM64 or via QEMU on x86). The test suite should include programs at each milestone — if galvanic claims to handle `let` bindings, there should be a test that compiles `let x = 42;` and verifies the output.
+
+**End-to-end tests are the primary validation mechanism.** Unit tests for individual phases are fine as supplements, but the thing that matters is: "did the right binary come out?"
 
 ---
 
-### Repository security for autonomous operation
+### Rust / compiler researchers (readers of the artifact)
 
-CI is triggered by `push` and `pull_request` (not `pull_request_target`). The `pull_request` trigger runs with read-only permissions on untrusted input — this is the safe configuration. No `issue_comment` or `workflow_run` triggers that would elevate permissions.
+People who find the repo and want to understand: what does it look like to implement Rust from the FLS? What spec sections are load-bearing? Where does cache-line awareness actually change a decision?
 
-The engine fetches only structured data (CI status, PR numbers) from GitHub — never PR titles, commit messages, or comments. This surface is minimal.
-
-**Gap**: Branch protection on `main` is not verified. Before running lathe cycles in production, confirm that `main` requires PR review and restricts direct pushes. Without this, lathe's own pushes could accidentally land on main without CI running.
+**What they need**: Code that goes all the way through — source to binary. A half-compiler with a great parser is less useful as a research artifact than a minimal compiler that actually works end-to-end.
 
 ---
 
 ## Tensions
 
-### Breadth (more FLS sections) vs. depth (testing what exists)
+### Front-end breadth vs. pipeline depth
 
-William wants to implement the FLS completely. There is a pull toward implementing structs, enums, traits, modules — moving the frontier forward. But the parser already handles fn items, all expression kinds, blocks, and statements, and none of it is tested beyond the smoke test.
+The lexer and parser already handle a wide subset of Rust syntax. The temptation is to keep widening them — add structs, enums, traits. But none of that matters until something comes out the back end.
 
-**Right now, depth wins.** The research value of galvanic comes from being able to say "this FLS section is implemented correctly, here is the evidence." An untested parser doesn't answer that. Adding more untested grammar rules makes the problem worse.
+**Pipeline depth wins.** Every cycle should ask: "does this extend what galvanic can compile to a running binary?" If not, it's probably not the right cycle. Only widen the front-end when it's the bottleneck for the next end-to-end milestone.
 
-What changes this: once each implemented FLS section (§2 lexer, §3/§6/§8/§9 parser basics) has substantive tests, the agent should shift to extending coverage.
+### Cache-line purity vs. making progress
 
-### Cache-line purity vs. correctness
+Cache-line awareness is a design constraint, not a blocker. Don't let data layout perfectionism delay getting the pipeline working. Design thoughtfully (document the cache-line rationale), implement practically (get it working), and refine later when there's real data.
 
-The cache-line design is central to galvanic's identity — Token is 8 bytes, Span is 8 bytes, the arena redesign is flagged in the AST docs. But the AST notes explicitly say: "The research value of the first implementation is in getting the FLS mapping right, not in premature optimization."
+### FLS fidelity vs. vertical progress
 
-**Correctness wins until the compiler actually compiles something.** Cache-line concerns belong in documentation and architecture decisions, not in refactors that touch working code.
-
-### FLS ambiguity documentation vs. making progress
-
-Every time the AST encounters a gap in the FLS, it's documented in a `FLS §X AMBIGUOUS` comment. This is valuable research output. The tension: spending time documenting ambiguities vs. implementing what the spec does say clearly.
-
-**Document ambiguities when you encounter them naturally.** Don't go hunting for them — that's not the lathe's job. When implementing a grammar rule and the spec is unclear, note it in the code and move on.
+The FLS is the specification, and galvanic should follow it faithfully. But "faithfully implement §3 through §17 in order" is horizontal thinking. Instead: for each vertical slice, faithfully implement the FLS sections that slice touches. When you implement codegen for `let x = 42; x`, cite the FLS sections for let-bindings, integer literals, and local variables — but don't detour into implementing every literal type before moving on.
 
 ---
 
-Every cycle, ask: **which stakeholder's journey can I make noticeably better right now, and where?**
+Every cycle, ask: **what's the smallest program galvanic can't yet compile to a running binary, and what's the one thing blocking it?**
 
 ---
 
@@ -72,38 +89,35 @@ Every cycle, ask: **which stakeholder's journey can I make noticeably better rig
 
 Each cycle:
 
-1. **Read the snapshot.** What's the build status? Test results? Clippy output? What changed since last cycle?
-2. **Pick one change.** Pick by imagining William opening the repo today. What would make him most confident the compiler is working?
-3. **Implement it.** One focused change. Tests included.
-4. **Validate.** `cargo build`, `cargo test`, `cargo clippy -- -D warnings`. All must pass.
-5. **Write the changelog.**
+1. **Read the snapshot.** What programs can galvanic currently compile end-to-end? What's the next milestone?
+2. **Pick one change.** The change that extends the pipeline furthest toward the next runnable binary. Not the change that adds the most front-end coverage.
+3. **Implement it.** One thing. Usually this means touching multiple phases (parser + IR + codegen) for one language feature — that's fine, that's one vertical slice.
+4. **Add an end-to-end test.** Compile a `.rs` file, run the output (or check the emitted assembly), verify the result. This is the primary test, not a unit test for the parser.
+5. **Validate.** `cargo build`, `cargo test`, `cargo clippy -- -D warnings`. All must pass.
+6. **Write the changelog.** What program can galvanic now compile that it couldn't before?
 
-**The pick step.** When the build is green and clippy is clean, the temptation is to reach for visible improvements — rename something, align a comment, add a doc example. Resist. The highest-value change is usually one that doesn't exist yet: a test that exercises a real code path, a fixture that matches what actual Rust code looks like.
-
-Ask: "What happens when I feed galvanic a real Rust function?" If you don't know the answer because there's no test for it, that's your cycle.
+**The pick bias to resist**: When the parser already handles something, the temptation is to "complete" the parser before moving deeper. Resist. A parser that handles 50 expression types feeding into zero codegen is not progress. A parser that handles 5 expression types feeding into working ARM64 codegen is.
 
 ---
 
 ## What Matters Now
 
-Galvanic is in **Stage 2: core works, untested at scale.** The lexer tokenizes, the parser handles fn items with full expression parsing. The binary runs. But:
+Galvanic is in **Stage 2: front-end works, no back-end exists.** The lexer tokenizes, the parser handles fn items with expressions, if-else, loops, blocks, let statements. But the pipeline ends at an AST. There is:
 
-- Does the lexer correctly tokenize a hex literal? A raw string? A lifetime `'a`? There are no unit tests for lexer output.
-- Does the parser correctly parse `fn add(a: i32, b: i32) -> i32 { a + b }`? `fn fib(n: u64) -> u64 { if n <= 1 { n } else { fib(n-1) + fib(n-2) } }`? Nobody has verified this in a test.
-- What happens when the parser sees `fn foo(`? Does the error message make sense?
-- Does the parser handle the tail-expression distinction (`expr;` vs. `expr`)? Is there a test for `fn foo() -> i32 { 42 }` vs. `fn foo() { 42; }`?
-- What does galvanic do with a file containing multiple function definitions? Just two. Is that tested?
+- No intermediate representation
+- No codegen
+- No emitted binary
+- No way to run the output of galvanic
 
-These are not hypothetical. These are the questions William would ask, and right now the answer is "I don't know, there's no test."
+**The next milestone**: `fn main() -> i32 { 0 }` compiles to an ARM64 binary that runs and exits with code 0.
 
-**Questions to answer this cycle, in priority order:**
+To get there, this cycle (and the next few) should focus on:
 
-1. Is there a test that feeds a real fn definition to the parser and checks the resulting AST? If not, write one.
-2. Are there lexer unit tests that verify token output for integer literals, string literals, keywords, and operators? If not, write them.
-3. Are there error-case tests — what does the parser do with `fn foo(`?
-4. Are there multi-function tests — does the parser handle two fns in sequence?
+1. **A minimal IR** — just enough to represent "return an integer from main." Not a complete IR design — the minimal thing.
+2. **ARM64 codegen** — emit the instructions for "put 0 in x0, call exit" or equivalent. Even emitting raw assembly text that gets assembled by `as` is fine as a first step.
+3. **An end-to-end test** — compile a `.rs` file, run the binary (possibly via QEMU on CI), check the exit code.
 
-**Never treat any list — in a README, an issue, or a snapshot — as a queue to grind through. Lists are context.**
+The front-end already handles this program. The parser already handles this program. The work is everything *after* parsing.
 
 ---
 
@@ -116,20 +130,18 @@ Layer 0: Compilation          — Does it build? (cargo build)
 Layer 1: Tests                — Do tests pass? (cargo test)
 Layer 2: Static analysis      — Is it clean? (cargo clippy -- -D warnings)
 Layer 3: Code quality         — Idiomatic Rust? Proper error handling? No unnecessary unsafe?
-Layer 4: Architecture         — Good module structure? Clean trait boundaries?
-Layer 5: Documentation        — Rustdoc, README, examples
-Layer 6: Features             — New functionality: more FLS sections, codegen stubs
+Layer 4: Pipeline depth       — Can galvanic compile more programs end-to-end?
+Layer 5: Pipeline breadth     — Can galvanic handle more syntax in existing phases?
+Layer 6: Documentation        — Rustdoc, README, examples
 ```
 
-Within any layer, always prefer the change that most improves a stakeholder's experience.
+**Layer 4 beats Layer 5.** Extending the pipeline to emit a binary for `{ 0 }` is higher priority than teaching the parser about structs. Only widen the front-end when the back-end has caught up.
 
 ---
 
 ## One Change Per Cycle
 
-Each cycle makes exactly one improvement. If you try to do two things you'll do zero things well.
-
-"Add lexer tests and parser tests" is two things. Pick one. Probably the parser tests — they exercise more of the implemented logic.
+Each cycle makes exactly one improvement. A "vertical slice" — adding one language feature through the entire pipeline — counts as one change. "Add let-bindings to the IR and codegen" is one thing. "Add let-bindings and also add struct parsing" is two things.
 
 ---
 
@@ -137,12 +149,24 @@ Each cycle makes exactly one improvement. If you try to do two things you'll do 
 
 **Anti-patterns to avoid:**
 
-- **Polishing what's already clean.** The code is well-documented and idiomatic. The gap isn't in polish — it's in test coverage.
-- **Extending the grammar before testing what's there.** Adding struct parsing when fn parsing is untested makes the problem bigger, not smaller.
-- **Fixing things that aren't broken.** The cache-line design is intentional. Don't simplify it away.
-- **Fidgeting instead of stress-testing.** The parser handles if-else, binary operators, function calls, let bindings. Has any of this been tested with actual inputs? If not, a cycle spent on README formatting is a cycle avoiding the hard question.
+- **Widening the parser when codegen doesn't exist.** The parser already handles more syntax than the rest of the pipeline can consume. Adding more parser features before codegen exists is avoiding the hard work.
+- **Testing only the front-end.** A test that checks AST shape is fine as a supplement, but it doesn't answer "does galvanic work?" Only an end-to-end test does.
+- **Designing the complete IR before emitting one instruction.** Start minimal. The IR can grow as the set of compilable programs grows.
+- **Polishing what's already clean.** The code is well-documented and idiomatic. The gap isn't in polish — it's in pipeline depth.
+- **Fidgeting instead of building codegen.** If the cycle doesn't involve emitting or assembling instructions, ask yourself why.
 
-When everything looks green, ask: "Have I tested this against inputs that look like what a real Rust file would contain?" If the answer is no — build those inputs. That's the next cycle.
+When everything looks green, ask: "What's the simplest program galvanic still can't compile?" That's the next cycle.
+
+---
+
+## ARM64 Codegen Notes
+
+Galvanic targets ARM64 (AArch64). For the initial milestones:
+
+- Emitting assembly text (`.s` files) and shelling out to `as`/`ld` is acceptable as a bootstrap strategy for the first few milestones. A built-in assembler can come later.
+- On CI (ubuntu-latest, x86_64), use QEMU user-mode emulation (`qemu-aarch64`) to run ARM64 binaries. The CI workflow should install `qemu-user` and `gcc-aarch64-linux-gnu` (for the linker/assembler).
+- The first binary just needs to exit with the right code. No stdout, no heap, no libc beyond `_start` → syscall exit.
+- Cache-line awareness becomes concrete at codegen: instruction alignment, data section layout, stack frame layout. Document every cache-line decision.
 
 ---
 
@@ -174,11 +198,20 @@ The lathe runs on a session branch. The engine provides branch, PR number, and C
 - What you changed
 - Files: paths modified
 
+## Programs That Now Compile
+- List the `.rs` programs galvanic can now compile end-to-end (if this cycle extended that set)
+
+## FLS Notes
+- Spec sections consulted
+- Ambiguities or gaps encountered
+- Cache-line decisions made
+
 ## Validated
 - How you verified it (cargo build, cargo test, cargo clippy output)
+- End-to-end test results (compiled X, ran it, got expected output)
 
 ## Next
-- What would make the biggest difference next
+- What's the next program galvanic should be able to compile?
 ```
 
 ---
@@ -193,4 +226,5 @@ The lathe runs on a session branch. The engine provides branch, PR number, and C
 - **Preserve the cache-line design.** Token is 8 bytes, Span is 8 bytes — don't add fields that break this without explicit rationale.
 - **Document FLS ambiguities when you find them.** Use the `FLS §X AMBIGUOUS:` comment pattern already established in the code.
 - **If stuck 3+ cycles on the same issue, change approach entirely.** Don't keep retrying the same fix.
-- **Every change must have a clear stakeholder benefit.** "Makes the code cleaner" is not a benefit. "Lets William verify that fn parsing is correct" is.
+- **Every change must produce a clear stakeholder benefit.** The strongest benefit is: "galvanic can now compile program X." If your cycle can't say that, justify why.
+- **Vertical slices over horizontal layers.** Touching parser + IR + codegen for one feature is better than completing one phase in isolation.

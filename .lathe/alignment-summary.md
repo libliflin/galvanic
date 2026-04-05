@@ -1,43 +1,51 @@
 # Alignment Summary
 
-For William to read before starting lathe cycles. Takes about a minute.
+Read this before starting cycles. It takes 30 seconds and will save you from cycles that don't matter.
+
+---
+
+## The approach: vertical slices, not horizontal layers
+
+**Do not build the compiler phase-by-phase.** Build it program-by-program.
+
+Pick the simplest Rust program galvanic can't yet compile to a running ARM64 binary. Make it work end-to-end. Then pick the next one. Each cycle should extend what galvanic can **actually compile and run**.
+
+The front-end (lexer + parser) is already far ahead of the back-end. The next several cycles should be focused almost entirely on IR and codegen — not on adding more syntax to the parser.
 
 ---
 
 ## Who this serves
 
-**William (you)** — The only stakeholder. Galvanic is a research compiler. Nobody else is running it, depending on its API, or waiting on features. Every cycle should serve your ability to answer the two research questions: (1) is the FLS independently implementable, and (2) what does cache-aware codegen actually look like?
+**William (you)** — Wants to see valid ARM64 binaries. "The parser accepts this" is not enough — "this compiles and runs correctly" is the bar. Cycles that widen the parser without extending codegen are not progress.
 
 There are no external users, no library consumers, no downstream teams. This keeps the alignment simple.
 
 ---
 
-## Key tensions I found
+## Key tensions
 
-**Breadth vs. depth.** You've implemented lexing and parsing of `fn` items with full expression support (Phase 1 and 2 are committed). The FLS has many more sections: structs, enums, traits, impls. The temptation is to keep extending the parser. But the existing code has almost no behavioral tests — the only test is a smoke test that checks the binary runs. I've aligned the agent to prioritize testing what exists before implementing more.
+**Front-end breadth vs. pipeline depth**: The parser handles far more syntax than the rest of the pipeline can consume. Depth wins — extend codegen before widening the parser.
 
-**Cache-line research vs. getting something working.** The Token/Span layout is carefully designed. The AST docs explicitly say "get the FLS mapping right first, not premature optimization" and flag the arena redesign as future work. I've encoded this: the agent preserves the cache-line constraints but doesn't refactor the AST toward arenas prematurely.
+**Cache-line awareness vs. pragmatism**: Cache-line awareness should shape every data structure and codegen decision, but should not delay getting the pipeline working. Design thoughtfully, then implement.
+
+**FLS fidelity vs. vertical progress**: Follow the FLS faithfully for each vertical slice — but don't detour into implementing every FLS section in a phase before moving to the next phase.
 
 ---
 
 ## Current focus
 
-**Stage 2: Core works, untested.** The lexer and parser exist and compile. The binary runs. But there are zero tests of actual parsing behavior. The agent will prioritize:
+**Next milestone**: `fn main() -> i32 { 0 }` compiles to an ARM64 binary that exits with code 0.
 
-1. Parser unit tests — does `fn add(a: i32, b: i32) -> i32 { a + b }` produce the right AST?
-2. Lexer unit tests — does `0xFF` produce `LitInteger`? Does `'a` produce `Lifetime`?
-3. Error case tests — what happens when the parser sees malformed input?
-
-Only after those foundations are in place should the agent move to extending the grammar.
+To get there:
+1. Add a minimal IR (just enough for "return integer from main")
+2. Add ARM64 codegen (emit assembly, use external assembler/linker)
+3. Add an end-to-end test (compile, run via QEMU on CI, check exit code)
 
 ---
 
 ## What could be wrong
 
-**Branch protection**: I couldn't verify whether `main` is protected on GitHub. If it's not, lathe's pushes could land directly on main without CI. Please check: Settings → Branches → Branch protection rules for `main`. Require PRs and status checks before allowing merges.
-
-**The research questions**: I inferred William's goals from the README. If the research focus has shifted (e.g., you're now more interested in codegen than spec coverage), the agent's priorities should be updated.
-
-**FLS coverage tracking**: There's no explicit tracking of which FLS sections are "done" vs. "stub." The architecture.md skill has a rough table, but it was written from reading the code — it may be incomplete. If you have a more authoritative list of what's implemented, I didn't find it.
-
-**Unicode**: The lexer comment notes that non-ASCII identifiers are accepted but NFC normalization isn't applied. If this is a known gap you're tracking separately (e.g., in an issue), the agent won't know about it.
+- **ARM64 on CI**: CI runs on x86_64. Need `qemu-user` and `gcc-aarch64-linux-gnu` for cross-compilation and emulation. The CI workflow will need updating.
+- **FLS version**: The FLS at spec.ferrocene.dev is the assumed reference. If working against a specific version, note it in `.lathe/refs/fls-pointer.md`.
+- **Assembly strategy**: Starting with text assembly (`.s` files) + external assembler is pragmatic. A built-in assembler is future work.
+- **Branch protection**: Verify that `main` requires PRs and status checks before merging.

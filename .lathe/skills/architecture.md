@@ -14,6 +14,29 @@ These goals are noted explicitly in the source code. When making changes, check 
 
 ---
 
+## Development approach: vertical slices
+
+Galvanic grows by making progressively more complex programs compile end-to-end. Not by completing one phase before starting the next.
+
+The pipeline is: **source text → tokens → AST → IR → ARM64 assembly → binary**
+
+Each cycle should extend what galvanic can compile all the way through this pipeline. A change that only touches the front-end (lexer/parser) without extending the back-end is usually not the right change — unless the front-end is the bottleneck for the next end-to-end milestone.
+
+### Milestone programs (in order)
+
+These are the programs galvanic should be able to compile, in roughly this order:
+
+1. `fn main() -> i32 { 0 }` — exit with code 0
+2. `fn main() -> i32 { 1 + 2 }` — integer arithmetic
+3. `fn main() -> i32 { let x = 42; x }` — local variables
+4. `fn main() -> i32 { if true { 1 } else { 0 } }` — control flow
+5. Two functions, one calls the other — function calls
+6. Loops, mutation, basic control flow graphs
+
+Each milestone should have an end-to-end test: compile the `.rs` file, run the binary, check the result.
+
+---
+
 ## Data layout constraints (DO NOT violate without explicit rationale)
 
 ### Token: 8 bytes
@@ -55,7 +78,14 @@ src/
   parser.rs   — Parser: parse(tokens, src) -> Result<SourceFile, ParseError>
 ```
 
-The pipeline is strictly linear: source text → tokens → AST. There is no IR, no name resolution, no type checking, no codegen yet. The pipeline currently ends after parsing.
+**Coming next** (add these as they become needed, not before):
+
+```
+  ir.rs       — or ir/mod.rs — Intermediate representation for codegen
+  codegen.rs  — or codegen/mod.rs — ARM64 instruction emission
+```
+
+The pipeline is strictly linear: source text → tokens → AST → IR → ARM64. Each new phase is added when the next vertical milestone requires it.
 
 ---
 
@@ -71,12 +101,6 @@ For ambiguities:
 ```rust
 /// FLS §9 AMBIGUOUS: the spec lists `FunctionQualifiers` but does not
 /// enumerate which qualifier combinations are legal. ...
-```
-
-For notes about non-ASCII or other known gaps:
-```rust
-/// FLS §2.3 NOTE: this implementation handles ASCII correctly; non-ASCII
-/// identifier characters are accepted but NFC normalisation is not yet applied.
 ```
 
 **When adding new code, always include the relevant FLS section reference.** This is how galvanic tracks spec coverage and documents what's been verified.
@@ -95,31 +119,27 @@ Hand-written recursive descent. Each grammar rule maps to one method. Methods:
 
 ---
 
-## What's implemented (as of Phase 2)
+## ARM64 codegen strategy
 
-| FLS Section | Status | Notes |
-|---|---|---|
-| §2 Lexical elements | Complete-ish | Full token set; Unicode NFC not applied |
-| §3 Items | Partial | Only `fn` items; no struct, enum, trait, impl, use, mod |
-| §4 Types | Partial | Path, Unit, Ref; no generics, tuples, arrays, slices |
-| §6 Expressions | Partial | Literals, paths, blocks, unary, binary (all ops), calls, if, return |
-| §8 Statements | Partial | Let, expression statement, empty; no item statements |
-| §9 Functions | Partial | No qualifiers (const, async, unsafe, extern); no where clauses |
+For the initial milestones:
+- Emitting assembly text (`.s` files) and using an external assembler/linker (`aarch64-linux-gnu-as`, `aarch64-linux-gnu-ld`) is the bootstrap approach. A built-in assembler can come later.
+- On CI (ubuntu-latest, x86_64), use QEMU user-mode emulation (`qemu-aarch64`) to run ARM64 binaries.
+- The first binary targets a bare Linux `_start` entry point using syscalls (no libc dependency). Exit via `mov x0, <code>; mov x8, #93; svc #0`.
+- Cache-line awareness becomes concrete at codegen: instruction alignment, data section layout, stack frame layout. Every cache-line decision should be documented.
 
 ---
 
-## What comes next (by FLS section, not yet implemented)
+## What's implemented (as of current state)
 
-In rough dependency order:
-- §3: `struct`, `enum`, `type`, `use`, `mod`, `impl`, `trait` items
-- §4: Generic type arguments (`Vec<i32>`), tuple types, array/slice types
-- §5: Patterns (struct patterns, tuple patterns, match arms)
-- §6: Method calls, field access, index expressions, closure expressions, loop/while/for
-- §7: Closures
-- §10: Traits
-- §11: Implementations
-- §12–§17: Advanced items
-- Codegen: ARM64 instruction selection, register allocation, cache-line-aware layout
+| Phase | Status | Notes |
+|---|---|---|
+| Lexer | Working | Full token set; Unicode NFC not applied |
+| Parser | Working | fn items, expressions, if-else, loops, let, blocks, calls, field access |
+| IR | Does not exist | **This is the current bottleneck** |
+| Codegen | Does not exist | **This is the current bottleneck** |
+| End-to-end | Does not exist | No program can be compiled to a binary |
+
+The front-end is ahead of the back-end. The next several cycles should focus on IR and codegen, not on widening the parser.
 
 ---
 
