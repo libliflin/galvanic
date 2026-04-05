@@ -1028,8 +1028,81 @@ impl<'src> Parser<'src> {
                 })
             }
 
-            _ => self.parse_primary(),
+            _ => {
+                let primary = self.parse_primary()?;
+                self.parse_postfix(primary)
+            }
         }
+    }
+
+    /// Apply postfix operations — calls `(args)`, field access `.field`, and
+    /// method calls `.method(args)` — to an already-parsed expression.
+    ///
+    /// This loop handles any chain of postfix operations:
+    /// `a.b.c(1).d` parses as `((a.b).c(1)).d`.
+    ///
+    /// FLS §6.3.1: Call expressions.
+    /// FLS §6.3.2: Method call expressions.
+    /// FLS §6.3.3: Field access expressions.
+    fn parse_postfix(&mut self, mut expr: Expr) -> Result<Expr, ParseError> {
+        loop {
+            match self.peek_kind() {
+                // Call expression: `expr(args)` — FLS §6.3.1
+                TokenKind::OpenParen => {
+                    expr = self.parse_call(expr)?;
+                }
+
+                // Field access or method call: `expr.ident` or `expr.ident(args)`
+                // FLS §6.3.2, §6.3.3
+                TokenKind::Dot => {
+                    self.advance(); // eat `.`
+
+                    if self.peek_kind() != TokenKind::Ident {
+                        return Err(self.error("expected field or method name after `.`"));
+                    }
+                    let member_span = self.current_span();
+                    self.advance(); // eat identifier
+
+                    if self.peek_kind() == TokenKind::OpenParen {
+                        // Method call: `receiver.method(args)`
+                        let receiver_span = expr.span;
+                        self.expect(TokenKind::OpenParen)?;
+                        let mut args = Vec::new();
+                        while self.peek_kind() != TokenKind::CloseParen
+                            && self.peek_kind() != TokenKind::Eof
+                        {
+                            args.push(self.parse_expr()?);
+                            if !self.eat(TokenKind::Comma) {
+                                break;
+                            }
+                        }
+                        let end = self.current_span();
+                        self.expect(TokenKind::CloseParen)?;
+                        expr = Expr {
+                            kind: ExprKind::MethodCall {
+                                receiver: Box::new(expr),
+                                method: member_span,
+                                args,
+                            },
+                            span: receiver_span.to(end),
+                        };
+                    } else {
+                        // Field access: `receiver.field`
+                        let span = expr.span.to(member_span);
+                        expr = Expr {
+                            kind: ExprKind::FieldAccess {
+                                receiver: Box::new(expr),
+                                field: member_span,
+                            },
+                            span,
+                        };
+                    }
+                }
+
+                _ => break,
+            }
+        }
+        Ok(expr)
     }
 
     /// Primary expressions — literals, paths, calls, grouped expressions,
@@ -1097,17 +1170,10 @@ impl<'src> Parser<'src> {
                 }
 
                 let path_end = *segments.last().unwrap();
-                let path_expr = Expr {
+                Ok(Expr {
                     kind: ExprKind::Path(segments),
                     span: start.to(path_end),
-                };
-
-                // Call expression: path immediately followed by `(`.
-                if self.peek_kind() == TokenKind::OpenParen {
-                    self.parse_call(path_expr)
-                } else {
-                    Ok(path_expr)
-                }
+                })
             }
 
             // Grouped expression or unit `()` — FLS §6.3.2, §6.3.3
@@ -2259,5 +2325,140 @@ mod tests {
         assert_eq!(segs.len(), 2);
         assert_eq!(segs[0].text(src), "Option");
         assert_eq!(segs[1].text(src), "None");
+    }
+
+    // ── Field access and method calls ─────────────────────────────────────────
+
+    #[test]
+    fn field_access_simple() {
+        // FLS §6.3.3: `point.x` is a field access expression.
+        let src = "fn f() { point.x; }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        let StmtKind::Expr(ref expr) = body.stmts[0].kind else {
+            panic!("expected expr stmt");
+        };
+        let ExprKind::FieldAccess { ref receiver, ref field } = expr.kind else {
+            panic!("expected FieldAccess, got {:?}", expr.kind);
+        };
+        // Receiver is the path `point`.
+        let ExprKind::Path(ref segs) = receiver.kind else {
+            panic!("expected Path receiver");
+        };
+        assert_eq!(segs[0].text(src), "point");
+        assert_eq!(field.text(src), "x");
+    }
+
+    #[test]
+    fn field_access_chained() {
+        // `a.b.c` parses as `(a.b).c` — left-associative.
+        let src = "fn f() { a.b.c; }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        let StmtKind::Expr(ref expr) = body.stmts[0].kind else {
+            panic!("expected expr stmt");
+        };
+        // Outermost: `.c`
+        let ExprKind::FieldAccess { ref receiver, ref field } = expr.kind else {
+            panic!("expected FieldAccess");
+        };
+        assert_eq!(field.text(src), "c");
+        // Inner: `a.b`
+        let ExprKind::FieldAccess { field: ref inner_field, .. } = receiver.kind else {
+            panic!("expected inner FieldAccess");
+        };
+        assert_eq!(inner_field.text(src), "b");
+    }
+
+    #[test]
+    fn method_call_no_args() {
+        // FLS §6.3.2: `vec.len()` — method call with no arguments.
+        let src = "fn f() { vec.len(); }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        let StmtKind::Expr(ref expr) = body.stmts[0].kind else {
+            panic!("expected expr stmt");
+        };
+        let ExprKind::MethodCall { ref method, ref args, .. } = expr.kind else {
+            panic!("expected MethodCall, got {:?}", expr.kind);
+        };
+        assert_eq!(method.text(src), "len");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn method_call_with_args() {
+        // FLS §6.3.2: `vec.push(1)` — method call with one argument.
+        let src = "fn f() { vec.push(1); }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        let StmtKind::Expr(ref expr) = body.stmts[0].kind else {
+            panic!("expected expr stmt");
+        };
+        let ExprKind::MethodCall { ref method, ref args, .. } = expr.kind else {
+            panic!("expected MethodCall");
+        };
+        assert_eq!(method.text(src), "push");
+        assert_eq!(args.len(), 1);
+        assert!(matches!(args[0].kind, ExprKind::LitInt(1)));
+    }
+
+    #[test]
+    fn method_call_chained() {
+        // `a.foo().bar()` — chained method calls, left-associative.
+        let src = "fn f() { a.foo().bar(); }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        let StmtKind::Expr(ref expr) = body.stmts[0].kind else {
+            panic!("expected expr stmt");
+        };
+        // Outermost: `.bar()`
+        let ExprKind::MethodCall { ref receiver, ref method, ref args } = expr.kind else {
+            panic!("expected outer MethodCall");
+        };
+        assert_eq!(method.text(src), "bar");
+        assert!(args.is_empty());
+        // Inner: `a.foo()`
+        let ExprKind::MethodCall { method: ref inner_method, .. } = receiver.kind else {
+            panic!("expected inner MethodCall");
+        };
+        assert_eq!(inner_method.text(src), "foo");
+    }
+
+    #[test]
+    fn method_call_mixed_with_field() {
+        // `obj.field.method()` — field access then method call.
+        let src = "fn f() { obj.data.len(); }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        let StmtKind::Expr(ref expr) = body.stmts[0].kind else {
+            panic!("expected expr stmt");
+        };
+        let ExprKind::MethodCall { ref receiver, ref method, .. } = expr.kind else {
+            panic!("expected MethodCall");
+        };
+        assert_eq!(method.text(src), "len");
+        // Receiver is `self.data`
+        let ExprKind::FieldAccess { ref field, .. } = receiver.kind else {
+            panic!("expected FieldAccess receiver");
+        };
+        assert_eq!(field.text(src), "data");
+    }
+
+    #[test]
+    fn error_dot_without_ident() {
+        // `a.` with nothing after the dot is a parse error.
+        let err = parse_err("fn f() { a.; }");
+        assert!(
+            err.message.contains("field") || err.message.contains("method"),
+            "{}",
+            err.message
+        );
     }
 }
