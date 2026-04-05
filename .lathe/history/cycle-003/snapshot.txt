@@ -1,15 +1,12 @@
 # Project Snapshot
-Generated: Sun Apr  5 13:19:31 EDT 2026
+Generated: Sun Apr  5 14:03:05 EDT 2026
 
 ## Git Status
 
 ## Recent Commits (last 10)
-df83f0a lathe: cycle cleanup (agent left uncommitted changes)
-7d66eb1 lathe: tests for comparison and logical operators, recursive fib
-89a02a6 lathe: cycle cleanup (agent left uncommitted changes)
-771f9f7 Phase 3: struct items — FLS §14 named/tuple/unit structs with visibility
-56e18f4 new lathe
-bed25c4 Phase 2: parser — FLS §3/§6/§8/§9 recursive descent
+70cc08e Phase 3: field access and method call expressions (FLS §6.3.2/§6.3.3) (#5)
+ce5d9ef Tests: cover untested operators, paths, pub fn; fix FnDef vis (#4)
+1329408 Phase 2: parser — FLS §3/§6/§8/§9 recursive descent (#2)
 a9b420d Phase 1: lexer — FLS §2 tokenization (#1)
 4427abd Initial skeleton: galvanic ARM64 Rust compiler
 
@@ -27,26 +24,28 @@ license = "MIT"
 
 ## Build
 ```
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+   Compiling galvanic v0.1.0 (/Users/williamlaffin/code/galvanic)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.15s
 OK — builds clean
 ```
 
 ## Tests
 ```
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+   Compiling galvanic v0.1.0 (/Users/williamlaffin/code/galvanic)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
      Running unittests src/main.rs (target/debug/deps/galvanic-066ca5edd86fcf57)
 
-running 95 tests
-test lexer::tests::bare_underscore_is_underscore_token ... ok
+running 126 tests
 test lexer::tests::binary_integer ... ok
-test lexer::tests::block_comment_skipped ... ok
-test lexer::tests::c_string_literal ... ok
 test lexer::tests::byte_literal ... ok
+test lexer::tests::block_comment_skipped ... ok
 test lexer::tests::byte_string_literal ... ok
+test lexer::tests::bare_underscore_is_underscore_token ... ok
+test lexer::tests::c_string_literal ... ok
 test lexer::tests::char_literals ... ok
 test lexer::tests::char_escape_sequences ... ok
-test lexer::tests::decimal_integer ... ok
 test lexer::tests::compound_punctuation ... ok
+test lexer::tests::decimal_integer ... ok
 test lexer::tests::delimiters ... ok
 test lexer::tests::double_underscore_is_ident ... ok
 test lexer::tests::empty_source_gives_eof ... ok
@@ -80,7 +79,13 @@ test lexer::tests::unterminated_block_comment_is_error ... ok
 test lexer::tests::unterminated_string_is_error ... ok
 test lexer::tests::weak_keywords ... ok
 test lexer::tests::whitespace_between_tokens ... ok
+test parser::tests::assignment_expression ... ok
+test parser::tests::assignment_right_associative ... ok
 test parser::tests::binary_add ... ok
+test parser::tests::bitwise_and ... ok
+test parser::tests::bitwise_or ... ok
+test parser::tests::bitwise_precedence_and_over_xor_over_or ... ok
+test parser::tests::bitwise_xor ... ok
 test parser::tests::boolean_literals ... ok
 test parser::tests::borrow_expression ... ok
 test parser::tests::call_expression ... ok
@@ -90,13 +95,27 @@ test parser::tests::comparison_less_equal ... ok
 test parser::tests::comparison_less_than ... ok
 test parser::tests::comparison_not_equal ... ok
 test parser::tests::empty_source_file ... ok
+test parser::tests::enum_and_fn_mixed ... ok
+test parser::tests::enum_empty ... ok
+test parser::tests::enum_mixed_variants ... ok
+test parser::tests::enum_named_variant ... ok
+test parser::tests::enum_pub_visibility ... ok
+test parser::tests::enum_tuple_variant ... ok
+test parser::tests::enum_unit_trailing_comma ... ok
+test parser::tests::enum_unit_variant ... ok
+test parser::tests::error_dot_without_ident ... ok
+test parser::tests::error_enum_missing_name ... ok
+test parser::tests::error_enum_missing_open_brace ... ok
 test parser::tests::error_missing_fn_name ... ok
 test parser::tests::error_missing_open_brace ... ok
 test parser::tests::error_non_item_at_top_level ... ok
 test parser::tests::error_struct_missing_body ... ok
 test parser::tests::error_struct_missing_name ... ok
 test parser::tests::error_struct_tuple_missing_semicolon ... ok
+test parser::tests::field_access_chained ... ok
+test parser::tests::field_access_simple ... ok
 test parser::tests::fn_empty_body ... ok
+test parser::tests::fn_pub_visibility ... ok
 test parser::tests::fn_trailing_comma_in_params ... ok
 test parser::tests::fn_with_params ... ok
 test parser::tests::fn_with_return_type ... ok
@@ -112,11 +131,19 @@ test parser::tests::let_with_type_and_init ... ok
 test parser::tests::let_without_init ... ok
 test parser::tests::logical_and ... ok
 test parser::tests::logical_or ... ok
+test parser::tests::method_call_chained ... ok
+test parser::tests::method_call_mixed_with_field ... ok
+test parser::tests::method_call_no_args ... ok
+test parser::tests::method_call_with_args ... ok
 test parser::tests::multiple_fns ... ok
+test parser::tests::mutable_borrow_expression ... ok
 test parser::tests::operator_precedence_mul_over_add ... ok
-test parser::tests::return_with_value ... ok
+test parser::tests::path_with_segments ... ok
 test parser::tests::recursive_fibonacci ... ok
+test parser::tests::return_with_value ... ok
 test parser::tests::return_without_value ... ok
+test parser::tests::shift_left ... ok
+test parser::tests::shift_right ... ok
 test parser::tests::struct_and_fn_mixed ... ok
 test parser::tests::struct_named_empty ... ok
 test parser::tests::struct_named_fields ... ok
@@ -127,26 +154,30 @@ test parser::tests::struct_tuple_pub_field ... ok
 test parser::tests::struct_unit ... ok
 test parser::tests::struct_unit_pub ... ok
 test parser::tests::tail_expression ... ok
+test parser::tests::two_segment_path_expression ... ok
 test parser::tests::type_mut_ref ... ok
 test parser::tests::type_ref ... ok
 test parser::tests::type_unit ... ok
+test parser::tests::unary_deref ... ok
 test parser::tests::unary_negate ... ok
+test parser::tests::unary_not ... ok
 test parser::tests::unit_literal ... ok
 
-test result: ok. 95 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 126 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 
      Running tests/smoke.rs (target/debug/deps/smoke-5aff513bc67c323f)
 
 running 1 test
 test empty_file_exits_zero ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
 
 ```
 
 ## Clippy
 ```
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s
+    Checking galvanic v0.1.0 (/Users/williamlaffin/code/galvanic)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.11s
 ```
 
 ## Rust Files
@@ -160,25 +191,15 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 (none)
 
 ## Test Count
-96 test functions
+127 test functions
 
 
 ## CI/CD Status
-
-### Primary PR: #3 (branch: lathe/20260405-131214)
-```
-(could not fetch checks)
-```
-
-### PR State
-```
-{"mergeStateStatus":"CLEAN","mergeable":"MERGEABLE","number":3,"state":"OPEN"}
-```
+Current branch: lathe/20260405-140305 (no PR created yet)
 
 ### All Open PRs (by current user)
 ```
-#3 [lathe/20260405-131214] state:OPEN checks:none
-#2 [lathe/20260405-104432] state:OPEN checks:pass
+#5 [lathe/20260405-135217] state:MERGED checks:pass
 ```
 
 ### CI Configuration
@@ -187,10 +208,10 @@ Workflows found:
 
 ### Recent Workflow Runs
 ```
-#24004104404 completed/success event:pull_request branch:lathe/20260405-104432 at:2026-04-05T15:01:33
-#24003817808 completed/success event:push branch:main at:2026-04-05T14:44:33
-#24003802381 completed/success event:pull_request branch:lathe/20260405-102939 at:2026-04-05T14:43:40
-#24003792051 completed/success event:pull_request branch:lathe/20260405-102939 at:2026-04-05T14:43:00
-#24003127824 completed/success event:push branch:main at:2026-04-05T14:04:35
+#24007289674 in_progress/ event:push branch:main at:2026-04-05T18:03:00
+#24007284693 completed/success event:pull_request branch:lathe/20260405-135217 at:2026-04-05T18:02:44
+#24007279919 completed/success event:pull_request branch:lathe/20260405-135217 at:2026-04-05T18:02:32
+#24007101225 completed/success event:push branch:main at:2026-04-05T17:52:10
+#24007099104 completed/success event:pull_request branch:lathe/20260405-134328 at:2026-04-05T17:52:04
 ```
 

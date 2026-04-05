@@ -676,7 +676,11 @@ impl<'src> Parser<'src> {
         // as a statement (side-effect only). If `}` is next, it is the tail.
         let is_expr_with_block = matches!(
             expr.kind,
-            ExprKind::Block(_) | ExprKind::If { .. }
+            ExprKind::Block(_)
+                | ExprKind::If { .. }
+                | ExprKind::Loop(_)
+                | ExprKind::While { .. }
+                | ExprKind::For { .. }
         );
 
         if is_expr_with_block && self.peek_kind() != TokenKind::CloseBrace {
@@ -1217,6 +1221,42 @@ impl<'src> Parser<'src> {
             // If expression — FLS §6.11
             TokenKind::KwIf => self.parse_if_expr(),
 
+            // Loop expression — FLS §6.8.1
+            TokenKind::KwLoop => {
+                self.advance();
+                let body = Box::new(self.parse_block()?);
+                let span = start.to(body.span);
+                Ok(Expr { kind: ExprKind::Loop(body), span })
+            }
+
+            // While loop expression — FLS §6.8.2
+            TokenKind::KwWhile => self.parse_while_expr(),
+
+            // For loop expression — FLS §6.8.3
+            TokenKind::KwFor => self.parse_for_expr(),
+
+            // Break expression — FLS §6.8.4
+            TokenKind::KwBreak => {
+                self.advance();
+                // No value if the next token terminates the expression context.
+                let value = if matches!(
+                    self.peek_kind(),
+                    TokenKind::Semi | TokenKind::CloseBrace | TokenKind::Eof
+                ) {
+                    None
+                } else {
+                    Some(Box::new(self.parse_expr()?))
+                };
+                let end = value.as_ref().map(|e| e.span).unwrap_or(start);
+                Ok(Expr { kind: ExprKind::Break(value), span: start.to(end) })
+            }
+
+            // Continue expression — FLS §6.8.5
+            TokenKind::KwContinue => {
+                self.advance();
+                Ok(Expr { kind: ExprKind::Continue, span: start })
+            }
+
             kind => Err(self.error(format!("expected expression, found {kind:?}"))),
         }
     }
@@ -1293,6 +1333,58 @@ impl<'src> Parser<'src> {
             kind: ExprKind::If { cond, then_block, else_expr },
             span: start.to(end),
         })
+    }
+
+    /// Parse a while loop expression.
+    ///
+    /// FLS §6.8.2: While loop expressions.
+    ///
+    /// Grammar: `"while" Expression BlockExpression`
+    ///
+    /// FLS §6.8.2 NOTE: The condition is parsed with `parse_expr`, which stops
+    /// naturally at `{` since `{` is not a valid binary operator. A block
+    /// condition `while { x } { y }` would parse `{ x }` as the condition;
+    /// this is rejected by rustc but the FLS does not forbid it syntactically.
+    /// We parse it and defer to a future semantic phase.
+    fn parse_while_expr(&mut self) -> Result<Expr, ParseError> {
+        let start = self.current_span();
+        self.expect(TokenKind::KwWhile)?;
+        let cond = Box::new(self.parse_expr()?);
+        let body = Box::new(self.parse_block()?);
+        let span = start.to(body.span);
+        Ok(Expr { kind: ExprKind::While { cond, body }, span })
+    }
+
+    /// Parse a for loop expression.
+    ///
+    /// FLS §6.8.3: For loop expressions.
+    ///
+    /// Grammar: `"for" Pattern "in" Expression BlockExpression`
+    ///
+    /// FLS §6.8.3 NOTE: The iterator expression is parsed with `parse_expr`.
+    /// The `in` keyword acts as a natural stopping point because it is not a
+    /// valid binary operator. Full irrefutable patterns (tuple, struct,
+    /// `ref`, `_`) in `for` position are future work; only identifiers are
+    /// accepted here.
+    fn parse_for_expr(&mut self) -> Result<Expr, ParseError> {
+        let start = self.current_span();
+        self.expect(TokenKind::KwFor)?;
+
+        // Pattern: identifier only for now (future: full irrefutable patterns).
+        if self.peek_kind() != TokenKind::Ident {
+            return Err(self.error(format!(
+                "expected loop variable (identifier) after `for`, found {:?}",
+                self.peek_kind()
+            )));
+        }
+        let pat = self.current_span();
+        self.advance();
+
+        self.expect(TokenKind::KwIn)?;
+        let iter = Box::new(self.parse_expr()?);
+        let body = Box::new(self.parse_block()?);
+        let span = start.to(body.span);
+        Ok(Expr { kind: ExprKind::For { pat, iter, body }, span })
     }
 }
 
@@ -2460,5 +2552,210 @@ mod tests {
             "{}",
             err.message
         );
+    }
+
+    // ── Loop expressions — FLS §6.8 ───────────────────────────────────────────
+
+    #[test]
+    fn loop_empty_body() {
+        // FLS §6.8.1: `loop {}` — infinite loop with empty body.
+        let src = "fn f() { loop {} }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        // The loop is the tail expression (no trailing `;`, ends the block).
+        let tail = body.tail.as_ref().expect("expected loop as tail");
+        let ExprKind::Loop(ref loop_body) = tail.kind else {
+            panic!("expected Loop, got {:?}", tail.kind);
+        };
+        assert!(loop_body.stmts.is_empty());
+        assert!(loop_body.tail.is_none());
+    }
+
+    #[test]
+    fn loop_with_body() {
+        // FLS §6.8.1: `loop` with statements in its body.
+        let src = "fn f() { loop { let x = 1; } }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        let tail = body.tail.as_ref().expect("expected loop as tail");
+        let ExprKind::Loop(ref loop_body) = tail.kind else {
+            panic!("expected Loop");
+        };
+        assert_eq!(loop_body.stmts.len(), 1);
+    }
+
+    #[test]
+    fn loop_as_stmt() {
+        // FLS §8.3: a loop (expression-with-block) in non-tail position is a
+        // statement; no trailing `;` is required before the next statement.
+        let src = "fn f() { loop {} let x = 1; }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        // The loop is stmt[0], the let is stmt[1].
+        assert_eq!(body.stmts.len(), 2);
+        let StmtKind::Expr(ref loop_expr) = body.stmts[0].kind else {
+            panic!("expected expr stmt for loop");
+        };
+        assert!(matches!(loop_expr.kind, ExprKind::Loop(_)));
+    }
+
+    #[test]
+    fn break_without_value() {
+        // FLS §6.8.4: bare `break;` exits the loop.
+        let src = "fn f() { loop { break; } }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        let tail = body.tail.as_ref().expect("expected loop tail");
+        let ExprKind::Loop(ref loop_body) = tail.kind else {
+            panic!("expected Loop");
+        };
+        let StmtKind::Expr(ref brk) = loop_body.stmts[0].kind else {
+            panic!("expected expr stmt");
+        };
+        assert!(matches!(brk.kind, ExprKind::Break(None)));
+    }
+
+    #[test]
+    fn break_with_value() {
+        // FLS §6.8.4: `break expr` — loop produces a value.
+        let src = "fn f() -> i32 { loop { break 42; } }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        let tail = body.tail.as_ref().expect("expected loop tail");
+        let ExprKind::Loop(ref loop_body) = tail.kind else {
+            panic!("expected Loop");
+        };
+        let StmtKind::Expr(ref brk) = loop_body.stmts[0].kind else {
+            panic!("expected expr stmt");
+        };
+        let ExprKind::Break(Some(ref val)) = brk.kind else {
+            panic!("expected Break(Some(_)), got {:?}", brk.kind);
+        };
+        assert!(matches!(val.kind, ExprKind::LitInt(42)));
+    }
+
+    #[test]
+    fn continue_expression() {
+        // FLS §6.8.5: `continue` skips the rest of the loop body.
+        let src = "fn f() { loop { continue; } }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        let tail = body.tail.as_ref().expect("expected loop tail");
+        let ExprKind::Loop(ref loop_body) = tail.kind else {
+            panic!("expected Loop");
+        };
+        let StmtKind::Expr(ref cont) = loop_body.stmts[0].kind else {
+            panic!("expected expr stmt");
+        };
+        assert!(matches!(cont.kind, ExprKind::Continue));
+    }
+
+    #[test]
+    fn while_loop_simple() {
+        // FLS §6.8.2: `while cond {}` — loop terminates when condition is false.
+        let src = "fn f() { while running {} }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        let tail = body.tail.as_ref().expect("expected while as tail");
+        let ExprKind::While { ref cond, ref body } = tail.kind else {
+            panic!("expected While, got {:?}", tail.kind);
+        };
+        // Condition is the path `running`.
+        assert!(matches!(cond.kind, ExprKind::Path(_)));
+        assert!(body.stmts.is_empty());
+    }
+
+    #[test]
+    fn while_loop_with_condition_expr() {
+        // FLS §6.8.2: `while i < 10 {}` — condition uses a comparison operator.
+        let src = "fn f() { while i < 10 { i = i + 1; } }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        let tail = body.tail.as_ref().expect("expected while as tail");
+        let ExprKind::While { ref cond, ref body } = tail.kind else {
+            panic!("expected While");
+        };
+        assert!(matches!(cond.kind, ExprKind::Binary { op: BinOp::Lt, .. }));
+        assert_eq!(body.stmts.len(), 1);
+    }
+
+    #[test]
+    fn while_loop_as_stmt() {
+        // FLS §8.3: while (expression-with-block) in non-tail position is a
+        // statement without needing a trailing `;`.
+        let src = "fn f() { while x {} let y = 1; }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        assert_eq!(body.stmts.len(), 2);
+        let StmtKind::Expr(ref while_expr) = body.stmts[0].kind else {
+            panic!("expected expr stmt");
+        };
+        assert!(matches!(while_expr.kind, ExprKind::While { .. }));
+    }
+
+    #[test]
+    fn for_loop_simple() {
+        // FLS §6.8.3: `for x in iter {}` — for loop over an iterator.
+        let src = "fn f() { for x in items {} }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        let tail = body.tail.as_ref().expect("expected for as tail");
+        let ExprKind::For { ref pat, ref iter, ref body } = tail.kind else {
+            panic!("expected For, got {:?}", tail.kind);
+        };
+        assert_eq!(pat.text(src), "x");
+        assert!(matches!(iter.kind, ExprKind::Path(_)));
+        assert!(body.stmts.is_empty());
+    }
+
+    #[test]
+    fn for_loop_with_body() {
+        // FLS §6.8.3: for loop body with a statement.
+        let src = "fn f() { for item in list { process(item); } }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        let tail = body.tail.as_ref().expect("expected for as tail");
+        let ExprKind::For { ref pat, ref body, .. } = tail.kind else {
+            panic!("expected For");
+        };
+        assert_eq!(pat.text(src), "item");
+        assert_eq!(body.stmts.len(), 1);
+        let StmtKind::Expr(ref call) = body.stmts[0].kind else {
+            panic!("expected expr stmt in for body");
+        };
+        assert!(matches!(call.kind, ExprKind::Call { .. }));
+    }
+
+    #[test]
+    fn for_loop_as_stmt() {
+        // FLS §8.3: for (expression-with-block) in non-tail position is a
+        // statement without needing a trailing `;`.
+        let src = "fn f() { for i in v {} let n = 0; }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        assert_eq!(body.stmts.len(), 2);
+        let StmtKind::Expr(ref for_expr) = body.stmts[0].kind else {
+            panic!("expected expr stmt");
+        };
+        assert!(matches!(for_expr.kind, ExprKind::For { .. }));
+    }
+
+    #[test]
+    fn error_for_missing_in() {
+        // `for x items {}` — missing `in` keyword.
+        let err = parse_err("fn f() { for x items {} }");
+        assert!(err.message.contains("KwIn"), "{}", err.message);
     }
 }

@@ -539,6 +539,68 @@ pub enum ExprKind {
         args: Vec<Expr>,
     },
 
+    /// A loop expression. FLS §6.8.1.
+    ///
+    /// `loop { body }`
+    ///
+    /// FLS §6.8.1: A loop expression executes its body repeatedly until a
+    /// `break` expression is reached. Its value is the operand of `break`,
+    /// or `()` if `break` carries no value.
+    Loop(Box<Block>),
+
+    /// A while loop expression. FLS §6.8.2.
+    ///
+    /// `while cond { body }`
+    ///
+    /// FLS §6.8.2: A while loop expression evaluates the condition before each
+    /// iteration; if the condition is `false` the loop terminates and evaluates
+    /// to `()`.
+    While {
+        cond: Box<Expr>,
+        body: Box<Block>,
+    },
+
+    /// A for loop expression. FLS §6.8.3.
+    ///
+    /// `for pat in iter { body }`
+    ///
+    /// FLS §6.8.3: A for loop expression iterates over the values produced by
+    /// an [`IntoIterator`]. The loop evaluates to `()`.
+    ///
+    /// FLS §6.8.3 NOTE: The pattern may be any irrefutable pattern. This
+    /// implementation restricts the loop variable to a simple identifier;
+    /// destructuring patterns in `for` position are future work.
+    For {
+        /// The loop variable (simple identifier pattern).
+        pat: Span,
+        /// The iterator expression.
+        iter: Box<Expr>,
+        /// The loop body.
+        body: Box<Block>,
+    },
+
+    /// A break expression. FLS §6.8.4.
+    ///
+    /// `break` or `break value`
+    ///
+    /// FLS §6.8.4: A break expression exits the innermost enclosing loop.
+    /// The optional value becomes the result of the enclosing `loop` expression;
+    /// `while` and `for` loops do not accept a break value.
+    ///
+    /// FLS §6.8.4 AMBIGUOUS: The spec does not clearly distinguish whether the
+    /// break-with-value restriction (only in `loop`, not `while`/`for`) is a
+    /// syntactic or semantic constraint. This implementation parses `break expr`
+    /// freely and defers the restriction to a future type-checking phase.
+    Break(Option<Box<Expr>>),
+
+    /// A continue expression. FLS §6.8.5.
+    ///
+    /// `continue`
+    ///
+    /// FLS §6.8.5: A continue expression skips the remainder of the current
+    /// loop body and begins the next iteration.
+    Continue,
+
     /// A return expression. FLS §6.12.
     ///
     /// FLS §6.12: `return` without a value returns `()`.
