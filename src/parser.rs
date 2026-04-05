@@ -30,8 +30,9 @@
 //! reference and is consistent with rustc's behaviour.
 
 use crate::ast::{
-    BinOp, Block, Expr, ExprKind, FnDef, Item, ItemKind, NamedField, Param, SourceFile, Span,
-    Stmt, StmtKind, StructDef, StructKind, Ty, TyKind, TupleField, UnaryOp, Visibility,
+    BinOp, Block, EnumDef, EnumVariant, EnumVariantKind, Expr, ExprKind, FnDef, Item, ItemKind,
+    NamedField, Param, SourceFile, Span, Stmt, StmtKind, StructDef, StructKind, Ty, TyKind,
+    TupleField, UnaryOp, Visibility,
 };
 use crate::lexer::{Token, TokenKind};
 
@@ -192,8 +193,13 @@ impl<'src> Parser<'src> {
                 let span = start.to(struct_def.span);
                 Ok(Item { kind: ItemKind::Struct(Box::new(struct_def)), span })
             }
+            TokenKind::KwEnum => {
+                let enum_def = self.parse_enum_def(vis)?;
+                let span = start.to(enum_def.span);
+                Ok(Item { kind: ItemKind::Enum(Box::new(enum_def)), span })
+            }
             kind => Err(self.error(format!(
-                "expected item (fn, struct, …), found {kind:?}"
+                "expected item (fn, struct, enum, …), found {kind:?}"
             ))),
         }
     }
@@ -323,6 +329,101 @@ impl<'src> Parser<'src> {
 
         let span = start.to(end);
         Ok(StructDef { vis, name, kind, span })
+    }
+
+    /// Parse an enum definition.
+    ///
+    /// FLS §15: Enumerations.
+    ///
+    /// Grammar:
+    /// ```text
+    /// EnumDeclaration ::=
+    ///     "enum" Identifier "{" EnumVariant* "}"
+    /// EnumVariant ::=
+    ///     Identifier
+    ///     ( "{" NamedField* "}"   -- named-field variant
+    ///     | "(" TupleField* ")"  -- tuple variant
+    ///     |                      -- unit variant
+    ///     )
+    /// ```
+    ///
+    /// FLS §15 NOTE: Generic type parameters and where clauses on enums are
+    /// not yet implemented. They are future work.
+    fn parse_enum_def(&mut self, vis: Visibility) -> Result<EnumDef, ParseError> {
+        let start = self.current_span();
+        self.expect(TokenKind::KwEnum)?;
+
+        // Enum name must be an identifier.
+        if self.peek_kind() != TokenKind::Ident {
+            return Err(self.error(format!(
+                "expected enum name (identifier), found {:?}",
+                self.peek_kind()
+            )));
+        }
+        let name = self.current_span();
+        self.advance();
+
+        // Enum body is always `{ … }`.
+        self.expect(TokenKind::OpenBrace)?;
+        let variants = self.parse_enum_variants()?;
+        let end = self.current_span();
+        self.expect(TokenKind::CloseBrace)?;
+
+        let span = start.to(end);
+        Ok(EnumDef { vis, name, variants, span })
+    }
+
+    /// Parse the variant list inside an enum body `{ Var1, Var2, … }`.
+    ///
+    /// FLS §15: Each variant is an identifier optionally followed by a
+    /// tuple body `(…)` or a named-field body `{…}`.
+    fn parse_enum_variants(&mut self) -> Result<Vec<EnumVariant>, ParseError> {
+        let mut variants = Vec::new();
+
+        while self.peek_kind() != TokenKind::CloseBrace
+            && self.peek_kind() != TokenKind::Eof
+        {
+            let start = self.current_span();
+
+            // Variant name must be an identifier.
+            if self.peek_kind() != TokenKind::Ident {
+                return Err(self.error(format!(
+                    "expected variant name (identifier), found {:?}",
+                    self.peek_kind()
+                )));
+            }
+            let name = self.current_span();
+            self.advance();
+
+            let (kind, end) = match self.peek_kind() {
+                // Named-field variant: `Foo { x: i32, … }`
+                TokenKind::OpenBrace => {
+                    self.advance(); // eat `{`
+                    let fields = self.parse_named_fields()?;
+                    let end = self.current_span();
+                    self.expect(TokenKind::CloseBrace)?;
+                    (EnumVariantKind::Named(fields), end)
+                }
+                // Tuple variant: `Foo(i32, …)`
+                TokenKind::OpenParen => {
+                    self.advance(); // eat `(`
+                    let fields = self.parse_tuple_fields()?;
+                    let end = self.current_span();
+                    self.expect(TokenKind::CloseParen)?;
+                    (EnumVariantKind::Tuple(fields), end)
+                }
+                // Unit variant: `Foo`
+                _ => (EnumVariantKind::Unit, name),
+            };
+
+            variants.push(EnumVariant { name, kind, span: start.to(end) });
+
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+        }
+
+        Ok(variants)
     }
 
     /// Parse the named fields of a struct body `{ field: Type, … }`.
@@ -1187,7 +1288,7 @@ fn strip_int_suffix(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{ExprKind, ItemKind, StmtKind, StructKind, TyKind, Visibility};
+    use crate::ast::{EnumVariantKind, ExprKind, ItemKind, StmtKind, StructKind, TyKind, Visibility};
     use crate::lexer::tokenize;
 
     /// Parse `src` into a SourceFile, panicking on error.
@@ -1839,5 +1940,134 @@ mod tests {
         // Tuple struct body without terminating `;`.
         let err = parse_err("struct Pair(i32, i32)");
         assert!(err.message.contains("Semi"), "{}", err.message);
+    }
+
+    // ── Enum items ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn enum_empty() {
+        // FLS §15: enum with no variants.
+        let src = "enum Empty {}";
+        let sf = parse_ok(src);
+        assert_eq!(sf.items.len(), 1);
+        let ItemKind::Enum(ref e) = sf.items[0].kind else {
+            panic!("expected Enum item");
+        };
+        assert_eq!(e.name.text(src), "Empty");
+        assert!(e.variants.is_empty());
+        assert_eq!(e.vis, Visibility::Private);
+    }
+
+    #[test]
+    fn enum_unit_variant() {
+        // FLS §15.1: unit variants — identifiers with no fields.
+        let src = "enum Direction { North, South, East, West }";
+        let sf = parse_ok(src);
+        let ItemKind::Enum(ref e) = sf.items[0].kind else {
+            panic!("expected Enum item");
+        };
+        assert_eq!(e.variants.len(), 4);
+        assert_eq!(e.variants[0].name.text(src), "North");
+        assert_eq!(e.variants[3].name.text(src), "West");
+        assert!(matches!(e.variants[0].kind, EnumVariantKind::Unit));
+    }
+
+    #[test]
+    fn enum_unit_trailing_comma() {
+        // Trailing comma after the last variant is allowed.
+        let src = "enum Bit { Zero, One, }";
+        let sf = parse_ok(src);
+        let ItemKind::Enum(ref e) = sf.items[0].kind else {
+            panic!("expected Enum item");
+        };
+        assert_eq!(e.variants.len(), 2);
+    }
+
+    #[test]
+    fn enum_tuple_variant() {
+        // FLS §15.2: tuple variant with positional fields.
+        let src = "enum Shape { Circle(f64), Rectangle(f64, f64) }";
+        let sf = parse_ok(src);
+        let ItemKind::Enum(ref e) = sf.items[0].kind else {
+            panic!("expected Enum item");
+        };
+        assert_eq!(e.variants.len(), 2);
+        assert_eq!(e.variants[0].name.text(src), "Circle");
+        let EnumVariantKind::Tuple(ref fields) = e.variants[0].kind else {
+            panic!("expected Tuple variant");
+        };
+        assert_eq!(fields.len(), 1);
+        let EnumVariantKind::Tuple(ref fields2) = e.variants[1].kind else {
+            panic!("expected Tuple variant");
+        };
+        assert_eq!(fields2.len(), 2);
+    }
+
+    #[test]
+    fn enum_named_variant() {
+        // FLS §15.3: named-field variant.
+        let src = "enum Event { KeyPress { code: u32, shift: bool } }";
+        let sf = parse_ok(src);
+        let ItemKind::Enum(ref e) = sf.items[0].kind else {
+            panic!("expected Enum item");
+        };
+        assert_eq!(e.variants.len(), 1);
+        assert_eq!(e.variants[0].name.text(src), "KeyPress");
+        let EnumVariantKind::Named(ref fields) = e.variants[0].kind else {
+            panic!("expected Named variant");
+        };
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].name.text(src), "code");
+        assert_eq!(fields[1].name.text(src), "shift");
+    }
+
+    #[test]
+    fn enum_mixed_variants() {
+        // FLS §15: all three variant forms in one enum.
+        let src = "enum Message { Quit, Move { x: i32, y: i32 }, Write(i32) }";
+        let sf = parse_ok(src);
+        let ItemKind::Enum(ref e) = sf.items[0].kind else {
+            panic!("expected Enum item");
+        };
+        assert_eq!(e.variants.len(), 3);
+        assert!(matches!(e.variants[0].kind, EnumVariantKind::Unit));
+        assert!(matches!(e.variants[1].kind, EnumVariantKind::Named(_)));
+        assert!(matches!(e.variants[2].kind, EnumVariantKind::Tuple(_)));
+    }
+
+    #[test]
+    fn enum_pub_visibility() {
+        // FLS §10.2: `pub` visibility on an enum.
+        let src = "pub enum Color { Red, Green, Blue }";
+        let sf = parse_ok(src);
+        let ItemKind::Enum(ref e) = sf.items[0].kind else {
+            panic!("expected Enum item");
+        };
+        assert_eq!(e.vis, Visibility::Pub);
+        assert_eq!(e.variants.len(), 3);
+    }
+
+    #[test]
+    fn enum_and_fn_mixed() {
+        // Enum and fn items together in one source file.
+        let src = "enum Flag { On, Off } fn check() {}";
+        let sf = parse_ok(src);
+        assert_eq!(sf.items.len(), 2);
+        assert!(matches!(sf.items[0].kind, ItemKind::Enum(_)));
+        assert!(matches!(sf.items[1].kind, ItemKind::Fn(_)));
+    }
+
+    #[test]
+    fn error_enum_missing_name() {
+        // `enum` keyword without a name.
+        let err = parse_err("enum {}");
+        assert!(err.message.contains("expected enum name"), "{}", err.message);
+    }
+
+    #[test]
+    fn error_enum_missing_open_brace() {
+        // Enum name without `{`.
+        let err = parse_err("enum Foo fn");
+        assert!(err.message.contains("OpenBrace"), "{}", err.message);
     }
 }
