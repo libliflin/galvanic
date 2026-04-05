@@ -26,7 +26,7 @@
 
 use std::fmt::Write as FmtWrite;
 
-use crate::ir::{Instr, IrValue, Module};
+use crate::ir::{IrBinOp, Instr, IrValue, Module};
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
@@ -114,19 +114,52 @@ fn emit_instr(out: &mut String, instr: &Instr) -> Result<(), CodegenError> {
             emit_load_x0(out, value)?;
             writeln!(out, "    ret")?;
         }
+
+        // FLS §2.4.4.1: Load integer immediate into virtual register.
+        // ARM64: `mov x{reg}, #{n}` assembles to MOVZ for 0 ≤ n ≤ 65535.
+        // Negative values and values > 65535 are not yet supported.
+        // Cache-line note: one MOVZ instruction = 4 bytes per LoadImm.
+        Instr::LoadImm(reg, n) => {
+            if *n < 0 {
+                return Err(CodegenError::Unsupported(
+                    "negative integer immediate (MOVN not yet implemented)".into(),
+                ));
+            }
+            writeln!(
+                out,
+                "    mov     x{reg}, #{n}             // FLS §2.4.4.1: load imm {n}"
+            )?;
+        }
+
+        // FLS §6.5.5: Integer binary arithmetic.
+        // ARM64: `add`/`sub`/`mul` operate on 64-bit registers.
+        // Virtual register N maps to ARM64 register xN (trivial allocation).
+        // Cache-line note: one ARM64 instruction = 4 bytes per BinOp.
+        Instr::BinOp { op, dst, lhs, rhs } => {
+            let mnemonic = match op {
+                IrBinOp::Add => "add",
+                IrBinOp::Sub => "sub",
+                IrBinOp::Mul => "mul",
+            };
+            writeln!(
+                out,
+                "    {mnemonic:<7} x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: {mnemonic}"
+            )?;
+        }
     }
     Ok(())
 }
 
-/// Emit an instruction that loads `value` into `x0`.
+/// Emit instructions that place `value` into `x0` for return.
 ///
 /// ARM64 note: `mov x0, #n` assembles to `MOVZ x0, #n` for 0 ≤ n ≤ 65535.
 /// Negative values and values > 65535 require multi-instruction sequences
-/// and are not yet supported (milestone 1 only needs small non-negative ints).
+/// and are not yet supported.
 ///
 /// FLS §2.4.4.1: Integer literals.
+/// FLS §6.19: Return expressions — result in x0.
 /// Cache-line note: each `mov` is 4 bytes — one slot in a 16-instruction
-/// cache line.
+/// cache line. When the result is already in x0 (Reg(0)), no move is needed.
 fn emit_load_x0(out: &mut String, value: &IrValue) -> Result<(), CodegenError> {
     match value {
         IrValue::I32(n) => {
@@ -141,6 +174,20 @@ fn emit_load_x0(out: &mut String, value: &IrValue) -> Result<(), CodegenError> {
         IrValue::Unit => {
             // FLS §4.4: unit return. Convention: exit code 0 for main.
             writeln!(out, "    mov     x0, #0              // FLS §4.4: unit return")?;
+        }
+        IrValue::Reg(r) => {
+            if *r == 0 {
+                // Result already in x0 — no move needed.
+                // Cache-line note: omitting the redundant mov saves 4 bytes
+                // and keeps the return sequence as tight as possible.
+            } else {
+                // Move result from x{r} to x0 for the ARM64 return convention.
+                // FLS §6.19: return value is placed in x0.
+                writeln!(
+                    out,
+                    "    mov     x0, x{r}              // FLS §6.19: return reg {r} → x0"
+                )?;
+            }
         }
     }
     Ok(())
