@@ -17,7 +17,7 @@
 //! implemented. Each new milestone will extend this pass by exactly what
 //! that milestone's target program requires.
 
-use crate::ast::{Block, Expr, ExprKind, ItemKind, SourceFile, TyKind};
+use crate::ast::{BinOp, Block, Expr, ExprKind, ItemKind, SourceFile, TyKind};
 use crate::ir::{Instr, IrFn, IrTy, IrValue, Module};
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -133,9 +133,11 @@ fn lower_block_return(block: &Block, ret_ty: &IrTy) -> Result<Vec<Instr>, LowerE
 
 /// Lower an expression to an `IrValue`.
 ///
-/// Only constant integer and unit literals are supported at this milestone.
+/// Supports constant integer and unit literals, and constant-folded binary
+/// arithmetic on `i32` operands.
 ///
 /// FLS §6.2: Literal expressions.
+/// FLS §6.5: Arithmetic operator expressions.
 fn lower_expr(expr: &Expr, expected_ty: &IrTy) -> Result<IrValue, LowerError> {
     match (&expr.kind, expected_ty) {
         // FLS §2.4.4.1: Integer literal narrowed to i32.
@@ -151,6 +153,40 @@ fn lower_expr(expr: &Expr, expected_ty: &IrTy) -> Result<IrValue, LowerError> {
 
         // FLS §4.4: Unit literal `()`.
         (ExprKind::Unit, IrTy::Unit) => Ok(IrValue::Unit),
+
+        // FLS §6.5: Arithmetic binary operations on constant i32 operands.
+        //
+        // Both sub-expressions are lowered first; if they both reduce to
+        // `IrValue::I32` the operation is folded at compile time. This covers
+        // the milestone-2 target `fn main() -> i32 { 1 + 2 }`.
+        //
+        // FLS §6.23: Arithmetic overflow. The FLS states overflow behaviour is
+        // implementation-defined. We use wrapping semantics here (matching
+        // rustc's debug-mode behaviour) and document that choice.
+        //
+        // Note: non-constant operands (e.g. variables) will require virtual
+        // registers and are handled in a later milestone.
+        (ExprKind::Binary { op, lhs, rhs }, IrTy::I32) => {
+            let lhs_val = lower_expr(lhs, expected_ty)?;
+            let rhs_val = lower_expr(rhs, expected_ty)?;
+            match (op, lhs_val, rhs_val) {
+                (BinOp::Add, IrValue::I32(a), IrValue::I32(b)) => {
+                    // FLS §6.5.5: Addition operator `+`.
+                    Ok(IrValue::I32(a.wrapping_add(b)))
+                }
+                (BinOp::Sub, IrValue::I32(a), IrValue::I32(b)) => {
+                    // FLS §6.5.5: Subtraction operator `-`.
+                    Ok(IrValue::I32(a.wrapping_sub(b)))
+                }
+                (BinOp::Mul, IrValue::I32(a), IrValue::I32(b)) => {
+                    // FLS §6.5.5: Multiplication operator `*`.
+                    Ok(IrValue::I32(a.wrapping_mul(b)))
+                }
+                _ => Err(LowerError::Unsupported(
+                    "non-constant or unsupported binary expression".into(),
+                )),
+            }
+        }
 
         // Any other combination is not yet supported.
         _ => Err(LowerError::Unsupported("expression".into())),

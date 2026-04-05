@@ -166,6 +166,94 @@ fn milestone_1_main_returns_nonzero() {
     assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
 }
 
+// ── Milestone 2: arithmetic ───────────────────────────────────────────────────
+
+/// Milestone 2: `fn main() -> i32 { 1 + 2 }` exits with code 3.
+///
+/// FLS §6.5.5: Addition operator `+`.
+/// FLS §2.4.4.1: Integer literals 1 and 2.
+/// FLS §6.23: Arithmetic overflow — wrapping semantics documented.
+#[test]
+fn milestone_2_add() {
+    if !tools_available() {
+        eprintln!("milestone_2_add: SKIP (aarch64 cross tools or qemu-aarch64 not found)");
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("main.rs");
+
+    // FLS §6.5.5 example: addition of two integer literals.
+    std::fs::write(&src, "fn main() -> i32 { 1 + 2 }\n").expect("write fixture");
+
+    let exit_code = compile_and_run(&src, dir.path());
+    assert_eq!(exit_code, 3, "expected exit 3 (1+2), got {exit_code}");
+}
+
+/// Milestone 2 (variant): `fn main() -> i32 { 10 - 3 }` exits with code 7.
+///
+/// FLS §6.5.5: Subtraction operator `-`.
+#[test]
+fn milestone_2_sub() {
+    if !tools_available() {
+        eprintln!("milestone_2_sub: SKIP (aarch64 cross tools or qemu-aarch64 not found)");
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("main.rs");
+
+    std::fs::write(&src, "fn main() -> i32 { 10 - 3 }\n").expect("write fixture");
+
+    let exit_code = compile_and_run(&src, dir.path());
+    assert_eq!(exit_code, 7, "expected exit 7 (10-3), got {exit_code}");
+}
+
+/// Milestone 2 (variant): `fn main() -> i32 { 3 * 4 }` exits with code 12.
+///
+/// FLS §6.5.5: Multiplication operator `*`.
+#[test]
+fn milestone_2_mul() {
+    if !tools_available() {
+        eprintln!("milestone_2_mul: SKIP (aarch64 cross tools or qemu-aarch64 not found)");
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("main.rs");
+
+    std::fs::write(&src, "fn main() -> i32 { 3 * 4 }\n").expect("write fixture");
+
+    let exit_code = compile_and_run(&src, dir.path());
+    assert_eq!(exit_code, 12, "expected exit 12 (3*4), got {exit_code}");
+}
+
+/// Milestone 2 (compound): `fn main() -> i32 { 1 + 2 + 3 }` exits with code 6.
+///
+/// Verifies that nested (left-associative) binary expressions constant-fold
+/// correctly through two levels of the AST.
+///
+/// FLS §6.21: Expression precedence — `+` is left-associative.
+#[test]
+fn milestone_2_nested_add() {
+    if !tools_available() {
+        eprintln!(
+            "milestone_2_nested_add: SKIP (aarch64 cross tools or qemu-aarch64 not found)"
+        );
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("main.rs");
+
+    std::fs::write(&src, "fn main() -> i32 { 1 + 2 + 3 }\n").expect("write fixture");
+
+    let exit_code = compile_and_run(&src, dir.path());
+    assert_eq!(exit_code, 6, "expected exit 6 (1+2+3), got {exit_code}");
+}
+
+// ── Milestone 1 ───────────────────────────────────────────────────────────────
+
 /// Milestone 1 (implicit unit): `fn main() {}` exits with code 0.
 ///
 /// FLS §9: "If no return type is specified, the return type is `()`."
