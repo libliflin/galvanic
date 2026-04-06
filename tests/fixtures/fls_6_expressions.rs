@@ -463,3 +463,37 @@ fn struct_update_example() -> i32 {
     let b = Origin { x: 5, ..a };     // FLS §6.11: update syntax — y copied from a
     b.x + b.y                          // 5 + 2 = 7
 }
+
+// FLS §6.11: Struct expressions with struct-type fields.
+// FLS §6.13: Chained field access expressions `receiver.field.field`.
+//
+// A struct may have fields whose types are themselves named structs. The
+// inner struct's fields occupy consecutive stack slots within the outer
+// struct's layout, in declaration order (FLS §4.11).
+//
+// Note: FLS §6.11 describes struct expressions but provides no example of
+// nested struct literals specifically. This example is derived from the
+// general struct expression semantics combined with field access (§6.13).
+//
+// FLS §6.13: "A field access expression accesses a field of a struct value."
+// Chained access `outer.inner.x` applies §6.13 twice: first to get `inner`
+// (a place of struct type), then again to get `x` (a scalar place).
+//
+// Cache-line note: A struct with two 2-field sub-structs occupies 4 consecutive
+// 8-byte slots (32 bytes = half a cache line). The nested field `inner.x` at
+// slot offset 1 within the sub-struct is adjacent to `inner.y` at offset 2 —
+// both fit in the same cache line as `outer` itself.
+struct Vec2 { x: i32, y: i32 }
+struct Segment { start: Vec2, end_pt: Vec2 }
+
+fn chained_field_access_example() -> i32 {
+    // FLS §6.11: nested struct literal — `start` and `end_pt` are Vec2 values.
+    // FLS §4.11: layout: start.x=slot0, start.y=slot1, end_pt.x=slot2, end_pt.y=slot3.
+    let s = Segment {
+        start: Vec2 { x: 0, y: 0 },
+        end_pt: Vec2 { x: 3, y: 4 },
+    };
+    // FLS §6.13: `s.end_pt.x` = slot2, `s.end_pt.y` = slot3.
+    // Manhattan distance: |end_pt.x - start.x| + |end_pt.y - start.y| = 3 + 4 = 7.
+    s.end_pt.x + s.end_pt.y
+}

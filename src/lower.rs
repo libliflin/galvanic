@@ -264,6 +264,13 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     // FLS §14.2: Tuple struct field counts. Maps struct name → field count.
     // Used to recognize constructor calls `Point(a, b)` during let-binding lowering.
     let mut tuple_struct_defs: HashMap<String, usize> = HashMap::new();
+    // FLS §6.11, §6.13, §4.11: Track per-field struct type names for nested struct
+    // construction and chained field access. `None` = scalar field, `Some(name)` =
+    // field whose type is another named struct (requiring multiple stack slots).
+    //
+    // Cache-line note: struct fields of struct type occupy their nested struct's total
+    // slot count instead of a single slot, allowing precise offset computation.
+    let mut struct_raw_field_types: HashMap<String, Vec<Option<String>>> = HashMap::new();
 
     for item in &src.items {
         match &item.kind {
@@ -275,10 +282,35 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                             .iter()
                             .map(|f| f.name.text(source).to_owned())
                             .collect();
-                        struct_defs.insert(struct_name, field_names);
+                        // FLS §6.13: Record the type of each field so we can compute
+                        // nested slot offsets for chained field access (`s.b.x`).
+                        // Scalar primitive types map to `None`; user-defined struct types
+                        // map to `Some(type_name)` and occupy multiple consecutive slots.
+                        let field_types: Vec<Option<String>> = fields
+                            .iter()
+                            .map(|f| match &f.ty.kind {
+                                TyKind::Path(segs) if segs.len() == 1 => {
+                                    let ty_name = segs[0].text(source);
+                                    // Primitive scalar types — each occupies exactly one slot.
+                                    match ty_name {
+                                        "i8" | "i16" | "i32" | "i64" | "i128"
+                                        | "u8" | "u16" | "u32" | "u64" | "u128"
+                                        | "isize" | "usize" | "f32" | "f64"
+                                        | "bool" | "char" => None,
+                                        // Any other single-segment type is assumed to be a
+                                        // user-defined struct — look it up in struct_defs later.
+                                        other => Some(other.to_owned()),
+                                    }
+                                }
+                                _ => None, // reference types, tuple types, etc. — treat as scalar
+                            })
+                            .collect();
+                        struct_defs.insert(struct_name.clone(), field_names);
+                        struct_raw_field_types.insert(struct_name, field_types);
                     }
                     StructKind::Unit => {
-                        struct_defs.insert(struct_name, vec![]);
+                        struct_defs.insert(struct_name.clone(), vec![]);
+                        struct_raw_field_types.insert(struct_name, vec![]);
                     }
                     StructKind::Tuple(fields) => {
                         // FLS §14.2: Tuple struct. Record field count so that
@@ -525,6 +557,81 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         }
     }
 
+    // Compute struct sizes and field offsets for nested struct support.
+    //
+    // FLS §6.11: Struct expressions with struct-type fields require knowing the
+    // total slot count for each field type to allocate contiguous stack slots.
+    // FLS §6.13: Chained field access (`s.b.x`) requires computing the byte
+    // offset of field `b` within `s`, which equals the sum of sizes of preceding
+    // fields. For scalar fields this is 1 slot; for struct-type fields it is
+    // the nested struct's total slot count.
+    //
+    // Algorithm: iteratively compute sizes until fixed point (handles forward
+    // references between structs; cycles left at their default of field_count).
+    //
+    // FLS §4.11: Representation. Galvanic lays out struct fields in declaration
+    // order with no padding (each slot is 8 bytes). This matches the ARM64 ABI
+    // for small aggregate passing.
+    //
+    // Cache-line note: struct_sizes and struct_field_offsets are read-only after
+    // construction and are not on any hot path.
+    let mut struct_sizes: HashMap<String, usize> = HashMap::new();
+    loop {
+        let mut changed = false;
+        for (sname, ftypes) in &struct_raw_field_types {
+            if struct_sizes.contains_key(sname) {
+                continue;
+            }
+            let mut total = 0usize;
+            let mut can_compute = true;
+            for ft in ftypes {
+                match ft {
+                    None => total += 1,
+                    Some(inner) => {
+                        if let Some(&sz) = struct_sizes.get(inner) {
+                            total += sz;
+                        } else {
+                            can_compute = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            if can_compute {
+                struct_sizes.insert(sname.clone(), total);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    // Any struct not yet resolved (unknown field type or cycle) defaults to
+    // its declared field count — same as the pre-nested-struct behaviour.
+    for (sname, field_names) in &struct_defs {
+        struct_sizes.entry(sname.clone()).or_insert(field_names.len());
+    }
+
+    // Compute field slot offsets: for each struct, the slot offset of each field
+    // relative to the struct's base slot.
+    //
+    // Example: `Outer { a: Inner { x: i32, y: i32 }, b: i32 }` has
+    //   field_offsets["Outer"] = [0, 2]  (a starts at 0, b at 2)
+    //   struct_sizes["Outer"] = 3        (2 for Inner + 1 for b)
+    let mut struct_field_offsets: HashMap<String, Vec<usize>> = HashMap::new();
+    for (sname, ftypes) in &struct_raw_field_types {
+        let mut offsets = Vec::with_capacity(ftypes.len());
+        let mut off = 0usize;
+        for ft in ftypes {
+            offsets.push(off);
+            off += match ft {
+                None => 1,
+                Some(inner) => struct_sizes.get(inner).copied().unwrap_or(1),
+            };
+        }
+        struct_field_offsets.insert(sname.clone(), offsets);
+    }
+
     // Second pass: lower function items.
     //
     // FLS §6.17: Branch target labels must be unique within the assembly file.
@@ -537,7 +644,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     for item in &src.items {
         match &item.kind {
             ItemKind::Fn(fn_def) => {
-                let (ir_fn, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &enum_defs, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &const_vals, &static_names, None, label_base)?;
+                let (ir_fn, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &enum_defs, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &const_vals, &static_names, &struct_raw_field_types, &struct_field_offsets, &struct_sizes, None, label_base)?;
                 label_base = next_label;
                 fns.push(ir_fn);
             }
@@ -575,6 +682,9 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         &enum_return_fns,
                         &const_vals,
                         &static_names,
+                        &struct_raw_field_types,
+                        &struct_field_offsets,
+                        &struct_sizes,
                         mctx,
                         label_base,
                     )?;
@@ -643,6 +753,9 @@ fn lower_fn(
     enum_return_fns: &HashMap<String, String>,
     const_vals: &HashMap<String, i32>,
     static_names: &std::collections::HashSet<String>,
+    struct_field_types: &HashMap<String, Vec<Option<String>>>,
+    struct_field_offsets: &HashMap<String, Vec<usize>>,
+    struct_sizes: &HashMap<String, usize>,
     method: Option<MethodCtx<'_>>,
     start_label: u32,
 ) -> Result<(IrFn, u32), LowerError> {
@@ -705,7 +818,7 @@ fn lower_fn(
         Some(block) => block,
     };
 
-    let mut ctx = LowerCtx::new(source, ret_ty, struct_defs, tuple_struct_defs, enum_defs, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, const_vals, static_names, start_label);
+    let mut ctx = LowerCtx::new(source, ret_ty, struct_defs, tuple_struct_defs, enum_defs, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, const_vals, static_names, struct_field_types, struct_field_offsets, struct_sizes, start_label);
 
     // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
     // to stack slots. Each parameter slot is allocated in parameter order
@@ -1443,6 +1556,42 @@ struct LowerCtx<'src> {
     ///
     /// Cache-line note: read-only during lowering; not on any hot path.
     static_names: &'src std::collections::HashSet<String>,
+
+    /// Per-field struct type names for nested struct support.
+    ///
+    /// FLS §6.11, §6.13: Struct-type fields require more than one stack slot and
+    /// need special handling in both construction (recursive literal storing) and
+    /// field access (chained offset computation).
+    ///
+    /// `None` = scalar field (i32, bool, u32, etc.), `Some(name)` = struct field.
+    ///
+    /// Cache-line note: read-only during lowering; not on any hot path.
+    struct_field_types: &'src HashMap<String, Vec<Option<String>>>,
+
+    /// Per-struct field slot offsets.
+    ///
+    /// FLS §6.13: Chained field access `s.b.x` requires computing the slot
+    /// offset of field `b` within `s`, which equals the sum of sizes of preceding
+    /// fields. For scalar fields this is 1; for struct-type fields it is that
+    /// struct's total slot count (see `struct_sizes`).
+    ///
+    /// `struct_field_offsets["Outer"][i]` is the slot offset of field `i`
+    /// relative to the base slot of an `Outer` variable.
+    ///
+    /// Cache-line note: read-only during lowering; not on any hot path.
+    struct_field_offsets: &'src HashMap<String, Vec<usize>>,
+
+    /// Total stack slot count for each named struct type.
+    ///
+    /// FLS §4.11: Galvanic lays out struct fields in declaration order, each
+    /// occupying 8 bytes. A struct with N scalar fields has size N. A struct
+    /// with a struct-type field of size M has size (sum of field sizes).
+    ///
+    /// Used to allocate the correct number of consecutive stack slots when a
+    /// nested struct variable is bound via `let`.
+    ///
+    /// Cache-line note: read-only during lowering; not on any hot path.
+    struct_sizes: &'src HashMap<String, usize>,
 }
 
 impl<'src> LowerCtx<'src> {
@@ -1460,6 +1609,9 @@ impl<'src> LowerCtx<'src> {
         enum_return_fns: &'src HashMap<String, String>,
         const_vals: &'src HashMap<String, i32>,
         static_names: &'src std::collections::HashSet<String>,
+        struct_field_types: &'src HashMap<String, Vec<Option<String>>>,
+        struct_field_offsets: &'src HashMap<String, Vec<usize>>,
+        struct_sizes: &'src HashMap<String, usize>,
         start_label: u32,
     ) -> Self {
         LowerCtx {
@@ -1482,6 +1634,9 @@ impl<'src> LowerCtx<'src> {
             enum_return_fns,
             const_vals,
             static_names,
+            struct_field_types,
+            struct_field_offsets,
+            struct_sizes,
             local_struct_types: HashMap::new(),
             local_enum_types: HashMap::new(),
             local_array_lens: HashMap::new(),
@@ -1562,6 +1717,175 @@ impl<'src> LowerCtx<'src> {
             }
             IrValue::Unit => Err(LowerError::Unsupported(
                 "unit value used as arithmetic operand".into(),
+            )),
+        }
+    }
+
+    // ── Nested struct helpers ─────────────────────────────────────────────────
+
+    /// Store a nested struct literal into consecutive stack slots starting at `base_slot`.
+    ///
+    /// Called when a struct literal has a field whose type is itself a named struct.
+    /// For example, in `let r = Rect { a: Point { x: 1, y: 2 }, b: ... }`, when
+    /// storing the `a` field we recurse with `struct_name = "Point"`.
+    ///
+    /// FLS §6.11: Struct expressions. Each field initializer is evaluated and
+    /// stored into the corresponding slot of the nested struct's layout.
+    ///
+    /// FLS §6.1.2:37–45: All stores are runtime instructions — no const folding.
+    ///
+    /// Cache-line note: N scalar fields in the nested struct emit N `str` instructions
+    /// (4 bytes each); the slots are consecutive so consecutive stores touch the same
+    /// 64-byte cache lines as non-nested structs.
+    fn store_nested_struct_lit(
+        &mut self,
+        expr: &Expr,
+        base_slot: u8,
+        struct_name: &str,
+    ) -> Result<(), LowerError> {
+        // The initializer must be a struct literal for the same type.
+        let ExprKind::StructLit { fields: lit_fields, .. } = &expr.kind else {
+            return Err(LowerError::Unsupported(format!(
+                "expected struct literal `{struct_name} {{ .. }}` for nested struct field"
+            )));
+        };
+
+        let field_names = self
+            .struct_defs
+            .get(struct_name)
+            .ok_or_else(|| {
+                LowerError::Unsupported(format!("unknown struct type `{struct_name}`"))
+            })?
+            .clone();
+
+        let field_offsets = self
+            .struct_field_offsets
+            .get(struct_name)
+            .cloned()
+            .unwrap_or_default();
+        let field_types = self
+            .struct_field_types
+            .get(struct_name)
+            .cloned()
+            .unwrap_or_default();
+
+        for (field_idx, field_name) in field_names.iter().enumerate() {
+            let field_offset = field_offsets.get(field_idx).copied().unwrap_or(field_idx);
+            let dst_slot = base_slot + field_offset as u8;
+
+            let field_init = lit_fields
+                .iter()
+                .find(|(f, _)| f.text(self.source) == field_name.as_str())
+                .ok_or_else(|| {
+                    LowerError::Unsupported(format!(
+                        "missing field `{field_name}` in nested `{struct_name}` literal"
+                    ))
+                })?;
+
+            let nested_ty = field_types.get(field_idx).cloned().flatten();
+            if let Some(nested_type_name) = nested_ty {
+                // Doubly-nested struct: recurse.
+                self.store_nested_struct_lit(&field_init.1, dst_slot, &nested_type_name)?;
+            } else {
+                let val = self.lower_expr(&field_init.1, &IrTy::I32)?;
+                let src = self.val_to_reg(val)?;
+                self.instrs.push(Instr::Store { src, slot: dst_slot });
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve a place expression (variable or chained field access) to its
+    /// stack slot index and optional struct type name.
+    ///
+    /// Returns `(slot, Some(type_name))` for a struct-typed place (e.g., `r.b`
+    /// where `b` is of type `Point`) or `(slot, None)` for a scalar place.
+    ///
+    /// This is the core of chained field access (`r.b.x`): the outer call
+    /// resolves `r.b` to `(slot_of_b, Some("Point"))`, then resolves `.x`
+    /// within `Point` to yield the final scalar slot.
+    ///
+    /// FLS §6.13: Field access expressions. The spec allows any number of
+    /// nested field accesses; we support arbitrary depth by recursion.
+    ///
+    /// FLS §6.1.4: Place expressions. A field access on a place expression is
+    /// itself a place expression — it can be the left operand of assignment.
+    ///
+    /// Cache-line note: each level of recursion costs one map lookup, not a
+    /// memory access. The actual load is emitted by the caller.
+    fn resolve_place(
+        &self,
+        expr: &Expr,
+    ) -> Result<(u8, Option<String>), LowerError> {
+        match &expr.kind {
+            ExprKind::Path(segs) if segs.len() == 1 => {
+                let var_name = segs[0].text(self.source);
+                let slot = *self.locals.get(var_name).ok_or_else(|| {
+                    LowerError::Unsupported(format!(
+                        "undefined variable `{var_name}` in field access"
+                    ))
+                })?;
+                // Check if this variable is a struct type — if so, further field
+                // access is possible. Non-struct locals return None (scalar type).
+                let ty = self.local_struct_types.get(&slot).cloned();
+                Ok((slot, ty))
+            }
+            ExprKind::FieldAccess { receiver, field } => {
+                // Recursively resolve the receiver to a (slot, optional_type) pair.
+                let (recv_slot, recv_ty) = self.resolve_place(receiver)?;
+
+                let field_name = field.text(self.source);
+
+                // FLS §6.10: Tuple field access `.0`, `.1` — integer index.
+                // Check tuple lens BEFORE the struct-type check, because tuples
+                // have no entry in `local_struct_types` (recv_ty is None for them).
+                if self.local_tuple_lens.contains_key(&recv_slot) {
+                    let idx: usize = field_name.parse().map_err(|_| {
+                        LowerError::Unsupported(format!(
+                            "invalid tuple field index `{field_name}`"
+                        ))
+                    })?;
+                    return Ok((recv_slot + idx as u8, None));
+                }
+
+                // FLS §6.13: Named struct field — look up field index and offset.
+                let type_name = recv_ty.ok_or_else(|| {
+                    LowerError::Unsupported(format!(
+                        "field access on scalar value (field `{field_name}`)"
+                    ))
+                })?;
+
+                let field_names = self.struct_defs.get(&type_name).ok_or_else(|| {
+                    LowerError::Unsupported(format!("unknown struct type `{type_name}`"))
+                })?;
+                let field_idx = field_names
+                    .iter()
+                    .position(|n| n == field_name)
+                    .ok_or_else(|| {
+                        LowerError::Unsupported(format!(
+                            "no field `{field_name}` in struct `{type_name}`"
+                        ))
+                    })?;
+
+                let offset = self
+                    .struct_field_offsets
+                    .get(&type_name)
+                    .and_then(|o| o.get(field_idx))
+                    .copied()
+                    .unwrap_or(field_idx);
+
+                // Return the type of this field (None if scalar, Some if nested struct).
+                let field_ty = self
+                    .struct_field_types
+                    .get(&type_name)
+                    .and_then(|t| t.get(field_idx))
+                    .cloned()
+                    .flatten();
+
+                Ok((recv_slot + offset as u8, field_ty))
+            }
+            _ => Err(LowerError::Unsupported(
+                "unsupported place expression (only variables and field accesses supported)".into(),
             )),
         }
     }
@@ -1978,11 +2302,17 @@ impl<'src> LowerCtx<'src> {
                 }
 
                 // FLS §6.11: Struct literal initializer — allocate one slot per
-                // field (consecutive) and store each field value.
+                // scalar field (or N slots for a struct-type field of total size N)
+                // and store each field value.
                 //
-                // Cache-line note: an N-field struct occupies N consecutive
-                // 8-byte slots. The base slot is recorded so that later field
-                // access expressions can compute `base_slot + field_index`.
+                // FLS §6.13, §4.11: Nested struct fields occupy multiple consecutive
+                // slots. The total slot count for the outer struct is `struct_sizes`
+                // entry for the struct type; field slot offsets come from
+                // `struct_field_offsets`.
+                //
+                // Cache-line note: an N-slot struct occupies N consecutive 8-byte
+                // slots. The base slot is recorded so that chained field access
+                // can compute `base_slot + field_offset`.
                 if let Some(init_expr) = init.as_ref()
                     && let ExprKind::StructLit {
                         name: struct_name_span,
@@ -2002,11 +2332,17 @@ impl<'src> LowerCtx<'src> {
                             })?
                             .clone();
 
-                        // Allocate base slot for field 0; subsequent fields get
-                        // consecutive slots (alloc_slot is monotonically increasing).
+                        // FLS §4.11: Allocate the total number of slots for this struct,
+                        // which may be greater than field_names.len() when any field is
+                        // itself a struct type (each such field occupies multiple slots).
+                        let total_slots = self
+                            .struct_sizes
+                            .get(struct_name)
+                            .copied()
+                            .unwrap_or(field_names.len());
                         let base_slot = self.alloc_slot()?;
-                        for _ in 1..field_names.len() {
-                            self.alloc_slot()?; // consume slots for fields 1..n-1
+                        for _ in 1..total_slots {
+                            self.alloc_slot()?; // consume additional slots for nested fields
                         }
 
                         self.locals.insert(var_name, base_slot);
@@ -2039,26 +2375,62 @@ impl<'src> LowerCtx<'src> {
                             None
                         };
 
+                        // Pre-fetch field offset and type tables to avoid repeated map
+                        // lookups inside the loop. Both are keyed by struct name.
+                        let field_offsets: Vec<usize> = self
+                            .struct_field_offsets
+                            .get(struct_name)
+                            .cloned()
+                            .unwrap_or_default();
+                        let field_types: Vec<Option<String>> = self
+                            .struct_field_types
+                            .get(struct_name)
+                            .cloned()
+                            .unwrap_or_default();
+
                         // Store each field in declaration order.
                         // FLS §6.11: Field initializers are evaluated in source
                         // order but stored in declaration order for layout stability.
                         // FLS §6.11: Fields not explicitly listed are copied from base.
                         for (field_idx, field_name) in field_names.iter().enumerate() {
-                            let dst_slot = base_slot + field_idx as u8;
+                            // FLS §4.11: field slot = base + offset (not base + index)
+                            // because preceding struct-type fields may span multiple slots.
+                            let field_offset = field_offsets
+                                .get(field_idx)
+                                .copied()
+                                .unwrap_or(field_idx);
+                            let dst_slot = base_slot + field_offset as u8;
 
                             if let Some(field_init) = init_fields
                                 .iter()
                                 .find(|(f, _)| f.text(self.source) == field_name.as_str())
                             {
-                                // Explicitly provided field — evaluate and store.
-                                let val = self.lower_expr(&field_init.1, &IrTy::I32)?;
-                                let src = self.val_to_reg(val)?;
-                                self.instrs.push(Instr::Store { src, slot: dst_slot });
+                                // FLS §6.11: Explicitly provided field — evaluate and store.
+                                // If the field is itself a struct type, store recursively
+                                // into `total_size` consecutive slots starting at `dst_slot`.
+                                let nested_ty = field_types
+                                    .get(field_idx)
+                                    .cloned()
+                                    .flatten();
+                                if let Some(nested_type_name) = nested_ty {
+                                    // Nested struct field: recursively store the struct literal
+                                    // into the target slots. Only struct literals are supported
+                                    // as nested struct field values at this milestone.
+                                    self.store_nested_struct_lit(
+                                        &field_init.1,
+                                        dst_slot,
+                                        &nested_type_name,
+                                    )?;
+                                } else {
+                                    let val = self.lower_expr(&field_init.1, &IrTy::I32)?;
+                                    let src = self.val_to_reg(val)?;
+                                    self.instrs.push(Instr::Store { src, slot: dst_slot });
+                                }
                             } else if let Some(base_first_slot) = base_struct_slot {
                                 // FLS §6.11: Copy unspecified field from the base struct.
-                                // Load from `base_first_slot + field_idx`, store to `dst_slot`.
+                                // Load from `base_first_slot + field_offset`, store to `dst_slot`.
                                 // Cache-line note: load+store = two 4-byte instructions = 8 bytes.
-                                let src_slot = base_first_slot + field_idx as u8;
+                                let src_slot = base_first_slot + field_offset as u8;
                                 let tmp = self.alloc_reg()?;
                                 self.instrs.push(Instr::Load { dst: tmp, slot: src_slot });
                                 self.instrs.push(Instr::Store { src: tmp, slot: dst_slot });
@@ -4833,73 +5205,16 @@ impl<'src> LowerCtx<'src> {
                             ))
                         })?
                     }
-                    ExprKind::FieldAccess { receiver, field } => {
-                        // Resolve the receiver to its base slot.
-                        //
+                    ExprKind::FieldAccess { .. } => {
                         // FLS §6.5.10: The left operand must be a place expression.
-                        // Supported forms:
-                        //   - Struct field: `s.name = value` (FLS §6.13)
-                        //   - Tuple element: `t.0 = value` (FLS §6.10)
-                        let base_slot = match &receiver.kind {
-                            ExprKind::Path(segs) if segs.len() == 1 => {
-                                let var_name = segs[0].text(self.source);
-                                self.locals.get(var_name).copied().ok_or_else(|| {
-                                    LowerError::Unsupported(format!(
-                                        "undefined variable `{var_name}` in field assignment"
-                                    ))
-                                })?
-                            }
-                            _ => {
-                                return Err(LowerError::Unsupported(
-                                    "field assignment on non-variable receiver not yet supported"
-                                        .into(),
-                                ));
-                            }
-                        };
-                        let field_name = field.text(self.source);
-
-                        // FLS §6.10: Tuple element store `t.N = value`.
-                        // The field token is a decimal integer naming the index.
-                        if self.local_tuple_lens.contains_key(&base_slot) {
-                            let idx: usize = field_name.parse().map_err(|_| {
-                                LowerError::Unsupported(format!(
-                                    "invalid tuple field index `{field_name}`"
-                                ))
-                            })?;
-                            let n = self.local_tuple_lens[&base_slot];
-                            if idx >= n {
-                                return Err(LowerError::Unsupported(format!(
-                                    "tuple index {idx} out of range for {n}-element tuple"
-                                )));
-                            }
-                            base_slot + idx as u8
-                        } else {
-                            // FLS §6.13: Struct field assignment by name.
-                            let struct_type_name = self
-                                .local_struct_types
-                                .get(&base_slot)
-                                .ok_or_else(|| {
-                                    LowerError::Unsupported(format!(
-                                        "variable at slot {base_slot} is not a struct or tuple"
-                                    ))
-                                })?
-                                .clone();
-                            let field_names =
-                                self.struct_defs.get(&struct_type_name).ok_or_else(|| {
-                                    LowerError::Unsupported(format!(
-                                        "unknown struct type `{struct_type_name}`"
-                                    ))
-                                })?;
-                            let field_idx = field_names
-                                .iter()
-                                .position(|n| n == field_name)
-                                .ok_or_else(|| {
-                                    LowerError::Unsupported(format!(
-                                        "no field `{field_name}` in struct `{struct_type_name}`"
-                                    ))
-                                })?;
-                            base_slot + field_idx as u8
-                        }
+                        // FLS §6.13: Struct field assignment — resolve using the same
+                        // `resolve_place` helper as field read access, which supports
+                        // chained access (`r.b.x = value`) via recursive slot computation.
+                        //
+                        // Cache-line note: field store emits one `str` instruction (4 bytes),
+                        // identical in cost to a plain variable store.
+                        let (slot, _) = self.resolve_place(lhs)?;
+                        slot
                     }
                     // FLS §6.5.10: Assignment to an indexed place expression `arr[index] = value`.
                     // FLS §6.9: The base must be a known array variable; the index is a runtime value.
@@ -5054,66 +5369,12 @@ impl<'src> LowerCtx<'src> {
                             ))
                         })?
                     }
-                    ExprKind::FieldAccess { receiver, field } => {
-                        // Resolve receiver variable to its base slot.
-                        //
-                        // FLS §6.5.11: Supports struct field and tuple element forms.
-                        let base_slot = match &receiver.kind {
-                            ExprKind::Path(segs) if segs.len() == 1 => {
-                                let var_name = segs[0].text(self.source);
-                                self.locals.get(var_name).copied().ok_or_else(|| {
-                                    LowerError::Unsupported(format!(
-                                        "undefined variable `{var_name}` in compound field assignment"
-                                    ))
-                                })?
-                            }
-                            _ => {
-                                return Err(LowerError::Unsupported(
-                                    "compound field assignment on non-variable receiver not yet supported".into(),
-                                ));
-                            }
-                        };
-                        let field_name = field.text(self.source);
-
-                        // FLS §6.10: Tuple element compound assignment `t.N += value`.
-                        if self.local_tuple_lens.contains_key(&base_slot) {
-                            let idx: usize = field_name.parse().map_err(|_| {
-                                LowerError::Unsupported(format!(
-                                    "invalid tuple field index `{field_name}`"
-                                ))
-                            })?;
-                            let n = self.local_tuple_lens[&base_slot];
-                            if idx >= n {
-                                return Err(LowerError::Unsupported(format!(
-                                    "tuple index {idx} out of range for {n}-element tuple"
-                                )));
-                            }
-                            base_slot + idx as u8
-                        } else {
-                            // FLS §6.13: Struct field compound assignment by name.
-                            let struct_type_name = self
-                                .local_struct_types
-                                .get(&base_slot)
-                                .ok_or_else(|| {
-                                    LowerError::Unsupported(format!(
-                                        "variable at slot {base_slot} is not a struct or tuple"
-                                    ))
-                                })?
-                                .clone();
-                            let field_names =
-                                self.struct_defs.get(&struct_type_name).ok_or_else(|| {
-                                    LowerError::Unsupported(format!(
-                                        "unknown struct type `{struct_type_name}` in compound field assignment"
-                                    ))
-                                })?;
-                            let field_idx =
-                                field_names.iter().position(|n| n == field_name).ok_or_else(|| {
-                                    LowerError::Unsupported(format!(
-                                        "no field `{field_name}` in struct `{struct_type_name}`"
-                                    ))
-                                })?;
-                            base_slot + field_idx as u8
-                        }
+                    ExprKind::FieldAccess { .. } => {
+                        // FLS §6.5.11: Compound assignment on a struct field or chained
+                        // field access — resolve using `resolve_place` which handles
+                        // both `self.field += n` and `r.b.x += n` uniformly.
+                        let (slot, _) = self.resolve_place(target)?;
+                        slot
                     }
                     _ => {
                         return Err(LowerError::Unsupported(
@@ -6365,69 +6626,30 @@ impl<'src> LowerCtx<'src> {
             // `base + N - 1`; if base is cache-line-aligned, fields 0–7 fit
             // within one 64-byte cache line (8 × 8-byte slots).
             //
+            // FLS §6.13: Field access expression `receiver.field`.
+            //
+            // Supports chained field access (`r.b.x`) via the `resolve_place`
+            // helper, which recursively resolves the receiver and computes the
+            // final stack slot using per-struct field offsets.
+            //
             // FLS §6.13 AMBIGUOUS: The spec does not specify whether field
             // access on a temporary (non-place) expression is well-formed.
-            // Galvanic restricts to named local variables for this milestone.
-            ExprKind::FieldAccess { receiver, field } => {
-                // Resolve receiver to its base slot.
-                let base_slot = match &receiver.kind {
-                    ExprKind::Path(segs) if segs.len() == 1 => {
-                        let var_name = segs[0].text(self.source);
-                        *self.locals.get(var_name).ok_or_else(|| {
-                            LowerError::Unsupported(format!(
-                                "undefined variable `{var_name}` in field access"
-                            ))
-                        })?
-                    }
-                    _ => {
-                        return Err(LowerError::Unsupported(
-                            "field access on non-variable expression not yet supported".into(),
-                        ));
-                    }
-                };
-
-                let field_name = field.text(self.source);
-
-                // FLS §6.10: Tuple field access `.0`, `.1`, etc.
-                // The field token is a decimal integer literal; parse it as
-                // the index into the tuple's consecutive stack slots.
-                if self.local_tuple_lens.contains_key(&base_slot) {
-                    let idx: usize = field_name.parse().map_err(|_| {
-                        LowerError::Unsupported(format!(
-                            "invalid tuple field index `{field_name}`"
-                        ))
-                    })?;
-                    let n = self.local_tuple_lens[&base_slot];
-                    if idx >= n {
-                        return Err(LowerError::Unsupported(format!(
-                            "tuple index {idx} out of range for {n}-element tuple"
-                        )));
-                    }
-                    let slot = base_slot + idx as u8;
-                    let reg = self.alloc_reg()?;
-                    self.instrs.push(Instr::Load { dst: reg, slot });
-                    return Ok(IrValue::Reg(reg));
-                }
-
-                // FLS §6.13: Struct field access by name.
-                let struct_type_name = self.local_struct_types.get(&base_slot).ok_or_else(|| {
-                    LowerError::Unsupported(format!(
-                        "variable at slot {base_slot} is not a struct or tuple"
-                    ))
-                })?.clone();
-
-                // Look up the field index in the struct definition.
-                let field_names = self.struct_defs.get(&struct_type_name).ok_or_else(|| {
-                    LowerError::Unsupported(format!("unknown struct type `{struct_type_name}`"))
-                })?;
-                let field_idx =
-                    field_names.iter().position(|n| n == field_name).ok_or_else(|| {
-                        LowerError::Unsupported(format!(
-                            "no field `{field_name}` in struct `{struct_type_name}`"
-                        ))
-                    })?;
-
-                let slot = base_slot + field_idx as u8;
+            // Galvanic restricts to named local variables and chained field
+            // access — temporary struct values are not yet supported as receivers.
+            //
+            // Cache-line note: field access emits one `ldr` instruction (4 bytes).
+            // For a struct with N fields, the Nth field load touches slot
+            // `base + field_offset[N-1]`; if base is cache-line-aligned, all
+            // scalar fields fit within the same 64-byte cache lines as their slots.
+            ExprKind::FieldAccess { .. } => {
+                // Use resolve_place to handle both simple (`p.x`) and chained
+                // (`r.b.x`) field access in a uniform way.
+                //
+                // FLS §6.13: The result of a field access is the value stored in
+                // the field's stack slot. For scalar fields (None type), emit `ldr`.
+                // For struct-type fields (Some type), returning only the base slot
+                // is correct for read access — the caller can further chain accesses.
+                let (slot, _field_ty) = self.resolve_place(expr)?;
                 let reg = self.alloc_reg()?;
                 self.instrs.push(Instr::Load { dst: reg, slot });
                 Ok(IrValue::Reg(reg))
