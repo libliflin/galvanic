@@ -38,6 +38,8 @@ use crate::ir::{IrBinOp, Instr, IrFn, IrTy, IrValue, Module};
 // FLS §6.15.5: Continue expressions — `lower_expr` handles `ExprKind::Continue`.
 // FLS §6.15.6: Break expressions — `lower_expr` handles `ExprKind::Break`.
 // FLS §6.5.3: Comparison operator expressions — `lower_expr` handles Lt/Le/Gt/Ge/Eq/Ne.
+// FLS §6.5.6: Bit operator expressions — `lower_expr` handles BitAnd/BitOr/BitXor.
+// FLS §6.5.7: Shift operator expressions — `lower_expr` handles Shl/Shr.
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
@@ -470,6 +472,8 @@ impl<'src> LowerCtx<'src> {
             }
 
             // FLS §6.5.5: Arithmetic binary operations — emit runtime instructions.
+            // FLS §6.5.6: Bit operator expressions (`&`, `|`, `^`).
+            // FLS §6.5.7: Shift operator expressions (`<<`, `>>`).
             //
             // Both operands are lowered recursively, producing LoadImm/BinOp
             // instructions. The result is in a virtual register.
@@ -477,8 +481,32 @@ impl<'src> LowerCtx<'src> {
             // Division and remainder are included here. FLS §6.23: division by
             // zero panics at runtime; galvanic does not yet insert a check
             // (FLS §6.23 AMBIGUOUS: the panic mechanism is not yet specified).
+            //
+            // FLS §6.5.6: "The type of a bit expression is the type of the left
+            // operand." Both operands must have the same integer type.
+            //
+            // FLS §6.5.7: For signed integer types, `>>` is arithmetic shift
+            // (sign-extending). The shift amount is taken modulo the bit width.
+            // FLS §6.5.7 AMBIGUOUS: the spec says the shift amount is taken modulo
+            // the bit width, but does not specify the exact register width used for
+            // the modulo (ARM64 uses 6 bits of the shift register for 64-bit shifts).
+            //
+            // FLS §6.1.2:37–45: All these operators emit runtime instructions —
+            // no constant folding even when both operands are literals.
             ExprKind::Binary { op, lhs, rhs }
-                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem) =>
+                if matches!(
+                    op,
+                    BinOp::Add
+                        | BinOp::Sub
+                        | BinOp::Mul
+                        | BinOp::Div
+                        | BinOp::Rem
+                        | BinOp::BitAnd
+                        | BinOp::BitOr
+                        | BinOp::BitXor
+                        | BinOp::Shl
+                        | BinOp::Shr
+                ) =>
             {
                 match ret_ty {
                     IrTy::I32 => {
@@ -495,12 +523,17 @@ impl<'src> LowerCtx<'src> {
                             BinOp::Mul => IrBinOp::Mul,
                             BinOp::Div => IrBinOp::Div,
                             BinOp::Rem => IrBinOp::Rem,
+                            BinOp::BitAnd => IrBinOp::BitAnd,
+                            BinOp::BitOr => IrBinOp::BitOr,
+                            BinOp::BitXor => IrBinOp::BitXor,
+                            BinOp::Shl => IrBinOp::Shl,
+                            BinOp::Shr => IrBinOp::Shr,
                             _ => unreachable!("matched above"),
                         };
                         self.instrs.push(Instr::BinOp { op: ir_op, dst, lhs: lhs_reg, rhs: rhs_reg });
                         Ok(IrValue::Reg(dst))
                     }
-                    _ => Err(LowerError::Unsupported("arithmetic on non-i32 type".into())),
+                    _ => Err(LowerError::Unsupported("bitwise/arithmetic on non-i32 type".into())),
                 }
             }
 

@@ -1104,3 +1104,175 @@ fn runtime_neg_emits_neg_instruction() {
         "expected `neg` instruction for unary negation, got:\n{asm}"
     );
 }
+
+// ── Milestone 12: bitwise operators & | ^ << >> ───────────────────────────────
+//
+// FLS §6.5.6: Bit operator expressions. The `&`, `|`, and `^` operators
+// perform bitwise AND, OR, and XOR on integer types respectively.
+//
+// FLS §6.5.7: Shift operator expressions. `<<` shifts left (padding with zeros);
+// `>>` shifts right (arithmetic shift for signed integers — sign-extending).
+//
+// ARM64 instructions:
+//   & → `and x{d}, x{l}, x{r}`
+//   | → `orr x{d}, x{l}, x{r}`
+//   ^ → `eor x{d}, x{l}, x{r}`
+//   << → `lsl x{d}, x{l}, x{r}`
+//   >> → `asr x{d}, x{l}, x{r}` (arithmetic, signed)
+//
+// FLS §6.1.2:37–45: All bitwise/shift operators emit runtime instructions —
+// even statically-known values like `5 & 3` must emit `and` at runtime.
+//
+// FLS example (§6.5.6): `0b1010 & 0b1100` = `0b1000` = 8
+// FLS example (§6.5.7): `1 << 3` = 8
+
+/// Milestone 12: `fn main() -> i32 { 5 & 3 }` exits with code 1.
+///
+/// `5 & 3` = `0b101 & 0b011` = `0b001` = 1.
+///
+/// FLS §6.5.6: Bitwise AND operator `&`.
+/// FLS §6.1.2:37–45: Must emit runtime `and` instruction, not fold to 1.
+#[test]
+fn milestone_12_bitwise_and() {
+    let Some(exit_code) = compile_and_run("fn main() -> i32 { 5 & 3 }\n") else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "expected exit 1 from `5 & 3`, got {exit_code}");
+}
+
+/// Milestone 12: `fn main() -> i32 { 5 | 3 }` exits with code 7.
+///
+/// `5 | 3` = `0b101 | 0b011` = `0b111` = 7.
+///
+/// FLS §6.5.6: Bitwise OR operator `|`.
+#[test]
+fn milestone_12_bitwise_or() {
+    let Some(exit_code) = compile_and_run("fn main() -> i32 { 5 | 3 }\n") else {
+        return;
+    };
+    assert_eq!(exit_code, 7, "expected exit 7 from `5 | 3`, got {exit_code}");
+}
+
+/// Milestone 12: `fn main() -> i32 { 5 ^ 3 }` exits with code 6.
+///
+/// `5 ^ 3` = `0b101 ^ 0b011` = `0b110` = 6.
+///
+/// FLS §6.5.6: Bitwise XOR operator `^`.
+#[test]
+fn milestone_12_bitwise_xor() {
+    let Some(exit_code) = compile_and_run("fn main() -> i32 { 5 ^ 3 }\n") else {
+        return;
+    };
+    assert_eq!(exit_code, 6, "expected exit 6 from `5 ^ 3`, got {exit_code}");
+}
+
+/// Milestone 12: `fn main() -> i32 { 1 << 3 }` exits with code 8.
+///
+/// `1 << 3` = 8.
+///
+/// FLS §6.5.7: Left shift operator `<<`. Pads with zeros on the right.
+#[test]
+fn milestone_12_shift_left() {
+    let Some(exit_code) = compile_and_run("fn main() -> i32 { 1 << 3 }\n") else {
+        return;
+    };
+    assert_eq!(exit_code, 8, "expected exit 8 from `1 << 3`, got {exit_code}");
+}
+
+/// Milestone 12: `fn main() -> i32 { 16 >> 2 }` exits with code 4.
+///
+/// `16 >> 2` = 4.
+///
+/// FLS §6.5.7: Right shift operator `>>`. Arithmetic shift for signed i32.
+#[test]
+fn milestone_12_shift_right() {
+    let Some(exit_code) = compile_and_run("fn main() -> i32 { 16 >> 2 }\n") else {
+        return;
+    };
+    assert_eq!(exit_code, 4, "expected exit 4 from `16 >> 2`, got {exit_code}");
+}
+
+/// Milestone 12: bitwise ops composed with arithmetic.
+///
+/// `fn main() -> i32 { (3 & 5) | (1 << 2) }` = `(1) | (4)` = 5.
+///
+/// FLS §6.5.6: Bit operators. FLS §6.21: Precedence — shift binds tighter
+/// than `|`, which binds tighter than `||`. So `(3 & 5) | (1 << 2)` parses
+/// as `(3 & 5) | (1 << 2)`.
+#[test]
+fn milestone_12_bitwise_composed() {
+    let Some(exit_code) = compile_and_run("fn main() -> i32 { (3 & 5) | (1 << 2) }\n") else {
+        return;
+    };
+    assert_eq!(exit_code, 5, "expected exit 5 from `(3 & 5) | (1 << 2)`, got {exit_code}");
+}
+
+/// Assembly inspection: `5 & 3` must emit `and` (not constant-fold to 1).
+///
+/// FLS §6.5.6: Bitwise AND.
+/// FLS §6.1.2:37–45: Non-const bitwise ops must emit runtime instructions.
+#[test]
+fn runtime_and_emits_and_instruction() {
+    let asm = compile_to_asm("fn main() -> i32 { 5 & 3 }\n");
+    assert!(
+        asm.contains("and"),
+        "expected `and` instruction for `5 & 3`, got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #1"),
+        "assembly must not constant-fold `5 & 3` to #1:\n{asm}"
+    );
+}
+
+/// Assembly inspection: `5 | 3` must emit `orr`.
+///
+/// FLS §6.5.6: Bitwise OR. ARM64 uses `orr` mnemonic.
+/// FLS §6.1.2:37–45: Non-const bitwise ops must emit runtime instructions.
+#[test]
+fn runtime_or_emits_orr_instruction() {
+    let asm = compile_to_asm("fn main() -> i32 { 5 | 3 }\n");
+    assert!(
+        asm.contains("orr"),
+        "expected `orr` instruction for `5 | 3`, got:\n{asm}"
+    );
+}
+
+/// Assembly inspection: `5 ^ 3` must emit `eor`.
+///
+/// FLS §6.5.6: Bitwise XOR. ARM64 uses `eor` mnemonic.
+/// FLS §6.1.2:37–45: Non-const bitwise ops must emit runtime instructions.
+#[test]
+fn runtime_xor_emits_eor_instruction() {
+    let asm = compile_to_asm("fn main() -> i32 { 5 ^ 3 }\n");
+    assert!(
+        asm.contains("eor"),
+        "expected `eor` instruction for `5 ^ 3`, got:\n{asm}"
+    );
+}
+
+/// Assembly inspection: `1 << 3` must emit `lsl`.
+///
+/// FLS §6.5.7: Left shift. ARM64 uses `lsl` mnemonic.
+/// FLS §6.1.2:37–45: Non-const shifts must emit runtime instructions.
+#[test]
+fn runtime_shl_emits_lsl_instruction() {
+    let asm = compile_to_asm("fn main() -> i32 { 1 << 3 }\n");
+    assert!(
+        asm.contains("lsl"),
+        "expected `lsl` instruction for `1 << 3`, got:\n{asm}"
+    );
+}
+
+/// Assembly inspection: `16 >> 2` must emit `asr` (arithmetic shift right for signed i32).
+///
+/// FLS §6.5.7: Right shift on signed integers is arithmetic (sign-extending).
+/// ARM64 uses `asr` for arithmetic shift right.
+/// FLS §6.1.2:37–45: Non-const shifts must emit runtime instructions.
+#[test]
+fn runtime_shr_emits_asr_instruction() {
+    let asm = compile_to_asm("fn main() -> i32 { 16 >> 2 }\n");
+    assert!(
+        asm.contains("asr"),
+        "expected `asr` instruction for `16 >> 2`, got:\n{asm}"
+    );
+}

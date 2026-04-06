@@ -295,6 +295,38 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool) 
                     writeln!(out, "    cmp     x{lhs}, x{rhs}               // FLS §6.5.3: compare (signed)")?;
                     writeln!(out, "    cset    x{dst}, ne                    // FLS §6.5.3: x{dst} = (x{lhs} != x{rhs})")?;
                 }
+
+                // FLS §6.5.6: Bit operator expressions.
+                // ARM64: `and`/`orr`/`eor` operate on 64-bit registers.
+                // Cache-line note: one 4-byte instruction per bitwise op.
+                IrBinOp::BitAnd => writeln!(
+                    out,
+                    "    and     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.6: bitwise and"
+                )?,
+                IrBinOp::BitOr => writeln!(
+                    out,
+                    "    orr     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.6: bitwise or"
+                )?,
+                IrBinOp::BitXor => writeln!(
+                    out,
+                    "    eor     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.6: bitwise xor"
+                )?,
+
+                // FLS §6.5.7: Shift operator expressions.
+                // ARM64: `lsl` (logical shift left) and `asr` (arithmetic shift right).
+                // Signed integers use arithmetic right shift (sign-extending) per FLS §6.5.7.
+                // FLS §6.5.7 AMBIGUOUS: shift amount is taken modulo bit width; ARM64
+                // variable-shift instructions use the low 6 bits of the shift register
+                // for 64-bit shifts (mod 64). This matches the FLS description for i32/i64.
+                // Cache-line note: one 4-byte instruction per shift.
+                IrBinOp::Shl => writeln!(
+                    out,
+                    "    lsl     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.7: shift left"
+                )?,
+                IrBinOp::Shr => writeln!(
+                    out,
+                    "    asr     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.7: arithmetic shift right (signed)"
+                )?,
             }
         }
 
