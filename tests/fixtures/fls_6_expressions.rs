@@ -46,6 +46,11 @@ fn main() {
     let _w: i32 = 5 as i32;       // i32 → i32 identity cast
     let _x: i32 = true as i32;    // bool → i32: true = 1
     let _y: i32 = false as i32;   // bool → i32: false = 0
+    // FLS §6.5.9: Numeric casts to other integer types (milestone 66).
+    let _cast_u32: u32 = 10 as u32;      // i32 → u32 reinterpret
+    let _cast_i64: i64 = 20 as i64;      // i32 → i64 widening
+    let _cast_usize: usize = 5 as usize; // i32 → usize
+    let _cast_back: i32 = _cast_u32 as i32; // u32 → i32 reinterpret
 
     // FLS §6.4 — Block expressions
     let _v = {

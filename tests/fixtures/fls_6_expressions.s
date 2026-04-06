@@ -3,7 +3,7 @@
     // fn main — FLS §9
     .global main
 main:
-    sub     sp, sp, #224            // FLS §8.1: frame for 28 slot(s)
+    sub     sp, sp, #256            // FLS §8.1: frame for 32 slot(s)
     mov     x0, #5                   // FLS §2.4.4.1: load imm 5
     str     x0, [sp, #0              ] // FLS §8.1: store slot 0
     mov     x1, #1                   // FLS §2.4.4.1: load imm 1
@@ -112,10 +112,18 @@ main:
     str     x62, [sp, #200            ] // FLS §8.1: store slot 25
     mov     x63, #0                   // FLS §2.4.4.1: load imm 0
     str     x63, [sp, #208            ] // FLS §8.1: store slot 26
-    mov     x64, #42                  // FLS §2.4.4.1: load imm 42
+    mov     x64, #10                  // FLS §2.4.4.1: load imm 10
     str     x64, [sp, #216            ] // FLS §8.1: store slot 27
+    mov     x65, #20                  // FLS §2.4.4.1: load imm 20
+    str     x65, [sp, #224            ] // FLS §8.1: store slot 28
+    mov     x66, #5                   // FLS §2.4.4.1: load imm 5
+    str     x66, [sp, #232            ] // FLS §8.1: store slot 29
+    ldr     x67, [sp, #216            ] // FLS §8.1: load slot 27
+    str     x67, [sp, #240            ] // FLS §8.1: store slot 30
+    mov     x68, #42                  // FLS §2.4.4.1: load imm 42
+    str     x68, [sp, #248            ] // FLS §8.1: store slot 31
     mov     x0, #0              // FLS §4.4: unit return
-    add     sp, sp, #224            // FLS §8.1: restore stack frame
+    add     sp, sp, #256            // FLS §8.1: restore stack frame
     ret
 
     // fn classify_age — FLS §9

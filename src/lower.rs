@@ -6729,26 +6729,27 @@ impl<'src> LowerCtx<'src> {
             // FLS §6.5.9: Type cast expression `expr as Ty`.
             //
             // A type cast expression converts the value of `expr` to the
-            // target type. At this milestone, only casts to `i32` and `bool`
-            // are supported — both are represented identically as 32-bit
-            // integer values in the IR (bool: 0 = false, 1 = true), so the
-            // cast is a no-op at the instruction level: lower the operand as
-            // i32 and return the result register unchanged.
+            // target type. All numeric integer types are supported: signed
+            // types lower with IrTy::I32 context (arithmetic: asr, sdiv),
+            // unsigned types with IrTy::U32 context (arithmetic: lsr, udiv).
             //
-            // FLS §6.5.9: Supported numeric casts (at this milestone):
-            //   i32 as i32  → identity (no instruction emitted)
-            //   bool as i32 → identity (bool is already 0/1 in IR)
+            // FLS §6.5.9: Numeric casts. On ARM64 all integer types occupy a
+            // 64-bit register. Same-width casts (i32↔u32, i64↔u64) are
+            // identity at the register level — no instruction emitted. Widening
+            // casts (i32→i64) are also identity since the register already
+            // holds 64 bits. Narrowing casts (i64→i8) should truncate the upper
+            // bits; galvanic does not yet emit explicit truncation — correct for
+            // values within the target range.
+            //
+            // FLS §6.5.9 AMBIGUOUS: The spec says narrowing integer casts
+            // truncate to the target type's bit width, but does not specify the
+            // mechanism. Galvanic defers explicit truncation.
             //
             // FLS §6.1.2:37–45: The operand is lowered at runtime even if its
             // value is statically known — no constant folding.
             //
-            // FLS §6.5.9 AMBIGUOUS: The spec enumerates valid cast combinations
-            // in terms of "permitted coercions" but does not specify the exact
-            // set of allowed source→target pairs. The Rust reference lists them;
-            // galvanic follows the reference. Unsupported casts return an error.
-            //
-            // Cache-line note: no new instruction is emitted for identity casts
-            // (i32→i32, bool→i32). The source value's register is reused directly.
+            // Cache-line note: identity casts emit zero instructions. The
+            // source register is reused directly by the caller.
             ExprKind::Cast { expr: inner, ty } => {
                 // Determine the target type name from the type path.
                 let target_name = match &ty.kind {
@@ -6757,26 +6758,43 @@ impl<'src> LowerCtx<'src> {
                     }
                     _ => {
                         return Err(LowerError::Unsupported(
-                            "cast to non-path type (only named types like i32 supported)".into(),
+                            "cast to non-path type (only named types supported)".into(),
                         ));
                     }
                 };
 
                 match target_name {
-                    // FLS §6.5.9: Numeric casts to i32.
-                    // Includes bool → i32 (0/1 → 0/1), i32 → i32 (identity).
-                    // Both source types are already represented as 32-bit
-                    // integers in the IR, so no instruction is emitted.
-                    "i32" => {
-                        // Lower the operand using i32 context. Boolean values
-                        // (FLS §2.4.7) are already 0/1 integers in the IR, so
-                        // this handles `bool as i32` correctly without any
-                        // additional instruction.
+                    // FLS §6.5.9: Signed integer targets.
+                    // Includes bool → i32 (0/1 → 0/1 identity), all signed
+                    // integer types. Narrowing (i64→i8, i64→i16) is identity
+                    // at the register level for values within the target range.
+                    "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => {
                         self.lower_expr(inner, &IrTy::I32)
                     }
 
+                    // FLS §6.5.9: Unsigned integer targets.
+                    // Division uses `udiv` and right shift uses `lsr` when the
+                    // result is subsequently used in arithmetic with U32 context.
+                    // Narrowing casts (u64→u8, u64→u16) are identity for small
+                    // values; truncation deferred (see FLS §6.5.9 AMBIGUOUS above).
+                    "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => {
+                        self.lower_expr(inner, &IrTy::U32)
+                    }
+
+                    // FLS §6.5.9: Cast to bool: nonzero → true, zero → false.
+                    // Not yet implemented — requires a comparison instruction.
+                    "bool" => Err(LowerError::Unsupported(
+                        "cast to bool not yet supported (FLS §6.5.9)".into(),
+                    )),
+
+                    // FLS §6.5.9: Floating-point targets not yet implemented
+                    // (galvanic has no floating-point IR type or codegen).
+                    "f32" | "f64" => Err(LowerError::Unsupported(
+                        "cast to floating-point not yet supported (FLS §6.5.9)".into(),
+                    )),
+
                     other => Err(LowerError::Unsupported(format!(
-                        "cast to `{other}` (only `i32` target supported at this milestone)"
+                        "cast to `{other}` not yet supported (FLS §6.5.9)"
                     ))),
                 }
             }

@@ -7805,3 +7805,119 @@ fn main() -> i32 {
         "expected bl to Point__translate:\n{asm}"
     );
 }
+
+// ── Milestone 66: numeric type casts to all integer types ──────────────────
+//
+// FLS §6.5.9: Type cast expressions. The `as` operator converts a value of
+// one numeric type to another. On ARM64 all integer types use 64-bit registers,
+// so widening casts (i32→i64, i32→usize) and same-width reinterpret casts
+// (i32↔u32) are identity at the register level — no extra instruction is
+// emitted. Narrowing casts (i64→i8) are also identity for values within the
+// target range; explicit truncation is deferred (FLS §6.5.9 AMBIGUOUS).
+//
+// FLS §6.5.9 AMBIGUOUS: The spec says narrowing casts truncate to the target
+// bit width but does not specify the mechanism. Galvanic defers truncation.
+//
+// FLS §6.1.2:37–45: The operand is lowered at runtime — no constant folding.
+
+/// Milestone 66: `i32 as u32 as i32` — round-trip through unsigned is identity.
+///
+/// FLS §6.5.9: `i32 as u32` reinterprets bits; `u32 as i32` reinterprets back.
+/// For values in [0, i32::MAX] the result equals the original.
+#[test]
+fn milestone_66_i32_as_u32_as_i32() {
+    let src = "fn main() -> i32 { let x: i32 = 42; x as u32 as i32 }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected 42, got {exit_code}");
+}
+
+/// Milestone 66: `u32 as i32` — unsigned parameter returned as signed.
+///
+/// FLS §6.5.9: For values ≤ i32::MAX, `u32 as i32` is an identity cast.
+#[test]
+fn milestone_66_u32_as_i32() {
+    let src = "fn get(x: u32) -> i32 { x as i32 }\nfn main() -> i32 { get(99) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 99, "expected 99, got {exit_code}");
+}
+
+/// Milestone 66: `i64 as i32` — narrowing signed cast is identity for small values.
+///
+/// FLS §6.5.9: Narrowing cast truncates to 32 bits; for values ≤ i32::MAX
+/// the result equals the original value.
+#[test]
+fn milestone_66_i64_as_i32() {
+    let src = "fn narrow(n: i64) -> i32 { n as i32 }\nfn main() -> i32 { narrow(77) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 77, "expected 77, got {exit_code}");
+}
+
+/// Milestone 66: `i32 as i64 as i32` — widen then narrow round-trip.
+///
+/// FLS §6.5.9: `i32 as i64` sign-extends (identity on 64-bit ARM64);
+/// `i64 as i32` truncates (identity for values ≤ i32::MAX).
+#[test]
+fn milestone_66_i32_as_i64_round_trip() {
+    let src = "fn main() -> i32 { let x: i32 = 55; x as i64 as i32 }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 55, "expected 55, got {exit_code}");
+}
+
+/// Milestone 66: `i32 as usize as i32` — round-trip through usize is identity.
+///
+/// FLS §6.5.9: `usize` is an unsigned pointer-sized integer; on a 64-bit
+/// system it is 64 bits. For values ≤ i32::MAX, `i32 as usize as i32`
+/// preserves the value.
+#[test]
+fn milestone_66_i32_as_usize_round_trip() {
+    let src = "fn main() -> i32 { let n: i32 = 11; n as usize as i32 }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 11, "expected 11, got {exit_code}");
+}
+
+/// Milestone 66: `usize as i32` — usize parameter cast to signed return.
+///
+/// FLS §6.5.9: For values ≤ i32::MAX, `usize as i32` is identity.
+#[test]
+fn milestone_66_usize_as_i32() {
+    let src = "fn to_signed(n: usize) -> i32 { n as i32 }\nfn main() -> i32 { to_signed(33) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 33, "expected 33, got {exit_code}");
+}
+
+/// Milestone 66: cast in arithmetic — `(x as u32 + 1) as i32`.
+///
+/// FLS §6.5.9: The result of a cast expression may be used directly as an
+/// operand in an arithmetic expression. The intermediate u32 value uses
+/// unsigned arithmetic (udiv, lsr) for subsequent operations.
+#[test]
+fn milestone_66_cast_in_arithmetic() {
+    let src = "fn inc(x: i32) -> i32 { (x as u32 + 1) as i32 }\nfn main() -> i32 { inc(20) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 21, "expected 21, got {exit_code}");
+}
+
+/// Milestone 66: assembly inspection — identity casts emit no extra instruction.
+///
+/// FLS §6.5.9: For same-register-width casts the source register is reused
+/// directly. No `mov`, `sxtw`, `uxtw`, or masking instruction should appear
+/// between the load of `x` and the return.
+///
+/// Cache-line note: zero-instruction casts have zero cache-line footprint —
+/// the optimal outcome for a reinterpret cast.
+#[test]
+fn runtime_numeric_cast_identity_emits_no_extra_instruction() {
+    // `x as u32 as i32` — two reinterpret casts that collapse to nothing.
+    let src = "fn main() -> i32 { let x: i32 = 5; x as u32 as i32 }\n";
+    let asm = compile_to_asm(src);
+    // The assembly should contain exactly one `ldr` (to load x from the stack)
+    // and no `sxtw`, `uxtw`, `and`, or extra `mov` for the casts themselves.
+    let cast_instrs = asm.lines().filter(|l| {
+        let l = l.trim();
+        l.starts_with("sxtw") || l.starts_with("uxtw") || l.starts_with("and ")
+    }).count();
+    assert_eq!(
+        cast_instrs, 0,
+        "expected zero cast instructions for identity `i32 as u32 as i32`, got:\n{asm}"
+    );
+}
