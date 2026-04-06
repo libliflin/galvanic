@@ -11792,3 +11792,153 @@ fn main() -> i32 {
         "expected immediate 5 (len of \"hello\") in assembly:\n{asm}"
     );
 }
+
+// ── Milestone 94: Byte string literals compile to runtime ARM64 (FLS §2.4.2) ──
+
+/// Milestone 94: Byte string literal `.len()` directly on the literal.
+///
+/// FLS §2.4.2: A byte string literal `b"..."` has type `&[u8]`.
+/// `b"hello".len()` returns 5 (number of bytes).
+#[test]
+fn milestone_94_byte_str_len_literal_direct() {
+    let src = r#"
+fn main() -> i32 {
+    b"hello".len() as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "b\"hello\".len()=5, got {exit_code}");
+}
+
+/// Milestone 94: Byte string literal bound to a `let` variable, then `.len()`.
+///
+/// FLS §2.4.2: `b"hello"` is a `&[u8]` with 5 bytes.
+/// FLS §8.1: Let binding stores the byte-length value.
+#[test]
+fn milestone_94_byte_str_len_let_binding() {
+    let src = r#"
+fn main() -> i32 {
+    let s = b"hello";
+    s.len() as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "b\"hello\".len()=5, got {exit_code}");
+}
+
+/// Milestone 94: Empty byte string literal has length zero.
+///
+/// FLS §2.4.2: `b""` is a valid byte string literal of type `&[u8]` with zero bytes.
+#[test]
+fn milestone_94_byte_str_len_empty() {
+    let src = r#"
+fn main() -> i32 {
+    let s = b"";
+    s.len() as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "b\"\".len()=0, got {exit_code}");
+}
+
+/// Milestone 94: Six-byte byte string literal.
+///
+/// FLS §2.4.2: ASCII characters in byte strings are 1 byte each.
+/// `b"world!"` is 6 bytes.
+#[test]
+fn milestone_94_byte_str_len_six_bytes() {
+    let src = r#"
+fn main() -> i32 {
+    let s = b"world!";
+    s.len() as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "b\"world!\".len()=6, got {exit_code}");
+}
+
+/// Milestone 94: Byte string with escape sequence — `\n` is one byte.
+///
+/// FLS §2.4.2.1: `\n` in a byte string literal is the single byte 0x0A.
+/// `b"a\nb"` is 3 bytes.
+#[test]
+fn milestone_94_byte_str_len_escape_newline() {
+    let src = r#"
+fn main() -> i32 {
+    let s = b"a\nb";
+    s.len() as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "b\"a\\nb\".len()=3, got {exit_code}");
+}
+
+/// Milestone 94: Byte string with tab escape.
+///
+/// FLS §2.4.2.1: `\t` is one byte (0x09).
+/// `b"x\ty"` is 3 bytes.
+#[test]
+fn milestone_94_byte_str_len_escape_tab() {
+    let src = r#"
+fn main() -> i32 {
+    let s = b"x\ty";
+    s.len() as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "b\"x\\ty\".len()=3, got {exit_code}");
+}
+
+/// Milestone 94: Two byte string lengths summed.
+///
+/// FLS §2.4.2: Multiple `&[u8]` let bindings in scope simultaneously.
+/// `b"hi".len() + b"bye".len()` = 2 + 3 = 5.
+#[test]
+fn milestone_94_byte_str_len_two_bindings_summed() {
+    let src = r#"
+fn main() -> i32 {
+    let a = b"hi";
+    let b = b"bye";
+    a.len() as i32 + b.len() as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "2+3=5, got {exit_code}");
+}
+
+/// Milestone 94: Byte string length used in arithmetic.
+///
+/// FLS §2.4.2: `.len()` on `&[u8]` returns `usize`; cast to `i32` for return.
+/// `b"abc".len() as i32 + 1 == 4`.
+#[test]
+fn milestone_94_byte_str_len_in_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    let s = b"abc";
+    s.len() as i32 + 1
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 4, "3+1=4, got {exit_code}");
+}
+
+/// Assembly check: byte string literal `.len()` emits a `mov` with the byte count.
+///
+/// FLS §2.4.2: The byte count is a compile-time constant.  It must still be
+/// materialised as a runtime `mov` (FLS §6.1.2:37–45).
+/// Cache-line note: one `mov` = 4 bytes (half a cache slot).
+#[test]
+fn runtime_byte_str_literal_len_emits_mov() {
+    let src = r#"
+fn main() -> i32 {
+    let s = b"hello";
+    s.len() as i32
+}
+"#;
+    let asm = compile_to_asm(src);
+    // b"hello" is 5 bytes; the assembler emits `mov x0, #5` or equivalent.
+    assert!(
+        asm.contains("#5"),
+        "expected immediate 5 (len of b\"hello\") in assembly:\n{asm}"
+    );
+}

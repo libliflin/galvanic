@@ -51,4 +51,15 @@ fn main() {
     let _x = "";                // 0 bytes
     let _y = "a\nb";            // 3 bytes (\n is 1 byte)
     let _z = "a\tb";            // 3 bytes (\t is 1 byte)
+
+    // FLS §2.4.2 — Byte string literals
+    // A byte string literal has type `&[u8]`.  The FLS does not provide
+    // standalone example programs for `.len()`; these are derived from the
+    // section's semantic description (§2.4.2: "a sequence of bytes").
+    // Galvanic materialises the byte count as a runtime immediate.
+    let _ba = b"hello";         // 5 bytes
+    let _bb = b"world!";        // 6 bytes
+    let _bc = b"";              // 0 bytes
+    let _bd = b"a\nb";          // 3 bytes (\n is 1 byte)
+    let _be = b"a\tb";          // 3 bytes (\t is 1 byte)
 }
