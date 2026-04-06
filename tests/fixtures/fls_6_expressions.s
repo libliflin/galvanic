@@ -632,6 +632,36 @@ match_ident_pattern:
     add     sp, sp, #32             // FLS §8.1: restore stack frame
     ret
 
+    // fn struct_expr_example — FLS §9
+    .global struct_expr_example
+struct_expr_example:
+    sub     sp, sp, #16             // FLS §8.1: frame for 2 slot(s)
+    mov     x0, #10                  // FLS §2.4.4.1: load imm 10
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    mov     x1, #20                  // FLS §2.4.4.1: load imm 20
+    str     x1, [sp, #8              ] // FLS §8.1: store slot 1
+    ldr     x2, [sp, #0              ] // FLS §8.1: load slot 0
+    ldr     x3, [sp, #8              ] // FLS §8.1: load slot 1
+    add     x4, x2, x3          // FLS §6.5.5: add
+    mov     x0, x4              // FLS §6.19: return reg 4 → x0
+    add     sp, sp, #16             // FLS §8.1: restore stack frame
+    ret
+
+    // fn field_access_example — FLS §9
+    .global field_access_example
+field_access_example:
+    sub     sp, sp, #16             // FLS §8.1: frame for 2 slot(s)
+    mov     x0, #6                   // FLS §2.4.4.1: load imm 6
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    mov     x1, #7                   // FLS §2.4.4.1: load imm 7
+    str     x1, [sp, #8              ] // FLS §8.1: store slot 1
+    ldr     x2, [sp, #0              ] // FLS §8.1: load slot 0
+    ldr     x3, [sp, #8              ] // FLS §8.1: load slot 1
+    mul     x4, x2, x3          // FLS §6.5.5: mul
+    mov     x0, x4              // FLS §6.19: return reg 4 → x0
+    add     sp, sp, #16             // FLS §8.1: restore stack frame
+    ret
+
     // ELF entry point — FLS §18.1
     .global _start
 _start:
