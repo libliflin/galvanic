@@ -725,6 +725,7 @@ pub struct MatchArm {
 /// FLS §5.1: Wildcard pattern `_` — matches any value without binding.
 /// FLS §5.1.4: Identifier patterns — bind the matched value to a name.
 /// FLS §5.2: Literal patterns — integer and boolean literals.
+/// FLS §5.1.9: Range patterns — `lo..=hi` (inclusive) and `lo..hi` (exclusive).
 /// FLS §5.1.11: Or patterns — `p0 | p1 | ...`.
 #[derive(Debug, Clone)]
 pub enum Pat {
@@ -756,6 +757,34 @@ pub enum Pat {
     NegLitInt(u128),
     /// Boolean literal pattern `true` / `false`. FLS §5.2.
     LitBool(bool),
+    /// Inclusive range pattern `lo..=hi`. FLS §5.1.9.
+    ///
+    /// Matches any value `v` such that `lo <= v && v <= hi`.
+    /// Both bounds are stored as `i128` to accommodate negative bounds
+    /// (e.g., `-5..=-1`).
+    ///
+    /// FLS §5.1.9: "A range pattern matches any value that falls within
+    /// the range's bounds." For `..=`, both bounds are inclusive.
+    ///
+    /// Cache-line note: lowering emits ~7 instructions per arm (ldr + 2×mov
+    /// + 2×cmp + and + cbz = 28 bytes) — two range arms per 64-byte cache line.
+    RangeInclusive {
+        /// Lower bound (inclusive).
+        lo: i128,
+        /// Upper bound (inclusive).
+        hi: i128,
+    },
+    /// Exclusive range pattern `lo..hi`. FLS §5.1.9.
+    ///
+    /// Matches any value `v` such that `lo <= v && v < hi`.
+    ///
+    /// FLS §5.1.9: Range patterns with `..` have an exclusive upper bound.
+    RangeExclusive {
+        /// Lower bound (inclusive).
+        lo: i128,
+        /// Upper bound (exclusive).
+        hi: i128,
+    },
     /// OR pattern `p0 | p1 | ...`. Matches if any alternative matches.
     ///
     /// FLS §5.1.11: Or patterns. The alternatives are tested left-to-right;
