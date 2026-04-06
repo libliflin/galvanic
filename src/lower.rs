@@ -400,6 +400,49 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         }
     }
 
+    // Build `&mut self` scalar-return registry: set of mangled names for `&mut self`
+    // methods that return a scalar (non-unit, non-struct, non-enum) type.
+    //
+    // FLS §10.1: `&mut self` methods may return any type. When the return type is
+    // a scalar (i32, bool, u32, etc.), the callee uses `RetFieldsAndValue` to pack
+    // both the modified fields and the return value. The call site uses `CallMutReturn`
+    // to capture the scalar from x{N} after writing back the fields.
+    //
+    // Cache-line note: populated once at compile time; not on any hot runtime path.
+    let mut mut_self_scalar_return_fns: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for item in &src.items {
+        if let ItemKind::Impl(impl_def) = &item.kind {
+            let type_name = impl_def.ty.text(source);
+            for method in &impl_def.methods {
+                if method.self_param != Some(SelfKind::RefMut) {
+                    continue;
+                }
+                let method_name = method.name.text(source);
+                let mangled = format!("{type_name}__{method_name}");
+                // Check if return type is a known scalar primitive (not void, not struct, not enum).
+                if let Some(ret_ty_node) = &method.ret_ty
+                    && let TyKind::Path(segs) = &ret_ty_node.kind
+                    && segs.len() == 1
+                {
+                    let ret_name = segs[0].text(source);
+                    // Scalar types handled by lower_ty: i32, bool, u32, etc.
+                    // Exclude struct/enum types (handled by other registries).
+                    if !struct_defs.contains_key(ret_name)
+                        && !enum_defs.contains_key(ret_name)
+                        && matches!(
+                            ret_name,
+                            "i32" | "i8" | "i16" | "i64" | "isize"
+                                | "u8" | "u16" | "u32" | "u64" | "usize"
+                                | "bool"
+                        )
+                    {
+                        mut_self_scalar_return_fns.insert(mangled);
+                    }
+                }
+            }
+        }
+    }
+
     // Build struct-returning associated function registry: mangled name → struct type name.
     //
     // FLS §10.1: Associated functions (no self parameter) that return a struct type
@@ -494,7 +537,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     for item in &src.items {
         match &item.kind {
             ItemKind::Fn(fn_def) => {
-                let (ir_fn, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &enum_defs, &method_self_kinds, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &const_vals, &static_names, None, label_base)?;
+                let (ir_fn, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &enum_defs, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &const_vals, &static_names, None, label_base)?;
                 label_base = next_label;
                 fns.push(ir_fn);
             }
@@ -526,6 +569,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         &tuple_struct_defs,
                         &enum_defs,
                         &method_self_kinds,
+                        &mut_self_scalar_return_fns,
                         &struct_return_fns,
                         &struct_return_free_fns,
                         &enum_return_fns,
@@ -593,6 +637,7 @@ fn lower_fn(
     tuple_struct_defs: &HashMap<String, usize>,
     enum_defs: &EnumDefs,
     method_self_kinds: &HashMap<String, SelfKind>,
+    mut_self_scalar_return_fns: &std::collections::HashSet<String>,
     struct_return_fns: &HashMap<String, String>,
     struct_return_free_fns: &HashMap<String, String>,
     enum_return_fns: &HashMap<String, String>,
@@ -660,7 +705,7 @@ fn lower_fn(
         Some(block) => block,
     };
 
-    let mut ctx = LowerCtx::new(source, ret_ty, struct_defs, tuple_struct_defs, enum_defs, method_self_kinds, struct_return_fns, struct_return_free_fns, enum_return_fns, const_vals, static_names, start_label);
+    let mut ctx = LowerCtx::new(source, ret_ty, struct_defs, tuple_struct_defs, enum_defs, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, const_vals, static_names, start_label);
 
     // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
     // to stack slots. Each parameter slot is allocated in parameter order
@@ -955,11 +1000,6 @@ fn lower_fn(
     // `&mut self` in terms of register passing. Galvanic uses a value-copy convention
     // (fields passed as registers, written back on return) for simplicity.
     if self_kind == Some(SelfKind::RefMut) {
-        if ret_ty != IrTy::Unit {
-            return Err(LowerError::Unsupported(
-                "&mut self methods with non-unit return type not yet supported".into(),
-            ));
-        }
         // Determine the number of self fields. The impl_type is guaranteed Some
         // when self_kind is Some (enforced by the parser / call site).
         let type_name = impl_type.expect("impl_type must be set when self_kind is RefMut");
@@ -976,12 +1016,26 @@ fn lower_fn(
         } else {
             0
         };
-        // Run the body (statements + tail), discarding the unit tail value.
+        // Lower the body, capturing the tail value.
         // Fields in the method's local slots will have been updated by body code.
-        ctx.lower_block_to_value(body, &ret_ty)?;
-        // Emit RetFields: loads each field from slot 0..n_fields-1 into x0..x{N-1}
-        // then performs the normal epilogue.
-        ctx.instrs.push(Instr::RetFields { base_slot: 0, n_fields });
+        let tail_val = ctx.lower_block_to_value(body, &ret_ty)?;
+        if ret_ty == IrTy::Unit {
+            // Unit return: emit RetFields to write back modified fields.
+            // Emit RetFields: loads each field from slot 0..n_fields-1 into x0..x{N-1}
+            // then performs the normal epilogue.
+            ctx.instrs.push(Instr::RetFields { base_slot: 0, n_fields });
+        } else {
+            // Scalar return: emit RetFieldsAndValue — fields in x0..x{N-1}, value in x{N}.
+            //
+            // FLS §10.1: &mut self methods may return any type. Galvanic extends the
+            // write-back convention: fields in x0..x{N-1}, scalar return in x{N}.
+            //
+            // FLS §10.1 AMBIGUOUS: The spec does not define the calling convention for
+            // &mut self with non-unit return type. This extension is consistent with the
+            // existing register-packing convention.
+            let val_reg = ctx.val_to_reg(tail_val)?;
+            ctx.instrs.push(Instr::RetFieldsAndValue { base_slot: 0, n_fields, val_reg });
+        }
     } else if let Some(ref struct_name) = struct_ret_name {
         // FLS §10.1: Associated function returning a struct type.
         // The tail expression must be a struct literal. Lower all statements,
@@ -1280,6 +1334,16 @@ struct LowerCtx<'src> {
     /// Cache-line note: read-only during lowering; not on any hot path.
     method_self_kinds: &'src HashMap<String, SelfKind>,
 
+    /// `&mut self` scalar-return registry: mangled names of `&mut self` methods
+    /// that return a scalar (non-unit, non-struct, non-enum) type.
+    ///
+    /// FLS §10.1: `&mut self` methods may return any type. When the return type
+    /// is scalar, the call site emits `CallMutReturn` instead of `CallMut` to
+    /// capture the scalar return value from x{N} (after the field write-backs).
+    ///
+    /// Cache-line note: read-only during lowering; not on any hot path.
+    mut_self_scalar_return_fns: &'src std::collections::HashSet<String>,
+
     /// Struct-returning associated function registry: mangled name → struct type name.
     ///
     /// FLS §10.1: Associated functions that return a struct type use a
@@ -1390,6 +1454,7 @@ impl<'src> LowerCtx<'src> {
         tuple_struct_defs: &'src HashMap<String, usize>,
         enum_defs: &'src EnumDefs,
         method_self_kinds: &'src HashMap<String, SelfKind>,
+        mut_self_scalar_return_fns: &'src std::collections::HashSet<String>,
         struct_return_fns: &'src HashMap<String, String>,
         struct_return_free_fns: &'src HashMap<String, String>,
         enum_return_fns: &'src HashMap<String, String>,
@@ -1411,6 +1476,7 @@ impl<'src> LowerCtx<'src> {
             tuple_struct_defs,
             enum_defs,
             method_self_kinds,
+            mut_self_scalar_return_fns,
             struct_return_fns,
             struct_return_free_fns,
             enum_return_fns,
@@ -6516,21 +6582,39 @@ impl<'src> LowerCtx<'src> {
                 self.has_calls = true;
                 if is_mut_self {
                     // `&mut self` call: write back x0..x{n_self_regs-1} to receiver slots.
-                    // The callee emits `RetFields`, placing modified field values
-                    // in x0..x{N-1} before returning. We store them back here.
+                    // The callee emits `RetFields` (or `RetFieldsAndValue` for scalar returns),
+                    // placing modified field values in x0..x{N-1} before returning.
+                    // We store them back here.
                     //
-                    // Return type of a `&mut self` method is unit — the call
-                    // expression itself evaluates to `()`.
+                    // If the method has a scalar return type, also capture x{N} as the result.
+                    //
+                    // FLS §10.1: Write-back convention — callee returns modified fields;
+                    // caller stores them. Scalar return in x{N} for non-unit methods.
                     //
                     // Cache-line note: N write-back stores = N × 4-byte `str`.
                     // For a 2-field struct: 8 bytes — fits in half a cache line.
-                    self.instrs.push(Instr::CallMut {
-                        name: mangled,
-                        args: arg_regs,
-                        write_back_slot: recv_base_slot,
-                        n_fields: n_self_regs as u8,
-                    });
-                    Ok(IrValue::Unit)
+                    let has_scalar_return = self.mut_self_scalar_return_fns.contains(&mangled);
+                    if has_scalar_return {
+                        // `&mut self` method returning a scalar value.
+                        // Emit CallMutReturn: write-back fields, then capture x{N} into dst.
+                        let dst = self.alloc_reg()?;
+                        self.instrs.push(Instr::CallMutReturn {
+                            name: mangled,
+                            args: arg_regs,
+                            write_back_slot: recv_base_slot,
+                            n_fields: n_self_regs as u8,
+                            dst,
+                        });
+                        Ok(IrValue::Reg(dst))
+                    } else {
+                        self.instrs.push(Instr::CallMut {
+                            name: mangled,
+                            args: arg_regs,
+                            write_back_slot: recv_base_slot,
+                            n_fields: n_self_regs as u8,
+                        });
+                        Ok(IrValue::Unit)
+                    }
                 } else {
                     let dst = self.alloc_reg()?;
                     self.instrs.push(Instr::Call { dst, name: mangled, args: arg_regs });
