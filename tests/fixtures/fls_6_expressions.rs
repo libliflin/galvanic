@@ -318,3 +318,29 @@ fn field_access_example() -> i32 {
     let r = TestPoint { x: 6, y: 7 };
     r.x * r.y   // FLS §6.13: field access on both fields
 }
+
+// FLS §6.12.2 + §10.1 — Method call expressions and associated functions.
+//
+// FLS §6.12.2: "A method call expression is a call expression whose function
+// is a method, that is, a function associated with a type."
+// FLS §10.1: "Methods are functions associated with a specific type. Methods
+// are defined within impl blocks."
+//
+// Note: FLS §6.12.2 provides no self-contained runnable example.
+// This is derived from the spec's semantic description (§10.1 + §6.12.2).
+struct MethodPoint { x: i32, y: i32 }
+
+impl MethodPoint {
+    fn sum(&self) -> i32 { self.x + self.y }   // FLS §10.1: &self method
+    fn scale_x(&self, n: i32) -> i32 { self.x * n }  // extra param beyond self
+}
+
+fn method_call_example() -> i32 {
+    let p = MethodPoint { x: 3, y: 4 };
+    p.sum()   // FLS §6.12.2: method call — passes self fields as leading args
+}
+
+fn method_call_with_arg_example() -> i32 {
+    let p = MethodPoint { x: 5, y: 0 };
+    p.scale_x(3)   // FLS §6.12.2: 5 * 3 = 15
+}

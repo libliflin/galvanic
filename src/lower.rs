@@ -97,7 +97,7 @@ impl std::fmt::Display for LowerError {
 /// ARM64 calling convention (caller-saved: x0–x17).
 fn expr_contains_call(expr: &Expr) -> bool {
     match &expr.kind {
-        ExprKind::Call { .. } => true,
+        ExprKind::Call { .. } | ExprKind::MethodCall { .. } => true,
         ExprKind::Binary { lhs, rhs, .. } => expr_contains_call(lhs) || expr_contains_call(rhs),
         ExprKind::Unary { operand, .. } => expr_contains_call(operand),
         ExprKind::Cast { expr: inner, .. } => expr_contains_call(inner),
@@ -216,6 +216,10 @@ fn expr_contains_break_with_value(expr: &Expr) -> bool {
             fields.iter().any(|(_, v)| expr_contains_break_with_value(v))
         }
         ExprKind::FieldAccess { receiver, .. } => expr_contains_break_with_value(receiver),
+        ExprKind::MethodCall { receiver, args, .. } => {
+            expr_contains_break_with_value(receiver)
+                || args.iter().any(expr_contains_break_with_value)
+        }
         // Do NOT recurse into nested loops — their `break` belongs to them.
         ExprKind::Loop(_) | ExprKind::While { .. } | ExprKind::WhileLet { .. } | ExprKind::For { .. } => false,
         _ => false,
@@ -305,7 +309,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                 }
                 enum_defs.insert(enum_name, variants);
             }
-            ItemKind::Fn(_) => {}
+            ItemKind::Fn(_) | ItemKind::Impl(_) => {}
         }
     }
 
@@ -314,7 +318,25 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     for item in &src.items {
         match &item.kind {
             ItemKind::Fn(fn_def) => {
-                fns.push(lower_fn(fn_def, source, &struct_defs, &enum_defs)?);
+                fns.push(lower_fn(fn_def, source, &struct_defs, &enum_defs, None, None)?);
+            }
+            ItemKind::Impl(impl_def) => {
+                // FLS §11: Inherent impl. Each method becomes a mangled top-level
+                // function: `TypeName__method_name`. The impl type's fields are
+                // passed as implicit leading parameters for `self`/`&self` methods.
+                let type_name = impl_def.ty.text(source);
+                for method in &impl_def.methods {
+                    let method_name = method.name.text(source);
+                    let mangled = format!("{type_name}__{method_name}");
+                    fns.push(lower_fn(
+                        method,
+                        source,
+                        &struct_defs,
+                        &enum_defs,
+                        method.self_param.map(|_| type_name),
+                        Some(&mangled),
+                    )?);
+                }
             }
             ItemKind::Struct(_) | ItemKind::Enum(_) => {} // already processed above
         }
@@ -332,13 +354,32 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
 /// per the ARM64 ABI. We spill each parameter to a stack slot so that
 /// path expressions can reference them via `Load` — reusing the same
 /// infrastructure as let-binding locals.
+/// Lower a single function (or method) definition to an `IrFn`.
+///
+/// FLS §9: Functions. FLS §10.1: Methods.
+///
+/// - `impl_type`: if `Some(type_name)`, this function is a method of that
+///   struct type and has a `self`/`&self` self-parameter. The struct's fields
+///   are spilled from leading registers before any explicit parameters.
+/// - `override_name`: if `Some(name)`, use this instead of `fn_def.name` as
+///   the function name in the emitted IR. Used for name-mangling methods to
+///   `TypeName__method_name`.
+///
+/// FLS §6.12.1: Functions with parameters receive arguments in x0–x{n-1}
+/// per the ARM64 ABI. We spill each parameter to a stack slot so that
+/// path expressions can reference them via `Load` — reusing the same
+/// infrastructure as let-binding locals.
 fn lower_fn(
     fn_def: &crate::ast::FnDef,
     source: &str,
     struct_defs: &HashMap<String, Vec<String>>,
     enum_defs: &EnumDefs,
+    impl_type: Option<&str>,
+    override_name: Option<&str>,
 ) -> Result<IrFn, LowerError> {
-    let name = fn_def.name.text(source).to_owned();
+    let name = override_name
+        .map(|s| s.to_owned())
+        .unwrap_or_else(|| fn_def.name.text(source).to_owned());
 
     // FLS §9: "If no return type is specified, the return type is `()`."
     let ret_ty = match &fn_def.ret_ty {
@@ -372,10 +413,64 @@ fn lower_fn(
     // than 1 per parameter when an enum type occupies multiple registers
     // (discriminant + field registers).
     let mut reg_idx: usize = 0;
+
+    // FLS §10.1: If this is a method with a self parameter, spill the struct
+    // fields from leading registers and register `self` as a struct variable.
+    //
+    // `&self` and `self` are lowered identically at this milestone: the
+    // caller passes each field as an individual integer register argument
+    // (a value copy). The method body can read but not mutate the original.
+    //
+    // ARM64 ABI: fields arrive in x0..x{N-1}; each is spilled to a stack
+    // slot so that `self.field` resolves via the existing field-access path.
+    //
+    // Cache-line note: N field spills = N `str` instructions (4 bytes each).
+    if let Some(type_name) = impl_type {
+        let field_names = struct_defs.get(type_name).ok_or_else(|| {
+            LowerError::Unsupported(format!(
+                "impl for unknown struct type `{type_name}`"
+            ))
+        })?;
+        let n_fields = field_names.len();
+        if n_fields > 0 {
+            if reg_idx + n_fields > 8 {
+                return Err(LowerError::Unsupported(
+                    "self fields exceed ARM64 register window".into(),
+                ));
+            }
+            let base_slot = ctx.alloc_slot()?;
+            for _ in 1..n_fields {
+                ctx.alloc_slot()?;
+            }
+            for fi in 0..n_fields {
+                ctx.instrs.push(Instr::Store {
+                    src: (reg_idx + fi) as u8,
+                    slot: base_slot + fi as u8,
+                });
+            }
+            // Register `self` as a struct variable pointing to base_slot.
+            // `self` is a keyword but &'static str coerces to &'src str.
+            ctx.locals.insert("self", base_slot);
+            ctx.local_struct_types.insert(base_slot, type_name.to_owned());
+            reg_idx += n_fields;
+        } else {
+            // Unit struct: no fields to pass. Register `self` with a dummy slot.
+            let base_slot = ctx.alloc_slot()?;
+            ctx.locals.insert("self", base_slot);
+            ctx.local_struct_types.insert(base_slot, type_name.to_owned());
+        }
+    }
     for param in fn_def.params.iter() {
         let param_name = param.name.text(source);
 
         // FLS §15: Enum type parameters — `fn f(o: Opt)`.
+        // FLS §11 / §6.12.2: Struct type parameters — `fn f(s: S)`.
+        //
+        // A struct value with N fields occupies N consecutive registers: one
+        // register per field in declaration order. This matches the method
+        // self-parameter calling convention in `lower_fn` (when `impl_type`
+        // is set). The N registers are spilled to N consecutive stack slots
+        // so that field access uses the same Load/Store paths as let-bindings.
         //
         // An enum value with max N fields occupies N+1 consecutive registers:
         // register reg_idx holds the discriminant; registers reg_idx+1..=reg_idx+N
@@ -388,6 +483,34 @@ fn lower_fn(
             && segs.len() == 1
         {
             let type_name = segs[0].text(source);
+
+            // FLS §11 / §6.12.2: Struct parameter — pass each field as a
+            // separate register, matching the method self-parameter convention.
+            if let Some(field_names) = struct_defs.get(type_name) {
+                let n_fields = field_names.len();
+                let regs_needed = n_fields.max(1); // unit structs use 0 regs but need 1 slot
+                if n_fields > 0 && reg_idx + n_fields > 8 {
+                    return Err(LowerError::Unsupported(
+                        "struct parameter exceeds ARM64 register window (>8 total registers)".into(),
+                    ));
+                }
+                let base_slot = ctx.alloc_slot()?;
+                for _ in 1..n_fields {
+                    ctx.alloc_slot()?;
+                }
+                ctx.locals.insert(param_name, base_slot);
+                ctx.local_struct_types.insert(base_slot, type_name.to_owned());
+                // Spill each field register to its stack slot.
+                for fi in 0..n_fields {
+                    ctx.instrs.push(Instr::Store {
+                        src: (reg_idx + fi) as u8,
+                        slot: base_slot + fi as u8,
+                    });
+                }
+                reg_idx += regs_needed;
+                continue;
+            }
+
             if let Some(variants) = enum_defs.get(type_name) {
                 let max_fields = variants.values().map(|(_, names)| names.len()).max().unwrap_or(0);
                 let regs_needed = 1 + max_fields;
@@ -2787,6 +2910,11 @@ impl<'src> LowerCtx<'src> {
 
                 // Lower each argument to virtual registers, left-to-right.
                 //
+                // FLS §11 / §6.12.2: If an argument is a struct variable
+                // (recorded in `local_struct_types`), it expands to N registers:
+                // one per field in declaration order. This matches the struct
+                // parameter calling convention in `lower_fn`.
+                //
                 // FLS §15: If an argument is an enum variable (recorded in
                 // `local_enum_types`), it expands to multiple registers:
                 // discriminant in the first, fields in subsequent registers.
@@ -2795,6 +2923,43 @@ impl<'src> LowerCtx<'src> {
                 // FLS §6.1.2:37–45: All loads are runtime instructions.
                 let mut arg_regs = Vec::with_capacity(args.len());
                 for arg in args {
+                    // Check whether this argument is a struct variable.
+                    let struct_info: Option<(u8, usize)> = if let ExprKind::Path(segs) = &arg.kind
+                        && segs.len() == 1
+                    {
+                        let var_name = segs[0].text(self.source);
+                        if let Some(&base_slot) = self.locals.get(var_name) {
+                            if let Some(st_name) = self.local_struct_types.get(&base_slot) {
+                                let n_fields = self.struct_defs
+                                    .get(st_name.as_str())
+                                    .map(|f| f.len())
+                                    .unwrap_or(0);
+                                Some((base_slot, n_fields))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    if let Some((base_slot, n_fields)) = struct_info {
+                        // Pass each struct field as a separate register.
+                        // FLS §11: field 0 → x{i}, field 1 → x{i+1}, etc.
+                        for fi in 0..n_fields {
+                            let field_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load {
+                                dst: field_reg,
+                                slot: base_slot + fi as u8,
+                            });
+                            arg_regs.push(field_reg);
+                        }
+                        // Unit struct: no registers to pass; continue.
+                        continue;
+                    }
+
                     // Check whether this argument is an enum variable.
                     let enum_info: Option<(u8, usize)> = if let ExprKind::Path(segs) = &arg.kind
                         && segs.len() == 1
@@ -4041,6 +4206,105 @@ impl<'src> LowerCtx<'src> {
                 let reg = self.alloc_reg()?;
                 self.instrs.push(Instr::Load { dst: reg, slot });
                 Ok(IrValue::Reg(reg))
+            }
+
+            // FLS §6.12.2 / §10.1: Method call expression `receiver.method(args)`.
+            //
+            // Supported form: the receiver must be a simple variable path whose
+            // type was recorded in `local_struct_types`. The method is resolved
+            // to a mangled function `TypeName__method_name`.
+            //
+            // Lowering strategy for `&self` and `self` methods: each struct field
+            // is passed as an individual register argument (a value copy). This
+            // matches the method's calling convention emitted by `lower_fn` when
+            // `impl_type` is set. The method can read but not mutate the caller's
+            // fields (correct for `&self`; sufficient for `self` at this milestone).
+            //
+            // ARM64 ABI: fields → x0..x{N-1}, extra args → x{N}..x{N+M-1}.
+            // Return value in x0.
+            //
+            // FLS §6.12.2 AMBIGUOUS: The spec does not specify how many
+            // auto-deref steps are legal. Galvanic restricts to zero deref steps
+            // (receiver must already be the correct struct type).
+            //
+            // Cache-line note: loading N fields emits N `ldr` instructions (4 bytes
+            // each). For a 2-field struct this is 8 bytes — fits in one cache line
+            // alongside the `bl` instruction.
+            ExprKind::MethodCall { receiver, method, args } => {
+                // Resolve the receiver to a struct variable's base slot and type.
+                let (recv_base_slot, struct_type_name) = match &receiver.kind {
+                    ExprKind::Path(segs) if segs.len() == 1 => {
+                        let var_name = segs[0].text(self.source);
+                        let base_slot =
+                            self.locals.get(var_name).copied().ok_or_else(|| {
+                                LowerError::Unsupported(format!(
+                                    "undefined variable `{var_name}` in method call"
+                                ))
+                            })?;
+                        let type_name = self
+                            .local_struct_types
+                            .get(&base_slot)
+                            .ok_or_else(|| {
+                                LowerError::Unsupported(format!(
+                                    "variable `{var_name}` is not a struct; method calls on \
+                                     non-struct types are not yet supported"
+                                ))
+                            })?
+                            .clone();
+                        (base_slot, type_name)
+                    }
+                    _ => {
+                        return Err(LowerError::Unsupported(
+                            "method call on non-variable receiver not yet supported".into(),
+                        ));
+                    }
+                };
+
+                // Build mangled function name: TypeName__method_name.
+                let method_name = method.text(self.source);
+                let mangled = format!("{struct_type_name}__{method_name}");
+
+                // Load each struct field into a register to pass as leading args.
+                //
+                // FLS §10.1: `self` fields are passed in declaration order.
+                // Field 0 → x0, field 1 → x1, etc., matching the method's
+                // parameter-spill order in lower_fn.
+                let field_names = self
+                    .struct_defs
+                    .get(struct_type_name.as_str())
+                    .ok_or_else(|| {
+                        LowerError::Unsupported(format!(
+                            "unknown struct type `{struct_type_name}` in method call"
+                        ))
+                    })?;
+                let n_fields = field_names.len();
+
+                let mut arg_regs: Vec<u8> = Vec::with_capacity(n_fields + args.len());
+
+                for fi in 0..n_fields {
+                    let slot = recv_base_slot + fi as u8;
+                    let reg = self.alloc_reg()?;
+                    self.instrs.push(Instr::Load { dst: reg, slot });
+                    arg_regs.push(reg);
+                }
+
+                // Lower explicit arguments (left-to-right, FLS §6.4:14).
+                for arg_expr in args {
+                    let val = self.lower_expr(arg_expr, &IrTy::I32)?;
+                    let reg = self.val_to_reg(val)?;
+                    arg_regs.push(reg);
+                }
+
+                if arg_regs.len() > 8 {
+                    return Err(LowerError::Unsupported(
+                        "method call with more than 8 total arguments (exceeds ARM64 register window)".into(),
+                    ));
+                }
+
+                let dst = self.alloc_reg()?;
+                self.has_calls = true;
+                self.instrs.push(Instr::Call { dst, name: mangled, args: arg_regs });
+                Ok(IrValue::Reg(dst))
             }
 
             // Anything else: not yet supported as runtime codegen.

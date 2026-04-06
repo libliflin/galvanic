@@ -97,7 +97,7 @@ pub struct Item {
 ///
 /// FLS §3: item kinds include functions, structs, enums, unions, traits,
 /// implementations, type aliases, constants, statics, use declarations,
-/// and extern blocks. `Fn`, `Struct`, and `Enum` are implemented here.
+/// and extern blocks. `Fn`, `Struct`, `Enum`, and `Impl` are implemented here.
 #[derive(Debug)]
 pub enum ItemKind {
     /// A function definition. FLS §9.
@@ -106,6 +106,12 @@ pub enum ItemKind {
     Struct(Box<StructDef>),
     /// An enum definition. FLS §15.
     Enum(Box<EnumDef>),
+    /// An inherent impl block. FLS §11.
+    ///
+    /// `impl TypeName { methods… }` — zero or more associated functions
+    /// defined on the named type. Only inherent impls (no trait bound) are
+    /// supported at this milestone.
+    Impl(Box<ImplDef>),
 }
 
 // ── Functions ─────────────────────────────────────────────────────────────────
@@ -135,7 +141,12 @@ pub struct FnDef {
     pub vis: Visibility,
     /// The function's name (span of the identifier token).
     pub name: Span,
-    /// The function's parameters.
+    /// The optional `self` parameter (present in methods only).
+    ///
+    /// FLS §10.1: Methods are functions that have a `self` parameter.
+    /// The `self` parameter is always first; regular parameters follow.
+    pub self_param: Option<SelfKind>,
+    /// The function's parameters (excluding `self`).
     pub params: Vec<Param>,
     /// The declared return type.
     ///
@@ -146,6 +157,44 @@ pub struct FnDef {
     /// FLS §9: The body is required for non-trait, non-extern functions.
     /// `None` is reserved for future use in trait/extern contexts.
     pub body: Option<Block>,
+}
+
+/// The form of a `self` parameter in a method definition.
+///
+/// FLS §10.1: Associated functions. Methods take a special `self` parameter
+/// as their first argument, which refers to the value on which the method is
+/// invoked.
+///
+/// FLS §10.1 AMBIGUOUS: The FLS lists `self`, `&self`, `&mut self`, and
+/// `mut self` as valid forms, but does not specify which are valid in all
+/// impl contexts. This implementation supports `self`, `&self`, and `&mut
+/// self`; `mut self` is treated as `self` (mutability of the binding).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelfKind {
+    /// `self` — takes ownership of the receiver.
+    Val,
+    /// `&self` — shared borrow of the receiver.
+    Ref,
+    /// `&mut self` — mutable borrow of the receiver.
+    RefMut,
+}
+
+/// An inherent impl block.
+///
+/// FLS §11: Implementations. `impl Type { methods }` defines methods on a
+/// named type. Only inherent impls (without a trait bound) are supported.
+///
+/// FLS §11 AMBIGUOUS: The spec allows `impl<T>` with generic parameters,
+/// but the interaction between generics and impl resolution is complex.
+/// Generic impls are future work.
+#[derive(Debug)]
+pub struct ImplDef {
+    /// The type being implemented.
+    pub ty: Span,
+    /// The methods defined in this impl block.
+    pub methods: Vec<Box<FnDef>>,
+    /// Span of the entire impl block.
+    pub span: Span,
 }
 
 /// A function parameter.

@@ -3726,3 +3726,177 @@ fn main() -> i32 {
         "expected ≥4 str instructions for named variant construction (discriminant + 3 fields)\nasm:\n{asm}"
     );
 }
+
+// ── Milestone 43: impl blocks with &self methods ──────────────────────────────
+//
+// FLS §11: Implementations. FLS §10.1: Methods. FLS §6.12.2: Method call
+// expressions. A method defined in an `impl` block is lowered to a mangled
+// function `TypeName__method_name`; field values are passed as leading
+// arguments.
+
+/// Milestone 43: basic `&self` method returning field sum.
+///
+/// FLS §11 + §10.1: `impl Point { fn sum(&self) -> i32 { self.x + self.y } }`.
+/// The method is called as `p.sum()` and must return `x + y`.
+#[test]
+fn milestone_43_method_returns_field_sum() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+impl Point {
+    fn sum(&self) -> i32 { self.x + self.y }
+}
+fn main() -> i32 {
+    let p = Point { x: 3, y: 4 };
+    p.sum()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 3 + 4 = 7, got {exit_code}");
+}
+
+/// Milestone 43: method accessing only first field.
+///
+/// FLS §10.1: `self.x` resolves to the first field of `self`.
+#[test]
+fn milestone_43_method_first_field() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+impl Point {
+    fn x_val(&self) -> i32 { self.x }
+}
+fn main() -> i32 {
+    let p = Point { x: 42, y: 0 };
+    p.x_val()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected 42, got {exit_code}");
+}
+
+/// Milestone 43: method accessing only second field.
+///
+/// FLS §10.1: `self.y` resolves to the second field of `self`.
+#[test]
+fn milestone_43_method_second_field() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+impl Point {
+    fn y_val(&self) -> i32 { self.y }
+}
+fn main() -> i32 {
+    let p = Point { x: 0, y: 13 };
+    p.y_val()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 13, "expected 13, got {exit_code}");
+}
+
+/// Milestone 43: method with additional explicit parameter besides `&self`.
+///
+/// FLS §10.1: Regular parameters follow `self` in the parameter list.
+/// They are passed after the self-fields in the calling convention.
+#[test]
+fn milestone_43_method_with_extra_param() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+impl Point {
+    fn add_to_x(&self, n: i32) -> i32 { self.x + n }
+}
+fn main() -> i32 {
+    let p = Point { x: 10, y: 0 };
+    p.add_to_x(5)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 15, "expected 10 + 5 = 15, got {exit_code}");
+}
+
+/// Milestone 43: multiple methods on the same struct.
+///
+/// FLS §11: An impl block may contain multiple methods; each is lowered
+/// to its own mangled function.
+#[test]
+fn milestone_43_multiple_methods() {
+    let src = r#"
+struct Rect { w: i32, h: i32 }
+impl Rect {
+    fn area(&self) -> i32 { self.w * self.h }
+    fn perimeter(&self) -> i32 { self.w + self.w + self.h + self.h }
+}
+fn main() -> i32 {
+    let r = Rect { w: 3, h: 4 };
+    r.area()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 12, "expected 3 * 4 = 12, got {exit_code}");
+}
+
+/// Milestone 43: method call result used in arithmetic.
+///
+/// FLS §6.12.2: Method call expressions produce a value usable in larger
+/// expressions. `p.sum() + 1` must return `sum + 1`.
+#[test]
+fn milestone_43_method_result_in_arithmetic() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+impl Point {
+    fn sum(&self) -> i32 { self.x + self.y }
+}
+fn main() -> i32 {
+    let p = Point { x: 3, y: 4 };
+    p.sum() + 1
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 8, "expected 3 + 4 + 1 = 8, got {exit_code}");
+}
+
+/// Milestone 43: method call on a parameter (struct passed to outer function).
+///
+/// FLS §10.1: Methods can be called on struct-typed locals that came from
+/// function parameters.
+#[test]
+fn milestone_43_method_on_parameter() {
+    let src = r#"
+struct Counter { n: i32 }
+impl Counter {
+    fn value(&self) -> i32 { self.n }
+}
+fn get_value(c: Counter) -> i32 { c.value() }
+fn main() -> i32 {
+    let c = Counter { n: 21 };
+    get_value(c)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 21, "expected 21, got {exit_code}");
+}
+
+/// Milestone 43: assembly inspection — method call emits `bl TypeName__method_name`.
+///
+/// FLS §10.1 + §6.12.2: Method calls must emit a branch-and-link to the mangled
+/// function name, not an interpreter result.
+#[test]
+fn runtime_method_call_emits_bl_mangled_name() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+impl Point {
+    fn sum(&self) -> i32 { self.x + self.y }
+}
+fn main() -> i32 {
+    let p = Point { x: 3, y: 4 };
+    p.sum()
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("Point__sum"),
+        "expected mangled function `Point__sum` in assembly:\n{asm}"
+    );
+    assert!(
+        asm.contains("bl") && asm.contains("Point__sum"),
+        "expected `bl Point__sum` call instruction in main:\n{asm}"
+    );
+}

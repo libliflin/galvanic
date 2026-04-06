@@ -33,7 +33,7 @@
 use crate::ast::{
     BinOp, Block, EnumDef, EnumVariant, EnumVariantKind, Expr, ExprKind, FnDef, Item, ItemKind,
     NamedField, Param, SourceFile, Span, Stmt, StmtKind, StructDef, StructKind, Ty, TyKind,
-    TupleField, UnaryOp, Visibility,
+    TupleField, UnaryOp, Visibility, ImplDef,
 };
 use crate::lexer::{Token, TokenKind};
 
@@ -218,8 +218,13 @@ impl<'src> Parser<'src> {
                 let span = start.to(enum_def.span);
                 Ok(Item { kind: ItemKind::Enum(Box::new(enum_def)), span })
             }
+            TokenKind::KwImpl => {
+                let impl_def = self.parse_impl_def()?;
+                let span = start.to(impl_def.span);
+                Ok(Item { kind: ItemKind::Impl(Box::new(impl_def)), span })
+            }
             kind => Err(self.error(format!(
-                "expected item (fn, struct, enum, …), found {kind:?}"
+                "expected item (fn, struct, enum, impl, …), found {kind:?}"
             ))),
         }
     }
@@ -268,6 +273,11 @@ impl<'src> Parser<'src> {
 
         // Parameter list enclosed in `( )`.
         self.expect(TokenKind::OpenParen)?;
+
+        // Check for optional `self` / `&self` / `&mut self` as first parameter.
+        // FLS §10.1: Methods begin with a self parameter.
+        let self_param = self.parse_self_param();
+
         let params = self.parse_params()?;
         self.expect(TokenKind::CloseParen)?;
 
@@ -283,7 +293,99 @@ impl<'src> Parser<'src> {
         // FLS §9: the body must be a block expression.
         let body = Some(self.parse_block()?);
 
-        Ok(FnDef { vis, name, params, ret_ty, body })
+        Ok(FnDef { vis, name, self_param, params, ret_ty, body })
+    }
+
+    /// Parse an inherent impl block.
+    ///
+    /// FLS §11: Implementations.
+    ///
+    /// Grammar (simplified):
+    /// ```text
+    /// ImplDeclaration ::=
+    ///     "impl" Identifier "{" FunctionDeclaration* "}"
+    /// ```
+    ///
+    /// FLS §11 NOTE: Trait impls (`impl Trait for Type`) and generic impls
+    /// (`impl<T>`) are not yet implemented.
+    fn parse_impl_def(&mut self) -> Result<ImplDef, ParseError> {
+        let start = self.current_span();
+        self.expect(TokenKind::KwImpl)?;
+
+        // The impl target must be a simple identifier.
+        if self.peek_kind() != TokenKind::Ident {
+            return Err(self.error(format!(
+                "expected type name after `impl`, found {:?}",
+                self.peek_kind()
+            )));
+        }
+        let ty = self.current_span();
+        self.advance();
+
+        self.expect(TokenKind::OpenBrace)?;
+
+        let mut methods = Vec::new();
+        while self.peek_kind() != TokenKind::CloseBrace && self.peek_kind() != TokenKind::Eof {
+            let vis = self.parse_visibility();
+            if self.peek_kind() != TokenKind::KwFn {
+                return Err(self.error(format!(
+                    "expected `fn` inside impl block, found {:?}",
+                    self.peek_kind()
+                )));
+            }
+            let method = self.parse_fn_def(vis)?;
+            methods.push(Box::new(method));
+        }
+
+        let end = self.current_span();
+        self.expect(TokenKind::CloseBrace)?;
+        let span = start.to(end);
+
+        Ok(ImplDef { ty, methods, span })
+    }
+
+    /// Consume a `self`, `&self`, or `&mut self` parameter if present.
+    ///
+    /// FLS §10.1: A self parameter must be the first parameter in a method.
+    /// Returns `Some(SelfKind)` if consumed, `None` if no self parameter.
+    ///
+    /// After consuming, also eats a trailing comma if one follows, so that
+    /// `parse_params` sees any remaining parameters without a leading comma.
+    fn parse_self_param(&mut self) -> Option<crate::ast::SelfKind> {
+        use crate::ast::SelfKind;
+
+        // `self`
+        if self.peek_kind() == TokenKind::KwSelfLower {
+            // Disambiguate `self` (self param) from `self: Type` (explicit self).
+            // If the next token after `self` is `:`, it's an explicit param; defer.
+            if self.peek_nth(1) != TokenKind::Colon {
+                self.advance(); // eat `self`
+                self.eat(TokenKind::Comma);
+                return Some(SelfKind::Val);
+            }
+        }
+
+        // `&self`
+        if self.peek_kind() == TokenKind::And && self.peek_nth(1) == TokenKind::KwSelfLower {
+            self.advance(); // eat `&`
+            self.advance(); // eat `self`
+            self.eat(TokenKind::Comma);
+            return Some(SelfKind::Ref);
+        }
+
+        // `&mut self`
+        if self.peek_kind() == TokenKind::And
+            && self.peek_nth(1) == TokenKind::KwMut
+            && self.peek_nth(2) == TokenKind::KwSelfLower
+        {
+            self.advance(); // eat `&`
+            self.advance(); // eat `mut`
+            self.advance(); // eat `self`
+            self.eat(TokenKind::Comma);
+            return Some(SelfKind::RefMut);
+        }
+
+        None
     }
 
     /// Parse a struct definition.
@@ -1324,6 +1426,20 @@ impl<'src> Parser<'src> {
             TokenKind::KwFalse => {
                 self.advance();
                 Ok(Expr { kind: ExprKind::LitBool(false), span: start })
+            }
+
+            // `self` used as a path expression — FLS §6.3 + §10.1.
+            //
+            // In method bodies, `self` refers to the receiver. It is parsed as
+            // a single-segment path so that `self.field` resolves through the
+            // same field-access machinery as any other local variable.
+            //
+            // FLS §10.1: `self` is bound in the scope of the method body and
+            // acts like a local variable of the enclosing struct type.
+            TokenKind::KwSelfLower => {
+                let seg = self.current_span();
+                self.advance();
+                Ok(Expr { kind: ExprKind::Path(vec![seg]), span: seg })
             }
 
             // Path expression, function call, or struct literal — FLS §6.2, §6.3.1, §6.11

@@ -662,6 +662,75 @@ field_access_example:
     add     sp, sp, #16             // FLS §8.1: restore stack frame
     ret
 
+    // fn MethodPoint__sum — FLS §9
+    .global MethodPoint__sum
+MethodPoint__sum:
+    sub     sp, sp, #16             // FLS §8.1: frame for 2 slot(s)
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    str     x1, [sp, #8              ] // FLS §8.1: store slot 1
+    ldr     x0, [sp, #0              ] // FLS §8.1: load slot 0
+    ldr     x1, [sp, #8              ] // FLS §8.1: load slot 1
+    add     x2, x0, x1          // FLS §6.5.5: add
+    mov     x0, x2              // FLS §6.19: return reg 2 → x0
+    add     sp, sp, #16             // FLS §8.1: restore stack frame
+    ret
+
+    // fn MethodPoint__scale_x — FLS §9
+    .global MethodPoint__scale_x
+MethodPoint__scale_x:
+    sub     sp, sp, #32             // FLS §8.1: frame for 3 slot(s)
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    str     x1, [sp, #8              ] // FLS §8.1: store slot 1
+    str     x2, [sp, #16             ] // FLS §8.1: store slot 2
+    ldr     x0, [sp, #0              ] // FLS §8.1: load slot 0
+    ldr     x1, [sp, #16             ] // FLS §8.1: load slot 2
+    mul     x2, x0, x1          // FLS §6.5.5: mul
+    mov     x0, x2              // FLS §6.19: return reg 2 → x0
+    add     sp, sp, #32             // FLS §8.1: restore stack frame
+    ret
+
+    // fn method_call_example — FLS §9
+    .global method_call_example
+method_call_example:
+    str     x30, [sp, #-16]!      // FLS §6.12.1: save lr (non-leaf)
+    sub     sp, sp, #16             // FLS §8.1: frame for 2 slot(s)
+    mov     x0, #3                   // FLS §2.4.4.1: load imm 3
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    mov     x1, #4                   // FLS §2.4.4.1: load imm 4
+    str     x1, [sp, #8              ] // FLS §8.1: store slot 1
+    ldr     x2, [sp, #0              ] // FLS §8.1: load slot 0
+    ldr     x3, [sp, #8              ] // FLS §8.1: load slot 1
+    mov     x0, x2                   // FLS §6.12.1: arg 0
+    mov     x1, x3                   // FLS §6.12.1: arg 1
+    bl      MethodPoint__sum         // FLS §6.12.1: call MethodPoint__sum
+    mov     x4, x0              // FLS §6.12.1: return value → x4
+    mov     x0, x4              // FLS §6.19: return reg 4 → x0
+    add     sp, sp, #16             // FLS §8.1: restore stack frame
+    ldr     x30, [sp], #16         // FLS §6.12.1: restore lr
+    ret
+
+    // fn method_call_with_arg_example — FLS §9
+    .global method_call_with_arg_example
+method_call_with_arg_example:
+    str     x30, [sp, #-16]!      // FLS §6.12.1: save lr (non-leaf)
+    sub     sp, sp, #16             // FLS §8.1: frame for 2 slot(s)
+    mov     x0, #5                   // FLS §2.4.4.1: load imm 5
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    mov     x1, #0                   // FLS §2.4.4.1: load imm 0
+    str     x1, [sp, #8              ] // FLS §8.1: store slot 1
+    ldr     x2, [sp, #0              ] // FLS §8.1: load slot 0
+    ldr     x3, [sp, #8              ] // FLS §8.1: load slot 1
+    mov     x4, #3                   // FLS §2.4.4.1: load imm 3
+    mov     x0, x2                   // FLS §6.12.1: arg 0
+    mov     x1, x3                   // FLS §6.12.1: arg 1
+    mov     x2, x4                   // FLS §6.12.1: arg 2
+    bl      MethodPoint__scale_x     // FLS §6.12.1: call MethodPoint__scale_x
+    mov     x5, x0              // FLS §6.12.1: return value → x5
+    mov     x0, x5              // FLS §6.19: return reg 5 → x0
+    add     sp, sp, #16             // FLS §8.1: restore stack frame
+    ldr     x30, [sp], #16         // FLS §6.12.1: restore lr
+    ret
+
     // ELF entry point — FLS §18.1
     .global _start
 _start:
