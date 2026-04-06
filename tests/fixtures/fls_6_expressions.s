@@ -1062,8 +1062,9 @@ closure_example:
     mov     x1, x8                   // FLS §6.12.1: arg 1
     bl      apply_closure            // FLS §6.12.1: call apply_closure
     mov     x9, x0              // FLS §6.12.1: return value → x9
-    bl      forty_two                // FLS §6.12.1: call forty_two
-    mov     x10, x0              // FLS §6.12.1: return value → x10
+    ldr     x9, [sp, #8                     ] // FLS §4.9: load fn ptr
+    blr     x9                       // FLS §4.9: indirect call
+    mov     x10, x0               // FLS §4.9: capture return
     mov     x0, x6                   // FLS §6.12.1: arg 0
     mov     x1, x9                   // FLS §6.12.1: arg 1
     mov     x2, x10                  // FLS §6.12.1: arg 2
@@ -1102,6 +1103,51 @@ __closure_closure_example_2:
     str     x1, [sp, #8              ] // FLS §8.1: store slot 1
     ldr     x0, [sp, #0              ] // FLS §8.1: load slot 0
     ldr     x1, [sp, #8              ] // FLS §8.1: load slot 1
+    add     x2, x0, x1          // FLS §6.5.5: add
+    mov     x0, x2              // FLS §6.19: return reg 2 → x0
+    add     sp, sp, #16             // FLS §8.1: restore stack frame
+    ret
+
+    // fn capturing_closure_example — FLS §9
+    .global capturing_closure_example
+capturing_closure_example:
+    str     x30, [sp, #-16]!      // FLS §6.12.1: save lr (non-leaf)
+    sub     sp, sp, #32             // FLS §8.1: frame for 3 slot(s)
+    mov     x0, #10                  // FLS §2.4.4.1: load imm 10
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    adrp    x1, __closure_capturing_closure_example_0              // FLS §4.9: fn ptr addr (page)
+    add     x1, x1, :lo12:__closure_capturing_closure_example_0  // FLS §4.9: fn ptr addr (offset)
+    str     x1, [sp, #8              ] // FLS §8.1: store slot 1
+    ldr     x2, [sp, #0              ] // FLS §8.1: load slot 0
+    mov     x3, #5                   // FLS §2.4.4.1: load imm 5
+    mov     x0, x2                        // FLS §4.9: arg 0
+    mov     x1, x3                        // FLS §4.9: arg 1
+    ldr     x9, [sp, #8                     ] // FLS §4.9: load fn ptr
+    blr     x9                       // FLS §4.9: indirect call
+    mov     x4, x0               // FLS §4.9: capture return
+    str     x4, [sp, #16             ] // FLS §8.1: store slot 2
+    ldr     x5, [sp, #0              ] // FLS §8.1: load slot 0
+    mov     x6, #7                   // FLS §2.4.4.1: load imm 7
+    mov     x0, x5                        // FLS §4.9: arg 0
+    mov     x1, x6                        // FLS §4.9: arg 1
+    ldr     x9, [sp, #8                     ] // FLS §4.9: load fn ptr
+    blr     x9                       // FLS §4.9: indirect call
+    mov     x7, x0               // FLS §4.9: capture return
+    ldr     x8, [sp, #16             ] // FLS §8.1: load slot 2
+    add     x9, x8, x7          // FLS §6.5.5: add
+    mov     x0, x9              // FLS §6.19: return reg 9 → x0
+    add     sp, sp, #32             // FLS §8.1: restore stack frame
+    ldr     x30, [sp], #16         // FLS §6.12.1: restore lr
+    ret
+
+    // fn __closure_capturing_closure_example_0 — FLS §9
+    .global __closure_capturing_closure_example_0
+__closure_capturing_closure_example_0:
+    sub     sp, sp, #16             // FLS §8.1: frame for 2 slot(s)
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    str     x1, [sp, #8              ] // FLS §8.1: store slot 1
+    ldr     x0, [sp, #8              ] // FLS §8.1: load slot 1
+    ldr     x1, [sp, #0              ] // FLS §8.1: load slot 0
     add     x2, x0, x1          // FLS §6.5.5: add
     mov     x0, x2              // FLS §6.19: return reg 2 → x0
     add     sp, sp, #16             // FLS §8.1: restore stack frame
