@@ -505,6 +505,63 @@ conditional_init_example:
     add     sp, sp, #16             // FLS §8.1: restore stack frame
     ret
 
+    // fn match_example — FLS §9
+    .global match_example
+match_example:
+    sub     sp, sp, #32             // FLS §8.1: frame for 3 slot(s)
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    ldr     x0, [sp, #0              ] // FLS §8.1: load slot 0
+    str     x0, [sp, #8              ] // FLS §8.1: store slot 1
+    ldr     x1, [sp, #8              ] // FLS §8.1: load slot 1
+    mov     x2, #0                   // FLS §2.4.4.1: load imm 0
+    cmp     x1, x2               // FLS §6.5.3: compare (signed)
+    cset    x3, eq                    // FLS §6.5.3: x3 = (x1 == x2)
+    cbz     x3, .L1                     // FLS §6.17: branch if false
+    mov     x4, #0                   // FLS §2.4.4.1: load imm 0
+    str     x4, [sp, #16             ] // FLS §8.1: store slot 2
+    b       .L0                        // FLS §6.17: branch to end
+.L1:                              // FLS §6.17: branch target
+    ldr     x5, [sp, #8              ] // FLS §8.1: load slot 1
+    mov     x6, #1                   // FLS §2.4.4.1: load imm 1
+    cmp     x5, x6               // FLS §6.5.3: compare (signed)
+    cset    x7, eq                    // FLS §6.5.3: x7 = (x5 == x6)
+    cbz     x7, .L2                     // FLS §6.17: branch if false
+    mov     x8, #1                   // FLS §2.4.4.1: load imm 1
+    str     x8, [sp, #16             ] // FLS §8.1: store slot 2
+    b       .L0                        // FLS §6.17: branch to end
+.L2:                              // FLS §6.17: branch target
+    mov     x9, #2                   // FLS §2.4.4.1: load imm 2
+    str     x9, [sp, #16             ] // FLS §8.1: store slot 2
+.L0:                              // FLS §6.17: branch target
+    ldr     x10, [sp, #16             ] // FLS §8.1: load slot 2
+    mov     x0, x10              // FLS §6.19: return reg 10 → x0
+    add     sp, sp, #32             // FLS §8.1: restore stack frame
+    ret
+
+    // fn match_bool_example — FLS §9
+    .global match_bool_example
+match_bool_example:
+    sub     sp, sp, #32             // FLS §8.1: frame for 3 slot(s)
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    ldr     x0, [sp, #0              ] // FLS §8.1: load slot 0
+    str     x0, [sp, #8              ] // FLS §8.1: store slot 1
+    ldr     x1, [sp, #8              ] // FLS §8.1: load slot 1
+    mov     x2, #1                   // FLS §2.4.4.1: load imm 1
+    cmp     x1, x2               // FLS §6.5.3: compare (signed)
+    cset    x3, eq                    // FLS §6.5.3: x3 = (x1 == x2)
+    cbz     x3, .L1                     // FLS §6.17: branch if false
+    mov     x4, #1                   // FLS §2.4.4.1: load imm 1
+    str     x4, [sp, #16             ] // FLS §8.1: store slot 2
+    b       .L0                        // FLS §6.17: branch to end
+.L1:                              // FLS §6.17: branch target
+    mov     x5, #0                   // FLS §2.4.4.1: load imm 0
+    str     x5, [sp, #16             ] // FLS §8.1: store slot 2
+.L0:                              // FLS §6.17: branch target
+    ldr     x6, [sp, #16             ] // FLS §8.1: load slot 2
+    mov     x0, x6              // FLS §6.19: return reg 6 → x0
+    add     sp, sp, #32             // FLS §8.1: restore stack frame
+    ret
+
     // ELF entry point — FLS §18.1
     .global _start
 _start:

@@ -225,3 +225,34 @@ fn conditional_init_example(flag: bool) -> i32 {
     }
     result               // FLS §6.3: path expression reads the assigned slot
 }
+
+// FLS §6.18 — Match expressions.
+//
+// FLS §6.18: "A match expression branches on a pattern."
+// Arms are tested in source order; the first matching arm executes.
+//
+// FLS §5.1: Wildcard pattern `_` — matches any value.
+// FLS §5.2: Literal patterns — integer and boolean literals.
+//
+// Note: FLS §6.18 does not provide a direct code example in the spec text;
+// this function is derived from the semantic description of match arms
+// and the grammar in §6.18.
+fn match_example(n: i32) -> i32 {
+    match n {
+        0 => 0,     // FLS §5.2: integer literal pattern 0
+        1 => 1,     // FLS §5.2: integer literal pattern 1
+        _ => 2,     // FLS §5.1: wildcard — matches any remaining value
+    }
+}
+
+// FLS §6.18 — Match on a boolean scrutinee.
+//
+// FLS §4.3: The boolean type `bool` has two values: `true` and `false`.
+// FLS §5.2: Boolean literal patterns.
+// No FLS §6.18 example provided for bool scrutinees; derived from the spec.
+fn match_bool_example(b: bool) -> i32 {
+    match b {
+        true  => 1,  // FLS §5.2: bool literal pattern true
+        false => 0,  // FLS §5.2: bool literal pattern false
+    }
+}

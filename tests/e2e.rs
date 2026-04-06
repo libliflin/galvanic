@@ -2198,3 +2198,118 @@ fn runtime_uninit_let_no_store_until_assignment() {
     // There must be a load (from the tail expression `x`)
     assert!(asm.contains("ldr"), "expected ldr from tail expression x");
 }
+
+// ── Milestone 22: match expressions on integer values ────────────────────────
+//
+// `match` is a fundamental Rust control-flow construct (FLS §6.18). This
+// milestone adds integer and boolean literal patterns plus the wildcard `_`.
+// Arms are tested in source order; the first matching arm executes.
+//
+// Lowering strategy: each non-wildcard arm lowers to a comparison chain
+// (scrutinee == pattern_val → cbz if not equal → arm body). The last arm is
+// emitted unconditionally (exhaustiveness deferred to a future type pass).
+//
+// FLS §6.18: Match expressions.
+// FLS §5.1: Wildcard pattern `_`.
+// FLS §5.2: Literal patterns (integer, boolean).
+// FLS §6.1.2:37–45: All comparisons emit runtime instructions.
+
+/// Milestone 22: match on zero — wildcard arm taken.
+///
+/// FLS §6.18: The first arm whose pattern matches executes.
+/// With `match x { 0 => 0, _ => 1 }` and x=5, the wildcard arm executes.
+#[test]
+fn milestone_22_match_wildcard_taken() {
+    let src = "fn main() -> i32 { let x = 5; match x { 0 => 0, _ => 1 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected wildcard arm (1), got {exit_code}");
+}
+
+/// Milestone 22: match on zero — literal arm taken.
+///
+/// FLS §6.18: The `0` literal pattern matches scrutinee 0; the first arm executes.
+#[test]
+fn milestone_22_match_literal_taken() {
+    let src = "fn main() -> i32 { let x = 0; match x { 0 => 42, _ => 1 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected literal arm (42), got {exit_code}");
+}
+
+/// Milestone 22: match with three arms — middle arm taken.
+///
+/// FLS §6.18: Arms are tested in source order; the first match wins.
+#[test]
+fn milestone_22_match_three_arms_middle() {
+    let src = "fn main() -> i32 { let x = 1; match x { 0 => 10, 1 => 20, _ => 30 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 20, "expected arm 1 (20), got {exit_code}");
+}
+
+/// Milestone 22: match with three arms — last (wildcard) arm taken.
+///
+/// FLS §6.18: Wildcard `_` matches any remaining value.
+#[test]
+fn milestone_22_match_three_arms_wildcard() {
+    let src = "fn main() -> i32 { let x = 99; match x { 0 => 10, 1 => 20, _ => 30 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 30, "expected wildcard arm (30), got {exit_code}");
+}
+
+/// Milestone 22: match on a function parameter.
+///
+/// FLS §6.18: The scrutinee may be any expression, including a variable
+/// that holds a function argument (not a compile-time constant).
+/// This verifies the compiler does not constant-fold the match — it must
+/// emit runtime comparison instructions.
+///
+/// FLS §6.1.2:37–45: Non-const code emits runtime instructions.
+#[test]
+fn milestone_22_match_on_parameter() {
+    let src = "\
+fn classify(n: i32) -> i32 {
+    match n {
+        0 => 0,
+        1 => 1,
+        _ => 2,
+    }
+}
+fn main() -> i32 { classify(1) }
+";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected classify(1) == 1, got {exit_code}");
+}
+
+/// Milestone 22: match used as a function (all arms covered).
+///
+/// FLS §6.18: Multiple literal arms with a wildcard default.
+#[test]
+fn milestone_22_match_fizzbuzz_like() {
+    let src = "\
+fn kind(n: i32) -> i32 {
+    match n {
+        0 => 0,
+        1 => 1,
+        2 => 2,
+        _ => 3,
+    }
+}
+fn main() -> i32 { kind(2) }
+";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2, "expected kind(2) == 2, got {exit_code}");
+}
+
+/// Milestone 22: assembly inspection — match emits comparison (cmp/cset) and
+/// conditional branch (cbz) for each non-wildcard arm.
+///
+/// FLS §6.18: Each arm tests at runtime — no compile-time constant folding.
+/// FLS §6.1.2:37–45: Non-const match emits runtime branch instructions.
+#[test]
+fn runtime_match_emits_comparison_and_cbz() {
+    let src = "fn main() -> i32 { let x = 0; match x { 0 => 42, _ => 1 } }\n";
+    let asm = compile_to_asm(src);
+    // Must emit a comparison (cmp for the arm equality test)
+    assert!(asm.contains("cmp"), "expected cmp for arm equality test");
+    // Must emit a conditional branch (cbz to skip the arm if not equal)
+    assert!(asm.contains("cbz"), "expected cbz for arm skip branch");
+}
