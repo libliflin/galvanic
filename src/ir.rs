@@ -564,6 +564,64 @@ pub enum Instr {
         /// Number of struct fields to write back (same as struct field count).
         n_fields: u8,
     },
+
+    /// Return struct fields AND a scalar value from a `&mut self` method.
+    ///
+    /// Callee convention for `&mut self` methods with a scalar return type:
+    ///   x0..x{N-1} — modified field values (write-back for caller)
+    ///   x{N}       — the scalar return value
+    ///
+    /// Emits:
+    ///   `ldr x{i}, [sp, #{(base_slot+i)*8}]`  for i in 0..n_fields  // field write-backs
+    ///   `mov x{n_fields}, x{val_reg}`                                 // return value (if val_reg != n_fields)
+    ///   standard epilogue + `ret`
+    ///
+    /// FLS §10.1: `&mut self` methods may return any type. Galvanic uses a
+    /// register-packing convention: fields in x0..x{N-1}, scalar in x{N}.
+    ///
+    /// FLS §10.1 AMBIGUOUS: The spec does not define the calling convention for
+    /// `&mut self` methods with non-unit return types. This convention is an
+    /// extension of the existing `RetFields` convention.
+    ///
+    /// Cache-line note: N+1 loads = (N+1) × 4-byte instructions before epilogue.
+    RetFieldsAndValue {
+        /// Stack slot of the first self field (always 0 for methods).
+        base_slot: u8,
+        /// Number of struct fields.
+        n_fields: u8,
+        /// Register holding the scalar return value.
+        val_reg: u8,
+    },
+
+    /// Call a `&mut self` method that returns a scalar value, write back fields,
+    /// and capture the return value.
+    ///
+    /// Like `CallMut`, but after writing back x0..x{N-1} to the caller's struct
+    /// slots, also reads x{N} (the callee's scalar return value) into `dst`.
+    ///
+    /// Emits:
+    ///   `mov x{i}, x{args[i]}`  for each arg          // move args into registers
+    ///   `bl {name}`                                     // call the method
+    ///   `str x{i}, [sp, #{(write_back_slot+i)*8}]`  for i in 0..n_fields  // write back
+    ///   `mov x{dst}, x{n_fields}`                      // capture return value
+    ///
+    /// FLS §10.1: Write-back convention — callee returns modified fields in
+    /// x0..x{N-1}, caller stores them back. Scalar return value is in x{N}.
+    ///
+    /// Cache-line note: N write-back stores + 1 capture move = (N+1) × 4-byte
+    /// instructions after the `bl`. Same cache footprint as `CallMut` + 1.
+    CallMutReturn {
+        /// Name of the `&mut self` method to call (mangled).
+        name: String,
+        /// Argument registers: struct fields first (x0..x{N-1}), then explicit args.
+        args: Vec<u8>,
+        /// Base stack slot of the receiver struct in the caller's frame.
+        write_back_slot: u8,
+        /// Number of struct fields to write back.
+        n_fields: u8,
+        /// Destination register for the scalar return value (from x{N}).
+        dst: u8,
+    },
 }
 
 // ── Values ────────────────────────────────────────────────────────────────────

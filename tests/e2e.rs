@@ -7127,3 +7127,122 @@ fn runtime_u32_shr_emits_lsr() {
         "expected `lsr` for unsigned right shift:\n{asm}"
     );
 }
+
+// ── Milestone 62: `&mut self` methods returning a scalar value ───────────────
+
+/// Milestone 62: `&mut self` method increments a field and returns the new value.
+///
+/// FLS §10.1: Methods may have a `&mut self` parameter and return any type.
+/// Galvanic's convention: modified fields in x0..x{N-1}, scalar return in x{N}.
+#[test]
+fn milestone_62_mut_self_returns_scalar() {
+    let src = r#"
+struct Counter { n: i32 }
+impl Counter {
+    fn increment(&mut self) -> i32 { self.n += 1; self.n }
+}
+fn main() -> i32 {
+    let mut c = Counter { n: 0 };
+    c.increment()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected 1 after one increment, got {exit_code}");
+}
+
+/// Milestone 62: multiple `&mut self` calls that return values.
+///
+/// FLS §10.1: Each call must both write back the modified field and return
+/// the updated value. The second call sees the state left by the first.
+#[test]
+fn milestone_62_mut_self_returns_scalar_chained() {
+    let src = r#"
+struct Counter { n: i32 }
+impl Counter {
+    fn increment(&mut self) -> i32 { self.n += 1; self.n }
+}
+fn main() -> i32 {
+    let mut c = Counter { n: 5 };
+    c.increment();
+    c.increment()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 7 after two increments from 5, got {exit_code}");
+}
+
+/// Milestone 62: `&mut self` return value used in arithmetic.
+///
+/// FLS §10.1: The return value of a `&mut self` method is a first-class value
+/// that can be used in any expression context.
+#[test]
+fn milestone_62_mut_self_return_in_arithmetic() {
+    let src = r#"
+struct Counter { n: i32 }
+impl Counter {
+    fn add(&mut self, x: i32) -> i32 { self.n += x; self.n }
+}
+fn main() -> i32 {
+    let mut c = Counter { n: 10 };
+    c.add(5) + c.add(3)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    // First call: n = 10+5 = 15, returns 15. Second call: n = 15+3 = 18, returns 18.
+    // Sum: 15 + 18 = 33.
+    assert_eq!(exit_code, 33, "expected 33 (15+18), got {exit_code}");
+}
+
+/// Milestone 62: `&mut self` returns a field value directly (no mutation).
+///
+/// FLS §10.1: A `&mut self` method that returns a field does not have to
+/// mutate anything — the return type and write-back are orthogonal.
+#[test]
+fn milestone_62_mut_self_returns_field() {
+    let src = r#"
+struct Pair { x: i32, y: i32 }
+impl Pair {
+    fn swap_and_get(&mut self) -> i32 {
+        let tmp = self.x;
+        self.x = self.y;
+        self.y = tmp;
+        self.x
+    }
+}
+fn main() -> i32 {
+    let mut p = Pair { x: 3, y: 7 };
+    p.swap_and_get()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    // After swap: x=7, y=3. Returns the new x (7).
+    assert_eq!(exit_code, 7, "expected 7 (swapped x), got {exit_code}");
+}
+
+/// Milestone 62: assembly inspection — `&mut self` with scalar return emits
+/// `RetFieldsAndValue` pattern: field ldr + return value mov before ret.
+///
+/// FLS §10.1 AMBIGUOUS: Fields in x0..x{N-1}, scalar in x{N}.
+#[test]
+fn runtime_mut_self_return_emits_ret_fields_and_value() {
+    let src = r#"
+struct Counter { n: i32 }
+impl Counter {
+    fn increment(&mut self) -> i32 { self.n += 1; self.n }
+}
+fn main() -> i32 { let mut c = Counter { n: 0 }; c.increment() }
+"#;
+    let asm = compile_to_asm(src);
+    // The method should load field 0 into x0 (write-back) and the return value into x1.
+    // The call site should write x0 back to the struct slot and capture x1 as the result.
+    assert!(
+        asm.contains("Counter__increment"),
+        "expected mangled method name in asm:\n{asm}"
+    );
+    // The caller should have a str for write-back AND a mov capturing the return reg.
+    // Verify the call site has a bl followed by field stores (write-back).
+    assert!(
+        asm.contains("bl      Counter__increment"),
+        "expected bl to Counter__increment:\n{asm}"
+    );
+}

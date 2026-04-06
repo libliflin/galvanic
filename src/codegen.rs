@@ -659,6 +659,94 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool) 
                 )?;
             }
         }
+
+        // FLS §10.1: Return modified struct fields AND a scalar value from a
+        // `&mut self` method.
+        //
+        // Convention: fields in x0..x{N-1} (write-back for caller), scalar in x{N}.
+        //
+        // Emits:
+        //   ldr x{i}, [sp, #{(base_slot+i)*8}]  for i in 0..n_fields  — field loads
+        //   mov x{n_fields}, x{val_reg}                                — return value
+        //   standard epilogue + ret
+        //
+        // FLS §10.1 AMBIGUOUS: The spec does not define the calling convention for
+        // &mut self with a non-unit return type. This extends RetFields by placing
+        // the scalar return value in x{n_fields}.
+        //
+        // Cache-line note: (N+1) × 4-byte loads/moves before epilogue.
+        Instr::RetFieldsAndValue { base_slot, n_fields, val_reg } => {
+            // Load each field from its stack slot into the corresponding write-back register.
+            for i in 0..*n_fields {
+                let slot_offset = (*base_slot as usize + i as usize) * 8;
+                writeln!(
+                    out,
+                    "    ldr     x{i}, [sp, #{slot_offset:<16}] // FLS §10.1: write-back field {i}"
+                )?;
+            }
+            // Place scalar return value in x{n_fields}.
+            let ret_reg = *n_fields;
+            if *val_reg != ret_reg {
+                writeln!(
+                    out,
+                    "    mov     x{ret_reg}, x{val_reg:<18} // FLS §10.1: scalar return value"
+                )?;
+            }
+            // Standard epilogue (mirrors Instr::RetFields handling).
+            if frame_size > 0 {
+                writeln!(
+                    out,
+                    "    add     sp, sp, #{frame_size:<14} // FLS §8.1: restore stack frame"
+                )?;
+            }
+            if saves_lr {
+                writeln!(
+                    out,
+                    "    ldr     x30, [sp], #16         // FLS §6.12.1: restore lr"
+                )?;
+            }
+            writeln!(out, "    ret")?;
+        }
+
+        // FLS §10.1: Call a `&mut self` method returning a scalar, write back fields,
+        // and capture the scalar return value.
+        //
+        // After `bl`, x0..x{N-1} hold modified field values and x{N} holds the
+        // scalar return. Write x0..x{N-1} back to the receiver's stack slots, then
+        // move x{N} into `dst`.
+        //
+        // FLS §6.12.2: Method call expressions — dispatched to mangled name.
+        // FLS §10.1: Write-back convention extended for scalar returns.
+        //
+        // Cache-line note: arg moves + bl + N write-back stores + 1 capture move.
+        Instr::CallMutReturn { name, args, write_back_slot, n_fields, dst } => {
+            // Move arguments to x0, x1, ... (struct fields first, then extra args).
+            for (i, &src_reg) in args.iter().enumerate() {
+                if src_reg != i as u8 {
+                    writeln!(
+                        out,
+                        "    mov     x{i}, x{src_reg:<19} // FLS §6.12.2: arg {i}"
+                    )?;
+                }
+            }
+            writeln!(out, "    bl      {name:<24} // FLS §6.12.2: call &mut self {name}")?;
+            // Write back modified fields from x0..x{N-1} to the struct's stack slots.
+            for i in 0..*n_fields {
+                let slot_offset = (*write_back_slot as usize + i as usize) * 8;
+                writeln!(
+                    out,
+                    "    str     x{i}, [sp, #{slot_offset:<16}] // FLS §10.1: write-back field {i}"
+                )?;
+            }
+            // Capture scalar return value from x{n_fields} into dst.
+            let ret_reg = *n_fields;
+            if *dst != ret_reg {
+                writeln!(
+                    out,
+                    "    mov     x{dst}, x{ret_reg:<18} // FLS §10.1: capture scalar return"
+                )?;
+            }
+        }
     }
     Ok(())
 }
