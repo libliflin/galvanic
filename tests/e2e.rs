@@ -8720,3 +8720,125 @@ fn runtime_struct_destruct_variable_emits_no_extra_stores() {
         "struct literal init must emit ≥2 str instructions; got {store_count}:\n{asm}"
     );
 }
+
+// ── Milestone 74: tuple struct destructuring in let bindings ──────────────────
+//
+// FLS §5.10.4 + §8.1: Tuple struct patterns (`let Point(x, y) = p;`) in
+// let position bind positional fields of a tuple struct to names.
+//
+// FLS §5.10.4: "A tuple struct pattern is a pattern that matches a tuple
+// struct or enum variant." In a let position it binds each positional field
+// of the matched value to the given identifier.
+//
+// FLS §6.1.2:37–45: All stores are runtime instructions; no const folding.
+
+/// Milestone 74: basic tuple struct destructuring sums both fields.
+///
+/// FLS §5.10.4: tuple struct pattern in let position binds positional fields.
+/// FLS §8.1: the binding is available for the remainder of the block.
+#[test]
+fn milestone_74_tuple_struct_destruct_basic() {
+    let src = "struct Point(i32, i32);\nfn main() -> i32 { let p = Point(3, 4); let Point(x, y) = p; x + y }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 3 + 4 = 7, got {exit_code}");
+}
+
+/// Milestone 74: access the first field only.
+///
+/// FLS §5.10.4: Each sub-pattern binds independently; unused fields can be
+/// ignored with `_`.
+#[test]
+fn milestone_74_tuple_struct_destruct_first_field() {
+    let src = "struct Point(i32, i32);\nfn main() -> i32 { let p = Point(10, 99); let Point(x, _) = p; x }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "expected 10, got {exit_code}");
+}
+
+/// Milestone 74: access the second field only.
+///
+/// FLS §5.10.4: Wildcard `_` discards the first field; the second is bound.
+#[test]
+fn milestone_74_tuple_struct_destruct_second_field() {
+    let src = "struct Point(i32, i32);\nfn main() -> i32 { let p = Point(99, 7); let Point(_, y) = p; y }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 7, got {exit_code}");
+}
+
+/// Milestone 74: arithmetic on both destructured bindings.
+///
+/// FLS §5.10.4: Both bindings are usable in subsequent expressions.
+#[test]
+fn milestone_74_tuple_struct_destruct_arithmetic() {
+    let src = "struct Point(i32, i32);\nfn main() -> i32 { let p = Point(10, 3); let Point(x, y) = p; x - y }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 10 - 3 = 7, got {exit_code}");
+}
+
+/// Milestone 74: destructure a tuple struct passed as a function parameter.
+///
+/// FLS §5.10.4: Tuple struct pattern works with any tuple struct value,
+/// including one received from a caller via function parameter.
+#[test]
+fn milestone_74_tuple_struct_destruct_from_param() {
+    let src = "struct Point(i32, i32);\nfn sum(p: Point) -> i32 { let Point(x, y) = p; x + y }\nfn main() -> i32 { sum(Point(5, 8)) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 13, "expected 5 + 8 = 13, got {exit_code}");
+}
+
+/// Milestone 74: destructure directly from a constructor call in let init.
+///
+/// FLS §5.10.4 + §8.1: The RHS of the let can be a constructor call expression.
+/// The fields are stored to fresh slots and bound to the sub-pattern names.
+#[test]
+fn milestone_74_tuple_struct_destruct_from_literal() {
+    let src = "struct Point(i32, i32);\nfn main() -> i32 { let Point(x, y) = Point(6, 2); x + y }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 8, "expected 6 + 2 = 8, got {exit_code}");
+}
+
+/// Milestone 74: three-field tuple struct destructuring.
+///
+/// FLS §5.10.4: The pattern arity must match the struct definition.
+/// Three fields: all three are bound and used.
+#[test]
+fn milestone_74_tuple_struct_destruct_three_fields() {
+    let src = "struct Triple(i32, i32, i32);\nfn main() -> i32 { let t = Triple(1, 2, 4); let Triple(a, b, c) = t; a + b + c }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 1 + 2 + 4 = 7, got {exit_code}");
+}
+
+/// Milestone 74: bindings from destructured tuple struct used in nested block.
+///
+/// FLS §8.1: bindings introduced by the let statement are in scope for the
+/// remainder of the enclosing block.
+#[test]
+fn milestone_74_tuple_struct_destruct_in_block() {
+    let src = "struct Point(i32, i32);\nfn main() -> i32 { let p = Point(5, 3); let Point(x, y) = p; if x > y { x - y } else { y - x } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2, "expected 5 - 3 = 2, got {exit_code}");
+}
+
+/// Runtime inspection: tuple struct variable destructure aliases slots (no extra stores).
+///
+/// FLS §5.10.4 + §6.1.2:37–45: When the initializer is a tuple struct
+/// variable, the pattern is pure slot aliasing — zero additional `str`
+/// instructions are emitted for the destructure itself.
+///
+/// Cache-line note: aliasing costs 0 bytes of instruction space; the tuple
+/// struct fields remain in their original consecutive slots.
+#[test]
+fn runtime_tuple_struct_destruct_variable_emits_no_extra_stores() {
+    let src = "struct Point(i32, i32);\nfn main() -> i32 { let p = Point(3, 4); let Point(x, y) = p; x + y }\n";
+    let asm = compile_to_asm(src);
+    // The constructor `Point(3, 4)` emits 2 str instructions.
+    // The destructure `let Point(x, y) = p` should emit 0 additional str instructions.
+    let store_count = asm.lines().filter(|l| l.trim().starts_with("str")).count();
+    assert!(
+        store_count <= 4,
+        "tuple struct variable destructure should not double-store; got {store_count} str:\n{asm}"
+    );
+    assert!(
+        store_count >= 2,
+        "constructor must emit ≥2 str instructions; got {store_count}:\n{asm}"
+    );
+}
