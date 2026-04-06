@@ -784,6 +784,46 @@ fn lower_fn(
                 reg_idx += regs_needed;
                 continue;
             }
+
+            // FLS §14.2, §10.1: Tuple struct parameter — `fn f(w: Wrap)`.
+            //
+            // A tuple struct with N fields is passed as N consecutive registers,
+            // identical to the tuple struct self-parameter calling convention.
+            // Spill to N consecutive stack slots; register in `local_tuple_lens`
+            // for `.0`/`.1` field access and `local_tuple_struct_types` for
+            // method call dispatch (so `w.val()` resolves to `Wrap::val`).
+            //
+            // FLS §6.1.2:37–45: All spills are runtime store instructions.
+            // Cache-line note: N × 4-byte `str` per parameter spill.
+            if let Some(&n_fields) = tuple_struct_defs.get(type_name) {
+                if n_fields > 0 {
+                    if reg_idx + n_fields > 8 {
+                        return Err(LowerError::Unsupported(
+                            "tuple struct parameter exceeds ARM64 register window (>8 total registers)".into(),
+                        ));
+                    }
+                    let base_slot = ctx.alloc_slot()?;
+                    for _ in 1..n_fields {
+                        ctx.alloc_slot()?;
+                    }
+                    ctx.locals.insert(param_name, base_slot);
+                    ctx.local_tuple_lens.insert(base_slot, n_fields);
+                    ctx.local_tuple_struct_types.insert(base_slot, type_name.to_owned());
+                    for fi in 0..n_fields {
+                        ctx.instrs.push(Instr::Store {
+                            src: (reg_idx + fi) as u8,
+                            slot: base_slot + fi as u8,
+                        });
+                    }
+                    reg_idx += n_fields;
+                } else {
+                    // Zero-field tuple struct: allocate a dummy slot.
+                    let base_slot = ctx.alloc_slot()?;
+                    ctx.locals.insert(param_name, base_slot);
+                    ctx.local_tuple_struct_types.insert(base_slot, type_name.to_owned());
+                }
+                continue;
+            }
         }
 
         // FLS §9: i32 and bool parameters — one register each.
