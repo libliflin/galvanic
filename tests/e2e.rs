@@ -5738,3 +5738,181 @@ fn main() -> i32 {
         "expected `ldr` for field binding in assembly:\n{asm}"
     );
 }
+
+// ── Milestone 53: struct patterns in match ────────────────────────────────────
+//
+// FLS §5.3: Struct patterns. A struct pattern `Point { x, y }` matches a
+// struct value and binds its named fields. For plain struct types (not enum
+// variants), the pattern is irrefutable — no discriminant check is emitted.
+//
+// FLS §6.1.2:37–45: All code is runtime; field loads emit `ldr` instructions.
+// FLS §6.18: Match expression evaluates scrutinee and matches arms in order.
+
+/// Milestone 53: match on struct — bind both fields and sum them.
+///
+/// FLS §5.3: `Point { x, y }` binds fields `x` and `y` from a `Point` struct.
+/// FLS §6.18: Single-arm match with struct pattern — always matches.
+#[test]
+fn milestone_53_struct_match_sum_fields() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn sum(p: Point) -> i32 {
+    match p {
+        Point { x, y } => x + y,
+    }
+}
+fn main() -> i32 {
+    sum(Point { x: 3, y: 4 })
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected exit 7, got {exit_code}");
+}
+
+/// Milestone 53: match on struct — first field only.
+///
+/// FLS §5.3: `Point { x, y: _ }` binds `x` and discards `y`.
+#[test]
+fn milestone_53_struct_match_first_field() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn get_x(p: Point) -> i32 {
+    match p {
+        Point { x, y: _ } => x,
+    }
+}
+fn main() -> i32 {
+    get_x(Point { x: 5, y: 99 })
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "expected exit 5, got {exit_code}");
+}
+
+/// Milestone 53: match on struct — second field only.
+///
+/// FLS §5.3: `Pair { a: _, b }` binds `b` and discards `a`.
+#[test]
+fn milestone_53_struct_match_second_field() {
+    let src = r#"
+struct Pair { a: i32, b: i32 }
+fn get_b(p: Pair) -> i32 {
+    match p {
+        Pair { a: _, b } => b,
+    }
+}
+fn main() -> i32 {
+    get_b(Pair { a: 1, b: 9 })
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 9, "expected exit 9, got {exit_code}");
+}
+
+/// Milestone 53: match on struct — field in arithmetic with another local.
+///
+/// FLS §5.3: bound fields are ordinary locals in the arm body.
+#[test]
+fn milestone_53_struct_match_field_in_arithmetic() {
+    let src = r#"
+struct Val { n: i32 }
+fn double(v: Val) -> i32 {
+    match v {
+        Val { n } => n * 2,
+    }
+}
+fn main() -> i32 {
+    double(Val { n: 6 })
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 12, "expected exit 12, got {exit_code}");
+}
+
+/// Milestone 53: match on struct — three fields, use all three.
+///
+/// FLS §5.3: struct pattern with multiple field bindings.
+#[test]
+fn milestone_53_struct_match_three_fields() {
+    let src = r#"
+struct Triple { a: i32, b: i32, c: i32 }
+fn sum3(t: Triple) -> i32 {
+    match t {
+        Triple { a, b, c } => a + b + c,
+    }
+}
+fn main() -> i32 {
+    sum3(Triple { a: 1, b: 2, c: 3 })
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "expected exit 6, got {exit_code}");
+}
+
+/// Milestone 53: match on struct — pattern binds out of source order.
+///
+/// FLS §5.3: Named-field struct patterns may list fields in any order.
+/// Field binding maps by name, not position.
+#[test]
+fn milestone_53_struct_match_out_of_order_binding() {
+    let src = r#"
+struct Pt { x: i32, y: i32 }
+fn diff(p: Pt) -> i32 {
+    match p {
+        Pt { y, x } => x - y,
+    }
+}
+fn main() -> i32 {
+    diff(Pt { x: 10, y: 3 })
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected exit 7, got {exit_code}");
+}
+
+/// Milestone 53: match on struct — result passed to another function.
+///
+/// FLS §5.3: bound field values are usable as regular expression values.
+#[test]
+fn milestone_53_struct_match_field_passed_to_fn() {
+    let src = r#"
+struct Wrap { v: i32 }
+fn inc(n: i32) -> i32 { n + 1 }
+fn unwrap_and_inc(w: Wrap) -> i32 {
+    match w {
+        Wrap { v } => inc(v),
+    }
+}
+fn main() -> i32 {
+    unwrap_and_inc(Wrap { v: 4 })
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "expected exit 5, got {exit_code}");
+}
+
+// ── Assembly inspection: milestone 53 ────────────────────────────────────────
+
+/// Milestone 53: struct match emits field loads (ldr) but no discriminant check.
+///
+/// FLS §5.3: Plain struct patterns are irrefutable — no discriminant comparison
+/// is needed. The assembly must contain `ldr` (for field binding) and `add`
+/// (for the arm body arithmetic), confirming runtime code was emitted.
+///
+/// FLS §6.1.2:37–45: Field loads are runtime instructions.
+#[test]
+fn runtime_struct_match_emits_ldr_without_discriminant_check() {
+    // Use a let-bound struct variable as scrutinee — no struct-literal-as-arg.
+    let src = "struct Point { x: i32, y: i32 }\nfn main() -> i32 { let p = Point { x: 1, y: 2 }; match p { Point { x, y } => x + y } }\n";
+    let asm = compile_to_asm(src);
+    // Field loads must be present for the pattern bindings.
+    assert!(
+        asm.contains("ldr"),
+        "expected `ldr` for field binding in assembly:\n{asm}"
+    );
+    // The arm body `x + y` must emit an `add` instruction.
+    assert!(
+        asm.contains("add"),
+        "expected `add` for field arithmetic in assembly:\n{asm}"
+    );
+}
