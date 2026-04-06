@@ -464,6 +464,13 @@ fn lower_fn(
         let param_name = param.name.text(source);
 
         // FLS §15: Enum type parameters — `fn f(o: Opt)`.
+        // FLS §11 / §6.12.2: Struct type parameters — `fn f(s: S)`.
+        //
+        // A struct value with N fields occupies N consecutive registers: one
+        // register per field in declaration order. This matches the method
+        // self-parameter calling convention in `lower_fn` (when `impl_type`
+        // is set). The N registers are spilled to N consecutive stack slots
+        // so that field access uses the same Load/Store paths as let-bindings.
         //
         // An enum value with max N fields occupies N+1 consecutive registers:
         // register reg_idx holds the discriminant; registers reg_idx+1..=reg_idx+N
@@ -476,6 +483,34 @@ fn lower_fn(
             && segs.len() == 1
         {
             let type_name = segs[0].text(source);
+
+            // FLS §11 / §6.12.2: Struct parameter — pass each field as a
+            // separate register, matching the method self-parameter convention.
+            if let Some(field_names) = struct_defs.get(type_name) {
+                let n_fields = field_names.len();
+                let regs_needed = n_fields.max(1); // unit structs use 0 regs but need 1 slot
+                if n_fields > 0 && reg_idx + n_fields > 8 {
+                    return Err(LowerError::Unsupported(
+                        "struct parameter exceeds ARM64 register window (>8 total registers)".into(),
+                    ));
+                }
+                let base_slot = ctx.alloc_slot()?;
+                for _ in 1..n_fields {
+                    ctx.alloc_slot()?;
+                }
+                ctx.locals.insert(param_name, base_slot);
+                ctx.local_struct_types.insert(base_slot, type_name.to_owned());
+                // Spill each field register to its stack slot.
+                for fi in 0..n_fields {
+                    ctx.instrs.push(Instr::Store {
+                        src: (reg_idx + fi) as u8,
+                        slot: base_slot + fi as u8,
+                    });
+                }
+                reg_idx += regs_needed;
+                continue;
+            }
+
             if let Some(variants) = enum_defs.get(type_name) {
                 let max_fields = variants.values().map(|(_, names)| names.len()).max().unwrap_or(0);
                 let regs_needed = 1 + max_fields;
@@ -2875,6 +2910,11 @@ impl<'src> LowerCtx<'src> {
 
                 // Lower each argument to virtual registers, left-to-right.
                 //
+                // FLS §11 / §6.12.2: If an argument is a struct variable
+                // (recorded in `local_struct_types`), it expands to N registers:
+                // one per field in declaration order. This matches the struct
+                // parameter calling convention in `lower_fn`.
+                //
                 // FLS §15: If an argument is an enum variable (recorded in
                 // `local_enum_types`), it expands to multiple registers:
                 // discriminant in the first, fields in subsequent registers.
@@ -2883,6 +2923,43 @@ impl<'src> LowerCtx<'src> {
                 // FLS §6.1.2:37–45: All loads are runtime instructions.
                 let mut arg_regs = Vec::with_capacity(args.len());
                 for arg in args {
+                    // Check whether this argument is a struct variable.
+                    let struct_info: Option<(u8, usize)> = if let ExprKind::Path(segs) = &arg.kind
+                        && segs.len() == 1
+                    {
+                        let var_name = segs[0].text(self.source);
+                        if let Some(&base_slot) = self.locals.get(var_name) {
+                            if let Some(st_name) = self.local_struct_types.get(&base_slot) {
+                                let n_fields = self.struct_defs
+                                    .get(st_name.as_str())
+                                    .map(|f| f.len())
+                                    .unwrap_or(0);
+                                Some((base_slot, n_fields))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    if let Some((base_slot, n_fields)) = struct_info {
+                        // Pass each struct field as a separate register.
+                        // FLS §11: field 0 → x{i}, field 1 → x{i+1}, etc.
+                        for fi in 0..n_fields {
+                            let field_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load {
+                                dst: field_reg,
+                                slot: base_slot + fi as u8,
+                            });
+                            arg_regs.push(field_reg);
+                        }
+                        // Unit struct: no registers to pass; continue.
+                        continue;
+                    }
+
                     // Check whether this argument is an enum variable.
                     let enum_info: Option<(u8, usize)> = if let ExprKind::Path(segs) = &arg.kind
                         && segs.len() == 1
