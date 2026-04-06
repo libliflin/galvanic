@@ -142,6 +142,8 @@ fn expr_contains_call(expr: &Expr) -> bool {
             fields.iter().any(|(_, v)| expr_contains_call(v))
         }
         ExprKind::FieldAccess { receiver, .. } => expr_contains_call(receiver),
+        ExprKind::Array(elems) => elems.iter().any(expr_contains_call),
+        ExprKind::Index { base, index } => expr_contains_call(base) || expr_contains_call(index),
         // Leaves: literals, paths, unit — none contain calls.
         _ => false,
     }
@@ -216,6 +218,10 @@ fn expr_contains_break_with_value(expr: &Expr) -> bool {
             fields.iter().any(|(_, v)| expr_contains_break_with_value(v))
         }
         ExprKind::FieldAccess { receiver, .. } => expr_contains_break_with_value(receiver),
+        ExprKind::Array(elems) => elems.iter().any(expr_contains_break_with_value),
+        ExprKind::Index { base, index } => {
+            expr_contains_break_with_value(base) || expr_contains_break_with_value(index)
+        }
         ExprKind::MethodCall { receiver, args, .. } => {
             expr_contains_break_with_value(receiver)
                 || args.iter().any(expr_contains_break_with_value)
@@ -971,6 +977,17 @@ struct LowerCtx<'src> {
     /// registered here with type `"Opt"`. Used by TupleStruct pattern
     /// lowering to locate field slots from the base slot.
     local_enum_types: HashMap<u8, String>,
+
+    /// Maps an array variable's base stack slot to its element count.
+    ///
+    /// FLS §6.8: Array variables occupy N consecutive 8-byte stack slots,
+    /// where N is the element count. When `let a = [e0, e1, e2]` is lowered,
+    /// `a`'s base slot is registered here with count 3. Index expressions
+    /// look up this map to emit `LoadIndexed` with the correct base slot.
+    ///
+    /// Cache-line note: populated once per array let binding; read once per
+    /// index expression. Not on a hot path.
+    local_array_lens: HashMap<u8, usize>,
 }
 
 impl<'src> LowerCtx<'src> {
@@ -999,6 +1016,7 @@ impl<'src> LowerCtx<'src> {
             struct_return_fns,
             local_struct_types: HashMap::new(),
             local_enum_types: HashMap::new(),
+            local_array_lens: HashMap::new(),
         }
     }
 
@@ -1403,6 +1421,41 @@ impl<'src> LowerCtx<'src> {
                         self.instrs.push(Instr::Store { src: disc_reg, slot: base_slot });
                         return Ok(());
                     }
+                }
+
+                // FLS §6.8: Array literal — `let a = [e0, e1, e2];`
+                //
+                // An array of N elements is laid out as N consecutive 8-byte
+                // stack slots. The variable name maps to the base slot (slot of
+                // element 0). Elements are evaluated and stored left-to-right
+                // (FLS §6.4:14).
+                //
+                // `local_array_lens` records the element count so that index
+                // expressions can validate the base slot maps to an array.
+                //
+                // FLS §6.1.2:37–45: All stores are runtime instructions.
+                // Cache-line note: N elements × 4-byte stores. An 8-element
+                // array initializer emits 8 store instructions = 32 bytes,
+                // filling half of a 64-byte cache line.
+                if let Some(init_expr) = init.as_ref()
+                    && let ExprKind::Array(elems) = &init_expr.kind
+                {
+                    let n = elems.len();
+                    // Allocate N consecutive slots.
+                    let base_slot = self.alloc_slot()?;
+                    for _ in 1..n {
+                        self.alloc_slot()?;
+                    }
+                    self.locals.insert(var_name, base_slot);
+                    self.local_array_lens.insert(base_slot, n);
+                    // Evaluate and store each element.
+                    // FLS §6.8: Elements are evaluated left-to-right.
+                    for (i, elem_expr) in elems.iter().enumerate() {
+                        let val = self.lower_expr(elem_expr, &IrTy::I32)?;
+                        let src = self.val_to_reg(val)?;
+                        self.instrs.push(Instr::Store { src, slot: base_slot + i as u8 });
+                    }
+                    return Ok(());
                 }
 
                 // Normal (non-struct) let binding.
@@ -4702,6 +4755,61 @@ impl<'src> LowerCtx<'src> {
                     self.instrs.push(Instr::Call { dst, name: mangled, args: arg_regs });
                     Ok(IrValue::Reg(dst))
                 }
+            }
+
+            // FLS §6.9: Indexing expression `base[index]`.
+            //
+            // Lowering strategy:
+            // 1. Resolve `base` to a simple variable path and look up its stack slot.
+            // 2. Lower `index` to a virtual register.
+            // 3. Emit `LoadIndexed { dst, base_slot, index_reg }`.
+            //
+            // FLS §6.9: The base must be an array (or slice). Galvanic restricts
+            // the base to a simple variable path whose type is a known array
+            // (registered in `local_array_lens`).
+            //
+            // FLS §6.9 AMBIGUOUS: Out-of-bounds access must panic, but the panic
+            // mechanism without the standard library is not specified. No bounds
+            // check is emitted at this milestone.
+            //
+            // FLS §6.1.2:37–45: All instructions are runtime (no constant folding).
+            //
+            // Cache-line note: `LoadIndexed` emits two 4-byte instructions (add + ldr),
+            // so an indexed read costs 8 bytes of instruction cache.
+            ExprKind::Index { base, index } => {
+                // Resolve the base to an array variable's stack slot.
+                let base_slot = match &base.kind {
+                    ExprKind::Path(segs) if segs.len() == 1 => {
+                        let var_name = segs[0].text(self.source);
+                        let slot = *self.locals.get(var_name).ok_or_else(|| {
+                            LowerError::Unsupported(format!(
+                                "undefined variable `{var_name}` in index expression"
+                            ))
+                        })?;
+                        // Verify this variable is a known array.
+                        if !self.local_array_lens.contains_key(&slot) {
+                            return Err(LowerError::Unsupported(format!(
+                                "variable `{var_name}` is not an array (indexing non-arrays not yet supported)"
+                            )));
+                        }
+                        slot
+                    }
+                    _ => {
+                        return Err(LowerError::Unsupported(
+                            "index expression on non-variable base not yet supported".into(),
+                        ));
+                    }
+                };
+
+                // Lower the index expression to a register.
+                // FLS §6.9: The index is of type `usize`; galvanic uses i32 here.
+                let idx_val = self.lower_expr(index, &IrTy::I32)?;
+                let index_reg = self.val_to_reg(idx_val)?;
+
+                // Emit LoadIndexed: adds base_slot*8 to sp, then indexed ldr.
+                let dst = self.alloc_reg()?;
+                self.instrs.push(Instr::LoadIndexed { dst, base_slot, index_reg });
+                Ok(IrValue::Reg(dst))
             }
 
             // Anything else: not yet supported as runtime codegen.

@@ -1419,6 +1419,32 @@ impl<'src> Parser<'src> {
 
                 // Field access or method call: `expr.ident` or `expr.ident(args)`
                 // FLS §6.3.2, §6.3.3
+                // Index expression — FLS §6.9
+                //
+                // `base[index]` — evaluates the base and index at runtime,
+                // then accesses the element at position `index`.
+                //
+                // FLS §6.9: "An indexing expression is used to access an element
+                // of an array or slice by position."
+                // FLS §6.9: The index type is `usize` (spec); galvanic uses `i32`
+                // at this milestone. Bounds checking is deferred.
+                //
+                // Cache-line note: lowered to `add + ldr` (two 4-byte instructions).
+                TokenKind::OpenBracket => {
+                    let base_span = expr.span;
+                    self.advance(); // eat `[`
+                    let index = self.parse_expr()?;
+                    let end = self.current_span();
+                    self.expect(TokenKind::CloseBracket)?;
+                    expr = Expr {
+                        kind: ExprKind::Index {
+                            base: Box::new(expr),
+                            index: Box::new(index),
+                        },
+                        span: base_span.to(end),
+                    };
+                }
+
                 TokenKind::Dot => {
                     self.advance(); // eat `.`
 
@@ -1692,6 +1718,39 @@ impl<'src> Parser<'src> {
 
             // Match expression — FLS §6.18
             TokenKind::KwMatch => self.parse_match_expr(),
+
+            // Array expression — FLS §6.8
+            //
+            // `[elem0, elem1, …]` — a comma-separated list of element expressions
+            // enclosed in square brackets. All elements must have the same type.
+            //
+            // FLS §6.8: "An array expression constructs a value of an array type."
+            // FLS §6.8: Elements are evaluated left-to-right (FLS §6.4:14).
+            //
+            // FLS §6.8 NOTE: Galvanic supports only the list form `[e, e, …]`.
+            // The repeat form `[expr; N]` (FLS §6.8: "array expression with length
+            // specified by an integer expression") is not yet supported.
+            //
+            // Cache-line note: an N-element array occupies N consecutive 8-byte
+            // stack slots; a 8-element array exactly fills one 64-byte cache line.
+            TokenKind::OpenBracket => {
+                self.advance(); // eat `[`
+                let mut elems: Vec<Expr> = Vec::new();
+                while self.peek_kind() != TokenKind::CloseBracket
+                    && self.peek_kind() != TokenKind::Eof
+                {
+                    elems.push(self.parse_expr()?);
+                    if !self.eat(TokenKind::Comma) {
+                        break;
+                    }
+                }
+                let end = self.current_span();
+                self.expect(TokenKind::CloseBracket)?;
+                Ok(Expr {
+                    kind: ExprKind::Array(elems),
+                    span: start.to(end),
+                })
+            }
 
             kind => Err(self.error(format!("expected expression, found {kind:?}"))),
         }
@@ -4173,5 +4232,92 @@ impl Area for Square { fn area(&self) -> i32 { self.side * self.side } }
         assert!(matches!(sf.items[0].kind, ItemKind::Trait(_)));
         assert!(matches!(sf.items[1].kind, ItemKind::Struct(_)));
         assert!(matches!(sf.items[2].kind, ItemKind::Impl(_)));
+    }
+
+    // ── Array expressions (FLS §6.8) and index expressions (FLS §6.9) ──────────
+
+    #[test]
+    fn array_literal_empty() {
+        // FLS §6.8: An empty array `[]` is a valid array expression.
+        // FLS §6.8: "An array expression consists of a comma-separated list."
+        // The list may be empty (zero elements).
+        // Note: type annotation `[i32; 0]` is not yet parsed — omit it here.
+        let src = "fn f() { let _a = []; }";
+        // Just verify it parses without error.
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!() };
+        let body = f.body.as_ref().unwrap();
+        let StmtKind::Let { init: Some(ref init), .. } = body.stmts[0].kind else {
+            panic!("expected let binding");
+        };
+        assert!(matches!(init.kind, ExprKind::Array(ref v) if v.is_empty()));
+    }
+
+    #[test]
+    fn array_literal_three_elements() {
+        // FLS §6.8: `[10, 20, 30]` is an array expression with three elements.
+        let src = "fn f() -> i32 { let a = [10, 20, 30]; a[0] }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!() };
+        let body = f.body.as_ref().unwrap();
+        let StmtKind::Let { init: Some(ref init), .. } = body.stmts[0].kind else {
+            panic!("expected let binding");
+        };
+        let ExprKind::Array(ref elems) = init.kind else {
+            panic!("expected Array, got {:?}", init.kind);
+        };
+        assert_eq!(elems.len(), 3);
+        assert!(matches!(elems[0].kind, ExprKind::LitInt(10)));
+        assert!(matches!(elems[1].kind, ExprKind::LitInt(20)));
+        assert!(matches!(elems[2].kind, ExprKind::LitInt(30)));
+    }
+
+    #[test]
+    fn array_index_constant() {
+        // FLS §6.9: `a[1]` is an indexing expression.
+        // The index is a literal integer — still a runtime index per the spec.
+        let src = "fn f() -> i32 { let a = [10, 20]; a[1] }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!() };
+        let body = f.body.as_ref().unwrap();
+        let tail = body.tail.as_ref().expect("expected tail expression");
+        let ExprKind::Index { ref base, ref index } = tail.kind else {
+            panic!("expected Index, got {:?}", tail.kind);
+        };
+        // Base is the path expression `a`.
+        assert!(matches!(base.kind, ExprKind::Path(_)));
+        // Index is the integer literal 1.
+        assert!(matches!(index.kind, ExprKind::LitInt(1)));
+    }
+
+    #[test]
+    fn array_index_variable() {
+        // FLS §6.9: `a[i]` is an indexing expression with a path index.
+        let src = "fn f() -> i32 { let a = [1, 2, 3]; let i = 0; a[i] }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!() };
+        let body = f.body.as_ref().unwrap();
+        let tail = body.tail.as_ref().expect("expected tail expression");
+        let ExprKind::Index { ref base, ref index } = tail.kind else {
+            panic!("expected Index, got {:?}", tail.kind);
+        };
+        assert!(matches!(base.kind, ExprKind::Path(_)));
+        assert!(matches!(index.kind, ExprKind::Path(_)));
+    }
+
+    #[test]
+    fn array_index_in_expression() {
+        // FLS §6.9 + §6.5.5: `a[0] + a[1]` — indexing as a sub-expression.
+        let src = "fn f() -> i32 { let a = [3, 7]; a[0] + a[1] }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!() };
+        let body = f.body.as_ref().unwrap();
+        let tail = body.tail.as_ref().expect("expected tail expression");
+        // Top-level is a binary addition.
+        let ExprKind::Binary { op: BinOp::Add, ref lhs, ref rhs } = tail.kind else {
+            panic!("expected Add, got {:?}", tail.kind);
+        };
+        assert!(matches!(lhs.kind, ExprKind::Index { .. }));
+        assert!(matches!(rhs.kind, ExprKind::Index { .. }));
     }
 }

@@ -401,6 +401,37 @@ pub enum Instr {
         n_fields: u8,
     },
 
+    /// Load from a stack-allocated array at a runtime-computed index.
+    ///
+    /// `LoadIndexed { dst, base_slot, index_reg }` emits:
+    ///   `add x{dst}, sp, #(base_slot * 8)`       // address of arr[0]
+    ///   `ldr x{dst}, [x{dst}, x{index_reg}, lsl #3]` // load arr[index]
+    ///
+    /// The `lsl #3` scales the index by 8 (the size of one i32 stack slot).
+    ///
+    /// FLS §6.9: Indexing expressions. The base is a stack-allocated array
+    /// (consecutive 8-byte slots); the index selects which slot to load.
+    ///
+    /// FLS §6.9 AMBIGUOUS: The spec requires bounds checking (panic on
+    /// out-of-bounds access), but does not specify the panic mechanism.
+    /// Galvanic does not emit bounds checks at this milestone.
+    ///
+    /// ARM64 LDR addressing: `[xB, xI, lsl #3]` reads from address `xB + xI*8`.
+    /// The `lsl #3` extension is encoded in the instruction and has zero extra cost.
+    ///
+    /// Cache-line note: two 4-byte instructions (8 bytes) per indexed load.
+    /// The add+ldr pair fits in the same pair of instruction slots in a
+    /// 64-byte cache line, so the base address computation and load are
+    /// fetched together.
+    LoadIndexed {
+        /// Destination register for the loaded element.
+        dst: u8,
+        /// Stack slot index of the first array element (slot 0).
+        base_slot: u8,
+        /// Register holding the runtime array index (0-based).
+        index_reg: u8,
+    },
+
     /// Call a `&mut self` method and write modified fields back to the caller's struct.
     ///
     /// `CallMut { name, args, write_back_slot, n_fields }` emits:

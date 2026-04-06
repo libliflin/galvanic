@@ -731,6 +731,59 @@ method_call_with_arg_example:
     ldr     x30, [sp], #16         // FLS §6.12.1: restore lr
     ret
 
+    // fn array_literal_example — FLS §9
+    .global array_literal_example
+array_literal_example:
+    sub     sp, sp, #32             // FLS §8.1: frame for 3 slot(s)
+    mov     x0, #10                  // FLS §2.4.4.1: load imm 10
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    mov     x1, #20                  // FLS §2.4.4.1: load imm 20
+    str     x1, [sp, #8              ] // FLS §8.1: store slot 1
+    mov     x2, #30                  // FLS §2.4.4.1: load imm 30
+    str     x2, [sp, #16             ] // FLS §8.1: store slot 2
+    mov     x3, #0                   // FLS §2.4.4.1: load imm 0
+    add     x4, sp, #0               // FLS §6.9: address of arr[0]
+    ldr     x4, [x4, x3, lsl #3] // FLS §6.9: load arr[index]
+    mov     x0, x4              // FLS §6.19: return reg 4 → x0
+    add     sp, sp, #32             // FLS §8.1: restore stack frame
+    ret
+
+    // fn array_index_middle_example — FLS §9
+    .global array_index_middle_example
+array_index_middle_example:
+    sub     sp, sp, #32             // FLS §8.1: frame for 3 slot(s)
+    mov     x0, #10                  // FLS §2.4.4.1: load imm 10
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    mov     x1, #20                  // FLS §2.4.4.1: load imm 20
+    str     x1, [sp, #8              ] // FLS §8.1: store slot 1
+    mov     x2, #30                  // FLS §2.4.4.1: load imm 30
+    str     x2, [sp, #16             ] // FLS §8.1: store slot 2
+    mov     x3, #1                   // FLS §2.4.4.1: load imm 1
+    add     x4, sp, #0               // FLS §6.9: address of arr[0]
+    ldr     x4, [x4, x3, lsl #3] // FLS §6.9: load arr[index]
+    mov     x0, x4              // FLS §6.19: return reg 4 → x0
+    add     sp, sp, #32             // FLS §8.1: restore stack frame
+    ret
+
+    // fn array_variable_index_example — FLS §9
+    .global array_variable_index_example
+array_variable_index_example:
+    sub     sp, sp, #32             // FLS §8.1: frame for 4 slot(s)
+    mov     x0, #5                   // FLS §2.4.4.1: load imm 5
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    mov     x1, #10                  // FLS §2.4.4.1: load imm 10
+    str     x1, [sp, #8              ] // FLS §8.1: store slot 1
+    mov     x2, #15                  // FLS §2.4.4.1: load imm 15
+    str     x2, [sp, #16             ] // FLS §8.1: store slot 2
+    mov     x3, #2                   // FLS §2.4.4.1: load imm 2
+    str     x3, [sp, #24             ] // FLS §8.1: store slot 3
+    ldr     x4, [sp, #24             ] // FLS §8.1: load slot 3
+    add     x5, sp, #0               // FLS §6.9: address of arr[0]
+    ldr     x5, [x5, x4, lsl #3] // FLS §6.9: load arr[index]
+    mov     x0, x5              // FLS §6.19: return reg 5 → x0
+    add     sp, sp, #32             // FLS §8.1: restore stack frame
+    ret
+
     // ELF entry point — FLS §18.1
     .global _start
 _start:

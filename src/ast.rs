@@ -881,6 +881,43 @@ pub enum ExprKind {
         /// The match arms, in source order.
         arms: Vec<MatchArm>,
     },
+
+    /// An array expression. FLS §6.8.
+    ///
+    /// `[elem0, elem1, elem2]`
+    ///
+    /// FLS §6.8: An array expression constructs a value of an array type. All
+    /// elements must have the same type. The length is determined by the number
+    /// of element expressions.
+    ///
+    /// At this milestone only `[i32; N]` arrays are supported. The elements
+    /// are evaluated left-to-right (FLS §6.4:14) and stored to consecutive
+    /// stack slots.
+    ///
+    /// Cache-line note: N elements occupying N consecutive 8-byte stack slots.
+    /// A 8-element array fills exactly one 64-byte cache line on the stack.
+    Array(Vec<Expr>),
+
+    /// An indexing expression. FLS §6.9.
+    ///
+    /// `base[index]`
+    ///
+    /// FLS §6.9: An indexing expression accesses an element of an array or
+    /// slice by position. The index must be a `usize` value.
+    ///
+    /// At this milestone the index is treated as an `i32` (runtime value).
+    /// Bounds checking is not yet emitted — this is
+    /// FLS §6.9 AMBIGUOUS: the spec does not specify the panic mechanism for
+    /// out-of-bounds access without the standard library.
+    ///
+    /// Cache-line note: lowered to `add sp, #base; ldr [base, idx, lsl #3]` —
+    /// two 4-byte instructions per index.
+    Index {
+        /// The array or slice being indexed.
+        base: Box<Expr>,
+        /// The index expression.
+        index: Box<Expr>,
+    },
 }
 
 // ── Match arms and patterns ───────────────────────────────────────────────────
