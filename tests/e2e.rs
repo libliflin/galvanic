@@ -292,6 +292,55 @@ fn milestone_4_if_with_let() {
     assert_eq!(exit_code, 7, "expected exit 7, got {exit_code}");
 }
 
+// ── Milestone 5: function calls ──────────────────────────────────────────────
+//
+// FLS §6.12.1: Call expressions. The callee is a path expression resolving to
+// a function item. Arguments are evaluated left-to-right and passed in x0–x{n-1}
+// per the ARM64 ABI. The return value arrives in x0.
+//
+// FLS §9: Functions with parameters receive arguments in registers; spilling
+// to the stack makes them addressable by name in the body.
+
+/// Milestone 5: two functions, one calls the other.
+///
+/// `fn add(a: i32, b: i32) -> i32 { a + b }` is called from main.
+/// FLS §6.12.1: Call expression with two integer arguments.
+/// FLS §9: Parameters are passed in x0 and x1 per the ARM64 ABI.
+#[test]
+fn milestone_5_call_add() {
+    let src = "fn add(a: i32, b: i32) -> i32 { a + b }\nfn main() -> i32 { add(1, 2) }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 3, "expected exit 3 from add(1, 2), got {exit_code}");
+}
+
+/// Milestone 5 (variant): call with three arguments.
+///
+/// FLS §9: Functions may take multiple parameters.
+/// FLS §6.5.5: Arithmetic in the callee body runs at runtime.
+#[test]
+fn milestone_5_call_three_args() {
+    let src = "fn sum3(a: i32, b: i32, c: i32) -> i32 { a + b + c }\nfn main() -> i32 { sum3(1, 2, 3) }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 6, "expected exit 6 from sum3(1,2,3), got {exit_code}");
+}
+
+/// Milestone 5 (variant): callee result used in caller arithmetic.
+///
+/// FLS §6.12.1: The return value of a call is a value expression.
+/// FLS §6.5.5: It can be used as an arithmetic operand.
+#[test]
+fn milestone_5_call_result_in_expr() {
+    let src = "fn double(x: i32) -> i32 { x + x }\nfn main() -> i32 { double(5) }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 10, "expected exit 10 from double(5), got {exit_code}");
+}
+
 // ── Assembly inspection: runtime instruction verification ────────────────────
 //
 // FLS §6.1.2:37–45: Non-const code must emit runtime instructions.
@@ -354,6 +403,28 @@ fn runtime_nested_add_emits_multiple_add_instructions() {
     assert!(
         add_count >= 2,
         "expected at least 2 `add` instructions for `1 + 2 + 3`, found {add_count}:\n{asm}"
+    );
+}
+
+/// `fn main() -> i32 { add(1, 2) }` must emit `bl add` and save/restore lr.
+///
+/// FLS §6.12.1: A call expression must emit `bl` at runtime.
+/// FLS §6.12.1: The calling function must save x30 (lr) before `bl`.
+#[test]
+fn runtime_call_emits_bl_and_lr_save() {
+    let src = "fn add(a: i32, b: i32) -> i32 { a + b }\nfn main() -> i32 { add(1, 2) }\n";
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("bl      add"),
+        "expected `bl add` instruction for call expression:\n{asm}"
+    );
+    assert!(
+        asm.contains("str     x30, [sp, #-16]!"),
+        "expected lr save in non-leaf main:\n{asm}"
+    );
+    assert!(
+        asm.contains("ldr     x30, [sp], #16"),
+        "expected lr restore before ret in non-leaf main:\n{asm}"
     );
 }
 

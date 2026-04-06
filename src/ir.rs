@@ -59,6 +59,21 @@ pub struct IrFn {
     /// half cache-line entry. Future register-allocation passes may
     /// eliminate some stack slots entirely.
     pub stack_slots: u8,
+
+    /// Whether this function calls other functions (i.e., is non-leaf).
+    ///
+    /// If true, the function prologue must save the link register (x30)
+    /// before any `bl` instruction overwrites it, and the epilogue must
+    /// restore it before `ret`.
+    ///
+    /// ARM64 ABI: `bl` sets x30 to the return address, clobbering any
+    /// previous value. A leaf function never executes `bl` so x30 remains
+    /// valid for the final `ret`. A non-leaf function must save x30.
+    ///
+    /// FLS §6.12.1: Call expressions imply the function is non-leaf.
+    /// Cache-line note: the lr save/restore pair adds 2 instructions (8 bytes)
+    /// to the function prologue/epilogue — one half of a 16-byte aligned pair.
+    pub saves_lr: bool,
 }
 
 // ── Instructions ──────────────────────────────────────────────────────────────
@@ -83,6 +98,7 @@ pub enum IrBinOp {
 /// Milestone 11 adds `LoadImm` and `BinOp` to emit real arithmetic code.
 /// Milestone 12 adds `Store` and `Load` for let bindings.
 /// Milestone 13 adds `Label`, `Branch`, and `CondBranch` for if/else control flow.
+/// Milestone 14 adds `Call` for function call expressions (FLS §6.12.1).
 pub enum Instr {
     /// Return a value to the caller.
     ///
@@ -195,6 +211,36 @@ pub enum Instr {
         reg: u8,
         /// The label to branch to when `reg` is zero (condition is false).
         label: u32,
+    },
+
+    /// Call a named function with arguments; result goes into a virtual register.
+    ///
+    /// `Call { dst, name, args }` emits (for each arg[i] ≠ i):
+    ///   `mov x{i}, x{args[i]}`
+    /// then:
+    ///   `bl {name}`
+    ///   `mov x{dst}, x0`  (omitted if dst == 0)
+    ///
+    /// FLS §6.12.1: Call expressions. The callee is a path expression resolved
+    /// to a function item. Arguments are evaluated left-to-right (FLS §6.4:14)
+    /// and passed in x0–x7 per the ARM64 procedure call standard.
+    ///
+    /// ARM64 ABI: integer/pointer args 0–7 go in x0–x7; return value in x0.
+    /// The link register (x30) is set to the return address by `bl`; the
+    /// calling function must save x30 if it makes any calls (see `saves_lr`
+    /// on `IrFn`).
+    ///
+    /// Cache-line note: a call with N args emits at most N+2 instructions
+    /// (N moves + bl + mov for result). For the common case of 1–2 args
+    /// already in x0–x1, N moves collapse to 0.
+    Call {
+        /// Destination virtual register for the return value.
+        dst: u8,
+        /// Name of the function to call.
+        name: String,
+        /// Argument virtual registers, in left-to-right parameter order.
+        /// `args[i]` holds the value to place in `x{i}` before the call.
+        args: Vec<u8>,
     },
 }
 
