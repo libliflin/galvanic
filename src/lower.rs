@@ -1745,6 +1745,10 @@ fn parse_char_value(text: &str) -> Result<u32, LowerError> {
 /// Raw string literals contain no escape sequences; each source char is
 /// counted by its UTF-8 byte length.
 fn parse_str_byte_len(text: &str) -> Result<usize, LowerError> {
+    // FLS §2.4.2: Byte string literals begin with `b"` or `br"`.
+    // Strip the leading `b` so the rest of the function handles `"..."` / `r"..."`.
+    let text = text.strip_prefix('b').unwrap_or(text);
+
     // Strip raw-string prefix if present: `r"..."` or `r##"..."##`.
     // Count the number of `#` characters (0–255).
     if let Some(rest) = text.strip_prefix('r') {
