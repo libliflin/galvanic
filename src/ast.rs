@@ -123,6 +123,52 @@ pub enum ItemKind {
     /// `const NAME: Type = expr;` — names a compile-time constant value.
     /// Every use of a constant is replaced with its value (FLS §7.1:10).
     Const(Box<ConstDef>),
+    /// A static item. FLS §7.2.
+    ///
+    /// `static NAME: Type = expr;` — names a value with a fixed memory address.
+    /// All references to a static refer to the same memory location (FLS §7.2:15).
+    /// Unlike constants, statics are not substituted inline; they reside in the
+    /// data section and are loaded via an address reference at runtime.
+    ///
+    /// Cache-line note: a static occupies one 8-byte slot in the `.data` section
+    /// (one slot per half cache line). Reading it costs an ADRP + ADD + LDR
+    /// sequence (12 bytes in the instruction stream), whereas a `const` costs
+    /// only a single MOV (4 bytes). This is the primary cache-line tradeoff
+    /// documented in galvanic's design.
+    Static(Box<StaticDef>),
+}
+
+/// A static item declaration.
+///
+/// FLS §7.2: Static items.
+///
+/// Grammar (abridged):
+/// ```text
+/// StaticDeclaration ::= "static" "mut"? Identifier ":" Type "=" Expression ";"
+/// ```
+///
+/// FLS §7.2:15: "All references to a static refer to the same memory address."
+/// FLS §7.2 AMBIGUOUS: The spec does not specify the data-section alignment for
+/// statics. Galvanic aligns each static to 8 bytes (`.align 3`) matching the
+/// 64-bit register width.
+///
+/// Cache-line note: each `StaticDef` is only allocated during parsing.
+#[derive(Debug)]
+pub struct StaticDef {
+    /// The name of the static.
+    pub name: Span,
+    /// The declared type. Currently only `i32` is supported.
+    pub ty: Ty,
+    /// The initializer expression. Must be a constant expression (FLS §6.1.2).
+    pub value: Expr,
+    /// Whether this static is mutable (`static mut`).
+    ///
+    /// FLS §7.2: Mutable statics can only be accessed inside `unsafe` blocks
+    /// (FLS §19). Galvanic parses `mut` but does not yet enforce the unsafe
+    /// requirement — this is future work.
+    pub mutable: bool,
+    /// Span of the entire declaration including the trailing semicolon.
+    pub span: Span,
 }
 
 /// A constant item declaration.

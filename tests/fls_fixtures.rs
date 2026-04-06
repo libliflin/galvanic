@@ -57,3 +57,8 @@ fn fls_13_traits() {
 fn fls_7_1_consts() {
     assert_galvanic_accepts("fls_7_1_consts.rs");
 }
+
+#[test]
+fn fls_7_2_statics() {
+    assert_galvanic_accepts("fls_7_2_statics.rs");
+}

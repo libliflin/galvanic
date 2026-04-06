@@ -6831,3 +6831,146 @@ fn runtime_const_emits_load_imm_not_stack_load() {
         "expected `mov` for constant substitution:\n{asm}"
     );
 }
+
+// ── Milestone 60: static items ────────────────────────────────────────────────
+
+/// Milestone 60: static item used as return value.
+///
+/// FLS §7.2: Static items have a fixed memory address in the data section.
+/// FLS §7.2:15: All references to a static refer to the same memory address.
+/// FLS §6.3: A path expression resolving to a static emits a memory load.
+#[test]
+fn milestone_60_static_as_return_value() {
+    let src = r#"
+static ANSWER: i32 = 42;
+fn main() -> i32 { ANSWER }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+/// Milestone 60: static item used in arithmetic.
+///
+/// FLS §7.2: The loaded static value participates in runtime arithmetic.
+/// FLS §6.5.5: Arithmetic operator expressions evaluated at runtime.
+#[test]
+fn milestone_60_static_in_arithmetic() {
+    let src = r#"
+static BASE: i32 = 10;
+fn main() -> i32 { BASE + 5 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 15, "expected exit 15, got {exit_code}");
+}
+
+/// Milestone 60: static item passed as function argument.
+///
+/// FLS §7.2: The loaded static value is passed as a runtime argument.
+/// FLS §6.12.1: Call expressions evaluate arguments left-to-right.
+#[test]
+fn milestone_60_static_as_fn_arg() {
+    let src = r#"
+static LIMIT: i32 = 7;
+fn double(n: i32) -> i32 { n * 2 }
+fn main() -> i32 { double(LIMIT) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 14, "expected exit 14, got {exit_code}");
+}
+
+/// Milestone 60: static item used as loop bound.
+///
+/// FLS §7.2: Static loaded on each loop iteration (each use goes through memory).
+/// FLS §6.15.3: While loop condition evaluated at runtime.
+#[test]
+fn milestone_60_static_as_loop_bound() {
+    let src = r#"
+static LIMIT: i32 = 5;
+fn main() -> i32 {
+    let mut i = 0;
+    while i < LIMIT { i += 1; }
+    i
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "expected exit 5, got {exit_code}");
+}
+
+/// Milestone 60: static item used in if condition.
+///
+/// FLS §7.2: Static loaded at runtime before comparison.
+/// FLS §6.17: If expression evaluates condition at runtime.
+#[test]
+fn milestone_60_static_in_if_condition() {
+    let src = r#"
+static THRESHOLD: i32 = 10;
+fn check(n: i32) -> i32 { if n > THRESHOLD { 1 } else { 0 } }
+fn main() -> i32 { check(15) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected exit 1, got {exit_code}");
+}
+
+/// Milestone 60: two static items used together.
+///
+/// FLS §7.2: Multiple statics each get their own data section entry and address.
+#[test]
+fn milestone_60_two_statics() {
+    let src = r#"
+static X: i32 = 3;
+static Y: i32 = 4;
+fn main() -> i32 { X + Y }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected exit 7, got {exit_code}");
+}
+
+/// Milestone 60: static item with zero value.
+///
+/// FLS §7.2: Zero is a valid static initializer (FLS §6.1.2).
+#[test]
+fn milestone_60_static_zero() {
+    let src = r#"
+static ZERO: i32 = 0;
+fn main() -> i32 { ZERO }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected exit 0, got {exit_code}");
+}
+
+/// Milestone 60: assembly inspection — static emits adrp+add+ldr, not mov.
+///
+/// FLS §7.2:15: A static reference must go through its memory address.
+/// This is the key architectural difference from `const` (which emits `mov`).
+///
+/// Cache-line note: static load = 3 instructions (12 bytes) vs const = 1
+/// instruction (4 bytes). The tradeoff: statics avoid code duplication but
+/// cost 3× more in instruction cache pressure per use site.
+#[test]
+fn runtime_static_emits_adrp_add_ldr() {
+    let src = "static ANSWER: i32 = 42;\nfn main() -> i32 { ANSWER }\n";
+    let asm = compile_to_asm(src);
+    // Must emit adrp — FLS §7.2: static address loaded via page-relative addressing.
+    assert!(
+        asm.contains("adrp"),
+        "expected `adrp` for static address load:\n{asm}"
+    );
+    // Must NOT emit a plain `mov` with #42 — static must go through memory.
+    // (There may be a `mov` for the exit code path, but not `mov x{r}, #42`.)
+    let has_imm_42 = asm.lines().any(|line| {
+        line.contains("mov") && line.contains("#42")
+    });
+    assert!(
+        !has_imm_42,
+        "static must not be substituted as immediate #42:\n{asm}"
+    );
+    // The .data section must contain the static's value.
+    assert!(
+        asm.contains(".data"),
+        "expected .data section for static:\n{asm}"
+    );
+    assert!(
+        asm.contains("ANSWER"),
+        "expected ANSWER label in assembly:\n{asm}"
+    );
+}

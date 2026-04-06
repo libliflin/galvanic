@@ -321,7 +321,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                 }
                 enum_defs.insert(enum_name, variants);
             }
-            ItemKind::Fn(_) | ItemKind::Impl(_) | ItemKind::Trait(_) | ItemKind::Const(_) => {}
+            ItemKind::Fn(_) | ItemKind::Impl(_) | ItemKind::Trait(_) | ItemKind::Const(_) | ItemKind::Static(_) => {}
         }
     }
 
@@ -349,6 +349,31 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                 && *n <= i32::MAX as u128
             {
                 const_vals.insert(name, *n as i32);
+            }
+        }
+    }
+
+    // Collect static item names and their data-section entries.
+    //
+    // FLS §7.2: Static items are allocated in the data section with a fixed
+    // address. Every use of a static emits a LoadStatic (ADRP + ADD + LDR)
+    // rather than a LoadImm, because FLS §7.2:15 requires all references
+    // to go through the same memory address.
+    //
+    // At this milestone only integer literal initializers are supported.
+    //
+    // Cache-line note: each StaticData entry will become a `.quad` in the
+    // `.data` section — 8 bytes per static.
+    let mut static_data: Vec<crate::ir::StaticData> = Vec::new();
+    let mut static_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for item in &src.items {
+        if let ItemKind::Static(s) = &item.kind {
+            let name = s.name.text(source).to_owned();
+            if let ExprKind::LitInt(n) = &s.value.kind
+                && *n <= i32::MAX as u128
+            {
+                static_data.push(crate::ir::StaticData { name: name.clone(), value: *n as i32 });
+                static_names.insert(name);
             }
         }
     }
@@ -469,7 +494,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     for item in &src.items {
         match &item.kind {
             ItemKind::Fn(fn_def) => {
-                let (ir_fn, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &enum_defs, &method_self_kinds, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &const_vals, None, label_base)?;
+                let (ir_fn, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &enum_defs, &method_self_kinds, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &const_vals, &static_names, None, label_base)?;
                 label_base = next_label;
                 fns.push(ir_fn);
             }
@@ -505,6 +530,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         &struct_return_free_fns,
                         &enum_return_fns,
                         &const_vals,
+                        &static_names,
                         mctx,
                         label_base,
                     )?;
@@ -519,10 +545,13 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
             // FLS §7.1: Const items are collected in the first pass above.
             // They produce no runtime code of their own.
             ItemKind::Const(_) => {}
+            // FLS §7.2: Static items are collected in the first pass above.
+            // They produce no function code — only data section entries.
+            ItemKind::Static(_) => {}
         }
     }
 
-    Ok(Module { fns })
+    Ok(Module { fns, statics: static_data })
 }
 
 // ── Function lowering ────────────────────────────────────────────────────────
@@ -568,6 +597,7 @@ fn lower_fn(
     struct_return_free_fns: &HashMap<String, String>,
     enum_return_fns: &HashMap<String, String>,
     const_vals: &HashMap<String, i32>,
+    static_names: &std::collections::HashSet<String>,
     method: Option<MethodCtx<'_>>,
     start_label: u32,
 ) -> Result<(IrFn, u32), LowerError> {
@@ -630,7 +660,7 @@ fn lower_fn(
         Some(block) => block,
     };
 
-    let mut ctx = LowerCtx::new(source, ret_ty, struct_defs, tuple_struct_defs, enum_defs, method_self_kinds, struct_return_fns, struct_return_free_fns, enum_return_fns, const_vals, start_label);
+    let mut ctx = LowerCtx::new(source, ret_ty, struct_defs, tuple_struct_defs, enum_defs, method_self_kinds, struct_return_fns, struct_return_free_fns, enum_return_fns, const_vals, static_names, start_label);
 
     // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
     // to stack slots. Each parameter slot is allocated in parameter order
@@ -1325,6 +1355,18 @@ struct LowerCtx<'src> {
     ///
     /// Cache-line note: read-only during lowering; not on any hot path.
     const_vals: &'src HashMap<String, i32>,
+
+    /// Static variable names: the set of names declared as `static` items.
+    ///
+    /// FLS §7.2: Static items. When a path expression `FOO` resolves to a known
+    /// static name, `LoadStatic { dst, name }` is emitted instead of `Load { slot }`.
+    /// This causes the codegen to emit ADRP + ADD + LDR at the use site.
+    ///
+    /// FLS §7.2:15: All references to a static go through its memory address —
+    /// unlike const substitution, static reads are actual memory loads.
+    ///
+    /// Cache-line note: read-only during lowering; not on any hot path.
+    static_names: &'src std::collections::HashSet<String>,
 }
 
 impl<'src> LowerCtx<'src> {
@@ -1340,6 +1382,7 @@ impl<'src> LowerCtx<'src> {
         struct_return_free_fns: &'src HashMap<String, String>,
         enum_return_fns: &'src HashMap<String, String>,
         const_vals: &'src HashMap<String, i32>,
+        static_names: &'src std::collections::HashSet<String>,
         start_label: u32,
     ) -> Self {
         LowerCtx {
@@ -1360,6 +1403,7 @@ impl<'src> LowerCtx<'src> {
             struct_return_free_fns,
             enum_return_fns,
             const_vals,
+            static_names,
             local_struct_types: HashMap::new(),
             local_enum_types: HashMap::new(),
             local_array_lens: HashMap::new(),
@@ -2324,6 +2368,13 @@ impl<'src> LowerCtx<'src> {
                 if let Some(&const_val) = self.const_vals.get(var_name) {
                     let r = self.alloc_reg()?;
                     self.instrs.push(Instr::LoadImm(r, const_val));
+                    return Ok(IrValue::Reg(r));
+                }
+                // Check static_names: FLS §7.2 — all references to a static
+                // go through its memory address (ADRP + ADD + LDR).
+                if self.static_names.contains(var_name) {
+                    let r = self.alloc_reg()?;
+                    self.instrs.push(Instr::LoadStatic { dst: r, name: var_name.to_owned() });
                     return Ok(IrValue::Reg(r));
                 }
                 let slot = self.locals.get(var_name).copied().ok_or_else(|| {
