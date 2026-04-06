@@ -5577,6 +5577,54 @@ impl<'src> LowerCtx<'src> {
             // For a simple add, this is three sequential 4-byte instructions that will
             // often land in the same 64-byte cache line.
             ExprKind::CompoundAssign { op, target, value } => {
+                // Handle compound assignment through a pointer: `*ptr op= value`.
+                //
+                // FLS §6.5.11: The LHS of compound assignment may be a dereference
+                // expression `*ptr`. Desugars to LoadPtr + BinOp + StorePtr.
+                //
+                // FLS §6.5.10: `*ptr = value` writes through the pointer; compound
+                // assignment adds a LoadPtr before the store.
+                //
+                // FLS §6.1.2:37–45: All three instructions are runtime — no folding.
+                //
+                // Cache-line note: LoadPtr + BinOp + StorePtr = 3 instructions (12 bytes),
+                // same footprint as the stack-slot variant (Load + BinOp + Store).
+                if let ExprKind::Unary { op: crate::ast::UnaryOp::Deref, operand } = &target.kind {
+                    // Lower the pointer operand to a register.
+                    let ptr_val = self.lower_expr(operand, &IrTy::I32)?;
+                    let ptr_reg = self.val_to_reg(ptr_val)?;
+
+                    // Load current value through the pointer.
+                    let lhs_reg = self.alloc_reg()?;
+                    self.instrs.push(Instr::LoadPtr { dst: lhs_reg, src: ptr_reg });
+
+                    // Lower the RHS.
+                    let rhs_val = self.lower_expr(value, &IrTy::I32)?;
+                    let rhs_reg = self.val_to_reg(rhs_val)?;
+
+                    // Apply the binary operation.
+                    let ir_op = match op {
+                        BinOp::Add    => IrBinOp::Add,
+                        BinOp::Sub    => IrBinOp::Sub,
+                        BinOp::Mul    => IrBinOp::Mul,
+                        BinOp::Div    => IrBinOp::Div,
+                        BinOp::Rem    => IrBinOp::Rem,
+                        BinOp::BitAnd => IrBinOp::BitAnd,
+                        BinOp::BitOr  => IrBinOp::BitOr,
+                        BinOp::BitXor => IrBinOp::BitXor,
+                        BinOp::Shl    => IrBinOp::Shl,
+                        BinOp::Shr    => IrBinOp::Shr,
+                        _ => unreachable!("compound assignment operator must be arithmetic or bitwise"),
+                    };
+                    let res_reg = self.alloc_reg()?;
+                    self.instrs.push(Instr::BinOp { op: ir_op, dst: res_reg, lhs: lhs_reg, rhs: rhs_reg });
+
+                    // Store the result back through the pointer.
+                    self.instrs.push(Instr::StorePtr { src: res_reg, addr: ptr_reg });
+
+                    return Ok(IrValue::Unit);
+                }
+
                 // Resolve target to a stack slot.
                 //
                 // FLS §6.5.11: Supports two place expression forms on the LHS:

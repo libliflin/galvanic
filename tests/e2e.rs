@@ -8258,3 +8258,120 @@ fn runtime_store_ptr_emits_str_indirect() {
     });
     assert!(has_indirect_str, "expected `str xS, [xA]` for *x = v, got:\n{asm}");
 }
+
+// ── Milestone 70: compound assignment through mutable references ──────────────
+
+/// Milestone 70: `*x += 1` increments through a mutable reference.
+///
+/// FLS §6.5.11: Compound assignment desugars to load + binop + store.
+/// FLS §6.5.10: The LHS is a dereference expression; store goes through the pointer.
+/// FLS §6.1.2:37–45: LoadPtr + BinOp + StorePtr are all runtime instructions.
+#[test]
+fn milestone_70_deref_add_assign() {
+    let src = "fn increment(x: &mut i32) { *x += 1; }\nfn main() -> i32 { let mut n = 5; increment(&mut n); n }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "expected 6, got {exit_code}");
+}
+
+/// Milestone 70: `*x -= 2` subtracts through a mutable reference.
+///
+/// FLS §6.5.11: `-=` through a pointer desugars to LoadPtr + Sub + StorePtr.
+#[test]
+fn milestone_70_deref_sub_assign() {
+    let src = "fn decrement(x: &mut i32, n: i32) { *x -= n; }\nfn main() -> i32 { let mut v = 20; decrement(&mut v, 8); v }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 12, "expected 12, got {exit_code}");
+}
+
+/// Milestone 70: `*x *= factor` multiplies through a mutable reference.
+///
+/// FLS §6.5.11: `*=` through a pointer desugars to LoadPtr + Mul + StorePtr.
+#[test]
+fn milestone_70_deref_mul_assign() {
+    let src = "fn double(x: &mut i32) { *x *= 2; }\nfn main() -> i32 { let mut v = 7; double(&mut v); v }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 14, "expected 14, got {exit_code}");
+}
+
+/// Milestone 70: multiple `*x += 1` calls accumulate correctly.
+///
+/// FLS §6.5.11: Each compound assignment is independent; the second reads the
+/// value written by the first.
+#[test]
+fn milestone_70_deref_add_assign_twice() {
+    let src = "fn add_two(x: &mut i32) { *x += 1; *x += 1; }\nfn main() -> i32 { let mut n = 10; add_two(&mut n); n }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 12, "expected 12, got {exit_code}");
+}
+
+/// Milestone 70: `*x += n` in a loop accumulates to the expected total.
+///
+/// FLS §6.15.3: While loop. Each iteration increments through the pointer.
+/// FLS §6.5.11: Compound assignment through pointer is idiomatic Rust.
+#[test]
+fn milestone_70_deref_add_assign_in_loop() {
+    let src = "fn accumulate(x: &mut i32, n: i32) { let mut i = 0; while i < n { *x += 1; i += 1; } }\nfn main() -> i32 { let mut total = 0; accumulate(&mut total, 7); total }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 7, got {exit_code}");
+}
+
+/// Milestone 70: `*x += param` uses the parameter value on the RHS.
+///
+/// FLS §6.5.11: The RHS expression is evaluated at runtime; here it is a
+/// function parameter (loaded from the stack), not a literal.
+#[test]
+fn milestone_70_deref_add_assign_from_param() {
+    let src = "fn add_to(x: &mut i32, amount: i32) { *x += amount; }\nfn main() -> i32 { let mut n = 3; add_to(&mut n, 4); n }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 7, got {exit_code}");
+}
+
+/// Milestone 70: two separate mutable references, both compound-assigned.
+///
+/// FLS §6.5.11: Two pointers are updated independently. No aliasing.
+#[test]
+fn milestone_70_two_deref_add_assigns() {
+    let src = "fn add_both(a: &mut i32, b: &mut i32, n: i32) { *a += n; *b += n; }\nfn main() -> i32 { let mut x = 1; let mut y = 2; add_both(&mut x, &mut y, 3); x + y }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 9, "expected 9, got {exit_code}");
+}
+
+/// Milestone 70: assembly inspection — `*x += 1` emits LoadPtr + add + StorePtr.
+///
+/// FLS §6.5.11 + §6.5.10: The sequence must be `ldr xD, [xP]` (load through pointer),
+/// an `add` instruction, then `str xR, [xP]` (store through pointer).
+///
+/// Cache-line note: 3 instructions × 4 bytes = 12 bytes — same as the
+/// stack-slot compound-assign variant (ldr [sp,#off] + add + str [sp,#off]).
+#[test]
+fn runtime_deref_compound_assign_emits_ldrptr_binop_strptr() {
+    let src = "fn increment(x: &mut i32) { *x += 1; }\nfn main() -> i32 { let mut n = 0; increment(&mut n); n }\n";
+    let asm = compile_to_asm(src);
+    // Must contain an indirect load `ldr xD, [xP]` (register-indirect, no offset).
+    let has_ldr_ptr = asm.lines().any(|l| {
+        let t = l.trim();
+        if !t.starts_with("ldr") { return false; }
+        if let Some(bracket) = t.find('[') {
+            let inside = &t[bracket + 1..];
+            inside.starts_with('x') && inside.contains(']') && !inside.contains(',')
+        } else {
+            false
+        }
+    });
+    // Must contain an add instruction.
+    let has_add = asm.lines().any(|l| l.trim().starts_with("add"));
+    // Must contain an indirect store `str xS, [xP]`.
+    let has_str_ptr = asm.lines().any(|l| {
+        let t = l.trim();
+        if !t.starts_with("str") { return false; }
+        if let Some(bracket) = t.find('[') {
+            let inside = &t[bracket + 1..];
+            inside.starts_with('x') && inside.contains(']') && !inside.contains(',')
+        } else {
+            false
+        }
+    });
+    assert!(has_ldr_ptr, "*x += 1 must emit `ldr xD, [xP]`:\n{asm}");
+    assert!(has_add, "*x += 1 must emit an `add` instruction:\n{asm}");
+    assert!(has_str_ptr, "*x += 1 must emit `str xS, [xP]`:\n{asm}");
+}
