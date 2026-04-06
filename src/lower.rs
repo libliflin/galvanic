@@ -129,9 +129,10 @@ fn lower_fn(fn_def: &crate::ast::FnDef, source: &str) -> Result<IrFn, LowerError
             ));
         }
         let param_ty = lower_ty(&param.ty, source)?;
-        // Only i32 parameters are supported at this milestone.
+        // Only i32 (and bool, which maps to i32) parameters are supported.
+        // FLS §4.3: bool is passed as a 32-bit integer register on ARM64.
         if !matches!(param_ty, IrTy::I32) {
-            return Err(LowerError::Unsupported("parameter type other than i32".into()));
+            return Err(LowerError::Unsupported("parameter type other than i32/bool".into()));
         }
         let slot = ctx.alloc_slot()?;
         let param_name = param.name.text(source);
@@ -154,13 +155,21 @@ fn lower_fn(fn_def: &crate::ast::FnDef, source: &str) -> Result<IrFn, LowerError
 
 /// Lower a type expression to an `IrTy`.
 ///
-/// FLS §4: Types. Only `i32` and `()` are supported.
+/// FLS §4: Types. Supports `i32`, `bool`, and `()`.
+///
+/// FLS §4.3: The boolean type `bool` has two values, `true` (1) and `false`
+/// (0). On ARM64, booleans are passed and returned in 32-bit integer registers
+/// (the same layout as `i32`), so `bool` maps to `IrTy::I32` in the IR.
+/// This is consistent with `LitBool` materialisation (FLS §6.1.3), which
+/// already represents `true`/`false` as immediates 1/0.
 fn lower_ty(ty: &crate::ast::Ty, source: &str) -> Result<IrTy, LowerError> {
     match &ty.kind {
         TyKind::Unit => Ok(IrTy::Unit),
         TyKind::Path(segments) if segments.len() == 1 => {
             match segments[0].text(source) {
                 "i32" => Ok(IrTy::I32),
+                // FLS §4.3: bool maps to i32 in the IR — same register layout.
+                "bool" => Ok(IrTy::I32),
                 name => Err(LowerError::Unsupported(format!("type `{name}`"))),
             }
         }
