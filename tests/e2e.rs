@@ -1603,3 +1603,92 @@ fn runtime_cast_identity_emits_no_cast_instruction() {
         "identity cast i32→i32 must not emit a cast instruction, got:\n{asm}"
     );
 }
+
+// ── Milestone 16: bool as parameter and return type ───────────────────────────
+//
+// FLS §4.3: The boolean type `bool` has two values: `true` (1) and `false` (0).
+// On ARM64, booleans are passed and returned in 32-bit integer registers —
+// the same layout as `i32`. Mapping `bool` to `IrTy::I32` is therefore
+// correct and sufficient for this milestone.
+//
+// This milestone enables:
+//   - Functions that accept `bool` parameters (passed as 0 or 1 in xN)
+//   - Functions that return `bool` (returned as 0 or 1 in x0)
+//   - Composing boolean-returning functions with if/else
+//
+// FLS §6.1.3: Boolean literal expressions materialise as `LoadImm 0/1` —
+// the same representation used for bool parameters.
+// FLS §6.1.2:37–45: All code emits runtime instructions.
+
+/// Milestone 16: bool parameter `true` is passed as 1, if-dispatch returns 1.
+///
+/// FLS §4.3: `true` is represented as 1 in a 32-bit register.
+/// FLS §6.17: The if expression dispatches on the bool parameter at runtime.
+#[test]
+fn milestone_16_bool_param_true() {
+    let src = "fn to_int(b: bool) -> i32 { if b { 1 } else { 0 } }\nfn main() -> i32 { to_int(true) }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "expected exit 1 from to_int(true), got {exit_code}");
+}
+
+/// Milestone 16: bool parameter `false` is passed as 0, if-dispatch returns 0.
+///
+/// FLS §4.3: `false` is represented as 0 in a 32-bit register.
+/// FLS §6.17: The if expression dispatches on the bool parameter at runtime.
+#[test]
+fn milestone_16_bool_param_false() {
+    let src = "fn to_int(b: bool) -> i32 { if b { 1 } else { 0 } }\nfn main() -> i32 { to_int(false) }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 0, "expected exit 0 from to_int(false), got {exit_code}");
+}
+
+/// Milestone 16: function returning `bool` — comparison result flows as return value.
+///
+/// `is_zero(0)` computes `0 == 0` (true = 1) and returns it as bool.
+/// The caller uses the return value as an if condition.
+///
+/// FLS §4.3: bool return type is represented as 0/1 in x0.
+/// FLS §6.5.3: Equality comparison emits `cmp`+`cset` at runtime.
+#[test]
+fn milestone_16_bool_return_true() {
+    let src = "fn is_zero(x: i32) -> bool { x == 0 }\nfn main() -> i32 { if is_zero(0) { 1 } else { 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "expected exit 1 from if is_zero(0) {{1}} else {{0}}, got {exit_code}");
+}
+
+/// Milestone 16: function returning `bool` — false case.
+///
+/// `is_zero(5)` computes `5 == 0` (false = 0), so the else branch runs.
+///
+/// FLS §4.3: bool return type is 0 when the comparison is false.
+/// FLS §6.5.3: Equality comparison emits `cmp`+`cset` at runtime.
+#[test]
+fn milestone_16_bool_return_false() {
+    let src = "fn is_zero(x: i32) -> bool { x == 0 }\nfn main() -> i32 { if is_zero(5) { 1 } else { 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 0, "expected exit 0 from if is_zero(5) {{1}} else {{0}}, got {exit_code}");
+}
+
+/// Milestone 16: bool parameter and bool return type together.
+///
+/// `negate(false)` takes bool param (0), applies `!` (mvn), returns bool (1).
+/// The caller uses the returned bool as an if condition.
+///
+/// FLS §4.3: bool param and return use the same i32 register layout.
+/// FLS §6.5.4: `!` on a bool (represented as i32) emits `mvn`.
+#[test]
+fn milestone_16_bool_param_and_return() {
+    let src = "fn negate(b: bool) -> bool { !b }\nfn main() -> i32 { if negate(false) { 1 } else { 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "expected exit 1 from if negate(false) {{1}} else {{0}}, got {exit_code}");
+}

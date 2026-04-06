@@ -122,6 +122,18 @@ fn add_two(a: i32, b: i32) -> i32 {
     a + b
 }
 
+// FLS §4.3 — Boolean type used as parameter and return type.
+// No direct FLS example provided in §4.3; derived from the semantic description:
+// "The boolean type bool has two values: true and false." (FLS §4.3)
+// FLS §6.17: The if expression dispatches on the bool parameter at runtime.
+fn bool_param_example(b: bool) -> i32 {
+    if b { 1 } else { 0 }
+}
+
+fn bool_return_example(x: i32) -> bool {
+    x > 0
+}
+
 // FLS §6.5.11 — Compound assignment expressions
 // No direct FLS example provided; derived from the semantic description:
 // "A compound assignment expression combines a binary operator expression
