@@ -679,9 +679,11 @@ impl<'src> Parser<'src> {
             expr.kind,
             ExprKind::Block(_)
                 | ExprKind::If { .. }
+                | ExprKind::IfLet { .. }
                 | ExprKind::Loop(_)
                 | ExprKind::While { .. }
                 | ExprKind::For { .. }
+                | ExprKind::Match { .. }
         );
 
         if is_expr_with_block && self.peek_kind() != TokenKind::CloseBrace {
