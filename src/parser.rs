@@ -1496,14 +1496,34 @@ impl<'src> Parser<'src> {
         })
     }
 
-    /// Parse a match arm pattern.
+    /// Parse a match arm pattern, including OR patterns.
     ///
-    /// FLS §5: Patterns. Only the minimal subset needed for integer/bool
-    /// matching is supported: wildcard `_`, integer literals, bool literals.
+    /// FLS §5: Patterns. Supported subset: wildcard `_`, integer literals,
+    /// negative integer literals, bool literals, and OR patterns `p0 | p1`.
     ///
     /// FLS §5.1: Wildcard pattern — `_`.
     /// FLS §5.2: Literal patterns — integer and boolean literals.
+    /// FLS §5.1.11: Or patterns — `p0 | p1 | ...`.
     fn parse_pattern(&mut self) -> Result<crate::ast::Pat, ParseError> {
+        use crate::ast::Pat;
+        let first = self.parse_single_pattern()?;
+        // FLS §5.1.11: If the next token is `|`, collect additional alternatives.
+        if self.peek_kind() != TokenKind::Or {
+            return Ok(first);
+        }
+        let mut alts = vec![first];
+        while self.peek_kind() == TokenKind::Or {
+            self.advance(); // consume `|`
+            alts.push(self.parse_single_pattern()?);
+        }
+        Ok(Pat::Or(alts))
+    }
+
+    /// Parse a single pattern alternative (no `|`).
+    ///
+    /// FLS §5.1: Wildcard pattern — `_`.
+    /// FLS §5.2: Literal patterns — integer and boolean literals.
+    fn parse_single_pattern(&mut self) -> Result<crate::ast::Pat, ParseError> {
         use crate::ast::Pat;
         match self.peek_kind() {
             // Wildcard pattern `_`. FLS §5.1.
@@ -3171,5 +3191,46 @@ mod tests {
             matches!(arms[2].pat, Pat::Wildcard),
             "expected Wildcard, got {:?}", arms[2].pat
         );
+    }
+
+    #[test]
+    fn or_pattern_two_alternatives() {
+        // FLS §5.1.11: OR pattern `0 | 1` in a match arm.
+        use crate::ast::{ExprKind, Pat};
+        let src = "fn f(x: i32) -> i32 { match x { 0 | 1 => 10, _ => 20 } }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!() };
+        let body = f.body.as_ref().unwrap();
+        let tail = body.tail.as_ref().expect("expected tail");
+        let ExprKind::Match { ref arms, .. } = tail.kind else {
+            panic!("expected Match");
+        };
+        assert_eq!(arms.len(), 2, "expected 2 arms");
+        // First arm: OR pattern with alternatives 0 and 1.
+        let Pat::Or(ref alts) = arms[0].pat else {
+            panic!("expected Pat::Or, got {:?}", arms[0].pat);
+        };
+        assert_eq!(alts.len(), 2);
+        assert!(matches!(alts[0], Pat::LitInt(0)));
+        assert!(matches!(alts[1], Pat::LitInt(1)));
+        // Second arm: wildcard.
+        assert!(matches!(arms[1].pat, Pat::Wildcard));
+    }
+
+    #[test]
+    fn or_pattern_three_alternatives() {
+        // FLS §5.1.11: Three-way OR pattern `1 | 2 | 3`.
+        use crate::ast::{ExprKind, Pat};
+        let src = "fn f(x: i32) -> i32 { match x { 1 | 2 | 3 => 1, _ => 0 } }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!() };
+        let body = f.body.as_ref().unwrap();
+        let tail = body.tail.as_ref().expect("expected tail");
+        let ExprKind::Match { ref arms, .. } = tail.kind else { panic!() };
+        let Pat::Or(ref alts) = arms[0].pat else { panic!("expected Or") };
+        assert_eq!(alts.len(), 3);
+        assert!(matches!(alts[0], Pat::LitInt(1)));
+        assert!(matches!(alts[1], Pat::LitInt(2)));
+        assert!(matches!(alts[2], Pat::LitInt(3)));
     }
 }

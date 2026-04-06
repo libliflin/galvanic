@@ -2418,3 +2418,120 @@ fn runtime_negative_pattern_emits_cmp() {
     // Must emit a conditional branch (cbz or similar)
     assert!(asm.contains("cbz"), "expected cbz for arm skip branch");
 }
+
+// ── Milestone 32: OR patterns in match (FLS §5.1.11) ─────────────────────────
+
+/// Milestone 32: `0 | 1 => 10` — scrutinee 0 matches the OR arm.
+///
+/// FLS §5.1.11: An OR pattern matches if any of its alternatives matches.
+/// The first alternative `0` matches scrutinee `0`, so the arm executes.
+#[test]
+fn milestone_32_or_pattern_first_alt_matches() {
+    let src = "fn main() -> i32 { let x = 0; match x { 0 | 1 => 10, _ => 20 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "expected 0 to match OR pattern 0|1, got {exit_code}");
+}
+
+/// Milestone 32: `0 | 1 => 10` — scrutinee 1 matches via second alternative.
+///
+/// FLS §5.1.11: The second alternative `1` matches scrutinee `1`.
+#[test]
+fn milestone_32_or_pattern_second_alt_matches() {
+    let src = "fn main() -> i32 { let x = 1; match x { 0 | 1 => 10, _ => 20 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "expected 1 to match OR pattern 0|1, got {exit_code}");
+}
+
+/// Milestone 32: `0 | 1 => 10` — scrutinee 2 falls to wildcard arm.
+///
+/// FLS §5.1.11: Neither alternative matches; the wildcard arm executes.
+#[test]
+fn milestone_32_or_pattern_no_match_falls_to_wildcard() {
+    let src = "fn main() -> i32 { let x = 2; match x { 0 | 1 => 10, _ => 20 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 20, "expected 2 to fall through to wildcard, got {exit_code}");
+}
+
+/// Milestone 32: three-alternative OR pattern `1 | 2 | 3 => 5`.
+///
+/// FLS §5.1.11: OR patterns may have more than two alternatives.
+/// Scrutinee 2 matches the second alternative.
+#[test]
+fn milestone_32_or_pattern_three_alts() {
+    let src = "fn main() -> i32 { let x = 2; match x { 1 | 2 | 3 => 5, _ => 99 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "expected 2 to match 1|2|3, got {exit_code}");
+}
+
+/// Milestone 32: OR pattern as a non-last arm, then another literal arm.
+///
+/// FLS §5.1.11: Multiple OR arms can appear in a single match.
+/// Scrutinee 5 matches the second arm `5 | 6 => 2`.
+#[test]
+fn milestone_32_or_pattern_multiple_or_arms() {
+    let src = "\
+fn classify(n: i32) -> i32 {
+    match n {
+        0 | 1 => 1,
+        5 | 6 => 2,
+        _ => 0,
+    }
+}
+fn main() -> i32 { classify(5) }
+";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2, "expected classify(5) == 2, got {exit_code}");
+}
+
+/// Milestone 32: OR pattern on a parameter.
+///
+/// FLS §5.1.11: OR patterns work on non-literal scrutinees.
+/// FLS §6.1.2:37–45: The comparisons are runtime instructions.
+#[test]
+fn milestone_32_or_pattern_on_parameter() {
+    let src = "\
+fn is_weekend(day: i32) -> i32 {
+    match day {
+        6 | 7 => 1,
+        _ => 0,
+    }
+}
+fn main() -> i32 { is_weekend(7) }
+";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected is_weekend(7) == 1, got {exit_code}");
+}
+
+/// Milestone 32: OR pattern with negative alternatives.
+///
+/// FLS §5.1.11 + FLS §5.2: OR patterns may combine negative literal patterns.
+#[test]
+fn milestone_32_or_pattern_with_negative_alts() {
+    let src = "\
+fn main() -> i32 {
+    let x = -1;
+    match x {
+        -2 | -1 => 10,
+        0 => 20,
+        _ => 30,
+    }
+}
+";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "expected -1 to match -2|-1 arm, got {exit_code}");
+}
+
+/// Milestone 32: assembly inspection — OR pattern emits OR-accumulation sequence.
+///
+/// FLS §5.1.11: Each alternative emits cmp+cset; the results are OR'd together
+/// before the cbz that guards the arm body.
+/// FLS §6.1.2:37–45: Runtime instructions — even with literal scrutinees.
+#[test]
+fn runtime_or_pattern_emits_orr_accumulation() {
+    let src = "fn main() -> i32 { let x = 1; match x { 0 | 1 => 42, _ => 0 } }\n";
+    let asm = compile_to_asm(src);
+    // OR accumulation emits an `orr` to combine equality results.
+    assert!(asm.contains("orr"), "expected orr for OR pattern accumulation");
+    // Must still emit a conditional branch.
+    assert!(asm.contains("cbz"), "expected cbz for arm skip branch");
+}
