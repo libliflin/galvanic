@@ -503,6 +503,11 @@ impl<'src> Parser<'src> {
         {
             let start = self.current_span();
 
+            // FLS §9.2: Parameters may be prefixed with `mut` to make the
+            // binding mutable within the function body. The `mut` is not
+            // part of the name — consume and discard it.
+            self.eat(TokenKind::KwMut);
+
             if self.peek_kind() != TokenKind::Ident {
                 return Err(self.error(format!(
                     "expected parameter name (identifier), found {:?}",
@@ -1879,6 +1884,16 @@ mod tests {
         assert_eq!(f.params.len(), 2);
         assert_eq!(f.params[0].name.text(src), "a");
         assert_eq!(f.params[1].name.text(src), "b");
+    }
+
+    #[test]
+    fn fn_mut_param() {
+        // FLS §9.2: parameters may be prefixed with `mut`.
+        let src = "fn f(mut x: i32) -> i32 { x }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        assert_eq!(f.params.len(), 1);
+        assert_eq!(f.params[0].name.text(src), "x");
     }
 
     #[test]
