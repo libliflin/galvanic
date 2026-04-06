@@ -613,3 +613,22 @@ fn match_tuple_return_example(x: i32) -> (i32, i32) {
         _ => (1, x),    // FLS §5.1: wildcard pattern
     }
 }
+
+// FLS §6.17 + §6.11: If-else expression producing a named struct value.
+//
+// The FLS does not provide a concrete code example for an if-else that returns
+// a struct; this is derived from §6.17 (if expressions return the value of the
+// executed branch) and §6.11 (struct expressions yield a value of the struct type).
+//
+// ARM64 codegen: the condition emits a comparison and `cbz`; each branch
+// stores the struct fields into the same return slots, then falls through to
+// `RetFields` which loads them into x0..x{N-1}.
+//
+// Cache-line note: each branch emits N stores (N×4 bytes); the cbz + branch
+// overhead is 8 bytes. For a 2-field struct the total per-branch cost is 16 bytes.
+struct Choice { lo: i32, hi: i32 }
+
+fn struct_if_else_example(a: i32, b: i32) -> Choice {
+    // FLS §6.17: The if/else expression produces a struct value at runtime.
+    if a < b { Choice { lo: a, hi: b } } else { Choice { lo: b, hi: a } }
+}

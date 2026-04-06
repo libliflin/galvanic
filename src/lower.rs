@@ -1443,10 +1443,12 @@ fn lower_fn(
             ctx.instrs.push(Instr::RetFieldsAndValue { base_slot: 0, n_fields, val_reg });
         }
     } else if let Some(ref struct_name) = struct_ret_name {
-        // FLS §10.1: Associated function returning a struct type.
-        // The tail expression must be a struct literal. Lower all statements,
-        // then store the struct literal fields to consecutive slots, then emit
-        // RetFields to return them in x0..x{N-1}.
+        // FLS §9, §10.1: Function returning a named struct type.
+        //
+        // The tail expression may be a struct literal, if-else, block, or variable
+        // path — any form handled by lower_struct_expr_into. All statements are
+        // lowered first, then the tail is lowered into N consecutive return slots,
+        // then RetFields emits the fields in x0..x{N-1}.
         //
         // ARM64 ABI: multiple return values packed into x0..x{N-1} (small structs).
         // The call site uses CallMut-style write-back to store them into the
@@ -1456,60 +1458,40 @@ fn lower_fn(
         // returning struct types from associated functions. Galvanic uses the same
         // register-packing convention as &mut self (fields in x0..x{N-1}).
         //
-        // Cache-line note: N field stores (4 bytes each) + RetFields ldr sequence
-        // (N loads) = 2N instructions before the epilogue.
-        let field_names = struct_defs.get(struct_name.as_str())
+        // Cache-line note: lower_struct_expr_into emits N store instructions per
+        // struct-literal arm + the RetFields N-ldr sequence = 2N instructions total.
+        let n_fields = struct_defs.get(struct_name.as_str())
             .ok_or_else(|| LowerError::Unsupported(format!("unknown struct `{struct_name}`")))?
-            .clone();
-        let n_fields = field_names.len();
+            .len();
 
         // Lower all statements.
         for stmt in &body.stmts {
             ctx.lower_stmt(stmt)?;
         }
 
-        // The tail expression must be a struct literal.
+        // The tail expression produces a struct value.
+        //
+        // FLS §6.11: The tail may be a struct literal, an if-else expression,
+        // a block, or a variable path — any expression yielding the declared
+        // struct type.
+        // FLS §6.17: If-else is the canonical way to conditionally return a struct.
         let tail = body.tail.as_deref().ok_or_else(|| {
             LowerError::Unsupported(format!(
-                "associated function returning `{struct_name}` must end with a struct literal"
+                "function returning `{struct_name}` must end with a struct expression"
             ))
         })?;
-        let ExprKind::StructLit { name: sn, fields: lit_fields, .. } = &tail.kind else {
-            return Err(LowerError::Unsupported(format!(
-                "associated function returning `{struct_name}`: tail must be a struct literal"
-            )));
-        };
-
-        let actual_struct_name = sn.text(source);
-        if actual_struct_name != struct_name.as_str() {
-            return Err(LowerError::Unsupported(format!(
-                "associated function declared to return `{struct_name}` but tail is `{actual_struct_name}`"
-            )));
-        }
 
         // Allocate consecutive slots for the return struct fields.
+        // FLS §6.11: Struct fields are stored in declaration order.
+        // Cache-line note: N consecutive 8-byte slots = N×8 bytes on the stack.
         let base_slot = ctx.alloc_slot()?;
         for _ in 1..n_fields {
             ctx.alloc_slot()?;
         }
 
-        // Store each field in declaration order.
-        // FLS §6.11: Field initializers evaluated in source order, stored in
-        // declaration order for layout stability.
-        for (field_idx, field_name) in field_names.iter().enumerate() {
-            let slot = base_slot + field_idx as u8;
-            let field_init = lit_fields
-                .iter()
-                .find(|(f, _)| f.text(source) == field_name.as_str())
-                .ok_or_else(|| {
-                    LowerError::Unsupported(format!(
-                        "missing field `{field_name}` in `{struct_name}` literal"
-                    ))
-                })?;
-            let val = ctx.lower_expr(&field_init.1, &IrTy::I32)?;
-            let src = ctx.val_to_reg(val)?;
-            ctx.instrs.push(Instr::Store { src, slot });
-        }
+        // Delegate to lower_struct_expr_into, which handles struct literals,
+        // if/else, blocks, and variable paths (FLS §6.11, §6.17, §6.4, §6.3).
+        ctx.lower_struct_expr_into(tail, base_slot, n_fields, struct_name)?;
 
         // Emit RetFields: loads fields from base_slot..base_slot+n_fields-1
         // into x0..x{N-1} before the epilogue.
@@ -3008,6 +2990,180 @@ impl<'src> LowerCtx<'src> {
             _ => Err(LowerError::Unsupported(
                 "tuple return: unsupported expression form".into(),
             )),
+        }
+    }
+
+    /// Lower an expression that produces a named struct value into pre-allocated
+    /// stack slots.
+    ///
+    /// Stores the N fields of `struct_name` into `base_slot..base_slot+n_fields-1`.
+    /// Used for functions returning named struct types (FLS §9, §6.11, §6.17).
+    ///
+    /// Handles:
+    /// - Struct literal `S { field: expr, ... }` — stores fields in declaration order
+    /// - If-else expression — each branch stores into the same slots
+    /// - Block expression — lowers statements then handles tail
+    /// - Variable path `x` (where x is a local of struct type) — copies all N slots
+    ///
+    /// FLS §6.11: Struct expression field initializers are evaluated in source order,
+    /// stored in declaration order for layout stability.
+    /// FLS §6.17: If-else expression — both branches must yield the same struct type.
+    /// FLS §6.4: Block expressions — statements then tail.
+    /// FLS §6.1.2:37–45: All stores are runtime instructions.
+    ///
+    /// Cache-line note: a 2-field struct literal emits 2 store instructions = 8 bytes,
+    /// fitting alongside the RetFields sequence in a single 64-byte cache line.
+    fn lower_struct_expr_into(
+        &mut self,
+        expr: &Expr,
+        base_slot: u8,
+        n_fields: usize,
+        struct_name: &str,
+    ) -> Result<(), LowerError> {
+        match &expr.kind {
+            // FLS §6.11: Struct literal `S { field: expr, ... }`.
+            //
+            // Fields may appear in any order in the source; they are stored in
+            // declaration order. If struct update syntax (`..base`) is used,
+            // unspecified fields are copied from the base variable.
+            ExprKind::StructLit { name: sn, fields: lit_fields, base: update_base, .. } => {
+                let actual_name = sn.text(self.source);
+                let field_names = self.struct_defs
+                    .get(actual_name)
+                    .ok_or_else(|| {
+                        LowerError::Unsupported(format!("unknown struct `{actual_name}`"))
+                    })?
+                    .clone();
+                for (field_idx, field_name) in field_names.iter().enumerate() {
+                    let slot = base_slot + field_idx as u8;
+                    if let Some(field_init) = lit_fields
+                        .iter()
+                        .find(|(f, _)| f.text(self.source) == field_name.as_str())
+                    {
+                        // Explicitly provided field initializer.
+                        let val = self.lower_expr(&field_init.1, &IrTy::I32)?;
+                        let src = self.val_to_reg(val)?;
+                        self.instrs.push(Instr::Store { src, slot });
+                    } else if let Some(base_expr) = update_base.as_deref() {
+                        // FLS §6.11: Struct update syntax — copy this field from base.
+                        let base_var = match &base_expr.kind {
+                            ExprKind::Path(segs) if segs.len() == 1 => segs[0].text(self.source),
+                            _ => {
+                                return Err(LowerError::Unsupported(
+                                    "struct update base must be a simple variable path".into(),
+                                ))
+                            }
+                        };
+                        let base_base = *self.locals.get(base_var).ok_or_else(|| {
+                            LowerError::Unsupported(format!(
+                                "struct update: undefined base variable `{base_var}`"
+                            ))
+                        })?;
+                        let offset = self
+                            .struct_field_offsets
+                            .get(actual_name)
+                            .and_then(|o| o.get(field_idx))
+                            .copied()
+                            .unwrap_or(field_idx);
+                        let tmp = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: tmp, slot: base_base + offset as u8 });
+                        self.instrs.push(Instr::Store { src: tmp, slot });
+                    } else {
+                        return Err(LowerError::Unsupported(format!(
+                            "missing field `{field_name}` in `{actual_name}` literal"
+                        )));
+                    }
+                }
+                Ok(())
+            }
+
+            // FLS §6.17: If-else expression — each branch stores the struct fields
+            // into the shared return slots.
+            //
+            // FLS §6.17: Both branches must produce a value of the same struct type.
+            // Galvanic enforces this structurally: both branches must lower
+            // successfully via lower_struct_expr_into with the same struct_name.
+            //
+            // FLS §6.1.2:37–45: The condition check and all stores are runtime.
+            //
+            // Cache-line note: the condition check emits 2 instructions (ldr + cbz).
+            // Each struct-literal branch emits N stores (N×4 bytes).
+            ExprKind::If { cond, then_block, else_expr } => {
+                let else_label = self.alloc_label();
+                let end_label = self.alloc_label();
+
+                let cond_val = self.lower_expr(cond, &IrTy::Bool)?;
+                let cond_reg = self.val_to_reg(cond_val)?;
+                self.instrs.push(Instr::CondBranch { reg: cond_reg, label: else_label });
+
+                // Then branch: lower statements then store struct result.
+                for stmt in &then_block.stmts {
+                    self.lower_stmt(stmt)?;
+                }
+                if let Some(tail) = then_block.tail.as_deref() {
+                    self.lower_struct_expr_into(tail, base_slot, n_fields, struct_name)?;
+                } else {
+                    return Err(LowerError::Unsupported(
+                        "struct-returning if expression: then branch must have a tail".into(),
+                    ));
+                }
+                self.instrs.push(Instr::Branch(end_label));
+
+                // Else branch: store struct result.
+                self.instrs.push(Instr::Label(else_label));
+                match else_expr {
+                    Some(e) => self.lower_struct_expr_into(e, base_slot, n_fields, struct_name)?,
+                    None => {
+                        return Err(LowerError::Unsupported(
+                            "struct-returning if expression must have an else branch".into(),
+                        ))
+                    }
+                }
+
+                self.instrs.push(Instr::Label(end_label));
+                Ok(())
+            }
+
+            // FLS §6.4: Block expression — lower statements then handle tail.
+            ExprKind::Block(block) => {
+                for stmt in &block.stmts {
+                    self.lower_stmt(stmt)?;
+                }
+                match block.tail.as_deref() {
+                    Some(tail) => {
+                        self.lower_struct_expr_into(tail, base_slot, n_fields, struct_name)
+                    }
+                    None => Err(LowerError::Unsupported(
+                        "struct-returning block must have a tail expression".into(),
+                    )),
+                }
+            }
+
+            // FLS §6.3, §7.1: Variable path — copy all struct slots from the source.
+            //
+            // Reading a local variable in a value context copies its contents
+            // (value semantics, FLS §7.1). For a struct with N fields we copy
+            // each of the N consecutive stack slots.
+            //
+            // Cache-line note: N copies = N ldr + N str = 2N instructions.
+            ExprKind::Path(segs) if segs.len() == 1 => {
+                let var_name = segs[0].text(self.source);
+                let src_base = *self.locals.get(var_name).ok_or_else(|| {
+                    LowerError::Unsupported(format!(
+                        "struct return: undefined variable `{var_name}`"
+                    ))
+                })?;
+                for i in 0..n_fields as u8 {
+                    let tmp = self.alloc_reg()?;
+                    self.instrs.push(Instr::Load { dst: tmp, slot: src_base + i });
+                    self.instrs.push(Instr::Store { src: tmp, slot: base_slot + i });
+                }
+                Ok(())
+            }
+
+            _ => Err(LowerError::Unsupported(format!(
+                "struct return (`{struct_name}`): unsupported expression form",
+            ))),
         }
     }
 

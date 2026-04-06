@@ -10214,3 +10214,182 @@ fn main() -> i32 {\n\
     });
     assert!(has_cmp, "expected comparison/branch in classify:\n{}", in_classify.join("\n"));
 }
+
+// ── Milestone 85: struct-returning functions with if/else tails ──────────────
+
+/// Milestone 85: struct-returning function with if/else — true branch taken.
+///
+/// FLS §6.17: If/else expression. The condition evaluates at runtime; the branch
+/// taken stores its struct fields into the return slots via RetFields.
+/// FLS §6.11: Named struct fields are stored in declaration order.
+/// FLS §9: Free functions may return named struct types.
+#[test]
+fn milestone_85_struct_return_if_else_true_branch() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(flag: i32) -> Point {
+    if flag > 0 { Point { x: 1, y: 2 } } else { Point { x: -1, y: -2 } }
+}
+fn main() -> i32 {
+    let p = make(5);
+    p.x
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "flag=5>0, x=1, got {exit_code}");
+}
+
+/// Milestone 85: struct-returning function with if/else — false branch taken.
+///
+/// FLS §6.17, §6.11, §9
+#[test]
+fn milestone_85_struct_return_if_else_false_branch() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(flag: i32) -> Point {
+    if flag > 0 { Point { x: 1, y: 2 } } else { Point { x: -1, y: -2 } }
+}
+fn main() -> i32 {
+    let p = make(0);
+    p.y
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(
+        exit_code as i32, -2i32,
+        "flag=0, false branch y=-2, got {exit_code}"
+    );
+}
+
+/// Milestone 85: both fields from a struct-returning if/else.
+///
+/// FLS §6.17, §6.11, §9, §6.13: Field access on the returned struct reads the
+/// correct slot regardless of which branch ran.
+#[test]
+fn milestone_85_struct_return_if_else_field_sum() {
+    let src = r#"
+struct Pair { a: i32, b: i32 }
+fn choose(flag: i32) -> Pair {
+    if flag == 0 { Pair { a: 3, b: 4 } } else { Pair { a: 10, b: 20 } }
+}
+fn main() -> i32 {
+    let p = choose(0);
+    p.a + p.b
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "flag=0, a=3+b=4=7, got {exit_code}");
+}
+
+/// Milestone 85: struct returned from if/else, result used in arithmetic.
+///
+/// FLS §6.17, §6.11, §9, §6.5.5
+#[test]
+fn milestone_85_struct_return_if_else_in_arithmetic() {
+    let src = r#"
+struct Val { n: i32 }
+fn wrap(x: i32) -> Val {
+    if x > 10 { Val { n: x - 10 } } else { Val { n: x } }
+}
+fn main() -> i32 {
+    let v = wrap(15);
+    v.n + 1
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "wrap(15).n=5, +1=6, got {exit_code}");
+}
+
+/// Milestone 85: struct returned from if/else, passed to another function.
+///
+/// FLS §6.17, §6.11, §9: The returned struct can be passed as an argument
+/// to a second function that reads its fields.
+#[test]
+fn milestone_85_struct_return_if_else_passed_to_fn() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(flag: i32) -> Point {
+    if flag > 0 { Point { x: 3, y: 4 } } else { Point { x: 0, y: 0 } }
+}
+fn sum(p: Point) -> i32 { p.x + p.y }
+fn main() -> i32 {
+    sum(make(1))
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "make(1)=Point{{3,4}}, sum=7, got {exit_code}");
+}
+
+/// Milestone 85: struct-returning function with if/else on a runtime parameter.
+///
+/// FLS §6.17: The condition is a runtime comparison — the branch taken is
+/// determined at runtime, not at compile time.
+#[test]
+fn milestone_85_struct_return_if_else_on_parameter() {
+    let src = r#"
+struct Range { lo: i32, hi: i32 }
+fn order(a: i32, b: i32) -> Range {
+    if a < b { Range { lo: a, hi: b } } else { Range { lo: b, hi: a } }
+}
+fn main() -> i32 {
+    let r = order(7, 3);
+    r.hi - r.lo
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 4, "order(7,3): hi=7,lo=3, diff=4, got {exit_code}");
+}
+
+/// Milestone 85: three-field struct returned from if/else.
+///
+/// FLS §6.17, §6.11: All N fields are stored correctly regardless of which
+/// branch executes.
+#[test]
+fn milestone_85_struct_return_if_else_three_fields() {
+    let src = r#"
+struct Triple { x: i32, y: i32, z: i32 }
+fn pick(flag: i32) -> Triple {
+    if flag > 0 {
+        Triple { x: 1, y: 2, z: 3 }
+    } else {
+        Triple { x: 4, y: 5, z: 6 }
+    }
+}
+fn main() -> i32 {
+    let t = pick(1);
+    t.z
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "pick(1).z=3, got {exit_code}");
+}
+
+/// Runtime: if/else in struct-returning function emits conditional branch.
+///
+/// FLS §6.17: The condition must emit a runtime comparison before branching.
+/// The assembly for the if/else must contain a `cbz` or conditional branch
+/// instruction.
+/// FLS §6.1.2:37–45: All comparisons and stores are runtime instructions.
+#[test]
+fn runtime_struct_return_if_else_emits_cbz() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(flag: i32) -> Point {
+    if flag > 0 { Point { x: 1, y: 2 } } else { Point { x: -1, y: -2 } }
+}
+fn main() -> i32 {
+    let p = make(5);
+    p.x
+}
+"#;
+    let asm = compile_to_asm(src);
+    let in_make: Vec<&str> = asm
+        .lines()
+        .skip_while(|l| !l.starts_with("make:"))
+        .take_while(|l| !l.starts_with("main:"))
+        .collect();
+    let has_branch = in_make
+        .iter()
+        .any(|l| l.trim_start().starts_with("cbz") || l.trim_start().starts_with("b."));
+    assert!(has_branch, "expected conditional branch in make:\n{}", in_make.join("\n"));
+}
