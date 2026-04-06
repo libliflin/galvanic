@@ -336,16 +336,19 @@ pub enum ParamKind {
     /// Named struct destructuring `StructName { field1, field2 }: StructTy`.
     ///
     /// FLS §5.10.2, §9.2: Struct patterns are irrefutable and may appear
-    /// in parameter position.
+    /// in parameter position. Supports flat bindings and arbitrarily nested
+    /// struct sub-patterns (FLS §5.10.2: "Struct patterns may nest").
     ///
-    /// Each entry is `(field_name_span, binding_span)`. `binding_span` is
-    /// `None` for wildcard `_` bindings. The shorthand form `{ x }` is sugar
-    /// for `{ x: x }` and is represented as `(x_span, Some(x_span))`.
+    /// Each entry is `(field_name_span, binding_pat)`:
+    /// - `Pat::Ident(span)` for a simple binding or shorthand `{ x }`.
+    /// - `Pat::Wildcard` for `{ field: _ }`.
+    /// - `Pat::StructVariant { path, fields }` with `path.len() == 1` for a
+    ///   nested struct pattern such as `{ inner: Inner { a, b } }`.
     Struct {
         /// Span of the struct type name (e.g. `Point` in `Point { x, y }`).
         type_span: Span,
         /// Field bindings in source order.
-        fields: Vec<(Span, Option<Span>)>,
+        fields: Vec<(Span, Pat)>,
     },
     /// Tuple struct destructuring `TupleStructName(a, b, ...): TyName`.
     ///

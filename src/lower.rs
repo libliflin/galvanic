@@ -1103,16 +1103,42 @@ fn lower_fn(
                 // Bind each named field in the pattern to its slot.
                 // FLS §5.10.2: The struct field binding order is determined by
                 // the *struct definition*, not the pattern source order.
-                // Each named field `x` in the pattern is resolved to its
-                // declaration-order index in `field_names`.
-                for (field_name_span, binding_span) in fields {
+                // Use struct_field_offsets to get the correct slot even when
+                // nested struct fields occupy multiple consecutive slots.
+                let offsets = struct_field_offsets.get(type_name);
+                for (field_name_span, binding_pat) in fields {
                     let fname = field_name_span.text(source);
-                    if let Some(binding) = binding_span {
-                        let bname = binding.text(source);
-                        if bname != "_"
-                            && let Some(fi) = field_names.iter().position(|f| f == fname)
+                    let Some(fi) = field_names.iter().position(|f| f == fname) else {
+                        continue;
+                    };
+                    let field_offset = offsets.and_then(|o| o.get(fi).copied()).unwrap_or(fi);
+                    let slot = base_slot + field_offset as u8;
+                    match binding_pat {
+                        crate::ast::Pat::Ident(bind_span) => {
+                            let bname = bind_span.text(source);
+                            if bname != "_" {
+                                ctx.locals.insert(bname, slot);
+                            }
+                        }
+                        crate::ast::Pat::Wildcard => {}
+                        crate::ast::Pat::StructVariant { path, fields: inner_fields }
+                            if path.len() == 1 =>
                         {
-                            ctx.locals.insert(bname, base_slot + fi as u8);
+                            // FLS §5.10.2: Nested struct pattern in parameter position.
+                            // The inner struct's fields are laid out starting at `slot`.
+                            let inner_name = path[0].text(source).to_owned();
+                            ctx.bind_struct_fields_from_slot(
+                                &inner_name,
+                                slot,
+                                inner_fields,
+                            )?;
+                        }
+                        _ => {
+                            return Err(LowerError::Unsupported(
+                                "only ident, wildcard, and nested struct sub-patterns are \
+                                 supported in struct parameter patterns"
+                                    .into(),
+                            ));
                         }
                     }
                 }
