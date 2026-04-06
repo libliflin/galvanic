@@ -2146,6 +2146,27 @@ impl<'src> Parser<'src> {
                 })
             }
 
+            // Closure expression — FLS §6.14.
+            //
+            // `|params| body` or `|params| -> RetTy body` where body is
+            // either a block `{ ... }` or any expression.
+            //
+            // `||` (zero params) is also a valid start: the `||` token is
+            // produced by the lexer for `||` (logical-or) — at primary
+            // level it can only be a zero-parameter closure.
+            //
+            // Disambiguation: `|` as bitwise OR is handled at the
+            // parse_bitwise_or level, which calls parse_unary →
+            // parse_primary only when building the right operand. At
+            // that point the `|` has already been consumed as the
+            // operator. Here we are starting a new primary, so `|` is
+            // unambiguously the opening of a closure parameter list.
+            //
+            // FLS §6.14 AMBIGUOUS: The spec lists attribute support
+            // on closure params; galvanic does not implement attributes.
+            TokenKind::Or => self.parse_closure(false),
+            TokenKind::OrOr => self.parse_closure(true),
+
             kind => Err(self.error(format!("expected expression, found {kind:?}"))),
         }
     }
@@ -2334,6 +2355,103 @@ impl<'src> Parser<'src> {
             kind: ExprKind::Match { scrutinee, arms },
             span: start.to(end),
         })
+    }
+
+    /// Parse a closure expression.
+    ///
+    /// FLS §6.14: Closure expressions.
+    ///
+    /// Grammar (simplified for galvanic's current subset):
+    /// ```text
+    /// ClosureExpression ::=
+    ///     "|" ClosureParam* "|" ("->" Type)? ExpressionWithoutBlock
+    ///   | "||"              "|" ("->" Type)? ExpressionWithoutBlock
+    /// ClosureParam ::= Pattern (":" Type)?
+    /// ```
+    ///
+    /// `zero_params`: if `true`, the caller already consumed `||` (zero-param
+    /// shorthand); if `false`, the caller consumed `|` and we parse params.
+    ///
+    /// FLS §6.14: Non-capturing closures coerce to `fn` pointer types.
+    /// Galvanic compiles them to hidden named functions and materialises the
+    /// address as a function pointer value.
+    ///
+    /// FLS §6.14 AMBIGUOUS: The spec does not specify how non-capturing
+    /// closures are distinguished from capturing ones at the syntax level.
+    /// Galvanic defers capture analysis; at this milestone all closures are
+    /// treated as non-capturing (no environment access is supported).
+    fn parse_closure(&mut self, zero_params: bool) -> Result<Expr, ParseError> {
+        use crate::ast::{ClosureParam, Pat};
+
+        let start = self.current_span();
+
+        let params: Vec<ClosureParam> = if zero_params {
+            // `||` — consume the `||` token (already peeked as OrOr).
+            self.advance();
+            vec![]
+        } else {
+            // `|` — consume the opening `|`, then parse params until `|`.
+            self.advance(); // eat `|`
+            let mut ps = Vec::new();
+            while self.peek_kind() != TokenKind::Or
+                && self.peek_kind() != TokenKind::Eof
+            {
+                let param_start = self.current_span();
+                // Pattern: identifier or `_`.
+                // FLS §6.14: ClosureParam → Pattern (`:` Type)?
+                let pat = match self.peek_kind() {
+                    TokenKind::Underscore => {
+                        self.advance();
+                        Pat::Wildcard
+                    }
+                    TokenKind::Ident => {
+                        let span = self.current_span();
+                        self.advance();
+                        Pat::Ident(span)
+                    }
+                    other => {
+                        return Err(self.error(format!(
+                            "expected identifier or `_` in closure parameter, found {other:?}"
+                        )));
+                    }
+                };
+                // Optional type annotation.
+                let ty = if self.eat(TokenKind::Colon) {
+                    Some(self.parse_ty()?)
+                } else {
+                    None
+                };
+                let param_end = self.current_span();
+                ps.push(ClosureParam { pat, ty, span: param_start.to(param_end) });
+                if !self.eat(TokenKind::Comma) {
+                    break;
+                }
+            }
+            // Consume closing `|`.
+            self.expect(TokenKind::Or)?;
+            ps
+        };
+
+        // Optional return type annotation `-> Type`.
+        // FLS §6.14: Return type annotation is optional.
+        let ret_ty = if self.eat(TokenKind::RArrow) {
+            Some(Box::new(self.parse_ty()?))
+        } else {
+            None
+        };
+
+        // Body: a block `{ … }` or any expression.
+        // FLS §6.14: The body is an ExpressionWithBlock or ExpressionWithoutBlock.
+        let body: Box<Expr> = if self.peek_kind() == TokenKind::OpenBrace {
+            let block = self.parse_block()?;
+            let span = block.span;
+            Box::new(Expr { kind: ExprKind::Block(Box::new(block)), span })
+        } else {
+            Box::new(self.parse_expr()?)
+        };
+
+        let span = start.to(body.span);
+        Ok(Expr { kind: ExprKind::Closure { params, ret_ty, body }, span })
     }
 
     /// Parse a match arm pattern, including OR patterns.

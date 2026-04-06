@@ -1073,6 +1073,47 @@ pub enum ExprKind {
         /// The index expression.
         index: Box<Expr>,
     },
+
+    /// A closure expression. FLS §6.14.
+    ///
+    /// `|params| body` or `|params| -> RetTy { body }` or `|| body`.
+    ///
+    /// Galvanic supports non-capturing closures only at this milestone.
+    /// Non-capturing closures coerce to `fn` pointer types (FLS §4.9,
+    /// FLS §6.14). The closure compiles to a hidden named function and
+    /// the expression evaluates to its address as a function pointer.
+    ///
+    /// Cache-line note: the address itself fits in one 8-byte slot.
+    Closure {
+        /// Parameters: pattern + optional type annotation.
+        ///
+        /// FLS §6.14: `ClosureParam → Pattern (`:` Type)?`
+        params: Vec<ClosureParam>,
+        /// Optional explicit return type annotation (`-> Type`).
+        ///
+        /// FLS §6.14: If absent, the return type is inferred from the body.
+        /// Galvanic defaults to `i32` when the annotation is absent.
+        ret_ty: Option<Box<Ty>>,
+        /// The closure body expression.
+        body: Box<Expr>,
+    },
+}
+
+/// A parameter in a closure expression.
+///
+/// FLS §6.14: `ClosureParam → OuterAttribute* Pattern (`:` Type)?`
+///
+/// At this milestone only simple identifier and wildcard patterns are
+/// supported. Type annotations are optional; when absent the type
+/// defaults to `i32` in galvanic's current implementation.
+#[derive(Debug)]
+pub struct ClosureParam {
+    /// The parameter pattern (identifier or wildcard at this milestone).
+    pub pat: Pat,
+    /// Optional explicit type annotation.
+    pub ty: Option<Ty>,
+    /// Source span covering the full parameter (pattern through type).
+    pub span: Span,
 }
 
 // ── Match arms and patterns ───────────────────────────────────────────────────

@@ -146,6 +146,11 @@ fn expr_contains_call(expr: &Expr) -> bool {
         ExprKind::Array(elems) => elems.iter().any(expr_contains_call),
         ExprKind::Tuple(elems) => elems.iter().any(expr_contains_call),
         ExprKind::Index { base, index } => expr_contains_call(base) || expr_contains_call(index),
+        // FLS §6.14: A closure expression itself does not call anything
+        // at the point where it appears — it defines a function and
+        // materialises its address. The body runs only when the closure
+        // is invoked, not when the closure expression is evaluated.
+        ExprKind::Closure { .. } => false,
         // Leaves: literals, paths, unit — none contain calls.
         _ => false,
     }
@@ -232,6 +237,9 @@ fn expr_contains_break_with_value(expr: &Expr) -> bool {
         }
         // Do NOT recurse into nested loops — their `break` belongs to them.
         ExprKind::Loop(_) | ExprKind::While { .. } | ExprKind::WhileLet { .. } | ExprKind::For { .. } => false,
+        // A closure body is a separate function — its `break` expressions belong to loops
+        // inside the closure, not to any enclosing loop of the closure expression itself.
+        ExprKind::Closure { .. } => false,
         _ => false,
     }
 }
@@ -722,9 +730,10 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     for item in &src.items {
         match &item.kind {
             ItemKind::Fn(fn_def) => {
-                let (ir_fn, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &enum_defs, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &const_vals, &static_names, &fn_names, &struct_raw_field_types, &struct_field_offsets, &struct_sizes, None, label_base)?;
+                let (ir_fn, closure_fns, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &enum_defs, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &const_vals, &static_names, &fn_names, &struct_raw_field_types, &struct_field_offsets, &struct_sizes, None, label_base)?;
                 label_base = next_label;
                 fns.push(ir_fn);
+                fns.extend(closure_fns);
             }
             ItemKind::Impl(impl_def) => {
                 // FLS §11: Inherent impl and trait impl. Each method becomes a
@@ -747,7 +756,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         mangled_name: &mangled,
                         self_kind: method.self_param,
                     });
-                    let (ir_fn, next_label) = lower_fn(
+                    let (ir_fn, closure_fns, next_label) = lower_fn(
                         method,
                         source,
                         &struct_defs,
@@ -771,6 +780,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                     )?;
                     label_base = next_label;
                     fns.push(ir_fn);
+                    fns.extend(closure_fns);
                 }
             }
             ItemKind::Struct(_) | ItemKind::Enum(_) => {} // already processed above
@@ -878,7 +888,7 @@ fn lower_fn(
     struct_sizes: &HashMap<String, usize>,
     method: Option<MethodCtx<'_>>,
     start_label: u32,
-) -> Result<(IrFn, u32), LowerError> {
+) -> Result<(IrFn, Vec<IrFn>, u32), LowerError> {
     // For associated functions, impl_type = None and self_kind = None.
     let impl_type = method.as_ref().and_then(|m| m.impl_type);
     let override_name = method.as_ref().map(|m| m.mangled_name);
@@ -948,7 +958,7 @@ fn lower_fn(
         Some(block) => block,
     };
 
-    let mut ctx = LowerCtx::new(source, ret_ty, struct_defs, tuple_struct_defs, enum_defs, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, const_vals, static_names, fn_names, struct_field_types, struct_field_offsets, struct_sizes, start_label);
+    let mut ctx = LowerCtx::new(source, &name, ret_ty, struct_defs, tuple_struct_defs, enum_defs, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, const_vals, static_names, fn_names, struct_field_types, struct_field_offsets, struct_sizes, start_label);
 
     // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
     // to stack slots. Each parameter slot is allocated in parameter order
@@ -1620,7 +1630,8 @@ fn lower_fn(
     let stack_slots = ctx.next_slot;
     let saves_lr = ctx.has_calls;
     let next_label = ctx.next_label;
-    Ok((IrFn { name, ret_ty, body: body_instrs, stack_slots, saves_lr }, next_label))
+    let pending_closures = ctx.pending_closures;
+    Ok((IrFn { name, ret_ty, body: body_instrs, stack_slots, saves_lr }, pending_closures, next_label))
 }
 
 // ── Type lowering ────────────────────────────────────────────────────────────
@@ -1994,12 +2005,40 @@ struct LowerCtx<'src> {
     ///
     /// Cache-line note: read-only during lowering; not on any hot path.
     struct_sizes: &'src HashMap<String, usize>,
+
+    /// Name of the function currently being lowered.
+    ///
+    /// Used to generate unique names for closure functions defined inside
+    /// this function: `__closure_{fn_name}_{closure_counter}`.
+    ///
+    /// FLS §6.14: Non-capturing closures compile to hidden named functions.
+    fn_name: String,
+
+    /// Counter for closure functions generated inside this function.
+    ///
+    /// FLS §6.14: Each closure expression produces a unique hidden function.
+    /// The name is `__closure_{fn_name}_{closure_counter}`. Incremented for
+    /// each closure encountered during lowering.
+    ///
+    /// Cache-line note: scalar field, negligible overhead.
+    closure_counter: u32,
+
+    /// Hidden functions generated by closure expressions in this function.
+    ///
+    /// FLS §6.14: Non-capturing closures compile to top-level functions.
+    /// These are accumulated here and added to the module after `lower_fn`
+    /// returns. Nested closures (closures inside closures) are also collected
+    /// here by draining the inner `LowerCtx`'s `pending_closures`.
+    ///
+    /// Cache-line note: Vec header is 24 bytes; elements are heap-allocated.
+    pending_closures: Vec<IrFn>,
 }
 
 impl<'src> LowerCtx<'src> {
     #[allow(clippy::too_many_arguments)]
     fn new(
         source: &'src str,
+        fn_name: &str,
         fn_ret_ty: IrTy,
         struct_defs: &'src HashMap<String, Vec<String>>,
         tuple_struct_defs: &'src HashMap<String, usize>,
@@ -2021,6 +2060,9 @@ impl<'src> LowerCtx<'src> {
     ) -> Self {
         LowerCtx {
             source,
+            fn_name: fn_name.to_owned(),
+            closure_counter: 0,
+            pending_closures: Vec::new(),
             instrs: Vec::new(),
             next_reg: 0,
             next_slot: 0,
@@ -9322,6 +9364,129 @@ impl<'src> LowerCtx<'src> {
                 "tuple expression must be bound to a `let` variable at this milestone".into(),
             )),
 
+            // FLS §6.14: Non-capturing closure expression.
+            //
+            // A closure `|x: i32, y: i32| -> i32 { x + y }` compiles to:
+            //   1. A hidden top-level function `__closure_{fn_name}_{counter}`.
+            //   2. `LoadFnAddr { dst, name }` — the closure's address as a fn pointer.
+            //
+            // FLS §6.14: Non-capturing closures coerce to `fn` pointer types (FLS §4.9).
+            // FLS §6.1.2:37–45: The function body emits runtime instructions.
+            // FLS §6.14 AMBIGUOUS: The spec does not specify a compilation strategy
+            // for non-capturing closures; galvanic treats them as named functions.
+            //
+            // Cache-line note: the closure address fits in one 8-byte register.
+            ExprKind::Closure { params, ret_ty, body } => {
+                // Generate a unique name for the closure function.
+                let closure_name =
+                    format!("__closure_{}_{}", self.fn_name, self.closure_counter);
+                self.closure_counter += 1;
+
+                // Determine the closure's return type.
+                // FLS §6.14: The return type is either annotated or inferred.
+                // Galvanic defaults to i32 when the annotation is absent.
+                let closure_ret_ty = match ret_ty {
+                    Some(ty) => lower_ty(ty, self.source)?,
+                    None => IrTy::I32,
+                };
+
+                // Build a new LowerCtx for the closure body.
+                // Labels continue from where the enclosing function left off so
+                // that all labels in the assembly output are globally unique.
+                // FLS §6.17: branch labels must be unique across the module.
+                let closure_start_label = self.next_label;
+                let mut closure_ctx = LowerCtx::new(
+                    self.source,
+                    &closure_name,
+                    closure_ret_ty,
+                    self.struct_defs,
+                    self.tuple_struct_defs,
+                    self.enum_defs,
+                    self.method_self_kinds,
+                    self.mut_self_scalar_return_fns,
+                    self.struct_return_fns,
+                    self.struct_return_free_fns,
+                    self.enum_return_fns,
+                    self.struct_return_methods,
+                    self.tuple_return_free_fns,
+                    self.const_vals,
+                    self.static_names,
+                    self.fn_names,
+                    self.struct_field_types,
+                    self.struct_field_offsets,
+                    self.struct_sizes,
+                    closure_start_label,
+                );
+
+                // Spill scalar parameters into stack slots and bind names.
+                // FLS §6.14: Closure parameters follow the ARM64 calling convention;
+                // the first N params arrive in x0..x{N-1}.
+                // FLS §9: Same spill strategy as free functions.
+                // FLS §6.1.2:37–45: All spills are runtime store instructions.
+                let _n_params = params.len();
+                for (i, param) in params.iter().enumerate() {
+                    let slot = closure_ctx.alloc_slot()?;
+                    closure_ctx.instrs.push(Instr::Store { src: i as u8, slot });
+                    match &param.pat {
+                        crate::ast::Pat::Ident(name_span) => {
+                            let name = name_span.text(self.source);
+                            if name != "_" {
+                                closure_ctx.locals.insert(name, slot);
+                            }
+                        }
+                        crate::ast::Pat::Wildcard => {}
+                        other => {
+                            return Err(LowerError::Unsupported(format!(
+                                "only identifier and wildcard patterns are supported \
+                                 in closure parameters at this milestone, found {other:?}"
+                            )));
+                        }
+                    }
+                    // Register fn-ptr params so indirect call emits `blr`.
+                    if let Some(ty) = &param.ty
+                        && matches!(lower_ty(ty, self.source), Ok(IrTy::FnPtr))
+                    {
+                        closure_ctx.local_fn_ptr_slots.insert(slot);
+                    }
+                }
+
+                // Lower the closure body.
+                // FLS §6.14: The body is evaluated when the closure is invoked.
+                // FLS §6.1.2:37–45: Body emits runtime instructions, no constant folding.
+                let body_val = closure_ctx.lower_expr(body, &closure_ret_ty)?;
+                closure_ctx.instrs.push(Instr::Ret(body_val));
+
+                // Update the enclosing function's label counter past what the closure used.
+                self.next_label = closure_ctx.next_label;
+
+                // Build the IrFn for the closure.
+                let stack_slots = closure_ctx.next_slot;
+                let saves_lr = closure_ctx.has_calls;
+                let closure_fn = IrFn {
+                    name: closure_name.clone(),
+                    ret_ty: closure_ret_ty,
+                    body: closure_ctx.instrs,
+                    stack_slots,
+                    saves_lr,
+                };
+
+                // Collect this closure and any closures defined inside it.
+                // FLS §6.14: Nested closures compile to additional hidden functions.
+                self.pending_closures.push(closure_fn);
+                self.pending_closures.extend(closure_ctx.pending_closures);
+
+                // Materialise the closure's address as a function pointer value.
+                // FLS §4.9: `LoadFnAddr` emits ADRP + ADD to load the label address.
+                // FLS §6.14: The closure expression evaluates to this address.
+                //
+                // Cache-line note: ADRP + ADD = 8 bytes; same cost as a static load.
+                let dst = self.alloc_reg()?;
+                self.instrs.push(Instr::LoadFnAddr { dst, name: closure_name });
+                // Mark the destination slot as holding a fn pointer (if stored).
+                // The caller may later do `let f = |x| ...` → Store → slot registered.
+                Ok(IrValue::Reg(dst))
+            }
+
             // Anything else: not yet supported as runtime codegen.
             _ => Err(LowerError::Unsupported(
                 "expression kind in non-const context (runtime codegen not yet implemented)".into(),
@@ -9329,3 +9494,4 @@ impl<'src> LowerCtx<'src> {
         }
     }
 }
+
