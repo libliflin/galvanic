@@ -507,6 +507,44 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         }
     }
 
+    // Build struct-returning `&self` instance method registry: mangled name → struct type name.
+    //
+    // FLS §10.1: `&self` instance methods that return a named struct type use
+    // the same write-back calling convention as struct-returning associated
+    // functions: the callee stores field values in x0..x{N-1} via `RetFields`;
+    // the call site (in a `let` binding) writes them to the destination
+    // variable's consecutive stack slots via `CallMut`.
+    //
+    // Only `&self` (SelfKind::Ref) methods are registered here. `&mut self`
+    // methods with struct returns are not yet supported (they would need
+    // both write-back of modified self fields AND return fields, which requires
+    // a new calling convention).
+    //
+    // Cache-line note: populated once at compile time, not on any hot path.
+    let mut struct_return_methods: HashMap<String, String> = HashMap::new();
+    for item in &src.items {
+        if let ItemKind::Impl(impl_def) = &item.kind {
+            let type_name = impl_def.ty.text(source);
+            for method in &impl_def.methods {
+                if method.self_param != Some(SelfKind::Ref) {
+                    continue; // Only &self methods.
+                }
+                let method_name = method.name.text(source);
+                let mangled = format!("{type_name}__{method_name}");
+                if let Some(ret_ty) = &method.ret_ty
+                    && let TyKind::Path(segs) = &ret_ty.kind
+                    && segs.len() == 1
+                {
+                    let ret_name = segs[0].text(source);
+                    if struct_defs.contains_key(ret_name) {
+                        // FLS §10.1: &self method returning a struct type.
+                        struct_return_methods.insert(mangled, ret_name.to_owned());
+                    }
+                }
+            }
+        }
+    }
+
     // Build struct-returning free function registry: fn name → struct type name.
     //
     // FLS §9: Free functions that return a named struct type use the same
@@ -644,7 +682,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     for item in &src.items {
         match &item.kind {
             ItemKind::Fn(fn_def) => {
-                let (ir_fn, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &enum_defs, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &const_vals, &static_names, &struct_raw_field_types, &struct_field_offsets, &struct_sizes, None, label_base)?;
+                let (ir_fn, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &enum_defs, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &const_vals, &static_names, &struct_raw_field_types, &struct_field_offsets, &struct_sizes, None, label_base)?;
                 label_base = next_label;
                 fns.push(ir_fn);
             }
@@ -680,6 +718,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         &struct_return_fns,
                         &struct_return_free_fns,
                         &enum_return_fns,
+                        &struct_return_methods,
                         &const_vals,
                         &static_names,
                         &struct_raw_field_types,
@@ -751,6 +790,7 @@ fn lower_fn(
     struct_return_fns: &HashMap<String, String>,
     struct_return_free_fns: &HashMap<String, String>,
     enum_return_fns: &HashMap<String, String>,
+    struct_return_methods: &HashMap<String, String>,
     const_vals: &HashMap<String, i32>,
     static_names: &std::collections::HashSet<String>,
     struct_field_types: &HashMap<String, Vec<Option<String>>>,
@@ -818,7 +858,7 @@ fn lower_fn(
         Some(block) => block,
     };
 
-    let mut ctx = LowerCtx::new(source, ret_ty, struct_defs, tuple_struct_defs, enum_defs, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, const_vals, static_names, struct_field_types, struct_field_offsets, struct_sizes, start_label);
+    let mut ctx = LowerCtx::new(source, ret_ty, struct_defs, tuple_struct_defs, enum_defs, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, const_vals, static_names, struct_field_types, struct_field_offsets, struct_sizes, start_label);
 
     // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
     // to stack slots. Each parameter slot is allocated in parameter order
@@ -1491,6 +1531,16 @@ struct LowerCtx<'src> {
     /// Cache-line note: read-only during lowering; not on any hot path.
     struct_return_free_fns: &'src HashMap<String, String>,
 
+    /// Struct-returning `&self` instance method registry: mangled name → struct type name.
+    ///
+    /// FLS §10.1: `&self` instance methods that return a named struct type use
+    /// the same write-back calling convention as struct-returning associated
+    /// functions. At the call site (in a `let` binding), the caller emits
+    /// `CallMut` to write x0..x{N-1} into the destination variable's slots.
+    ///
+    /// Cache-line note: read-only during lowering; not on any hot path.
+    struct_return_methods: &'src HashMap<String, String>,
+
     /// Enum-returning free function registry: fn name → enum type name.
     ///
     /// FLS §9, §15: Free functions that return an enum type use the same
@@ -1621,6 +1671,7 @@ impl<'src> LowerCtx<'src> {
         struct_return_fns: &'src HashMap<String, String>,
         struct_return_free_fns: &'src HashMap<String, String>,
         enum_return_fns: &'src HashMap<String, String>,
+        struct_return_methods: &'src HashMap<String, String>,
         const_vals: &'src HashMap<String, i32>,
         static_names: &'src std::collections::HashSet<String>,
         struct_field_types: &'src HashMap<String, Vec<Option<String>>>,
@@ -1646,6 +1697,7 @@ impl<'src> LowerCtx<'src> {
             struct_return_fns,
             struct_return_free_fns,
             enum_return_fns,
+            struct_return_methods,
             const_vals,
             static_names,
             struct_field_types,
@@ -2313,6 +2365,95 @@ impl<'src> LowerCtx<'src> {
                         });
                         return Ok(());
                     }
+                }
+
+                // FLS §10.1, §6.12.2: `&self` method call returning a struct.
+                //
+                // `let q = p.translate(dx, dy)` where `Point__translate` is in
+                // `struct_return_methods`. The callee returns the new struct's
+                // field values in x0..x{N-1} via `RetFields`. We:
+                //   1. Load receiver (p) fields into leading arg registers.
+                //   2. Lower explicit arguments.
+                //   3. Allocate N consecutive slots for the destination variable (q).
+                //   4. Emit `CallMut` to write x0..x{N-1} into q's slots after `bl`.
+                //
+                // The receiver struct's fields are passed by value (copied into
+                // registers); the receiver itself is not modified (read-only self).
+                //
+                // FLS §10.1 AMBIGUOUS: The spec does not define the calling
+                // convention for `&self` methods returning struct types. Galvanic
+                // uses the same register-packing convention as struct-returning
+                // associated functions: fields returned in x0..x{N-1}.
+                //
+                // FLS §6.1.2:37–45: All instructions are runtime (no const folding).
+                // Cache-line note: N self-field loads + arg moves + bl + N return
+                // stores = 2N+1 extra instructions compared to a scalar method call.
+                if let Some(init_expr) = init.as_ref()
+                    && let ExprKind::MethodCall { receiver, method, args } = &init_expr.kind
+                    && let ExprKind::Path(recv_segs) = &receiver.kind
+                    && recv_segs.len() == 1
+                {
+                    let recv_name = recv_segs[0].text(self.source);
+                    let method_name = method.text(self.source);
+                    if let Some(recv_base_slot) = self.locals.get(recv_name).copied()
+                        && let Some(recv_type) = self.local_struct_types.get(&recv_base_slot).cloned() {
+                            let mangled = format!("{recv_type}__{method_name}");
+                            if let Some(ret_struct_name) = self.struct_return_methods.get(&mangled).cloned() {
+                                let field_names = self.struct_defs
+                                    .get(ret_struct_name.as_str())
+                                    .ok_or_else(|| {
+                                        LowerError::Unsupported(format!(
+                                            "unknown return struct `{ret_struct_name}`"
+                                        ))
+                                    })?
+                                    .clone();
+                                let n_return_fields = field_names.len();
+
+                                // Allocate slots for destination variable (q).
+                                let base_slot = self.alloc_slot()?;
+                                for _ in 1..n_return_fields {
+                                    self.alloc_slot()?;
+                                }
+                                self.locals.insert(var_name, base_slot);
+                                self.local_struct_types.insert(base_slot, ret_struct_name.clone());
+
+                                // Load receiver fields into leading arg registers.
+                                let recv_field_names = self.struct_defs
+                                    .get(recv_type.as_str())
+                                    .ok_or_else(|| {
+                                        LowerError::Unsupported(format!(
+                                            "unknown receiver struct `{recv_type}`"
+                                        ))
+                                    })?
+                                    .clone();
+                                let n_recv_fields = recv_field_names.len();
+                                let mut arg_regs: Vec<u8> = Vec::new();
+                                for fi in 0..n_recv_fields {
+                                    let slot = recv_base_slot + fi as u8;
+                                    let reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::Load { dst: reg, slot });
+                                    arg_regs.push(reg);
+                                }
+
+                                // Lower explicit arguments.
+                                for arg_expr in args.iter() {
+                                    let val = self.lower_expr(arg_expr, &IrTy::I32)?;
+                                    let reg = self.val_to_reg(val)?;
+                                    arg_regs.push(reg);
+                                }
+
+                                self.has_calls = true;
+                                // Emit CallMut: args → bl → store x0..x{N-1} to base_slot..
+                                // The callee's RetFields returns new struct fields in x0..x{N-1}.
+                                self.instrs.push(Instr::CallMut {
+                                    name: mangled,
+                                    args: arg_regs,
+                                    write_back_slot: base_slot,
+                                    n_fields: n_return_fields as u8,
+                                });
+                                return Ok(());
+                            }
+                        }
                 }
 
                 // FLS §6.11: Struct literal initializer — allocate one slot per
@@ -6831,6 +6972,16 @@ impl<'src> LowerCtx<'src> {
                     == Some(&SelfKind::RefMut);
 
                 self.has_calls = true;
+                // Guard: struct-returning &self methods cannot be used as scalar expressions.
+                // The caller needs a destination slot (use in a `let` binding).
+                //
+                // FLS §10.1 AMBIGUOUS: No spec-defined way to discard a struct return.
+                if self.struct_return_methods.contains_key(&mangled) {
+                    return Err(LowerError::Unsupported(format!(
+                        "`{mangled}` returns a struct; use it in a `let` binding"
+                    )));
+                }
+
                 if is_mut_self {
                     // `&mut self` call: write back x0..x{n_self_regs-1} to receiver slots.
                     // The callee emits `RetFields` (or `RetFieldsAndValue` for scalar returns),

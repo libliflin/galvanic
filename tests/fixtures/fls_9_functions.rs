@@ -91,4 +91,22 @@ impl Rect {
     fn area(&self) -> i32 {
         self.w * self.h
     }
+
+    // FLS §10.1: &self method returning the impl type (struct value).
+    //
+    // The FLS §10.1 does not provide a code example for methods returning
+    // struct types. This example is derived from the semantic description:
+    // "An associated function is a function defined in an implementation."
+    // Methods may return any type, including the implementing type.
+    //
+    // Galvanic uses the same register-packing convention as struct-returning
+    // associated functions: the callee returns field values in x0..x{N-1}
+    // via RetFields; the call site writes them to a new destination variable's
+    // stack slots via CallMut.
+    //
+    // FLS §10.1 AMBIGUOUS: The spec does not define a calling convention for
+    // methods with struct return types.
+    fn scale(&self, factor: i32) -> Rect {
+        Rect { w: self.w * factor, h: self.h * factor }
+    }
 }
