@@ -622,6 +622,45 @@ pub enum Instr {
         /// Destination register for the scalar return value (from x{N}).
         dst: u8,
     },
+
+    /// Compute the address of a stack slot: `dst = sp + slot * 8`.
+    ///
+    /// `AddrOf { dst, slot }` → `add x{dst}, sp, #{slot * 8}` on ARM64.
+    ///
+    /// FLS §6.5.1: Borrow expressions `&place` produce a reference (pointer)
+    /// to the place's memory location. For a local variable at stack slot `s`,
+    /// this is `sp + s * 8`.
+    ///
+    /// ARM64: `add xD, sp, #imm` computes `sp + imm` and stores the result
+    /// in `xD`. The immediate is `slot * 8` (byte offset of the slot).
+    ///
+    /// Cache-line note: one 4-byte instruction. The resulting pointer value
+    /// occupies one 8-byte register slot — identical footprint to any i32 value.
+    AddrOf {
+        /// Destination register — receives the address.
+        dst: u8,
+        /// Stack slot index; byte offset = slot * 8.
+        slot: u8,
+    },
+
+    /// Load through a pointer: `dst = *src` (load 8 bytes at address in src).
+    ///
+    /// `LoadPtr { dst, src }` → `ldr x{dst}, [x{src}]` on ARM64.
+    ///
+    /// FLS §6.5.2: Dereference expressions `*expr` load the value at the
+    /// memory address held in `expr`. The address is in a register; the
+    /// load uses register-indirect addressing.
+    ///
+    /// ARM64: `ldr xD, [xS]` loads 8 bytes from the address in `xS`.
+    ///
+    /// Cache-line note: one 4-byte instruction. The load targets the same
+    /// cache line as the referent value on the stack (8-byte aligned).
+    LoadPtr {
+        /// Destination register — receives the loaded value.
+        dst: u8,
+        /// Source register — holds the pointer (memory address).
+        src: u8,
+    },
 }
 
 // ── Values ────────────────────────────────────────────────────────────────────

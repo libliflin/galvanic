@@ -518,3 +518,29 @@ fn shadow_example() -> i32 {
     let x = x * 2;      // FLS §8.1: RHS reads slot 1 (8), new x = 16 (slot 2)
     x                   // returns 16
 }
+
+// FLS §6.5.1 — Borrow expression `&place`.
+// FLS §6.5.2 — Dereference expression `*expr`.
+//
+// FLS §6.5.1: "A borrow expression also called a reference expression is a
+// unary operator expression that uses the borrow operator."
+// FLS §6.5.2: "A dereference expression also called a deref expression is a
+// unary operator expression that uses the dereference operator."
+//
+// The FLS does not provide a standalone code example for borrow/deref; this
+// function is derived from the semantic descriptions in §6.5.1 and §6.5.2.
+//
+// ARM64 codegen:
+//   `&n`  → `add x{dst}, sp, #{slot * 8}`   (one instruction, FLS §6.5.1)
+//   `*x`  → `ldr x{dst}, [x{src}]`          (one instruction, FLS §6.5.2)
+//
+// Cache-line note: each borrow or deref emits exactly one 4-byte instruction.
+// A borrow-then-deref round-trip (`*(&n)`) is therefore 2 instructions (8 bytes),
+// fitting in the same instruction-slot pair as a load-store.
+fn deref_ref_example(n: i32) -> i32 {
+    // FLS §6.5.1: `&n` forms a pointer to n's stack slot.
+    // FLS §6.5.2: `*x` loads through the pointer.
+    let x: &i32 = &n;  // borrow: x holds the address of n
+    *x                  // deref: load the value at that address
+}
+

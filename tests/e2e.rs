@@ -8022,3 +8022,134 @@ fn runtime_shadow_rhs_reads_old_slot() {
         "expected ldr from slot 0 (offset #0) before add, got: {ldr_before}"
     );
 }
+
+// ── Milestone 68: references as function parameters compile to runtime ARM64 ──
+// FLS §6.5.1: Borrow expressions — `&place` computes the address of a local variable.
+// FLS §6.5.2: Dereference expressions — `*expr` loads through a pointer.
+// FLS §4.8: Reference types `&T` and `&mut T` are pointer-sized values.
+
+/// Milestone 68: `*x` inside a function with `&i32` parameter returns the
+/// referent value.
+///
+/// FLS §6.5.2: A dereference expression evaluates the operand (producing an
+/// address) and loads the value at that address.
+#[test]
+fn milestone_68_deref_ref_param() {
+    let src = "fn identity_ref(x: &i32) -> i32 { *x }\nfn main() -> i32 { let n = 42; identity_ref(&n) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected 42, got {exit_code}");
+}
+
+/// Milestone 68: `*x * 2` — arithmetic on a dereferenced reference.
+///
+/// FLS §6.5.2: The dereferenced value can be used in arithmetic expressions.
+/// FLS §6.5.5: Arithmetic expressions apply to the loaded value.
+#[test]
+fn milestone_68_deref_in_arithmetic() {
+    let src = "fn double(x: &i32) -> i32 { *x * 2 }\nfn main() -> i32 { let n = 21; double(&n) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected 42, got {exit_code}");
+}
+
+/// Milestone 68: passing `&n` where `n` is a parameter.
+///
+/// FLS §6.5.1: Any local variable (including function parameters, which are
+/// spilled to the stack) can be borrowed.
+#[test]
+fn milestone_68_borrow_param() {
+    let src = "fn identity_ref(x: &i32) -> i32 { *x }\nfn relay(n: i32) -> i32 { identity_ref(&n) }\nfn main() -> i32 { relay(7) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 7, got {exit_code}");
+}
+
+/// Milestone 68: deref result used in an `if` condition.
+///
+/// FLS §6.17: if expressions use a boolean condition. The dereferenced value
+/// (a boolean reference `&bool`) is used as the condition.
+#[test]
+fn milestone_68_deref_bool_param() {
+    let src = "fn check(flag: &i32) -> i32 { if *flag != 0 { 1 } else { 0 } }\nfn main() -> i32 { let b = 1; check(&b) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected 1, got {exit_code}");
+}
+
+/// Milestone 68: deref of a variable passed through two borrow levels.
+///
+/// FLS §6.5.1: `&n` passes n's address. The callee receives the pointer in a
+/// register (x0), spills it, then loads it back to dereference.
+#[test]
+fn milestone_68_deref_zero() {
+    let src = "fn get_zero(x: &i32) -> i32 { *x }\nfn main() -> i32 { let n = 0; get_zero(&n) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected 0, got {exit_code}");
+}
+
+/// Milestone 68: `&n` and `&m` — two borrows in one call expression.
+///
+/// FLS §6.5.1: Each borrow produces a separate pointer value passed in
+/// x0 and x1 per the ARM64 ABI.
+#[test]
+fn milestone_68_two_ref_params() {
+    let src = "fn add_refs(a: &i32, b: &i32) -> i32 { *a + *b }\nfn main() -> i32 { let x = 10; let y = 32; add_refs(&x, &y) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected 42, got {exit_code}");
+}
+
+/// Milestone 68: deref result stored in a local variable.
+///
+/// FLS §8.1: `let v = *x` — the dereferenced value is bound to a new slot.
+#[test]
+fn milestone_68_deref_into_let() {
+    let src = "fn load(p: &i32) -> i32 { let v = *p; v + 1 }\nfn main() -> i32 { let n = 9; load(&n) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "expected 10, got {exit_code}");
+}
+
+/// Milestone 68: assembly inspection — `&n` emits `add` to form the stack address.
+///
+/// FLS §6.5.1: The borrow expression must emit `add x{dst}, sp, #{offset}`
+/// to form the pointer value at runtime, not a constant address.
+///
+/// Cache-line note: `add` is one 4-byte instruction — identical footprint to
+/// any `ldr`/`str`. The address computation fits in one instruction slot.
+#[test]
+fn runtime_borrow_emits_add_sp() {
+    let src = "fn identity_ref(x: &i32) -> i32 { *x }\nfn main() -> i32 { let n = 42; identity_ref(&n) }\n";
+    let asm = compile_to_asm(src);
+    // `&n` must produce an `add xD, sp, #offset` instruction in main.
+    let has_addr_add = asm.lines().any(|l| {
+        let t = l.trim();
+        t.starts_with("add") && t.contains("sp,") && !t.contains("sp, sp,")
+    });
+    assert!(has_addr_add, "expected `add xD, sp, #offset` for &n, got:\n{asm}");
+}
+
+/// Milestone 68: assembly inspection — `*x` inside the callee emits an
+/// indirect `ldr`.
+///
+/// FLS §6.5.2: The dereference must emit `ldr x{dst}, [x{src}]` — a
+/// register-indirect load, not a stack-relative load.
+///
+/// Cache-line note: `ldr [xN]` is one 4-byte instruction. Compared to the
+/// two-instruction `adrp`+`ldr` needed for statics, a reference dereference
+/// is cheaper when the pointer is already in a register.
+#[test]
+fn runtime_deref_emits_ldr_indirect() {
+    let src = "fn get(x: &i32) -> i32 { *x }\nfn main() -> i32 { let n = 5; get(&n) }\n";
+    let asm = compile_to_asm(src);
+    // `*x` must emit `ldr xD, [xN]` (square bracket with register, no #offset).
+    let has_indirect_ldr = asm.lines().any(|l| {
+        let t = l.trim();
+        // Match `ldr xD, [xN]` but not `ldr xD, [sp, #offset]` (stack load)
+        // and not `ldr xD, [xN, ...]` (indexed load).
+        if !t.starts_with("ldr") { return false; }
+        if let Some(bracket_start) = t.find('[') {
+            let inside = &t[bracket_start + 1..];
+            // Must start with 'x' (register) not 's' (sp) and must close immediately.
+            inside.starts_with('x') && inside.contains(']') && !inside.contains(',')
+        } else {
+            false
+        }
+    });
+    assert!(has_indirect_ldr, "expected `ldr xD, [xN]` for *x, got:\n{asm}");
+}

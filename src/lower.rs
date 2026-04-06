@@ -1364,6 +1364,15 @@ fn lower_ty(ty: &crate::ast::Ty, source: &str) -> Result<IrTy, LowerError> {
                 name => Err(LowerError::Unsupported(format!("type `{name}`"))),
             }
         }
+        // FLS §4.8: Reference types `&T` and `&mut T`. A reference is a pointer —
+        // an 8-byte address on ARM64. Galvanic represents reference-typed parameters
+        // and locals using `IrTy::I32` (a 64-bit register), matching the inner type's
+        // IR representation. The pointer IS the value in the register; `*x` dereferences
+        // it via `LoadPtr { dst, src }`.
+        //
+        // FLS §4.8: "A reference type is a kind of pointer type."
+        // Cache-line note: references occupy one 8-byte register slot — same as i32/i64.
+        TyKind::Ref { inner, .. } => lower_ty(inner, source),
         _ => Err(LowerError::Unsupported("complex type".into())),
     }
 }
@@ -6737,6 +6746,77 @@ impl<'src> LowerCtx<'src> {
                     self.instrs.push(Instr::Not { dst, src });
                     Ok(IrValue::Reg(dst))
                 }
+            }
+
+            // FLS §6.5.2: Dereference expression `*expr`.
+            //
+            // The operand must evaluate to a reference (pointer). Lower the
+            // operand to obtain the address in a register, then emit `LoadPtr`
+            // to load the value at that address.
+            //
+            // ARM64: `ldr x{dst}, [x{src}]` — register-indirect load.
+            //
+            // FLS §6.5.2: "A dereference expression also called a deref
+            // expression is a unary operator expression that uses the
+            // dereference operator."
+            //
+            // FLS §6.1.2:37–45: Runtime instruction — even if the reference
+            // is statically known, the load must execute at runtime.
+            //
+            // Cache-line note: one 4-byte instruction. The load hits the cache
+            // line that contains the referent on the stack.
+            ExprKind::Unary { op: crate::ast::UnaryOp::Deref, operand } => {
+                // Lower operand as I32 (a pointer is a register-width integer).
+                let addr_val = self.lower_expr(operand, &IrTy::I32)?;
+                let src = self.val_to_reg(addr_val)?;
+                let dst = self.alloc_reg()?;
+                self.instrs.push(Instr::LoadPtr { dst, src });
+                Ok(IrValue::Reg(dst))
+            }
+
+            // FLS §6.5.1: Borrow expression `&place` or `&mut place`.
+            //
+            // Computes the address of the operand's stack slot and returns it
+            // as a pointer value (a 64-bit integer on ARM64).
+            //
+            // ARM64: `add x{dst}, sp, #{slot * 8}` — forms the stack address.
+            //
+            // FLS §6.5.1: "A borrow expression also called a reference
+            // expression is a unary operator expression that uses the borrow
+            // operator."
+            //
+            // Restriction: only single-segment path expressions (local variables)
+            // are supported as the borrow operand at this milestone. Borrowing
+            // a complex place (field access, index) is deferred.
+            //
+            // FLS §6.1.2:37–45: Runtime instruction — the address is formed
+            // at runtime even if the stack layout is statically known.
+            //
+            // Cache-line note: one 4-byte instruction. The resulting pointer
+            // occupies one 8-byte register slot — same footprint as any integer.
+            ExprKind::Unary {
+                op: crate::ast::UnaryOp::Ref | crate::ast::UnaryOp::RefMut,
+                operand,
+            } => {
+                // Resolve the operand to a stack slot — must be a simple local variable.
+                let slot = match &operand.kind {
+                    ExprKind::Path(segments) if segments.len() == 1 => {
+                        let var_name = segments[0].text(self.source);
+                        *self.locals.get(var_name).ok_or_else(|| {
+                            LowerError::Unsupported(format!(
+                                "borrow of undefined variable `{var_name}`"
+                            ))
+                        })?
+                    }
+                    _ => {
+                        return Err(LowerError::Unsupported(
+                            "borrow of complex place not yet supported (FLS §6.5.1)".into(),
+                        ));
+                    }
+                };
+                let dst = self.alloc_reg()?;
+                self.instrs.push(Instr::AddrOf { dst, slot });
+                Ok(IrValue::Reg(dst))
             }
 
             // FLS §6.5.9: Type cast expression `expr as Ty`.
