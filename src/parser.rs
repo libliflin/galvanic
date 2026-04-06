@@ -1095,11 +1095,52 @@ impl<'src> Parser<'src> {
                 self.advance();
                 Ok(Pat::Wildcard)
             }
-            // Identifier pattern. FLS §5.2.
+            // Identifier or struct pattern. FLS §5.2 (ident), FLS §5.10.2 (struct).
+            //
+            // If the identifier is followed by `{`, it begins a struct pattern
+            // `StructName { field1, field2 }`. Otherwise it is a plain binding.
             TokenKind::Ident => {
                 let span = self.current_span();
                 self.advance();
-                Ok(Pat::Ident(span))
+                // Peek ahead: `{` means struct pattern (FLS §5.10.2).
+                if self.peek_kind() == TokenKind::OpenBrace {
+                    self.advance(); // consume `{`
+                    let mut pat_fields: Vec<(crate::ast::Span, Pat)> = Vec::new();
+                    while self.peek_kind() != TokenKind::CloseBrace {
+                        let field_name = self.expect(TokenKind::Ident)?;
+                        let field_pat = if self.peek_kind() == TokenKind::Colon {
+                            self.advance(); // consume `:`
+                            // Only ident and wildcard sub-patterns for now.
+                            match self.peek_kind() {
+                                TokenKind::Underscore => {
+                                    self.advance();
+                                    Pat::Wildcard
+                                }
+                                TokenKind::Ident => {
+                                    let s = self.current_span();
+                                    self.advance();
+                                    Pat::Ident(s)
+                                }
+                                _ => Pat::Wildcard,
+                            }
+                        } else {
+                            // Shorthand `{ field }` — bind as `{ field: field }`.
+                            Pat::Ident(field_name)
+                        };
+                        pat_fields.push((field_name, field_pat));
+                        if !self.eat(TokenKind::Comma) {
+                            break;
+                        }
+                        // Allow trailing comma before `}`.
+                        if self.peek_kind() == TokenKind::CloseBrace {
+                            break;
+                        }
+                    }
+                    self.expect(TokenKind::CloseBrace)?;
+                    Ok(Pat::StructVariant { path: vec![span], fields: pat_fields })
+                } else {
+                    Ok(Pat::Ident(span))
+                }
             }
             // Tuple pattern `(p0, p1, ...)`. FLS §5.10.3.
             //
@@ -2648,6 +2689,46 @@ mod tests {
             panic!("expected let");
         };
         assert!(init.is_none());
+    }
+
+    #[test]
+    fn let_struct_pattern_single_segment_two_fields() {
+        // FLS §5.10.2 + §8.1: struct pattern in let binding.
+        // `let Point { x, y } = p;` produces Pat::StructVariant with a one-segment
+        // path and two shorthand field patterns.
+        let src = "fn f(p: Point) { let Point { x, y } = p; }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        let StmtKind::Let { pat, .. } = &body.stmts[0].kind else {
+            panic!("expected let");
+        };
+        let Pat::StructVariant { path, fields } = pat else {
+            panic!("expected Pat::StructVariant, got {pat:?}");
+        };
+        assert_eq!(path.len(), 1, "single-segment path for plain struct type");
+        assert_eq!(path[0].text(src), "Point");
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].0.text(src), "x");
+        assert_eq!(fields[1].0.text(src), "y");
+    }
+
+    #[test]
+    fn let_struct_pattern_wildcard_field() {
+        // FLS §5.10.2 + §5.11: wildcard sub-pattern in struct let-pattern.
+        // `let Point { x: _, y }` ignores x and binds y.
+        let src = "fn f(p: Point) { let Point { x: _, y } = p; }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        let StmtKind::Let { pat, .. } = &body.stmts[0].kind else {
+            panic!("expected let");
+        };
+        let Pat::StructVariant { fields, .. } = pat else {
+            panic!("expected Pat::StructVariant, got {pat:?}");
+        };
+        assert!(matches!(fields[0].1, Pat::Wildcard));
+        assert!(matches!(fields[1].1, Pat::Ident(_)));
     }
 
     // ── Expressions ───────────────────────────────────────────────────────────
