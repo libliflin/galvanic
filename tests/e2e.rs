@@ -10392,6 +10392,199 @@ fn main() -> i32 {
     assert!(has_branch, "expected conditional branch in make:\n{}", in_make.join("\n"));
 }
 
+// ── Milestone 86: struct return from match expression ──────────────────────
+// FLS §6.18: Match expressions; FLS §6.11: Struct expressions; FLS §9: Functions
+
+/// Milestone 86: struct-returning function with match — literal arm taken.
+///
+/// FLS §6.18: "A match expression is used to branch over the possible values
+/// of the scrutinee operand." FLS §6.11: Struct literal stores fields in order.
+#[test]
+fn milestone_86_struct_match_literal_arm_taken() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(flag: i32) -> Point {
+    match flag {
+        1 => Point { x: 3, y: 4 },
+        _ => Point { x: 0, y: 0 },
+    }
+}
+fn main() -> i32 { make(1).x }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3);
+}
+
+/// Milestone 86: struct-returning match — wildcard arm taken.
+///
+/// FLS §6.18: Default arm executes when no prior arm matched.
+#[test]
+fn milestone_86_struct_match_wildcard_arm_taken() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(flag: i32) -> Point {
+    match flag {
+        1 => Point { x: 3, y: 4 },
+        _ => Point { x: 7, y: 8 },
+    }
+}
+fn main() -> i32 { make(0).y }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 8);
+}
+
+/// Milestone 86: struct-returning match — second field from taken arm.
+///
+/// FLS §6.11: Fields stored in declaration order at base_slot+i.
+#[test]
+fn milestone_86_struct_match_second_field() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(flag: i32) -> Point {
+    match flag {
+        1 => Point { x: 10, y: 20 },
+        _ => Point { x: 0, y: 0 },
+    }
+}
+fn main() -> i32 { make(1).y }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 20);
+}
+
+/// Milestone 86: struct-returning match on a parameter passed to another function.
+///
+/// FLS §6.12.1: call site must preserve all struct fields before forwarding.
+#[test]
+fn milestone_86_struct_match_passed_to_fn() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(flag: i32) -> Point {
+    match flag {
+        1 => Point { x: 3, y: 4 },
+        _ => Point { x: 0, y: 0 },
+    }
+}
+fn sum(p: Point) -> i32 { p.x + p.y }
+fn main() -> i32 { sum(make(1)) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7);
+}
+
+/// Milestone 86: struct-returning match — sum of fields used in arithmetic.
+///
+/// FLS §6.5.5: Addition of field values.
+#[test]
+fn milestone_86_struct_match_field_sum() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(flag: i32) -> Point {
+    match flag {
+        2 => Point { x: 5, y: 6 },
+        _ => Point { x: 1, y: 1 },
+    }
+}
+fn main() -> i32 { let p = make(2); p.x + p.y }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 11);
+}
+
+/// Milestone 86: struct-returning match — three arms, middle one taken.
+///
+/// FLS §6.18: Arms tested in source order.
+#[test]
+fn milestone_86_struct_match_three_arms_middle() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(flag: i32) -> Point {
+    match flag {
+        1 => Point { x: 1, y: 0 },
+        2 => Point { x: 0, y: 2 },
+        _ => Point { x: 0, y: 0 },
+    }
+}
+fn main() -> i32 { make(2).y }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2);
+}
+
+/// Milestone 86: struct-returning match — result used in if expression.
+///
+/// FLS §6.17: if condition on struct field.
+#[test]
+fn milestone_86_struct_match_in_if() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(flag: i32) -> Point {
+    match flag {
+        1 => Point { x: 10, y: 0 },
+        _ => Point { x: 0, y: 5 },
+    }
+}
+fn main() -> i32 {
+    let p = make(1);
+    if p.x > 0 { p.x } else { p.y }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10);
+}
+
+/// Milestone 86: struct-returning match on parameter.
+///
+/// FLS §9.2: Function parameters can be used as match scrutinee.
+#[test]
+fn milestone_86_struct_match_on_parameter() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(flag: i32) -> Point {
+    match flag {
+        42 => Point { x: 42, y: 0 },
+        _ => Point { x: 0, y: 42 },
+    }
+}
+fn check(flag: i32) -> i32 { make(flag).x }
+fn main() -> i32 { check(42) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42);
+}
+
+/// Assembly check: struct-returning match emits comparison and cbz.
+///
+/// FLS §6.18: Pattern check requires a comparison instruction.
+/// FLS §6.1.2:37–45: All instructions are runtime.
+#[test]
+fn runtime_struct_match_emits_comparison_and_cbz() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(flag: i32) -> Point {
+    match flag {
+        1 => Point { x: 3, y: 4 },
+        _ => Point { x: 0, y: 0 },
+    }
+}
+fn main() -> i32 { let p = make(1); p.x }
+"#;
+    let asm = compile_to_asm(src);
+    let in_make: Vec<&str> = asm
+        .lines()
+        .skip_while(|l| !l.starts_with("make:"))
+        .take_while(|l| !l.starts_with("main:"))
+        .collect();
+    let has_cbz = in_make.iter().any(|l| l.trim_start().starts_with("cbz"));
+    let has_cset = in_make.iter().any(|l| l.trim_start().starts_with("cset"));
+    assert!(
+        has_cbz && has_cset,
+        "expected cset+cbz in make:\n{}",
+        in_make.join("\n")
+    );
+}
+
 /// Assembly check: struct-returning free function used directly as argument.
 ///
 /// `sum(make(1))` must NOT capture only x0 after `bl make` — it must store
