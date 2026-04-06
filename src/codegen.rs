@@ -506,6 +506,40 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool) 
             writeln!(out, "    ret")?;
         }
 
+        // FLS §6.9: Indexed array load — `dst = array[index]`.
+        //
+        // ARM64 two-instruction sequence:
+        //   add x{dst}, sp, #(base_slot * 8)         // address of element 0
+        //   ldr x{dst}, [x{dst}, x{index_reg}, lsl #3] // load element at index
+        //
+        // `lsl #3` scales the index by 8 (one slot = 8 bytes), equivalent to
+        // multiplying by `sizeof(i32)` rounded up to 8-byte alignment.
+        //
+        // ARM64 LDR with shifted register: `ldr xD, [xB, xI, lsl #3]` is a
+        // single 4-byte instruction that reads from address `xB + xI*8`.
+        // The shift amount (3) is encoded directly in the instruction encoding.
+        //
+        // Precondition: `dst != index_reg`. If they were the same, the `add`
+        // would overwrite `index_reg` before the `ldr` can use it. The lowering
+        // pass guarantees `dst` is a freshly allocated register that does not
+        // alias `index_reg` (both come from `alloc_reg()` in sequence).
+        //
+        // FLS §6.9 AMBIGUOUS: Out-of-bounds access must panic; no check is emitted.
+        //
+        // Cache-line note: add + ldr = two 4-byte instructions = 8 bytes,
+        // fitting in one adjacent instruction slot pair in a 64-byte cache line.
+        Instr::LoadIndexed { dst, base_slot, index_reg } => {
+            let base_offset = *base_slot as u32 * 8;
+            writeln!(
+                out,
+                "    add     x{dst}, sp, #{base_offset:<15} // FLS §6.9: address of arr[0]"
+            )?;
+            writeln!(
+                out,
+                "    ldr     x{dst}, [x{dst}, x{index_reg}, lsl #3] // FLS §6.9: load arr[index]"
+            )?;
+        }
+
         // FLS §6.12.2 + §10.1: Call a `&mut self` method and write modified fields back.
         //
         // After the `bl`, x0..x{N-1} hold the method's modified field values

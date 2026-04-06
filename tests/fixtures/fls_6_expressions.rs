@@ -344,3 +344,37 @@ fn method_call_with_arg_example() -> i32 {
     let p = MethodPoint { x: 5, y: 0 };
     p.scale_x(3)   // FLS §6.12.2: 5 * 3 = 15
 }
+
+// FLS §6.8 — Array expressions.
+//
+// FLS §6.8: "An array expression constructs a value of an array type."
+// FLS §6.8: "An array expression consists of a comma-separated list of
+// operands of the same type." All elements must have the same type.
+//
+// Note: FLS §6.8 provides the syntax but no self-contained runnable example.
+// This example is derived from the spec's semantic description.
+
+fn array_literal_example() -> i32 {
+    let a = [10, 20, 30];  // FLS §6.8: array of three i32 elements
+    a[0]                   // FLS §6.9: index expression — returns first element (10)
+}
+
+fn array_index_middle_example() -> i32 {
+    let a = [10, 20, 30];  // FLS §6.8
+    a[1]                   // FLS §6.9: second element (20)
+}
+
+// FLS §6.9 — Indexing expressions.
+//
+// FLS §6.9: "An indexing expression is used to index into an array or slice."
+// The index must be of type `usize` (spec); galvanic uses `i32` at this milestone.
+//
+// FLS §6.9 AMBIGUOUS: The spec requires bounds checking (panic on out-of-bounds),
+// but does not specify the panic mechanism without the standard library.
+// No bounds check is emitted at this milestone.
+
+fn array_variable_index_example() -> i32 {
+    let a = [5, 10, 15];  // FLS §6.8
+    let i = 2;
+    a[i]                  // FLS §6.9: runtime index — loads element at position i (15)
+}

@@ -4527,6 +4527,174 @@ fn main() -> i32 {
 
 // ── Assembly inspection: milestone 46 ────────────────────────────────────────
 
+// ── Milestone 47: array expressions and indexing ──────────────────────────────
+
+/// Milestone 47: array literal with constant index — first element.
+///
+/// FLS §6.8: Array expression `[10, 20, 30]` constructs a stack array.
+/// FLS §6.9: Index expression `a[0]` accesses the first element.
+/// The array is stored in consecutive stack slots; `a[0]` loads slot 0.
+#[test]
+fn milestone_47_array_index_first() {
+    let src = r#"
+fn main() -> i32 {
+    let a = [10, 20, 30];
+    a[0]
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "expected exit 10, got {exit_code}");
+}
+
+/// Milestone 47: array literal with constant index — middle element.
+///
+/// FLS §6.8, §6.9. `a[1]` must load the second element (20), not the first or third.
+#[test]
+fn milestone_47_array_index_middle() {
+    let src = r#"
+fn main() -> i32 {
+    let a = [10, 20, 30];
+    a[1]
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 20, "expected exit 20, got {exit_code}");
+}
+
+/// Milestone 47: array literal with constant index — last element.
+///
+/// FLS §6.8, §6.9. `a[2]` must load the third element.
+#[test]
+fn milestone_47_array_index_last() {
+    let src = r#"
+fn main() -> i32 {
+    let a = [10, 20, 30];
+    a[2]
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 30, "expected exit 30, got {exit_code}");
+}
+
+/// Milestone 47: array element used in arithmetic.
+///
+/// FLS §6.8, §6.9, §6.5.5: `a[0] + a[1]` — two indexed loads, then addition.
+#[test]
+fn milestone_47_array_index_in_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    let a = [3, 7];
+    a[0] + a[1]
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "expected exit 10, got {exit_code}");
+}
+
+/// Milestone 47: variable index at runtime.
+///
+/// FLS §6.9: The index expression is a runtime value (`i`), not a literal.
+/// The emitted `LoadIndexed` must compute the address dynamically.
+#[test]
+fn milestone_47_array_variable_index() {
+    let src = r#"
+fn main() -> i32 {
+    let a = [10, 20, 30];
+    let i = 2;
+    a[i]
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 30, "expected exit 30, got {exit_code}");
+}
+
+/// Milestone 47: index computed from a parameter.
+///
+/// FLS §6.9: The index is derived from a function parameter — a truly
+/// runtime-unknown value. This is the litmus test (FLS constraint §1):
+/// if the compiler were interpreting instead of compiling, it would not
+/// be able to handle a parameter-derived index.
+#[test]
+fn milestone_47_array_param_index() {
+    let src = r#"
+fn get(i: i32) -> i32 {
+    let a = [5, 10, 15];
+    a[i]
+}
+fn main() -> i32 {
+    get(1)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "expected exit 10, got {exit_code}");
+}
+
+/// Milestone 47: two-element array, sum both elements.
+///
+/// FLS §6.8, §6.9, §6.5.5. Each index load must produce the correct element.
+#[test]
+fn milestone_47_array_sum_elements() {
+    let src = r#"
+fn main() -> i32 {
+    let a = [4, 6];
+    a[0] + a[1]
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "expected exit 10, got {exit_code}");
+}
+
+/// Milestone 47: array index in a loop (accumulator pattern).
+///
+/// FLS §6.8, §6.9, §6.15.3: Index a 5-element array in a while loop,
+/// summing the elements. This verifies that `LoadIndexed` produces
+/// correct results across multiple loop iterations with changing runtime
+/// index values.
+#[test]
+fn milestone_47_array_index_in_loop() {
+    let src = r#"
+fn main() -> i32 {
+    let a = [1, 2, 3, 4, 5];
+    let mut sum = 0;
+    let mut i = 0;
+    while i < 5 {
+        sum = sum + a[i];
+        i = i + 1;
+    }
+    sum
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 15, "expected exit 15, got {exit_code}");
+}
+
+// ── Assembly inspection: milestone 47 ────────────────────────────────────────
+
+/// Milestone 47: array indexing emits `add` + `ldr` with `lsl #3`.
+///
+/// FLS §6.9: The indexed load must compute `sp + base*8 + index*8`.
+/// ARM64: `add x{dst}, sp, #base_offset` + `ldr x{dst}, [x{dst}, x{idx}, lsl #3]`.
+/// The `lsl #3` confirms element size scaling (8 bytes per slot).
+#[test]
+fn runtime_array_index_emits_add_and_ldr_lsl3() {
+    let src = r#"
+fn main() -> i32 {
+    let a = [10, 20, 30];
+    let i = 1;
+    a[i]
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("lsl #3"),
+        "expected `lsl #3` (element size scaling) in indexed load:\n{asm}"
+    );
+    assert!(
+        asm.contains("add") && asm.contains("sp,"),
+        "expected `add xN, sp, #offset` for base address:\n{asm}"
+    );
+}
+
 /// Milestone 46: trait impl method emitted under `TypeName__method_name`.
 ///
 /// FLS §13: Trait methods resolve via static dispatch using the same mangling
