@@ -561,11 +561,12 @@ pub enum StmtKind {
     ///
     /// Grammar: `"let" Pattern (":" Type)? ("=" Expression)? ";"`
     ///
-    /// FLS §8.1 NOTE: the pattern can be any irrefutable pattern. This
-    /// implementation restricts to a simple identifier (and `_`). Tuple
-    /// and struct patterns in let position are future work.
+    /// FLS §8.1: The pattern may be any irrefutable pattern. Common forms:
+    /// - `let x = expr;` — identifier pattern, binds `x`.
+    /// - `let _ = expr;` — wildcard pattern, discards.
+    /// - `let (a, b) = tuple;` — tuple pattern (FLS §5.10.3), destructures.
     Let {
-        name: Span,
+        pat: Pat,
         ty: Option<Ty>,
         init: Option<Box<Expr>>,
     },
@@ -1173,6 +1174,21 @@ pub enum Pat {
         /// The shorthand `{ x }` is represented as `(x_span, Pat::Ident(x_span))`.
         fields: Vec<(Span, Pat)>,
     },
+
+    /// Tuple pattern `(p0, p1, ...)`. Matches a tuple value of the given arity.
+    ///
+    /// FLS §5.10.3: "A tuple pattern is a pattern that matches a tuple which
+    /// satisfies all criteria defined by its subpatterns."
+    ///
+    /// Used in `let (a, b) = t;` — each sub-pattern is matched against the
+    /// corresponding tuple element. Only `Pat::Ident` and `Pat::Wildcard`
+    /// sub-patterns are supported at this milestone.
+    ///
+    /// The empty form `()` matches the unit value (0-element tuple).
+    ///
+    /// Cache-line note: rebinding an existing tuple variable emits zero
+    /// instructions (alias); a tuple literal init emits N stores (4N bytes).
+    Tuple(Vec<Pat>),
 }
 
 // ── Operators ─────────────────────────────────────────────────────────────────

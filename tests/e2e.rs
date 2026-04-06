@@ -8490,3 +8490,116 @@ fn runtime_borrow_struct_field_emits_add_sp() {
     });
     assert!(has_add_sp, "&mut p.a must emit `add xD, sp, #offset`:\n{asm}");
 }
+
+// ── Milestone 72: tuple destructuring in let bindings ────────────────────────
+//
+// FLS §5.10.3: Tuple patterns — `let (a, b) = expr;` binds each element of a
+// tuple value to a name.
+// FLS §8.1: Let statements accept any irrefutable pattern.
+// FLS §6.10: Tuple expressions produce a sequence of values stored in
+// consecutive stack slots.
+
+/// Milestone 72: destructure a tuple literal into two bindings.
+///
+/// FLS §5.10.3 + §8.1: `let (a, b) = (3, 4);` — evaluate the tuple literal
+/// and bind each element. Returns their sum.
+#[test]
+fn milestone_72_destruct_tuple_literal_sum() {
+    let src = "fn main() -> i32 { let (a, b) = (3, 4); a + b }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 3 + 4 = 7, got {exit_code}");
+}
+
+/// Milestone 72: destructure a tuple literal, subtract.
+///
+/// FLS §5.10.3: Bindings are independent variables in the enclosing scope.
+#[test]
+fn milestone_72_destruct_tuple_literal_sub() {
+    let src = "fn main() -> i32 { let (a, b) = (10, 3); a - b }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 10 - 3 = 7, got {exit_code}");
+}
+
+/// Milestone 72: wildcard pattern discards an element.
+///
+/// FLS §5.10.3 + §5.11: The `_` sub-pattern discards the corresponding
+/// element. No variable is bound for that position.
+#[test]
+fn milestone_72_destruct_wildcard_first() {
+    let src = "fn main() -> i32 { let (_, b) = (99, 5); b }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "expected 5, got {exit_code}");
+}
+
+/// Milestone 72: wildcard discards the second element.
+///
+/// FLS §5.10.3: Either element may be a wildcard.
+#[test]
+fn milestone_72_destruct_wildcard_second() {
+    let src = "fn main() -> i32 { let (a, _) = (7, 99); a }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 7, got {exit_code}");
+}
+
+/// Milestone 72: destructure an existing tuple variable.
+///
+/// FLS §5.10.3 + §6.10: `let (a, b) = pair;` where `pair` is a previously
+/// bound tuple. The bindings alias the existing slots — no copies emitted.
+#[test]
+fn milestone_72_destruct_existing_tuple() {
+    let src = "fn main() -> i32 { let t = (5, 2); let (a, b) = t; a + b }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 5 + 2 = 7, got {exit_code}");
+}
+
+/// Milestone 72: destructure tuple from a function parameter.
+///
+/// FLS §5.10.3: Tuple destructuring works on any tuple value, including
+/// one built from function parameters.
+#[test]
+fn milestone_72_destruct_tuple_from_params() {
+    let src = "fn sub(x: i32, y: i32) -> i32 { let (a, b) = (x, y); a - b }\nfn main() -> i32 { sub(9, 2) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 9 - 2 = 7, got {exit_code}");
+}
+
+/// Milestone 72: destructure a three-element tuple.
+///
+/// FLS §5.10.3: The arity of the pattern must match the arity of the tuple.
+/// Three-element tuples use three consecutive stack slots.
+#[test]
+fn milestone_72_destruct_three_element_tuple() {
+    let src = "fn main() -> i32 { let (a, b, c) = (1, 2, 4); a + b + c }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 1 + 2 + 4 = 7, got {exit_code}");
+}
+
+/// Milestone 72: destructuring in an inner block with arithmetic on bindings.
+///
+/// FLS §5.10.3 + §6.4: Tuple destructuring is valid in any block scope.
+#[test]
+fn milestone_72_destruct_in_block() {
+    let src = "fn main() -> i32 { let r = { let (x, y) = (3, 4); x * x + y * y }; r }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    // 3*3 + 4*4 = 9 + 16 = 25
+    assert_eq!(exit_code, 25, "expected 9 + 16 = 25, got {exit_code}");
+}
+
+/// Milestone 72: assembly inspection — tuple literal destructure emits stores.
+///
+/// FLS §5.10.3 + §6.1.2:37–45: Each element of `(3, 4)` must be stored to a
+/// stack slot at runtime. The destructure `let (a, b) = (3, 4);` must emit
+/// at least one `str` instruction per element.
+///
+/// Cache-line note: 2 elements → 2 `str` + 2 `mov` = 16 bytes. Both stores
+/// fit in one 64-byte cache line alongside other preamble instructions.
+#[test]
+fn runtime_tuple_destruct_emits_stores() {
+    let src = "fn main() -> i32 { let (a, b) = (3, 4); a + b }\n";
+    let asm = compile_to_asm(src);
+    let store_count = asm.lines().filter(|l| l.trim().starts_with("str")).count();
+    assert!(
+        store_count >= 2,
+        "tuple destructure must emit ≥2 str instructions, got {store_count}:\n{asm}"
+    );
+}

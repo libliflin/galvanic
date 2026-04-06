@@ -117,6 +117,27 @@ fn unwrap_or_zero(o: Opt) -> i32 {
     }
 }
 
+// FLS §5.10.3: Tuple pattern — `(p0, p1, ...)` in a let statement.
+// FLS §8.1: Let statements accept any irrefutable pattern, including tuple
+// patterns. FLS §5.10.3: "A tuple pattern is a pattern that matches a tuple
+// which satisfies all criteria defined by its subpatterns."
+//
+// Note: The FLS does not provide a concrete code example for tuple patterns
+// in let position; this is derived from the semantic description in §5.10.3
+// and the let statement grammar in §8.1.
+fn swap(x: i32, y: i32) -> i32 {
+    // FLS §5.10.3: Destructure a tuple literal — binds `a` and `b`.
+    let (a, b) = (y, x);
+    // Returns `a - b` = `y - x` as a sanity check that elements were swapped.
+    a - b
+}
+
+fn sum_pair(x: i32, y: i32) -> i32 {
+    // FLS §5.10.3: Destructure into named bindings, then use in arithmetic.
+    let (p, q) = (x, y);
+    p + q
+}
+
 fn main() -> i32 {
     // FLS §5.1.9: inclusive range — value 2 in [1,3] → 1.
     let a = range_inclusive(2);
@@ -139,6 +160,10 @@ fn main() -> i32 {
     let i = unwrap_or_zero(s);
     let n = Opt::None;
     let j = unwrap_or_zero(n);
-    // a=1, b=2, c=1, d=1, e=1, f=1, g=4, h=2, i=3, j=0 → sum=16
-    a + b + c + d + e + f + g + h + i + j
+    // FLS §5.10.3: tuple pattern in let — swap(3,5): (a,b)=(5,3) → a-b=2.
+    let k = swap(3, 5);
+    // FLS §5.10.3: sum via tuple destructure — sum_pair(1,2)=3.
+    let m = sum_pair(1, 2);
+    // a=1, b=2, c=1, d=1, e=1, f=1, g=4, h=2, i=3, j=0, k=2, m=3 → sum=21
+    a + b + c + d + e + f + g + h + i + j + k + m
 }

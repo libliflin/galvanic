@@ -2207,8 +2207,136 @@ impl<'src> LowerCtx<'src> {
             //
             // FLS §6.1.2:37–45: Any store instruction is a runtime instruction;
             // the initializer (when present) is evaluated at runtime.
-            StmtKind::Let { name, ty: _, init } => {
-                let var_name = name.text(self.source);
+            StmtKind::Let { pat, ty: _, init } => {
+                // FLS §5.10.3: Tuple pattern in let position — `let (a, b) = t;`.
+                //
+                // Handled before the scalar special-case chain since it
+                // doesn't produce a single `var_name`. Supports two init forms:
+                //
+                // 1. Tuple literal RHS: `let (a, b) = (e0, e1);` — evaluate
+                //    each element, store to fresh slots, bind names.
+                // 2. Variable RHS:      `let (a, b) = pair;` — `pair` must be
+                //    a known tuple variable; bind names to its existing slots.
+                //
+                // Sub-patterns: only `Pat::Ident` (binding) and `Pat::Wildcard`
+                // (discard) are supported at this milestone (FLS §5.10.3).
+                //
+                // FLS §6.1.2:37–45: All stores are runtime instructions.
+                // Cache-line note: literal init costs N stores (4N bytes);
+                // variable rebind costs 0 instructions (slot alias only).
+                if let Pat::Tuple(pats) = pat {
+                    // Case 1: init is a tuple literal `(e0, e1, ...)`.
+                    if let Some(init_expr) = init.as_ref()
+                        && let ExprKind::Tuple(elems) = &init_expr.kind
+                    {
+                        if elems.len() != pats.len() {
+                            return Err(LowerError::Unsupported(format!(
+                                "tuple pattern has {} elements but initializer has {}",
+                                pats.len(), elems.len()
+                            )));
+                        }
+                        let n = pats.len();
+                        let base_slot = self.alloc_slot()?;
+                        for _ in 1..n {
+                            self.alloc_slot()?;
+                        }
+                        // Evaluate and store each element left-to-right (FLS §6.4:14).
+                        for (i, elem_expr) in elems.iter().enumerate() {
+                            let val = self.lower_expr(elem_expr, &IrTy::I32)?;
+                            let src = self.val_to_reg(val)?;
+                            self.instrs.push(Instr::Store {
+                                src,
+                                slot: base_slot + i as u8,
+                            });
+                        }
+                        // Bind each sub-pattern to its slot.
+                        for (i, sub_pat) in pats.iter().enumerate() {
+                            match sub_pat {
+                                Pat::Ident(span) => {
+                                    let name = span.text(self.source);
+                                    self.locals.insert(name, base_slot + i as u8);
+                                }
+                                Pat::Wildcard => {} // no binding
+                                _ => {
+                                    return Err(LowerError::Unsupported(
+                                        "nested tuple pattern not yet supported".into(),
+                                    ));
+                                }
+                            }
+                        }
+                        // Register as a tuple so element re-access works later.
+                        if n > 0 {
+                            self.local_tuple_lens.insert(base_slot, n);
+                        }
+                        return Ok(());
+                    }
+
+                    // Case 2: init is a simple variable path whose value is
+                    // a known tuple (registered in `local_tuple_lens`).
+                    //
+                    // This is a zero-instruction rebind: we simply register each
+                    // sub-pattern name against the source variable's slots.
+                    if let Some(init_expr) = init.as_ref()
+                        && let ExprKind::Path(segs) = &init_expr.kind
+                        && segs.len() == 1
+                    {
+                        let src_name = segs[0].text(self.source);
+                        let src_slot = *self.locals.get(src_name).ok_or_else(|| {
+                            LowerError::Unsupported(format!(
+                                "undefined variable `{src_name}` in tuple destructure"
+                            ))
+                        })?;
+                        let src_len = *self.local_tuple_lens.get(&src_slot).ok_or_else(|| {
+                            LowerError::Unsupported(format!(
+                                "variable `{src_name}` is not a tuple"
+                            ))
+                        })?;
+                        if src_len != pats.len() {
+                            return Err(LowerError::Unsupported(format!(
+                                "tuple pattern has {} elements but `{src_name}` has {src_len}",
+                                pats.len()
+                            )));
+                        }
+                        for (i, sub_pat) in pats.iter().enumerate() {
+                            match sub_pat {
+                                Pat::Ident(span) => {
+                                    let name = span.text(self.source);
+                                    self.locals.insert(name, src_slot + i as u8);
+                                }
+                                Pat::Wildcard => {}
+                                _ => {
+                                    return Err(LowerError::Unsupported(
+                                        "nested tuple pattern not yet supported".into(),
+                                    ));
+                                }
+                            }
+                        }
+                        return Ok(());
+                    }
+
+                    return Err(LowerError::Unsupported(
+                        "tuple destructuring requires a tuple literal or simple variable initializer".into(),
+                    ));
+                }
+
+                // All other patterns: extract `var_name` for the scalar path.
+                //
+                // FLS §5.11: Wildcard pattern `_` — evaluate init for side
+                // effects but bind no name.
+                let var_name = match pat {
+                    Pat::Ident(span) => span.text(self.source),
+                    Pat::Wildcard => {
+                        if let Some(init_expr) = init.as_ref() {
+                            self.lower_expr(init_expr, &IrTy::I32)?;
+                        }
+                        return Ok(());
+                    }
+                    _ => {
+                        return Err(LowerError::Unsupported(
+                            "complex let pattern not yet supported".into(),
+                        ));
+                    }
+                };
 
                 // FLS §10.1: Struct-returning associated function call as let-binding init.
                 //
@@ -3792,6 +3920,11 @@ impl<'src> LowerCtx<'src> {
                                 "struct/variant if-let pattern path must have 1 or 2 segments".into(),
                             ));
                         }
+                    }
+                    Pat::Tuple(_) => {
+                        return Err(LowerError::Unsupported(
+                            "tuple pattern in if-let not yet supported".into(),
+                        ));
                     }
                 }
 
@@ -6280,6 +6413,11 @@ impl<'src> LowerCtx<'src> {
                                 "struct/variant while-let pattern path must have 1 or 2 segments".into(),
                             ));
                         }
+                    }
+                    Pat::Tuple(_) => {
+                        return Err(LowerError::Unsupported(
+                            "tuple pattern in while-let not yet supported".into(),
+                        ));
                     }
                 }
 
