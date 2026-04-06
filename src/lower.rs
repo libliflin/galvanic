@@ -1934,6 +1934,73 @@ impl<'src> LowerCtx<'src> {
         Ok(())
     }
 
+    /// Bind struct field patterns recursively from a known base slot.
+    ///
+    /// After a struct value is on the stack (slots `base_slot .. base_slot + size`),
+    /// this method walks `pat_fields` and installs each `Pat::Ident` binding into
+    /// `self.locals`. For nested struct sub-patterns (`inner: Inner { a, b }`),
+    /// it recurses with the inner struct's base slot.
+    ///
+    /// FLS §5.10.2: Struct patterns. FLS §8.1: Let statements.
+    ///
+    /// Cache-line note: only `self.locals` is mutated — zero instructions emitted.
+    fn bind_struct_fields_from_slot(
+        &mut self,
+        struct_name: &str,
+        base_slot: u8,
+        pat_fields: &[(crate::ast::Span, Pat)],
+    ) -> Result<(), LowerError> {
+        let field_names = self
+            .struct_defs
+            .get(struct_name)
+            .cloned()
+            .ok_or_else(|| {
+                LowerError::Unsupported(format!("unknown struct type `{struct_name}`"))
+            })?;
+        let offsets = self
+            .struct_field_offsets
+            .get(struct_name)
+            .cloned()
+            .ok_or_else(|| {
+                LowerError::Unsupported(format!(
+                    "unknown field offsets for struct `{struct_name}`"
+                ))
+            })?;
+        for (field_name_span, sub_pat) in pat_fields {
+            let fname = field_name_span.text(self.source);
+            let fi = field_names
+                .iter()
+                .position(|f| f == fname)
+                .ok_or_else(|| {
+                    LowerError::Unsupported(format!(
+                        "no field `{fname}` on struct `{struct_name}`"
+                    ))
+                })?;
+            let slot = base_slot + offsets[fi] as u8;
+            match sub_pat {
+                Pat::Ident(bind_span) => {
+                    let bind_name = bind_span.text(self.source);
+                    self.locals.insert(bind_name, slot);
+                }
+                Pat::Wildcard => {}
+                Pat::StructVariant { path, fields: inner_fields } if path.len() == 1 => {
+                    // FLS §5.10.2: Struct patterns may nest arbitrarily deep.
+                    // The field's slot is the base of the inner struct's layout.
+                    let inner_name = path[0].text(self.source).to_owned();
+                    self.bind_struct_fields_from_slot(&inner_name, slot, inner_fields)?;
+                }
+                _ => {
+                    return Err(LowerError::Unsupported(
+                        "only ident, wildcard, and nested struct sub-patterns are \
+                         supported in struct let-patterns"
+                            .into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Resolve a place expression (variable or chained field access) to its
     /// stack slot index and optional struct type name.
     ///
@@ -2408,51 +2475,14 @@ impl<'src> LowerCtx<'src> {
                                  variable type `{src_type}`"
                             )));
                         }
-                        let field_names = self
-                            .struct_defs
-                            .get(struct_name)
-                            .cloned()
-                            .ok_or_else(|| {
-                                LowerError::Unsupported(format!(
-                                    "unknown struct type `{struct_name}`"
-                                ))
-                            })?;
-                        let offsets = self
-                            .struct_field_offsets
-                            .get(struct_name)
-                            .cloned()
-                            .ok_or_else(|| {
-                                LowerError::Unsupported(format!(
-                                    "unknown field offsets for struct `{struct_name}`"
-                                ))
-                            })?;
                         // Alias each named field pattern to its source slot.
-                        for (field_name_span, sub_pat) in pat_fields.iter() {
-                            let fname = field_name_span.text(self.source);
-                            let fi = field_names
-                                .iter()
-                                .position(|f| f == fname)
-                                .ok_or_else(|| {
-                                    LowerError::Unsupported(format!(
-                                        "no field `{fname}` on struct `{struct_name}`"
-                                    ))
-                                })?;
-                            let slot = src_slot + offsets[fi] as u8;
-                            match sub_pat {
-                                Pat::Ident(bind_span) => {
-                                    let bind_name = bind_span.text(self.source);
-                                    self.locals.insert(bind_name, slot);
-                                }
-                                Pat::Wildcard => {}
-                                _ => {
-                                    return Err(LowerError::Unsupported(
-                                        "only ident/wildcard sub-patterns in struct \
-                                         let-pattern"
-                                            .into(),
-                                    ));
-                                }
-                            }
-                        }
+                        // FLS §5.10.2: supports nested struct sub-patterns via
+                        // `bind_struct_fields_from_slot`.
+                        self.bind_struct_fields_from_slot(
+                            struct_name,
+                            src_slot,
+                            pat_fields,
+                        )?;
                         return Ok(());
                     }
 
@@ -2546,32 +2576,13 @@ impl<'src> LowerCtx<'src> {
                         }
 
                         // Bind each field pattern to its allocated slot.
-                        for (field_name_span, sub_pat) in pat_fields.iter() {
-                            let fname = field_name_span.text(self.source);
-                            let fi = field_names
-                                .iter()
-                                .position(|f| f == fname)
-                                .ok_or_else(|| {
-                                    LowerError::Unsupported(format!(
-                                        "no field `{fname}` on struct `{struct_name}`"
-                                    ))
-                                })?;
-                            let slot = base_slot + offsets[fi] as u8;
-                            match sub_pat {
-                                Pat::Ident(bind_span) => {
-                                    let bind_name = bind_span.text(self.source);
-                                    self.locals.insert(bind_name, slot);
-                                }
-                                Pat::Wildcard => {}
-                                _ => {
-                                    return Err(LowerError::Unsupported(
-                                        "only ident/wildcard sub-patterns in struct \
-                                         let-pattern"
-                                            .into(),
-                                    ));
-                                }
-                            }
-                        }
+                        // FLS §5.10.2: supports nested struct sub-patterns via
+                        // `bind_struct_fields_from_slot`.
+                        self.bind_struct_fields_from_slot(
+                            struct_name,
+                            base_slot,
+                            pat_fields,
+                        )?;
                         return Ok(());
                     }
 

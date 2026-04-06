@@ -8951,3 +8951,182 @@ fn runtime_nested_tuple_destruct_emits_stores() {
         "nested tuple destructure must emit ≥3 str instructions, got {store_count}:\n{asm}"
     );
 }
+
+// ── Milestone 76: nested struct destructuring in let bindings ─────────────────
+//
+// FLS §5.10.2 + §8.1: A struct pattern field's sub-pattern may itself be
+// another struct pattern, binding inner struct fields directly into scope.
+// Example: `let Outer { x, inner: Inner { a } } = val;`
+//
+// All bindings are slot-alias operations — zero instructions emitted. The
+// struct literal initializer case stores each scalar field to its own slot
+// (FLS §6.1.2:37–45: runtime stores, not const folding).
+//
+// Note: the FLS does not provide a specific code example for nested struct
+// destructuring in let position; these programs are derived from the
+// structural description in FLS §5.10.2 and §8.1.
+
+/// Milestone 76: basic nested struct pattern — inner field accessed after bind.
+///
+/// FLS §5.10.2: A struct pattern may use another struct pattern as a field
+/// sub-pattern: `let Outer { x, inner: Inner { a } } = ...;`
+#[test]
+fn milestone_76_nested_struct_basic() {
+    let src = "\
+struct Inner { a: i32 }\n\
+struct Outer { x: i32, inner: Inner }\n\
+fn main() -> i32 {\n\
+    let Outer { x, inner: Inner { a } } = Outer { x: 3, inner: Inner { a: 4 } };\n\
+    x + a\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 3 + 4 = 7, got {exit_code}");
+}
+
+/// Milestone 76: nested struct — access second field of inner struct.
+///
+/// FLS §5.10.2: All named fields of the inner struct are accessible after
+/// the nested pattern bind.
+#[test]
+fn milestone_76_nested_struct_second_field() {
+    let src = "\
+struct Inner { a: i32, b: i32 }\n\
+struct Outer { x: i32, inner: Inner }\n\
+fn main() -> i32 {\n\
+    let Outer { x, inner: Inner { a, b } } = Outer { x: 1, inner: Inner { a: 2, b: 4 } };\n\
+    x + a + b\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 1 + 2 + 4 = 7, got {exit_code}");
+}
+
+/// Milestone 76: nested struct wildcard — discard inner field with `_`.
+///
+/// FLS §5.10.2 + §5.1: A wildcard sub-pattern in a struct field position
+/// discards that field without binding it.
+#[test]
+fn milestone_76_nested_struct_wildcard_inner() {
+    let src = "\
+struct Inner { a: i32, b: i32 }\n\
+struct Outer { x: i32, inner: Inner }\n\
+fn main() -> i32 {\n\
+    let Outer { x, inner: Inner { a, b: _ } } = Outer { x: 3, inner: Inner { a: 4, b: 99 } };\n\
+    x + a\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 3 + 4 = 7, got {exit_code}");
+}
+
+/// Milestone 76: nested struct from variable — alias slots, zero instructions.
+///
+/// FLS §5.10.2 + §8.1: When the RHS is a variable of the matching struct type,
+/// the pattern binds field names to the variable's existing slots.
+#[test]
+fn milestone_76_nested_struct_from_variable() {
+    let src = "\
+struct Inner { a: i32 }\n\
+struct Outer { x: i32, inner: Inner }\n\
+fn f(o: Outer) -> i32 {\n\
+    let Outer { x, inner: Inner { a } } = o;\n\
+    x + a\n\
+}\n\
+fn main() -> i32 { f(Outer { x: 3, inner: Inner { a: 4 } }) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 3 + 4 = 7, got {exit_code}");
+}
+
+/// Milestone 76: nested struct in arithmetic expression.
+///
+/// FLS §5.10.2: Bound names are ordinary let-bindings usable in any expression.
+#[test]
+fn milestone_76_nested_struct_arithmetic() {
+    let src = "\
+struct Inner { a: i32, b: i32 }\n\
+struct Outer { x: i32, inner: Inner }\n\
+fn main() -> i32 {\n\
+    let Outer { x, inner: Inner { a, b } } = Outer { x: 10, inner: Inner { a: 2, b: 1 } };\n\
+    x - a - b\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 10 - 2 - 1 = 7, got {exit_code}");
+}
+
+/// Milestone 76: nested struct passed to function.
+///
+/// FLS §5.10.2: Bound variables from nested struct patterns are plain locals
+/// and can be passed as function arguments.
+#[test]
+fn milestone_76_nested_struct_field_passed_to_fn() {
+    let src = "\
+struct Inner { a: i32 }\n\
+struct Outer { x: i32, inner: Inner }\n\
+fn double(n: i32) -> i32 { n * 2 }\n\
+fn main() -> i32 {\n\
+    let Outer { x: _, inner: Inner { a } } = Outer { x: 0, inner: Inner { a: 7 } };\n\
+    double(a) - 7\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected double(7) - 7 = 7, got {exit_code}");
+}
+
+/// Milestone 76: nested struct in block scope.
+///
+/// FLS §5.10.2 + §6.4: Nested struct destructuring is valid in any block scope.
+#[test]
+fn milestone_76_nested_struct_in_block() {
+    let src = "\
+struct Inner { a: i32 }\n\
+struct Outer { x: i32, inner: Inner }\n\
+fn main() -> i32 {\n\
+    let r = {\n\
+        let Outer { x, inner: Inner { a } } = Outer { x: 3, inner: Inner { a: 4 } };\n\
+        x + a\n\
+    };\n\
+    r\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 3 + 4 = 7, got {exit_code}");
+}
+
+/// Milestone 76: three-level nested struct destructuring.
+///
+/// FLS §5.10.2: Nesting is arbitrarily deep — each level recurses.
+#[test]
+fn milestone_76_three_level_nesting() {
+    let src = "\
+struct C { c: i32 }\n\
+struct B { v: i32, nested: C }\n\
+struct A { x: i32, inner: B }\n\
+fn main() -> i32 {\n\
+    let A { x, inner: B { v, nested: C { c } } } =\n\
+        A { x: 1, inner: B { v: 2, nested: C { c: 4 } } };\n\
+    x + v + c\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 1 + 2 + 4 = 7, got {exit_code}");
+}
+
+/// Runtime inspection: nested struct literal destructure emits stores for each
+/// scalar field.
+///
+/// FLS §5.10.2 + §6.1.2:37–45: Scalar fields in the nested struct literal must
+/// be stored at runtime. Two nested scalars → at least 2 `str` instructions.
+///
+/// Cache-line note: each scalar store is 4 bytes; 2 stores fit well within a
+/// single 64-byte cache line.
+#[test]
+fn runtime_nested_struct_destruct_emits_stores() {
+    let src = "\
+struct Inner { a: i32 }\n\
+struct Outer { x: i32, inner: Inner }\n\
+fn main() -> i32 {\n\
+    let Outer { x, inner: Inner { a } } = Outer { x: 3, inner: Inner { a: 4 } };\n\
+    x + a\n\
+}\n";
+    let asm = compile_to_asm(src);
+    let store_count = asm.lines().filter(|l| l.trim().starts_with("str")).count();
+    assert!(
+        store_count >= 2,
+        "nested struct destructure must emit ≥2 str instructions, got {store_count}:\n{asm}"
+    );
+}
