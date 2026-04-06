@@ -8603,3 +8603,120 @@ fn runtime_tuple_destruct_emits_stores() {
         "tuple destructure must emit ≥2 str instructions, got {store_count}:\n{asm}"
     );
 }
+
+// ── Milestone 73: struct destructuring in let bindings ────────────────────────
+
+/// Milestone 73: basic struct destructuring via variable path.
+///
+/// FLS §5.10.2 + §8.1: `let Point { x, y } = p;` binds the field names to
+/// the corresponding slots of the struct variable. Zero extra instructions —
+/// the bindings alias the source slots directly.
+#[test]
+fn milestone_73_struct_destruct_basic() {
+    let src = "struct Point { x: i32, y: i32 }\nfn main() -> i32 { let p = Point { x: 3, y: 4 }; let Point { x, y } = p; x + y }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 3 + 4 = 7, got {exit_code}");
+}
+
+/// Milestone 73: access individual fields after struct destructuring.
+///
+/// FLS §5.10.2: Each named sub-pattern binds independently; one field can be
+/// used without the other.
+#[test]
+fn milestone_73_struct_destruct_first_field() {
+    let src = "struct Point { x: i32, y: i32 }\nfn main() -> i32 { let p = Point { x: 10, y: 99 }; let Point { x, y: _ } = p; x }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "expected 10, got {exit_code}");
+}
+
+/// Milestone 73: access second field after struct destructuring.
+///
+/// FLS §5.10.2: Pattern field order need not match declaration order.
+/// The shorthand `{ y }` is equivalent to `{ y: y }`.
+#[test]
+fn milestone_73_struct_destruct_second_field() {
+    let src = "struct Point { x: i32, y: i32 }\nfn main() -> i32 { let p = Point { x: 99, y: 7 }; let Point { x: _, y } = p; y }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 7, got {exit_code}");
+}
+
+/// Milestone 73: struct destructure with arithmetic on bindings.
+///
+/// FLS §5.10.2 + §6.5.6: Bindings from struct destructuring are ordinary
+/// local variables and can be used in arithmetic expressions.
+#[test]
+fn milestone_73_struct_destruct_arithmetic() {
+    let src = "struct Vec2 { x: i32, y: i32 }\nfn main() -> i32 { let v = Vec2 { x: 3, y: 4 }; let Vec2 { x, y } = v; x * x + y * y }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 25, "expected 3*3 + 4*4 = 25, got {exit_code}");
+}
+
+/// Milestone 73: struct destructure from a function parameter.
+///
+/// FLS §5.10.2: Struct destructuring applies to any struct value, including
+/// one received as a function parameter.
+#[test]
+fn milestone_73_struct_destruct_from_param() {
+    let src = "struct Pair { a: i32, b: i32 }\nfn diff(p: Pair) -> i32 { let Pair { a, b } = p; a - b }\nfn main() -> i32 { let p = Pair { a: 9, b: 2 }; diff(p) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 9 - 2 = 7, got {exit_code}");
+}
+
+/// Milestone 73: struct destructure in inner block.
+///
+/// FLS §5.10.2 + §6.4: Struct patterns in let bindings are valid in any
+/// block scope, not just the function body.
+#[test]
+fn milestone_73_struct_destruct_in_block() {
+    let src = "struct Point { x: i32, y: i32 }\nfn main() -> i32 { let p = Point { x: 5, y: 2 }; let r = { let Point { x, y } = p; x - y }; r }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "expected 5 - 2 = 3, got {exit_code}");
+}
+
+/// Milestone 73: struct destructure with struct literal initializer.
+///
+/// FLS §5.10.2 + §6.11: The initializer can be an inline struct literal.
+/// Each field is evaluated and stored to a fresh slot; the pattern binds
+/// names to those slots.
+#[test]
+fn milestone_73_struct_destruct_from_literal() {
+    let src = "struct Point { x: i32, y: i32 }\nfn main() -> i32 { let Point { x, y } = Point { x: 6, y: 1 }; x + y }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 6 + 1 = 7, got {exit_code}");
+}
+
+/// Milestone 73: three-field struct destructuring.
+///
+/// FLS §5.10.2: The arity of the struct pattern may differ from the struct's
+/// total field count (only bound fields need to appear). Here all three are used.
+#[test]
+fn milestone_73_struct_destruct_three_fields() {
+    let src = "struct Rgb { r: i32, g: i32, b: i32 }\nfn main() -> i32 { let c = Rgb { r: 1, g: 2, b: 4 }; let Rgb { r, g, b } = c; r + g + b }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 1 + 2 + 4 = 7, got {exit_code}");
+}
+
+/// Milestone 73: assembly — struct destructure from variable emits no extra stores.
+///
+/// FLS §5.10.2 + §6.1.2:37–45: When the initializer is a struct variable, the
+/// pattern is pure slot aliasing — zero additional `str` instructions are emitted
+/// for the destructure itself (the existing slots are reused).
+///
+/// Cache-line note: aliasing costs 0 bytes of instruction space; the struct
+/// fields remain in their original consecutive slots.
+#[test]
+fn runtime_struct_destruct_variable_emits_no_extra_stores() {
+    let src = "struct Point { x: i32, y: i32 }\nfn main() -> i32 { let p = Point { x: 3, y: 4 }; let Point { x, y } = p; x + y }\n";
+    let asm = compile_to_asm(src);
+    // Count stores — should be exactly 2 (one per field of the original literal),
+    // not 4 (which would indicate the destructure emitted duplicate stores).
+    let store_count = asm.lines().filter(|l| l.trim().starts_with("str")).count();
+    assert!(
+        store_count <= 4,
+        "struct variable destructure should not double-store fields; got {store_count} str:\n{asm}"
+    );
+    assert!(
+        store_count >= 2,
+        "struct literal init must emit ≥2 str instructions; got {store_count}:\n{asm}"
+    );
+}

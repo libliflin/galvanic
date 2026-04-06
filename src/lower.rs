@@ -2319,6 +2319,228 @@ impl<'src> LowerCtx<'src> {
                     ));
                 }
 
+                // FLS §5.10.2 + §8.1: Struct pattern in let binding.
+                //
+                // `let StructName { field1, field2, .. } = expr;` binds each named
+                // field pattern to the corresponding stack slot of the struct value.
+                //
+                // Supported initializer forms:
+                //   1. Variable path — `let Point { x, y } = p;` — slot aliasing,
+                //      zero runtime instructions.
+                //   2. Struct literal — `let Point { x, y } = Point { x: 3, y: 4 };` —
+                //      evaluate each field and store to fresh slots, then alias names.
+                //
+                // FLS §6.1.2:37–45: All stores are runtime instructions; no
+                // compile-time evaluation of non-const code.
+                // Cache-line note: N-field struct occupies N consecutive 8-byte
+                // slots. Slot aliasing costs 0 instructions; literal init costs
+                // N store instructions.
+                if let Pat::StructVariant { path: pat_path, fields: pat_fields } = pat
+                    && pat_path.len() == 1
+                {
+                    let struct_name = pat_path[0].text(self.source);
+
+                    // Case 1: Init is a simple variable path.
+                    if let Some(init_expr) = init.as_ref()
+                        && let ExprKind::Path(segs) = &init_expr.kind
+                        && segs.len() == 1
+                    {
+                        let src_name = segs[0].text(self.source);
+                        let src_slot =
+                            *self.locals.get(src_name).ok_or_else(|| {
+                                LowerError::Unsupported(format!(
+                                    "undefined variable `{src_name}` in struct destructure"
+                                ))
+                            })?;
+                        let src_type = self
+                            .local_struct_types
+                            .get(&src_slot)
+                            .cloned()
+                            .ok_or_else(|| {
+                                LowerError::Unsupported(format!(
+                                    "variable `{src_name}` is not a struct (cannot destructure)"
+                                ))
+                            })?;
+                        if src_type != struct_name {
+                            return Err(LowerError::Unsupported(format!(
+                                "struct pattern `{struct_name}` does not match \
+                                 variable type `{src_type}`"
+                            )));
+                        }
+                        let field_names = self
+                            .struct_defs
+                            .get(struct_name)
+                            .cloned()
+                            .ok_or_else(|| {
+                                LowerError::Unsupported(format!(
+                                    "unknown struct type `{struct_name}`"
+                                ))
+                            })?;
+                        let offsets = self
+                            .struct_field_offsets
+                            .get(struct_name)
+                            .cloned()
+                            .ok_or_else(|| {
+                                LowerError::Unsupported(format!(
+                                    "unknown field offsets for struct `{struct_name}`"
+                                ))
+                            })?;
+                        // Alias each named field pattern to its source slot.
+                        for (field_name_span, sub_pat) in pat_fields.iter() {
+                            let fname = field_name_span.text(self.source);
+                            let fi = field_names
+                                .iter()
+                                .position(|f| f == fname)
+                                .ok_or_else(|| {
+                                    LowerError::Unsupported(format!(
+                                        "no field `{fname}` on struct `{struct_name}`"
+                                    ))
+                                })?;
+                            let slot = src_slot + offsets[fi] as u8;
+                            match sub_pat {
+                                Pat::Ident(bind_span) => {
+                                    let bind_name = bind_span.text(self.source);
+                                    self.locals.insert(bind_name, slot);
+                                }
+                                Pat::Wildcard => {}
+                                _ => {
+                                    return Err(LowerError::Unsupported(
+                                        "only ident/wildcard sub-patterns in struct \
+                                         let-pattern"
+                                            .into(),
+                                    ));
+                                }
+                            }
+                        }
+                        return Ok(());
+                    }
+
+                    // Case 2: Init is an inline struct literal.
+                    if let Some(init_expr) = init.as_ref()
+                        && let ExprKind::StructLit {
+                            name: lit_name_span,
+                            fields: lit_fields,
+                            base: lit_base,
+                        } = &init_expr.kind
+                    {
+                        let lit_struct_name = lit_name_span.text(self.source);
+                        if lit_struct_name != struct_name {
+                            return Err(LowerError::Unsupported(format!(
+                                "struct pattern `{struct_name}` does not match \
+                                 literal type `{lit_struct_name}`"
+                            )));
+                        }
+                        if lit_base.is_some() {
+                            return Err(LowerError::Unsupported(
+                                "struct update syntax not supported in struct \
+                                 let-pattern"
+                                    .into(),
+                            ));
+                        }
+                        let field_names = self
+                            .struct_defs
+                            .get(struct_name)
+                            .cloned()
+                            .ok_or_else(|| {
+                                LowerError::Unsupported(format!(
+                                    "unknown struct type `{struct_name}`"
+                                ))
+                            })?;
+                        let offsets = self
+                            .struct_field_offsets
+                            .get(struct_name)
+                            .cloned()
+                            .ok_or_else(|| {
+                                LowerError::Unsupported(format!(
+                                    "unknown field offsets for struct `{struct_name}`"
+                                ))
+                            })?;
+                        let n_slots = self
+                            .struct_sizes
+                            .get(struct_name)
+                            .copied()
+                            .unwrap_or(field_names.len());
+                        let field_types = self
+                            .struct_field_types
+                            .get(struct_name)
+                            .cloned()
+                            .unwrap_or_default();
+
+                        // Allocate consecutive slots for the temporary struct.
+                        let base_slot = self.alloc_slot()?;
+                        for _ in 1..n_slots {
+                            self.alloc_slot()?;
+                        }
+                        self.local_struct_types
+                            .insert(base_slot, struct_name.to_owned());
+
+                        // Evaluate and store each field in declaration order
+                        // (FLS §6.4:14 — left-to-right evaluation order).
+                        for (fi, fname) in field_names.iter().enumerate() {
+                            let slot = base_slot + offsets[fi] as u8;
+                            let field_init = lit_fields
+                                .iter()
+                                .find(|(fs, _)| fs.text(self.source) == fname.as_str())
+                                .ok_or_else(|| {
+                                    LowerError::Unsupported(format!(
+                                        "missing field `{fname}` in struct literal"
+                                    ))
+                                })?;
+                            let inner_type =
+                                field_types.get(fi).and_then(|t| t.clone());
+                            if let Some(ref itype) = inner_type
+                                && self.struct_defs.contains_key(itype.as_str())
+                            {
+                                self.store_nested_struct_lit(
+                                    &field_init.1,
+                                    slot,
+                                    itype,
+                                )?;
+                            } else {
+                                let val =
+                                    self.lower_expr(&field_init.1, &IrTy::I32)?;
+                                let src = self.val_to_reg(val)?;
+                                self.instrs.push(Instr::Store { src, slot });
+                            }
+                        }
+
+                        // Bind each field pattern to its allocated slot.
+                        for (field_name_span, sub_pat) in pat_fields.iter() {
+                            let fname = field_name_span.text(self.source);
+                            let fi = field_names
+                                .iter()
+                                .position(|f| f == fname)
+                                .ok_or_else(|| {
+                                    LowerError::Unsupported(format!(
+                                        "no field `{fname}` on struct `{struct_name}`"
+                                    ))
+                                })?;
+                            let slot = base_slot + offsets[fi] as u8;
+                            match sub_pat {
+                                Pat::Ident(bind_span) => {
+                                    let bind_name = bind_span.text(self.source);
+                                    self.locals.insert(bind_name, slot);
+                                }
+                                Pat::Wildcard => {}
+                                _ => {
+                                    return Err(LowerError::Unsupported(
+                                        "only ident/wildcard sub-patterns in struct \
+                                         let-pattern"
+                                            .into(),
+                                    ));
+                                }
+                            }
+                        }
+                        return Ok(());
+                    }
+
+                    return Err(LowerError::Unsupported(
+                        "struct let-pattern requires a struct variable or struct \
+                         literal initializer"
+                            .into(),
+                    ));
+                }
+
                 // All other patterns: extract `var_name` for the scalar path.
                 //
                 // FLS §5.11: Wildcard pattern `_` — evaluate init for side

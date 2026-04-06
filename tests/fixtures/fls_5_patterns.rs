@@ -117,6 +117,22 @@ fn unwrap_or_zero(o: Opt) -> i32 {
     }
 }
 
+// FLS §5.10.2: Struct pattern — `StructName { field1, field2 }` in a let statement.
+// FLS §8.1: Let statements accept any irrefutable pattern, including struct
+// patterns. FLS §5.10.2: "A struct pattern is a pattern that matches a struct
+// or enum struct variant."
+//
+// Note: The FLS does not provide a concrete code example for struct patterns
+// in let position; this is derived from the semantic description in §5.10.2
+// and the let statement grammar in §8.1.
+struct Vec2 { x: i32, y: i32 }
+
+fn magnitude_sq(v: Vec2) -> i32 {
+    // FLS §5.10.2: Destructure a struct variable — binds `x` and `y`.
+    let Vec2 { x, y } = v;
+    x * x + y * y
+}
+
 // FLS §5.10.3: Tuple pattern — `(p0, p1, ...)` in a let statement.
 // FLS §8.1: Let statements accept any irrefutable pattern, including tuple
 // patterns. FLS §5.10.3: "A tuple pattern is a pattern that matches a tuple
@@ -164,6 +180,9 @@ fn main() -> i32 {
     let k = swap(3, 5);
     // FLS §5.10.3: sum via tuple destructure — sum_pair(1,2)=3.
     let m = sum_pair(1, 2);
-    // a=1, b=2, c=1, d=1, e=1, f=1, g=4, h=2, i=3, j=0, k=2, m=3 → sum=21
-    a + b + c + d + e + f + g + h + i + j + k + m
+    // FLS §5.10.2: struct destructure — magnitude_sq(Vec2 { x:1, y:0 }) = 1.
+    let v = Vec2 { x: 1, y: 0 };
+    let n2 = magnitude_sq(v);
+    // a=1, b=2, c=1, d=1, e=1, f=1, g=4, h=2, i=3, j=0, k=2, m=3, n2=1 → sum=22
+    a + b + c + d + e + f + g + h + i + j + k + m + n2
 }
