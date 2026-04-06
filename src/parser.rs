@@ -32,7 +32,7 @@
 
 use crate::ast::{
     BinOp, Block, EnumDef, EnumVariant, EnumVariantKind, Expr, ExprKind, FnDef, Item, ItemKind,
-    NamedField, Param, SourceFile, Span, Stmt, StmtKind, StructDef, StructKind, Ty, TyKind,
+    NamedField, Param, Pat, SourceFile, Span, Stmt, StmtKind, StructDef, StructKind, Ty, TyKind,
     TupleField, UnaryOp, Visibility, ImplDef, TraitDef, ConstDef, StaticDef,
 };
 use crate::lexer::{Token, TokenKind};
@@ -1054,17 +1054,9 @@ impl<'src> Parser<'src> {
         // Mutability is parsed but not yet enforced (no borrow checker yet).
         self.eat(TokenKind::KwMut);
 
-        // Pattern: identifier or `_`.
-        if self.peek_kind() != TokenKind::Ident
-            && self.peek_kind() != TokenKind::Underscore
-        {
-            return Err(self.error(format!(
-                "expected identifier in let pattern, found {:?}",
-                self.peek_kind()
-            )));
-        }
-        let name = self.current_span();
-        self.advance();
+        // Pattern — FLS §8.1: any irrefutable pattern is permitted.
+        // Common forms: identifier, `_`, or tuple `(a, b)` (FLS §5.10.3).
+        let pat = self.parse_let_pattern()?;
 
         // Optional type annotation `: Type`.
         let ty = if self.eat(TokenKind::Colon) {
@@ -1084,9 +1076,61 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::Semi)?;
 
         Ok(Stmt {
-            kind: StmtKind::Let { name, ty, init },
+            kind: StmtKind::Let { pat, ty, init },
             span: start.to(end),
         })
+    }
+
+    /// Parse a pattern in `let` position.
+    ///
+    /// FLS §8.1: The pattern in a let statement is irrefutable. Currently
+    /// supports: identifier, `_` (wildcard), and tuple patterns `(p0, p1, ...)`.
+    ///
+    /// FLS §5.10.3: Tuple patterns — `(p0, p1, ...)` where each sub-pattern
+    /// is an identifier, `_`, or another irrefutable pattern.
+    fn parse_let_pattern(&mut self) -> Result<Pat, ParseError> {
+        match self.peek_kind() {
+            // Wildcard `_`. FLS §5.11.
+            TokenKind::Underscore => {
+                self.advance();
+                Ok(Pat::Wildcard)
+            }
+            // Identifier pattern. FLS §5.2.
+            TokenKind::Ident => {
+                let span = self.current_span();
+                self.advance();
+                Ok(Pat::Ident(span))
+            }
+            // Tuple pattern `(p0, p1, ...)`. FLS §5.10.3.
+            //
+            // Parses `(` then a comma-separated list of sub-patterns then `)`.
+            // The empty form `()` produces `Pat::Tuple(vec![])` (unit value).
+            // A single element requires a trailing comma: `(p,)`.
+            // Two or more elements: `(p0, p1)`.
+            TokenKind::OpenParen => {
+                self.advance(); // consume `(`
+                // Empty tuple `()` → unit pattern.
+                if self.peek_kind() == TokenKind::CloseParen {
+                    self.advance(); // consume `)`
+                    return Ok(Pat::Tuple(vec![]));
+                }
+                let mut pats = Vec::new();
+                loop {
+                    pats.push(self.parse_let_pattern()?);
+                    if !self.eat(TokenKind::Comma) {
+                        break;
+                    }
+                    if self.peek_kind() == TokenKind::CloseParen {
+                        break; // trailing comma
+                    }
+                }
+                self.expect(TokenKind::CloseParen)?;
+                Ok(Pat::Tuple(pats))
+            }
+            kind => Err(self.error(format!(
+                "expected identifier, `_`, or `(` in let pattern, found {kind:?}"
+            ))),
+        }
     }
 
     // ── Expressions ───────────────────────────────────────────────────────────

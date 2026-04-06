@@ -565,3 +565,29 @@ fn mut_ref_assign_example(x: &mut i32, v: i32) {
     // FLS §6.5.10: `*x = v` — store v through the pointer x.
     *x = v;
 }
+
+// FLS §6.5.1: Borrowing a struct field place expression.
+//
+// "A borrow expression also called a reference expression is a unary operator
+// expression that uses the borrow operator."
+// FLS §6.1.4: A field access expression is a place expression.
+//
+// The FLS does not provide a concrete code example for field borrows; this
+// function is derived from §6.5.1 and §6.1.4's definitions of borrow
+// expressions and place expressions respectively.
+//
+// ARM64 codegen for `&mut p.field`:
+//   `add x{dst}, sp, #{field_slot * 8}` — one instruction, same as `&local`.
+//   The slot index is the field's position in the struct's flat stack layout.
+//
+// Cache-line note: `add xD, sp, #offset` is 4 bytes — identical footprint
+// to borrowing a plain local variable. Field borrows carry no extra cost.
+struct FieldPair { a: i32, b: i32 }
+
+fn borrow_field_example(mut p: FieldPair, delta: i32) -> i32 {
+    // FLS §6.5.1 + §6.1.4: `&mut p.a` borrows the place `p.a`.
+    // FLS §6.5.11: `*r += delta` compounds through the pointer.
+    let r = &mut p.a;
+    *r += delta;
+    p.a
+}

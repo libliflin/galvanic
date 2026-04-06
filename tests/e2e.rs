@@ -8375,3 +8375,231 @@ fn runtime_deref_compound_assign_emits_ldrptr_binop_strptr() {
     assert!(has_add, "*x += 1 must emit an `add` instruction:\n{asm}");
     assert!(has_str_ptr, "*x += 1 must emit `str xS, [xP]`:\n{asm}");
 }
+
+// ── Milestone 71: borrowing struct and tuple fields ───────────────────────────
+//
+// FLS §6.5.1: A borrow expression may target any place expression, including
+// struct fields and tuple fields, not only simple local variables.
+// FLS §6.1.4: A field access expression is a place expression.
+//
+// These tests verify that `&p.field` and `&mut p.field` compile to an `add xD,
+// sp, #(slot * 8)` instruction targeting the field's stack slot, and that
+// reads/writes through the resulting pointer observe the correct value.
+
+/// Milestone 71: immutable borrow of a struct field and deref.
+///
+/// FLS §6.5.1 + §6.1.4: `&p.a` borrows the place `p.a`.
+/// FLS §6.5.2: `*r` dereferences the pointer.
+#[test]
+fn milestone_71_borrow_struct_field_immutable() {
+    let src = "struct P { a: i32, b: i32 }\nfn main() -> i32 { let p = P { a: 42, b: 1 }; let r = &p.a; *r }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected 42, got {exit_code}");
+}
+
+/// Milestone 71: mutable borrow of a struct field, write through it.
+///
+/// FLS §6.5.1 + §6.1.4: `&mut p.a` gives a `*mut i32` pointing at slot `p.a`.
+/// FLS §6.5.10: `*r = value` writes through the pointer.
+#[test]
+fn milestone_71_borrow_struct_field_mut_write() {
+    let src = "struct P { a: i32, b: i32 }\nfn main() -> i32 { let mut p = P { a: 5, b: 32 }; let r = &mut p.a; *r = 10; p.a + p.b }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected 42, got {exit_code}");
+}
+
+/// Milestone 71: mutable borrow targets the second struct field.
+///
+/// FLS §6.5.1: Borrowing any named field, not just the first.
+#[test]
+fn milestone_71_borrow_second_struct_field() {
+    let src = "struct P { a: i32, b: i32 }\nfn main() -> i32 { let mut p = P { a: 10, b: 0 }; let r = &mut p.b; *r = 32; p.a + p.b }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected 42, got {exit_code}");
+}
+
+/// Milestone 71: field borrow does not clobber the adjacent field.
+///
+/// FLS §6.5.1 + §6.5.10: A write through `&mut p.a` must not affect `p.b`.
+#[test]
+fn milestone_71_borrow_field_does_not_clobber_sibling() {
+    let src = "struct P { a: i32, b: i32 }\nfn main() -> i32 { let mut p = P { a: 99, b: 7 }; let r = &mut p.a; *r = 5; p.b }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 7, got {exit_code}");
+}
+
+/// Milestone 71: compound assignment through a borrowed struct field.
+///
+/// FLS §6.5.11 + §6.5.1: `*r += n` combines LoadPtr + BinOp + StorePtr on
+/// a reference obtained via `&mut p.field`.
+#[test]
+fn milestone_71_borrow_struct_field_compound_assign() {
+    let src = "struct P { x: i32 }\nfn main() -> i32 { let mut p = P { x: 5 }; let r = &mut p.x; *r += 37; p.x }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected 42, got {exit_code}");
+}
+
+/// Milestone 71: borrow of struct field passed to a function taking `&mut i32`.
+///
+/// FLS §6.5.1 + §9: The address of a field can be passed to a function that
+/// expects a mutable reference parameter.
+#[test]
+fn milestone_71_borrow_field_passed_to_fn() {
+    let src = "struct P { v: i32 }\nfn double(x: &mut i32) { *x *= 2; }\nfn main() -> i32 { let mut p = P { v: 21 }; double(&mut p.v); p.v }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected 42, got {exit_code}");
+}
+
+/// Milestone 71: immutable borrow of a tuple field.
+///
+/// FLS §6.5.1 + §6.1.4: Tuple fields are place expressions; `&t.0` is valid.
+/// FLS §6.10: Tuple field access by integer index.
+#[test]
+fn milestone_71_borrow_tuple_field_immutable() {
+    let src = "fn main() -> i32 { let t = (42, 1); let r = &t.0; *r }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected 42, got {exit_code}");
+}
+
+/// Milestone 71: mutable borrow of a tuple field, write through it.
+///
+/// FLS §6.5.1 + §6.10: `&mut t.1` yields a pointer to the second tuple element.
+#[test]
+fn milestone_71_borrow_tuple_field_mut_write() {
+    let src = "fn main() -> i32 { let mut t = (10, 0); let r = &mut t.1; *r = 32; t.0 + t.1 }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected 42, got {exit_code}");
+}
+
+/// Milestone 71: assembly inspection — `&mut p.a` emits `add xD, sp, #(slot*8)`.
+///
+/// FLS §6.5.1: Borrowing a field produces a pointer formed by `add` against
+/// the stack pointer. The field slot is statically known at compile time even
+/// though the instruction executes at runtime (FLS §6.1.2:37–45).
+///
+/// Cache-line note: `add xD, sp, #(slot*8)` is one 4-byte instruction,
+/// identical footprint to borrowing a plain local variable.
+#[test]
+fn runtime_borrow_struct_field_emits_add_sp() {
+    let src = "struct P { a: i32, b: i32 }\nfn main() -> i32 { let mut p = P { a: 1, b: 2 }; let r = &mut p.a; *r }\n";
+    let asm = compile_to_asm(src);
+    // The borrow of `p.a` must produce `add xD, sp, #offset`.
+    let has_add_sp = asm.lines().any(|l| {
+        let t = l.trim();
+        t.starts_with("add") && t.contains("sp,")
+    });
+    assert!(has_add_sp, "&mut p.a must emit `add xD, sp, #offset`:\n{asm}");
+}
+
+// ── Milestone 72: tuple destructuring in let bindings ────────────────────────
+//
+// FLS §5.10.3: Tuple patterns — `let (a, b) = expr;` binds each element of a
+// tuple value to a name.
+// FLS §8.1: Let statements accept any irrefutable pattern.
+// FLS §6.10: Tuple expressions produce a sequence of values stored in
+// consecutive stack slots.
+
+/// Milestone 72: destructure a tuple literal into two bindings.
+///
+/// FLS §5.10.3 + §8.1: `let (a, b) = (3, 4);` — evaluate the tuple literal
+/// and bind each element. Returns their sum.
+#[test]
+fn milestone_72_destruct_tuple_literal_sum() {
+    let src = "fn main() -> i32 { let (a, b) = (3, 4); a + b }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 3 + 4 = 7, got {exit_code}");
+}
+
+/// Milestone 72: destructure a tuple literal, subtract.
+///
+/// FLS §5.10.3: Bindings are independent variables in the enclosing scope.
+#[test]
+fn milestone_72_destruct_tuple_literal_sub() {
+    let src = "fn main() -> i32 { let (a, b) = (10, 3); a - b }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 10 - 3 = 7, got {exit_code}");
+}
+
+/// Milestone 72: wildcard pattern discards an element.
+///
+/// FLS §5.10.3 + §5.11: The `_` sub-pattern discards the corresponding
+/// element. No variable is bound for that position.
+#[test]
+fn milestone_72_destruct_wildcard_first() {
+    let src = "fn main() -> i32 { let (_, b) = (99, 5); b }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "expected 5, got {exit_code}");
+}
+
+/// Milestone 72: wildcard discards the second element.
+///
+/// FLS §5.10.3: Either element may be a wildcard.
+#[test]
+fn milestone_72_destruct_wildcard_second() {
+    let src = "fn main() -> i32 { let (a, _) = (7, 99); a }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 7, got {exit_code}");
+}
+
+/// Milestone 72: destructure an existing tuple variable.
+///
+/// FLS §5.10.3 + §6.10: `let (a, b) = pair;` where `pair` is a previously
+/// bound tuple. The bindings alias the existing slots — no copies emitted.
+#[test]
+fn milestone_72_destruct_existing_tuple() {
+    let src = "fn main() -> i32 { let t = (5, 2); let (a, b) = t; a + b }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 5 + 2 = 7, got {exit_code}");
+}
+
+/// Milestone 72: destructure tuple from a function parameter.
+///
+/// FLS §5.10.3: Tuple destructuring works on any tuple value, including
+/// one built from function parameters.
+#[test]
+fn milestone_72_destruct_tuple_from_params() {
+    let src = "fn sub(x: i32, y: i32) -> i32 { let (a, b) = (x, y); a - b }\nfn main() -> i32 { sub(9, 2) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 9 - 2 = 7, got {exit_code}");
+}
+
+/// Milestone 72: destructure a three-element tuple.
+///
+/// FLS §5.10.3: The arity of the pattern must match the arity of the tuple.
+/// Three-element tuples use three consecutive stack slots.
+#[test]
+fn milestone_72_destruct_three_element_tuple() {
+    let src = "fn main() -> i32 { let (a, b, c) = (1, 2, 4); a + b + c }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 1 + 2 + 4 = 7, got {exit_code}");
+}
+
+/// Milestone 72: destructuring in an inner block with arithmetic on bindings.
+///
+/// FLS §5.10.3 + §6.4: Tuple destructuring is valid in any block scope.
+#[test]
+fn milestone_72_destruct_in_block() {
+    let src = "fn main() -> i32 { let r = { let (x, y) = (3, 4); x * x + y * y }; r }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    // 3*3 + 4*4 = 9 + 16 = 25
+    assert_eq!(exit_code, 25, "expected 9 + 16 = 25, got {exit_code}");
+}
+
+/// Milestone 72: assembly inspection — tuple literal destructure emits stores.
+///
+/// FLS §5.10.3 + §6.1.2:37–45: Each element of `(3, 4)` must be stored to a
+/// stack slot at runtime. The destructure `let (a, b) = (3, 4);` must emit
+/// at least one `str` instruction per element.
+///
+/// Cache-line note: 2 elements → 2 `str` + 2 `mov` = 16 bytes. Both stores
+/// fit in one 64-byte cache line alongside other preamble instructions.
+#[test]
+fn runtime_tuple_destruct_emits_stores() {
+    let src = "fn main() -> i32 { let (a, b) = (3, 4); a + b }\n";
+    let asm = compile_to_asm(src);
+    let store_count = asm.lines().filter(|l| l.trim().starts_with("str")).count();
+    assert!(
+        store_count >= 2,
+        "tuple destructure must emit ≥2 str instructions, got {store_count}:\n{asm}"
+    );
+}
