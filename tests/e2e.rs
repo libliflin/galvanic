@@ -2313,3 +2313,108 @@ fn runtime_match_emits_comparison_and_cbz() {
     // Must emit a conditional branch (cbz to skip the arm if not equal)
     assert!(asm.contains("cbz"), "expected cbz for arm skip branch");
 }
+
+// ── Milestone 23: negative literal patterns in match ─────────────────────────
+//
+// Rust allows negative integer literal patterns in match arms, e.g.:
+//   match x { -1 => 0, 0 => 1, _ => 2 }
+//
+// FLS §5.2: Literal patterns include negative integer literals.
+// The pattern `-1` matches the value -1 (as i32: 0xFFFF_FFFF).
+//
+// Lowering strategy: `Pat::NegLitInt(n)` materializes `-(n as i32)` as the
+// comparison immediate, then proceeds identically to `Pat::LitInt`.
+//
+// FLS §6.1.2:37–45: The comparison emits runtime instructions — even when
+// the scrutinee is a statically known constant.
+
+/// Milestone 23: negative literal pattern — arm taken when value matches -1.
+///
+/// FLS §5.2: `-1` is a valid integer literal pattern. The scrutinee -1
+/// matches the first arm and the function returns 10.
+#[test]
+fn milestone_23_negative_pattern_taken() {
+    let src = "fn main() -> i32 { let x = -1; match x { -1 => 10, 0 => 20, _ => 30 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "expected -1 arm (10), got {exit_code}");
+}
+
+/// Milestone 23: negative literal pattern — arm NOT taken when value is 0.
+///
+/// FLS §5.2: The `0` arm fires; the `-1` arm was checked first and skipped.
+#[test]
+fn milestone_23_negative_pattern_not_taken() {
+    let src = "fn main() -> i32 { let x = 0; match x { -1 => 10, 0 => 20, _ => 30 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 20, "expected 0 arm (20), got {exit_code}");
+}
+
+/// Milestone 23: negative literal pattern — wildcard fires for positive value.
+///
+/// FLS §5.2: Neither `-1` nor `0` match; the wildcard arm executes.
+#[test]
+fn milestone_23_negative_pattern_wildcard_taken() {
+    let src = "fn main() -> i32 { let x = 5; match x { -1 => 10, 0 => 20, _ => 30 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 30, "expected wildcard arm (30), got {exit_code}");
+}
+
+/// Milestone 23: negative literal pattern on a function parameter.
+///
+/// FLS §5.2: The scrutinee is a function argument — not a compile-time
+/// constant. This verifies that the compiler emits runtime comparison
+/// instructions for the negative pattern arm.
+///
+/// FLS §6.1.2:37–45: Non-const code emits runtime instructions.
+#[test]
+fn milestone_23_negative_pattern_on_parameter() {
+    let src = "\
+fn classify(n: i32) -> i32 {
+    match n {
+        -1 => 1,
+        0 => 2,
+        1 => 3,
+        _ => 4,
+    }
+}
+fn main() -> i32 { classify(-1) }
+";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected classify(-1) == 1, got {exit_code}");
+}
+
+/// Milestone 23: multiple negative patterns — each arm matched distinctly.
+///
+/// FLS §5.2: Multiple negative literal arms are checked in source order.
+#[test]
+fn milestone_23_multiple_negative_patterns() {
+    let src = "\
+fn sign_code(n: i32) -> i32 {
+    match n {
+        -2 => 10,
+        -1 => 20,
+        0 => 30,
+        _ => 40,
+    }
+}
+fn main() -> i32 { sign_code(-2) }
+";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "expected sign_code(-2) == 10, got {exit_code}");
+}
+
+/// Milestone 23: assembly inspection — negative literal pattern emits a
+/// `mov` with a negative immediate (via `movn` or negation) and a `cmp`.
+///
+/// FLS §5.2: The pattern value `-1` must be materialized at runtime and
+/// compared against the scrutinee — it must not be constant-folded away.
+/// FLS §6.1.2:37–45: Non-const match always emits runtime comparison.
+#[test]
+fn runtime_negative_pattern_emits_cmp() {
+    let src = "fn main() -> i32 { let x = -1; match x { -1 => 42, _ => 0 } }\n";
+    let asm = compile_to_asm(src);
+    // Must emit a comparison for the pattern equality test
+    assert!(asm.contains("cmp"), "expected cmp for negative pattern arm equality test");
+    // Must emit a conditional branch (cbz or similar)
+    assert!(asm.contains("cbz"), "expected cbz for arm skip branch");
+}

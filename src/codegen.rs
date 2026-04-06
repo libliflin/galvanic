@@ -193,15 +193,22 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool) 
         }
 
         // FLS §2.4.4.1: Load integer immediate into virtual register.
-        // ARM64: `mov x{reg}, #{n}` assembles to MOVZ for 0 ≤ n ≤ 65535.
-        // Negative values and values > 65535 are not yet supported.
-        // Cache-line note: one MOVZ instruction = 4 bytes per LoadImm.
+        // ARM64: `mov x{reg}, #{n}` covers both positive and negative values.
+        //   Positive (0 ≤ n ≤ 65535): assembler emits MOVZ.
+        //   Negative (-65536 ≤ n ≤ -1): assembler emits MOVN (move NOT).
+        //     Example: `mov x0, #-1` → MOVN x0, #0 (encodes as NOT(0) = -1).
+        //
+        // The GNU assembler (aarch64-linux-gnu-as) accepts `mov xN, #n`
+        // for any i16-range immediate and selects the correct encoding.
+        // Values outside the immediate range require MOVZ+MOVK sequences —
+        // not yet supported; deferred to a future milestone.
+        //
+        // FLS §5.2: Negative literal patterns materialise their value via
+        // LoadImm with a negative immediate — this is the first caller of
+        // negative LoadImm.
+        //
+        // Cache-line note: one ARM64 instruction (MOVZ or MOVN) = 4 bytes.
         Instr::LoadImm(reg, n) => {
-            if *n < 0 {
-                return Err(CodegenError::Unsupported(
-                    "negative integer immediate (MOVN not yet implemented)".into(),
-                ));
-            }
             writeln!(
                 out,
                 "    mov     x{reg}, #{n:<19} // FLS §2.4.4.1: load imm {n}"
@@ -477,12 +484,8 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool) 
 fn emit_load_x0(out: &mut String, value: &IrValue) -> Result<(), CodegenError> {
     match value {
         IrValue::I32(n) => {
-            if *n < 0 {
-                // Negative immediates require MOVN — not yet implemented.
-                return Err(CodegenError::Unsupported(
-                    "negative integer return value".into(),
-                ));
-            }
+            // ARM64: `mov x0, #n` for both positive and negative immediates.
+            // Negative values encode as MOVN (GNU assembler selects automatically).
             writeln!(out, "    mov     x0, #{n}             // FLS §2.4.4.1: integer literal {n}")?;
         }
         IrValue::Unit => {
