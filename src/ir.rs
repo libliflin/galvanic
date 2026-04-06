@@ -174,6 +174,22 @@ pub enum IrBinOp {
     /// FLS §6.5.7: The shift amount is taken modulo the bit width (64 on ARM64).
     /// Cache-line note: one 4-byte instruction per Shr.
     Shr,
+
+    /// Unsigned integer division `/`. FLS §6.5.5.
+    ///
+    /// Used when the operand type is unsigned (`u8`, `u16`, `u32`, `u64`, `usize`).
+    /// ARM64: `udiv x{dst}, x{lhs}, x{rhs}`.
+    /// FLS §4.1: Unsigned integers wrap on division by zero — galvanic does not
+    /// yet insert the divide-by-zero check (FLS §6.23 AMBIGUOUS on the mechanism).
+    UDiv,
+
+    /// Logical (unsigned) right shift `>>`. FLS §6.5.7.
+    ///
+    /// Used when the operand type is unsigned (`u8`, `u16`, `u32`, `u64`, `usize`).
+    /// ARM64: `lsr x{dst}, x{lhs}, x{rhs}` (logical shift right, zero-extending).
+    /// Unsigned integers use logical shift per FLS §6.5.7.
+    /// Cache-line note: one 4-byte instruction per UShr.
+    UShr,
 }
 
 /// An IR instruction.
@@ -610,4 +626,21 @@ pub enum IrTy {
     ///
     /// Cache-line note: same register width as `IrTy::I32`.
     Bool,
+
+    /// Unsigned integer type — covers `u8`, `u16`, `u32`, `u64`, and `usize`.
+    ///
+    /// FLS §4.1: Unsigned integer types. All map to a 64-bit ARM64 register
+    /// (AArch64 is 64-bit; narrower types use the low bits). Key difference
+    /// from `IrTy::I32`: division uses `udiv` (unsigned) and right shift uses
+    /// `lsr` (logical, zero-extending) rather than `asr` (arithmetic,
+    /// sign-extending).
+    ///
+    /// FLS §4.1 AMBIGUOUS: The spec does not specify the ABI layout for
+    /// unsigned types narrower than the register width. Galvanic stores them
+    /// in full 64-bit registers without truncation — correct for arithmetic
+    /// within the type's range, but will produce incorrect results for
+    /// overflow or bitwise operations on the upper bits. Truncation is deferred.
+    ///
+    /// Cache-line note: same register width as `IrTy::I32`.
+    U32,
 }

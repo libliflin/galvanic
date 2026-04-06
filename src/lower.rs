@@ -929,8 +929,12 @@ fn lower_fn(
         // Only i32 and bool parameters are supported (both use integer registers).
         // FLS §4.3: bool is passed as a 32-bit integer register on ARM64.
         // FLS §4.1: i32 parameters occupy one 64-bit register (x0–x7).
-        if !matches!(param_ty, IrTy::I32 | IrTy::Bool) {
-            return Err(LowerError::Unsupported("parameter type other than i32/bool".into()));
+        // FLS §4.1: All primitive integer types and bool are supported as
+        // parameters. Each uses one 64-bit ARM64 register (x0–x7).
+        if !matches!(param_ty, IrTy::I32 | IrTy::Bool | IrTy::U32) {
+            return Err(LowerError::Unsupported(
+                "parameter type other than i32/bool/u32/i64/u64/usize/isize/i8/i16/u8/u16".into(),
+            ));
         }
         let slot = ctx.alloc_slot()?;
         ctx.locals.insert(param_name, slot);
@@ -1122,12 +1126,20 @@ fn lower_ty(ty: &crate::ast::Ty, source: &str) -> Result<IrTy, LowerError> {
         TyKind::Unit => Ok(IrTy::Unit),
         TyKind::Path(segments) if segments.len() == 1 => {
             match segments[0].text(source) {
-                "i32" => Ok(IrTy::I32),
+                // FLS §4.1: Signed integer types. i8/i16/i64/isize all use
+                // signed 64-bit registers on ARM64. Width truncation for
+                // narrower types is deferred (FLS §4.1 AMBIGUOUS on ABI layout).
+                "i32" | "i8" | "i16" | "i64" | "isize" => Ok(IrTy::I32),
                 // FLS §4.3: bool is a distinct type in the IR so that `!` can
                 // emit logical NOT (eor, XOR with 1) rather than bitwise NOT (mvn).
                 // On ARM64, bool and i32 share the same register layout (0/1 as i64),
                 // but the semantics of `!` differ.
                 "bool" => Ok(IrTy::Bool),
+                // FLS §4.1: Unsigned integer types. u8/u16/u32/u64/usize all
+                // use 64-bit registers on ARM64. Unsigned division uses `udiv`
+                // and unsigned right shift uses `lsr` (see IrBinOp::UDiv/UShr).
+                // Width truncation for narrower types is deferred.
+                "u8" | "u16" | "u32" | "u64" | "usize" => Ok(IrTy::U32),
                 name => Err(LowerError::Unsupported(format!("type `{name}`"))),
             }
         }
@@ -2321,7 +2333,24 @@ impl<'src> LowerCtx<'src> {
                         self.instrs.push(Instr::LoadImm(r, n));
                         Ok(IrValue::Reg(r))
                     }
-                    _ => Err(LowerError::Unsupported("integer literal with non-i32 type".into())),
+                    // FLS §4.1: Unsigned integer literal. Reuses LoadImm(i32)
+                    // so the value must fit in i32 range at this milestone.
+                    // Values in (i32::MAX, u32::MAX] require MOVZ+MOVK and are
+                    // deferred (FLS §2.4.4.1 AMBIGUOUS: spec does not specify
+                    // encoding limits for large unsigned literals).
+                    IrTy::U32 => {
+                        if *n > i32::MAX as u128 {
+                            return Err(LowerError::Unsupported(format!(
+                                "unsigned literal {n} > {}: MOVZ+MOVK not yet supported",
+                                i32::MAX
+                            )));
+                        }
+                        let n = *n as i32;
+                        let r = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(r, n));
+                        Ok(IrValue::Reg(r))
+                    }
+                    _ => Err(LowerError::Unsupported("integer literal with non-integer type".into())),
                 }
             }
 
@@ -2515,7 +2544,58 @@ impl<'src> LowerCtx<'src> {
                         self.instrs.push(Instr::BinOp { op: ir_op, dst, lhs: lhs_reg, rhs: rhs_reg });
                         Ok(IrValue::Reg(dst))
                     }
-                    _ => Err(LowerError::Unsupported("bitwise/arithmetic on non-i32 type".into())),
+                    // FLS §4.1: Unsigned integer arithmetic. Same spill/reload
+                    // logic as signed, but division uses `udiv` (IrBinOp::UDiv)
+                    // and right shift uses `lsr` (IrBinOp::UShr) for correct
+                    // unsigned semantics. Add/sub/mul/bitwise are identical to
+                    // signed at the hardware level on ARM64.
+                    IrTy::U32 => {
+                        let lhs_val = self.lower_expr(lhs, ret_ty)?;
+
+                        let lhs_spill: Option<u8> = if let IrValue::Reg(r) = lhs_val {
+                            if expr_contains_call(rhs) {
+                                let slot = self.alloc_slot()?;
+                                self.instrs.push(Instr::Store { src: r, slot });
+                                Some(slot)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+
+                        let rhs_val = self.lower_expr(rhs, ret_ty)?;
+
+                        let lhs_val = if let Some(slot) = lhs_spill {
+                            let dst = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst, slot });
+                            IrValue::Reg(dst)
+                        } else {
+                            lhs_val
+                        };
+
+                        let lhs_reg = self.val_to_reg(lhs_val)?;
+                        let rhs_reg = self.val_to_reg(rhs_val)?;
+
+                        let dst = self.alloc_reg()?;
+                        // FLS §4.1: unsigned uses udiv and lsr; all others identical to signed.
+                        let ir_op = match op {
+                            BinOp::Add => IrBinOp::Add,
+                            BinOp::Sub => IrBinOp::Sub,
+                            BinOp::Mul => IrBinOp::Mul,
+                            BinOp::Div => IrBinOp::UDiv,
+                            BinOp::Rem => IrBinOp::Rem, // unsigned rem: sdiv step replaced by udiv in codegen
+                            BinOp::BitAnd => IrBinOp::BitAnd,
+                            BinOp::BitOr => IrBinOp::BitOr,
+                            BinOp::BitXor => IrBinOp::BitXor,
+                            BinOp::Shl => IrBinOp::Shl,
+                            BinOp::Shr => IrBinOp::UShr,
+                            _ => unreachable!("matched above"),
+                        };
+                        self.instrs.push(Instr::BinOp { op: ir_op, dst, lhs: lhs_reg, rhs: rhs_reg });
+                        Ok(IrValue::Reg(dst))
+                    }
+                    _ => Err(LowerError::Unsupported("bitwise/arithmetic on non-integer type".into())),
                 }
             }
 
@@ -2565,7 +2645,7 @@ impl<'src> LowerCtx<'src> {
                     //
                     // Cache-line note: the phi slot is one 8-byte stack entry;
                     // read exactly once after the if expression completes.
-                    IrTy::I32 | IrTy::Bool => {
+                    IrTy::I32 | IrTy::Bool | IrTy::U32 => {
                         let else_label = self.alloc_label();
                         let end_label = self.alloc_label();
 
@@ -3115,7 +3195,7 @@ impl<'src> LowerCtx<'src> {
                 }
 
                 match ret_ty {
-                    IrTy::I32 | IrTy::Bool => {
+                    IrTy::I32 | IrTy::Bool | IrTy::U32 => {
                         let phi_slot = self.alloc_slot()?;
 
                         // Then branch.
@@ -3267,7 +3347,7 @@ impl<'src> LowerCtx<'src> {
                 let exit_label = self.alloc_label();
 
                 match ret_ty {
-                    IrTy::I32 | IrTy::Bool => {
+                    IrTy::I32 | IrTy::Bool | IrTy::U32 => {
                         let phi_slot = self.alloc_slot()?;
 
                         for arm in checked_arms {
