@@ -211,17 +211,63 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool) 
         // FLS §6.5.5: Integer binary arithmetic.
         // ARM64: `add`/`sub`/`mul` operate on 64-bit registers.
         // Virtual register N maps to ARM64 register xN (trivial allocation).
-        // Cache-line note: one ARM64 instruction = 4 bytes per BinOp.
+        // Cache-line note: one ARM64 instruction = 4 bytes per arithmetic BinOp.
+        //
+        // FLS §6.5.3: Comparison operator expressions.
+        // ARM64 comparison: `cmp x{lhs}, x{rhs}` sets condition flags;
+        // `cset x{dst}, <cond>` materialises 1 or 0 based on flags.
+        // Cache-line note: two 4-byte instructions (8 bytes) per comparison.
+        // Signed comparison (signed integers are the only type at this milestone).
         Instr::BinOp { op, dst, lhs, rhs } => {
-            let mnemonic = match op {
-                IrBinOp::Add => "add",
-                IrBinOp::Sub => "sub",
-                IrBinOp::Mul => "mul",
-            };
-            writeln!(
-                out,
-                "    {mnemonic:<7} x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: {mnemonic}"
-            )?;
+            match op {
+                IrBinOp::Add => writeln!(
+                    out,
+                    "    add     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: add"
+                )?,
+                IrBinOp::Sub => writeln!(
+                    out,
+                    "    sub     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: sub"
+                )?,
+                IrBinOp::Mul => writeln!(
+                    out,
+                    "    mul     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: mul"
+                )?,
+                // Comparison ops: signed integer comparison on ARM64.
+                // `cmp xA, xB` is an alias for `subs xzr, xA, xB` — sets N, Z, C, V flags.
+                // `cset xD, cond` sets xD to 1 if the condition holds, 0 otherwise.
+                // The condition codes match signed integer semantics (lt, le, gt, ge, eq, ne).
+                //
+                // FLS §6.5.3: "The type of a comparison expression is bool."
+                // ARM64 ABI: bool is represented as 0 or 1 in a 64-bit register.
+                //
+                // Cache-line note: the two-instruction pair (cmp + cset) is 8 bytes —
+                // two adjacent slots in the same cache line. The cmp result (flags)
+                // is consumed immediately by cset, so no register is written by cmp.
+                IrBinOp::Lt => {
+                    writeln!(out, "    cmp     x{lhs}, x{rhs}               // FLS §6.5.3: compare (signed)")?;
+                    writeln!(out, "    cset    x{dst}, lt                    // FLS §6.5.3: x{dst} = (x{lhs} < x{rhs})")?;
+                }
+                IrBinOp::Le => {
+                    writeln!(out, "    cmp     x{lhs}, x{rhs}               // FLS §6.5.3: compare (signed)")?;
+                    writeln!(out, "    cset    x{dst}, le                    // FLS §6.5.3: x{dst} = (x{lhs} <= x{rhs})")?;
+                }
+                IrBinOp::Gt => {
+                    writeln!(out, "    cmp     x{lhs}, x{rhs}               // FLS §6.5.3: compare (signed)")?;
+                    writeln!(out, "    cset    x{dst}, gt                    // FLS §6.5.3: x{dst} = (x{lhs} > x{rhs})")?;
+                }
+                IrBinOp::Ge => {
+                    writeln!(out, "    cmp     x{lhs}, x{rhs}               // FLS §6.5.3: compare (signed)")?;
+                    writeln!(out, "    cset    x{dst}, ge                    // FLS §6.5.3: x{dst} = (x{lhs} >= x{rhs})")?;
+                }
+                IrBinOp::Eq => {
+                    writeln!(out, "    cmp     x{lhs}, x{rhs}               // FLS §6.5.3: compare (signed)")?;
+                    writeln!(out, "    cset    x{dst}, eq                    // FLS §6.5.3: x{dst} = (x{lhs} == x{rhs})")?;
+                }
+                IrBinOp::Ne => {
+                    writeln!(out, "    cmp     x{lhs}, x{rhs}               // FLS §6.5.3: compare (signed)")?;
+                    writeln!(out, "    cset    x{dst}, ne                    // FLS §6.5.3: x{dst} = (x{lhs} != x{rhs})")?;
+                }
+            }
         }
 
         // FLS §8.1: Store a virtual register to a stack slot.
