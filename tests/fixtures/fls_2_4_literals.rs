@@ -19,4 +19,16 @@ fn main() {
     // FLS §2.4.7 — Boolean literals
     let _h = true;
     let _i = false;
+
+    // FLS §2.4.5 — Character literals
+    // Simple ASCII characters, escape sequences, and a Unicode escape.
+    // FLS §2.4.5: A character literal is a char-typed expression whose value
+    // is a Unicode scalar value.
+    let _j = 'a';
+    let _k = 'Z';
+    let _l = '0';
+    let _m = '\n';
+    let _n = '\t';
+    let _o = '\\';
+    let _p = '\u{1F600}';
 }
