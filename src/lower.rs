@@ -27,7 +27,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{BinOp, Block, Expr, ExprKind, ItemKind, SourceFile, StmtKind, TyKind};
+use crate::ast::{BinOp, Block, Expr, ExprKind, ItemKind, SourceFile, Stmt, StmtKind, TyKind};
 use crate::ir::{IrBinOp, Instr, IrFn, IrTy, IrValue, Module};
 
 // ── FLS citations added in this module ───────────────────────────────────────
@@ -55,6 +55,67 @@ impl std::fmt::Display for LowerError {
         match self {
             LowerError::Unsupported(msg) => write!(f, "not yet supported: {msg}"),
         }
+    }
+}
+
+// ── Call-detection helpers ────────────────────────────────────────────────────
+
+/// Return `true` if the expression tree contains at least one `Call` node.
+///
+/// Used during lowering to determine whether an intermediate register value
+/// needs to be spilled to a stack slot before lowering the other sub-expression.
+/// ARM64 calling convention: `x0`–`x17` are caller-saved — any `bl` instruction
+/// in the RHS of a binary expression will clobber a live register holding the
+/// LHS result. Spilling prevents this.
+///
+/// For example, `fib(n-1) + fib(n-2)`: the first call puts its result in some
+/// register `r`. The second call (`bl fib`) re-uses that same register range
+/// internally, overwriting `r`. Without a spill, the add would use the wrong
+/// value for the LHS.
+///
+/// FLS §6.12.1: Call expressions invoke a function at runtime and follow the
+/// ARM64 calling convention (caller-saved: x0–x17).
+fn expr_contains_call(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Call { .. } => true,
+        ExprKind::Binary { lhs, rhs, .. } => expr_contains_call(lhs) || expr_contains_call(rhs),
+        ExprKind::Unary { operand, .. } => expr_contains_call(operand),
+        ExprKind::Cast { expr: inner, .. } => expr_contains_call(inner),
+        ExprKind::CompoundAssign { target, value, .. } => {
+            expr_contains_call(target) || expr_contains_call(value)
+        }
+        ExprKind::Block(block) => block_contains_call(block),
+        ExprKind::If { cond, then_block, else_expr } => {
+            expr_contains_call(cond)
+                || block_contains_call(then_block)
+                || else_expr.as_ref().is_some_and(|e| expr_contains_call(e))
+        }
+        ExprKind::While { cond, body } => {
+            expr_contains_call(cond) || block_contains_call(body)
+        }
+        ExprKind::Loop(body) => block_contains_call(body),
+        ExprKind::Break(opt_val) => opt_val.as_ref().is_some_and(|e| expr_contains_call(e)),
+        ExprKind::Return(opt_val) => opt_val.as_ref().is_some_and(|e| expr_contains_call(e)),
+        // Leaves: literals, paths, unit — none contain calls.
+        _ => false,
+    }
+}
+
+/// Return `true` if any statement or tail expression in the block contains a call.
+///
+/// FLS §6.4: Block expressions are sequences of statements followed by an
+/// optional tail expression. A call anywhere in the sequence makes the block
+/// "call-containing" for register-spill purposes.
+fn block_contains_call(block: &Block) -> bool {
+    block.stmts.iter().any(stmt_contains_call)
+        || block.tail.as_ref().is_some_and(|e| expr_contains_call(e))
+}
+
+fn stmt_contains_call(stmt: &Stmt) -> bool {
+    match &stmt.kind {
+        StmtKind::Expr(e) => expr_contains_call(e),
+        StmtKind::Let { init, .. } => init.as_ref().is_some_and(|e| expr_contains_call(e)),
+        StmtKind::Empty => false,
     }
 }
 
@@ -524,7 +585,46 @@ impl<'src> LowerCtx<'src> {
                 match ret_ty {
                     IrTy::I32 => {
                         let lhs_val = self.lower_expr(lhs, ret_ty)?;
+
+                        // Spill lhs to a stack slot if rhs contains a call.
+                        //
+                        // ARM64 calling convention: x0–x17 are caller-saved.
+                        // A `bl` instruction in the rhs lowers to a call that
+                        // clobbers every register in that range, including the
+                        // register that holds the lhs result. Without a spill,
+                        // `fib(n-1) + fib(n-2)` would compute the wrong answer
+                        // because fib(n-2)'s call sequence overwrites the
+                        // register that holds fib(n-1)'s result.
+                        //
+                        // Only spill when lhs is already in a register (not an
+                        // unresolved immediate like `IrValue::I32`). Immediates
+                        // are not in any register yet so they are unaffected by
+                        // the call.
+                        //
+                        // FLS §6.12.1: Call expressions follow ARM64 AAPCS64
+                        // calling convention (caller-saved: x0–x17).
+                        let lhs_spill: Option<u8> = if let IrValue::Reg(r) = lhs_val {
+                            if expr_contains_call(rhs) {
+                                let slot = self.alloc_slot()?;
+                                self.instrs.push(Instr::Store { src: r, slot });
+                                Some(slot)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+
                         let rhs_val = self.lower_expr(rhs, ret_ty)?;
+
+                        // Reload lhs from its spill slot, if we spilled it.
+                        let lhs_val = if let Some(slot) = lhs_spill {
+                            let dst = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst, slot });
+                            IrValue::Reg(dst)
+                        } else {
+                            lhs_val
+                        };
 
                         let lhs_reg = self.val_to_reg(lhs_val)?;
                         let rhs_reg = self.val_to_reg(rhs_val)?;
@@ -877,7 +977,27 @@ impl<'src> LowerCtx<'src> {
                 // the type-checking rules for comparisons in the absence of
                 // type inference. We assume both sides are i32.
                 let lhs_val = self.lower_expr(lhs, &IrTy::I32)?;
+                // Spill lhs register if rhs contains a call (ARM64 caller-save
+                // convention; same rationale as arithmetic BinOp above).
+                let lhs_spill: Option<u8> = if let IrValue::Reg(r) = lhs_val {
+                    if expr_contains_call(rhs) {
+                        let slot = self.alloc_slot()?;
+                        self.instrs.push(Instr::Store { src: r, slot });
+                        Some(slot)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
                 let rhs_val = self.lower_expr(rhs, &IrTy::I32)?;
+                let lhs_val = if let Some(slot) = lhs_spill {
+                    let dst = self.alloc_reg()?;
+                    self.instrs.push(Instr::Load { dst, slot });
+                    IrValue::Reg(dst)
+                } else {
+                    lhs_val
+                };
                 let lhs_reg = self.val_to_reg(lhs_val)?;
                 let rhs_reg = self.val_to_reg(rhs_val)?;
                 let dst = self.alloc_reg()?;
