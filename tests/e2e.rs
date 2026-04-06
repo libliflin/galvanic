@@ -1276,3 +1276,145 @@ fn runtime_shr_emits_asr_instruction() {
         "expected `asr` instruction for `16 >> 2`, got:\n{asm}"
     );
 }
+
+// ── Milestone 13: compound assignment operators ───────────────────────────────
+//
+// FLS §6.5.11: Compound assignment expressions. `x op= e` is equivalent to
+// `x = x op e` — the variable is read, the operation is applied at runtime,
+// and the result is stored back. The expression has type `()`.
+//
+// FLS §6.1.2:37–45: The load, binary op, and store must all emit runtime
+// instructions — even `x += 1` with statically-known values emits ldr/add/str.
+//
+// ARM64: compound assignment emits `ldr x{t}, [sp, #slot*8]`,
+//        the binary op instruction, then `str x{result}, [sp, #slot*8]`.
+
+/// Milestone 13: `let mut x = 5; x += 3; x` exits with code 8.
+///
+/// FLS §6.5.11: `+=` compound assignment.
+/// FLS §6.1.2:37–45: ldr + add + str are runtime instructions.
+#[test]
+fn milestone_13_compound_add() {
+    let src = "fn main() -> i32 { let mut x = 5; x += 3; x }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 8, "expected exit 8 from `x += 3` (5+3), got {exit_code}");
+}
+
+/// Milestone 13: `let mut x = 10; x -= 3; x` exits with code 7.
+///
+/// FLS §6.5.11: `-=` compound assignment.
+#[test]
+fn milestone_13_compound_sub() {
+    let src = "fn main() -> i32 { let mut x = 10; x -= 3; x }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 7, "expected exit 7 from `x -= 3` (10-3), got {exit_code}");
+}
+
+/// Milestone 13: `let mut x = 3; x *= 4; x` exits with code 12.
+///
+/// FLS §6.5.11: `*=` compound assignment.
+#[test]
+fn milestone_13_compound_mul() {
+    let src = "fn main() -> i32 { let mut x = 3; x *= 4; x }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 12, "expected exit 12 from `x *= 4` (3*4), got {exit_code}");
+}
+
+/// Milestone 13: `let mut x = 10; x /= 2; x` exits with code 5.
+///
+/// FLS §6.5.11: `/=` compound assignment.
+#[test]
+fn milestone_13_compound_div() {
+    let src = "fn main() -> i32 { let mut x = 10; x /= 2; x }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 5, "expected exit 5 from `x /= 2` (10/2), got {exit_code}");
+}
+
+/// Milestone 13: `let mut x = 10; x %= 3; x` exits with code 1.
+///
+/// FLS §6.5.11: `%=` compound assignment.
+#[test]
+fn milestone_13_compound_rem() {
+    let src = "fn main() -> i32 { let mut x = 10; x %= 3; x }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "expected exit 1 from `x %= 3` (10%3), got {exit_code}");
+}
+
+/// Milestone 13: `let mut x = 5; x &= 3; x` exits with code 1.
+///
+/// `5 & 3` = `0b101 & 0b011` = `0b001` = 1.
+///
+/// FLS §6.5.11: `&=` compound assignment (bitwise AND).
+#[test]
+fn milestone_13_compound_bitand() {
+    let src = "fn main() -> i32 { let mut x = 5; x &= 3; x }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "expected exit 1 from `x &= 3` (5&3), got {exit_code}");
+}
+
+/// Milestone 13: `let mut x = 5; x |= 2; x` exits with code 7.
+///
+/// `5 | 2` = `0b101 | 0b010` = `0b111` = 7.
+///
+/// FLS §6.5.11: `|=` compound assignment (bitwise OR).
+#[test]
+fn milestone_13_compound_bitor() {
+    let src = "fn main() -> i32 { let mut x = 5; x |= 2; x }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 7, "expected exit 7 from `x |= 2` (5|2), got {exit_code}");
+}
+
+/// Milestone 13: compound assignment used inside a while loop.
+///
+/// `while x < 10 { x += 3; }` with x starting at 1: x goes 1→4→7→10.
+/// Loop exits when x == 10; exit code is 10.
+///
+/// This is the canonical use case for compound assignment in real programs.
+///
+/// FLS §6.5.11: compound assignment inside a loop body.
+/// FLS §6.15.3: while loop executes while condition is true.
+#[test]
+fn milestone_13_compound_in_loop() {
+    let src = "fn main() -> i32 { let mut x = 1; while x < 10 { x += 3; } x }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 10, "expected exit 10 from `while x < 10 {{ x += 3; }}`, got {exit_code}");
+}
+
+/// Assembly inspection: `x += 3` must emit `ldr`, `add`, and `str`.
+///
+/// FLS §6.5.11: compound assignment desugars to load + op + store at runtime.
+/// FLS §6.1.2:37–45: all three instructions must appear — no elision.
+#[test]
+fn runtime_compound_add_emits_ldr_add_str() {
+    let asm = compile_to_asm("fn main() -> i32 { let mut x = 5; x += 3; x }\n");
+    assert!(
+        asm.contains("ldr"),
+        "expected `ldr` instruction for compound assignment read, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("add"),
+        "expected `add` instruction for compound assignment operation, got:\n{asm}"
+    );
+    // At least 2 `str` instructions: let init + compound assign store.
+    let str_count = asm.matches("str").count();
+    assert!(
+        str_count >= 2,
+        "expected at least 2 `str` instructions (let init + compound assign), found {str_count}:\n{asm}"
+    );
+}

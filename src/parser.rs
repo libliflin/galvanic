@@ -757,11 +757,13 @@ impl<'src> Parser<'src> {
         self.parse_assign()
     }
 
-    /// Assignment — FLS §6.9. Right-associative.
+    /// Assignment and compound assignment — FLS §6.5.10, §6.5.11. Right-associative.
     ///
-    /// FLS §6.9 NOTE: Compound assignment operators (`+=`, `-=`, …) are
-    /// not yet handled. The spec treats them as distinct expression forms
-    /// from plain `=` assignment.
+    /// Plain `=` lowers to `ExprKind::Binary { op: BinOp::Assign, .. }`.
+    /// Compound `op=` lowers to `ExprKind::CompoundAssign { op, .. }`.
+    ///
+    /// FLS §6.5.11: Compound assignment operators are distinct expression forms
+    /// from plain assignment. The left-hand side must be a place expression.
     fn parse_assign(&mut self) -> Result<Expr, ParseError> {
         let lhs = self.parse_or()?;
 
@@ -773,6 +775,39 @@ impl<'src> Parser<'src> {
                     op: BinOp::Assign,
                     lhs: Box::new(lhs),
                     rhs: Box::new(rhs),
+                },
+                span,
+            });
+        }
+
+        // FLS §6.5.11: Compound assignment operators.
+        //
+        // Each `op=` token maps to the corresponding `BinOp` arithmetic/bitwise
+        // operation. The compound assignment desugars at the lowering level to
+        // a load, the binary op, and a store — no new AST binary operators needed.
+        let compound_op = match self.peek_kind() {
+            TokenKind::PlusEq    => Some(BinOp::Add),
+            TokenKind::MinusEq   => Some(BinOp::Sub),
+            TokenKind::StarEq    => Some(BinOp::Mul),
+            TokenKind::SlashEq   => Some(BinOp::Div),
+            TokenKind::PercentEq => Some(BinOp::Rem),
+            TokenKind::AndEq     => Some(BinOp::BitAnd),
+            TokenKind::OrEq      => Some(BinOp::BitOr),
+            TokenKind::CaretEq   => Some(BinOp::BitXor),
+            TokenKind::ShlEq     => Some(BinOp::Shl),
+            TokenKind::ShrEq     => Some(BinOp::Shr),
+            _                    => None,
+        };
+
+        if let Some(op) = compound_op {
+            self.advance();
+            let value = self.parse_assign()?; // right-associative
+            let span = lhs.span.to(value.span);
+            return Ok(Expr {
+                kind: ExprKind::CompoundAssign {
+                    op,
+                    target: Box::new(lhs),
+                    value: Box::new(value),
                 },
                 span,
             });
@@ -2350,6 +2385,53 @@ mod tests {
         };
         // RHS is also an assignment — right-associative.
         assert!(matches!(rhs.kind, ExprKind::Binary { op: BinOp::Assign, .. }));
+    }
+
+    #[test]
+    fn compound_assign_add() {
+        // FLS §6.5.11: `+=` parses as CompoundAssign { op: Add, .. }.
+        let src = "fn f() { let mut x = 0; x += 1; }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        let StmtKind::Expr(ref expr) = body.stmts[1].kind else {
+            panic!("expected expr stmt");
+        };
+        assert!(
+            matches!(expr.kind, ExprKind::CompoundAssign { op: BinOp::Add, .. }),
+            "expected CompoundAssign Add, got {:?}", expr.kind
+        );
+    }
+
+    #[test]
+    fn compound_assign_all_operators() {
+        // FLS §6.5.11: all compound assignment operators parse correctly.
+        let ops = [
+            ("x -= 1", BinOp::Sub),
+            ("x *= 2", BinOp::Mul),
+            ("x /= 2", BinOp::Div),
+            ("x %= 3", BinOp::Rem),
+            ("x &= 1", BinOp::BitAnd),
+            ("x |= 1", BinOp::BitOr),
+            ("x ^= 1", BinOp::BitXor),
+            ("x <<= 1", BinOp::Shl),
+            ("x >>= 1", BinOp::Shr),
+        ];
+        for (stmt, expected_op) in ops {
+            let src = format!("fn f() {{ let mut x = 5; {stmt}; }}");
+            let sf = parse_ok(&src);
+            let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+            let body = f.body.as_ref().unwrap();
+            let StmtKind::Expr(ref expr) = body.stmts[1].kind else {
+                panic!("expected expr stmt for `{stmt}`");
+            };
+            match &expr.kind {
+                ExprKind::CompoundAssign { op, .. } => {
+                    assert_eq!(*op, expected_op, "wrong op for `{stmt}`");
+                }
+                other => panic!("expected CompoundAssign for `{stmt}`, got {other:?}"),
+            }
+        }
     }
 
     // ── Remaining unary operators ─────────────────────────────────────────────

@@ -496,6 +496,24 @@ pub enum ExprKind {
         rhs: Box<Expr>,
     },
 
+    /// A compound assignment expression. FLS §6.5.11.
+    ///
+    /// `target op= value` reads the current value of `target`, applies `op`,
+    /// and stores the result back to `target`. The expression has type `()`.
+    ///
+    /// Supported operators: `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`,
+    /// `<<=`, `>>=`.
+    ///
+    /// FLS §6.5.11: "The type of a compound assignment expression is the unit type ()."
+    CompoundAssign {
+        /// The arithmetic/bitwise/shift operation to apply.
+        op: BinOp,
+        /// The place expression (left-hand side; must be a local variable path).
+        target: Box<Expr>,
+        /// The value expression (right-hand side; evaluated at runtime).
+        value: Box<Expr>,
+    },
+
     /// A function call expression. FLS §6.3.1.
     ///
     /// FLS §6.3.1 NOTE: the spec distinguishes call expressions (any callee)
