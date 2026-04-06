@@ -1948,6 +1948,22 @@ impl<'src> LowerCtx<'src> {
             // FLS §6.1.2:37–45: All checks emit runtime instructions.
             // Cache-line note: same instruction count as a 2-arm match.
             ExprKind::IfLet { pat, scrutinee, then_block, else_expr } => {
+                // FLS §15: If the scrutinee is a plain variable holding an enum
+                // value, record its base slot for TupleStruct/StructVariant pattern
+                // field access. `scrut_slot` holds the discriminant copy; fields are
+                // at `enum_base_slot + 1..N`.
+                let enum_base_slot: Option<u8> =
+                    if let ExprKind::Path(segs) = &scrutinee.kind
+                        && segs.len() == 1
+                    {
+                        let var_name = segs[0].text(self.source);
+                        self.locals
+                            .get(var_name)
+                            .copied()
+                            .filter(|s| self.local_enum_types.contains_key(s))
+                    } else {
+                        None
+                    };
                 // Infer scrutinee type from the pattern (bool literal → Bool, else I32).
                 let scrut_ty = match pat {
                     Pat::LitBool(_) => IrTy::Bool,
@@ -1960,6 +1976,10 @@ impl<'src> LowerCtx<'src> {
                 let scrut_reg = self.val_to_reg(scrut_val)?;
                 let scrut_slot = self.alloc_slot()?;
                 self.instrs.push(Instr::Store { src: scrut_reg, slot: scrut_slot });
+
+                // Bindings introduced by TupleStruct/StructVariant/Ident patterns;
+                // all are removed after the then block (before the else branch).
+                let mut bound_names: Vec<&str> = Vec::new();
 
                 let else_label = self.alloc_label();
                 let end_label = self.alloc_label();
@@ -2155,33 +2175,165 @@ impl<'src> LowerCtx<'src> {
                             label: else_label,
                         });
                     }
-                    // FLS §5.4 + §15: TupleStruct pattern in if-let — future milestone.
-                    Pat::TupleStruct { .. } => {
-                        return Err(LowerError::Unsupported(
-                            "TupleStruct pattern in if-let not yet supported".into(),
-                        ));
+                    // FLS §5.4 + §15: TupleStruct pattern in if-let.
+                    //
+                    // `if let Enum::Variant(f0, f1, ..) = x { then } else { else }`
+                    // Strategy: compare discriminant at scrut_slot against the variant's
+                    // discriminant; branch to else_label on mismatch; then install
+                    // positional field bindings from enum_base_slot + 1 + idx.
+                    //
+                    // FLS §6.1.2:37–45: All instructions are runtime.
+                    // Cache-line note: ~5 instructions (ldr + mov + cmp + cset + cbz)
+                    // for the discriminant check, plus 2×N for N field bindings.
+                    Pat::TupleStruct { path: segs, fields } => {
+                        if segs.len() != 2 {
+                            return Err(LowerError::Unsupported(
+                                "tuple struct pattern path must have two segments".into(),
+                            ));
+                        }
+                        let enum_name = segs[0].text(self.source);
+                        let variant_name = segs[1].text(self.source);
+                        let discriminant = self
+                            .enum_defs
+                            .get(enum_name)
+                            .and_then(|v| v.get(variant_name))
+                            .map(|(disc, _)| *disc)
+                            .ok_or_else(|| {
+                                LowerError::Unsupported(format!(
+                                    "unknown enum variant `{enum_name}::{variant_name}`"
+                                ))
+                            })?;
+                        let base = enum_base_slot.ok_or_else(|| {
+                            LowerError::Unsupported(
+                                "TupleStruct pattern in if-let requires enum variable scrutinee"
+                                    .into(),
+                            )
+                        })?;
+                        // Discriminant check — branch to else on mismatch.
+                        let s_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                        let p_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(p_reg, discriminant));
+                        let cmp_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::BinOp {
+                            op: IrBinOp::Eq,
+                            dst: cmp_reg,
+                            lhs: s_reg,
+                            rhs: p_reg,
+                        });
+                        self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: else_label });
+                        // Install positional field bindings into bound_names.
+                        for (fi, fp) in fields.iter().enumerate() {
+                            if let Pat::Ident(span) = fp {
+                                let fname = span.text(self.source);
+                                let fslot = base + 1 + fi as u8;
+                                let bslot = self.alloc_slot()?;
+                                let breg = self.alloc_reg()?;
+                                self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                self.locals.insert(fname, bslot);
+                                bound_names.push(fname);
+                            } else if !matches!(fp, Pat::Wildcard) {
+                                return Err(LowerError::Unsupported(
+                                    "only ident/wildcard fields in TupleStruct if-let pattern"
+                                        .into(),
+                                ));
+                            }
+                        }
                     }
-                    // FLS §5.3 + §15.3: StructVariant pattern in if-let — future milestone.
-                    Pat::StructVariant { .. } => {
-                        return Err(LowerError::Unsupported(
-                            "StructVariant pattern in if-let not yet supported".into(),
-                        ));
+                    // FLS §5.3 + §15.3: StructVariant pattern in if-let.
+                    //
+                    // `if let Enum::Variant { field, .. } = x { then } else { else }`
+                    // Strategy: compare discriminant at scrut_slot against the variant's
+                    // discriminant; branch to else_label on mismatch; then install named
+                    // field bindings by declaration order using enum_base_slot + 1 + idx.
+                    //
+                    // FLS §6.1.2:37–45: All instructions are runtime.
+                    // Cache-line note: ~5 + 2×N instructions per variant arm.
+                    Pat::StructVariant { path: segs, fields: pat_fields } => {
+                        if segs.len() != 2 {
+                            return Err(LowerError::Unsupported(
+                                "struct variant pattern path must have two segments".into(),
+                            ));
+                        }
+                        let enum_name = segs[0].text(self.source);
+                        let variant_name = segs[1].text(self.source);
+                        let (discriminant, field_names) = self
+                            .enum_defs
+                            .get(enum_name)
+                            .and_then(|v| v.get(variant_name))
+                            .cloned()
+                            .ok_or_else(|| {
+                                LowerError::Unsupported(format!(
+                                    "unknown enum variant `{enum_name}::{variant_name}`"
+                                ))
+                            })?;
+                        let base = enum_base_slot.ok_or_else(|| {
+                            LowerError::Unsupported(
+                                "StructVariant pattern in if-let requires enum variable scrutinee"
+                                    .into(),
+                            )
+                        })?;
+                        // Discriminant check — branch to else on mismatch.
+                        let s_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                        let p_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(p_reg, discriminant));
+                        let cmp_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::BinOp {
+                            op: IrBinOp::Eq,
+                            dst: cmp_reg,
+                            lhs: s_reg,
+                            rhs: p_reg,
+                        });
+                        self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: else_label });
+                        // Install named field bindings by declaration order.
+                        for (fname_span, fp) in pat_fields.iter() {
+                            let fname = fname_span.text(self.source);
+                            let field_idx = field_names
+                                .iter()
+                                .position(|n| n == fname)
+                                .ok_or_else(|| {
+                                    LowerError::Unsupported(format!(
+                                        "enum variant `{enum_name}::{variant_name}` has no field `{fname}`"
+                                    ))
+                                })?;
+                            match fp {
+                                Pat::Ident(bind_span) => {
+                                    let bind_name = bind_span.text(self.source);
+                                    let fslot = base + 1 + field_idx as u8;
+                                    let bslot = self.alloc_slot()?;
+                                    let breg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                    self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                    self.locals.insert(bind_name, bslot);
+                                    bound_names.push(bind_name);
+                                }
+                                Pat::Wildcard => {} // ignore field
+                                _ => {
+                                    return Err(LowerError::Unsupported(
+                                        "only ident/wildcard sub-patterns in StructVariant if-let fields"
+                                            .into(),
+                                    ));
+                                }
+                            }
+                        }
                     }
                 }
 
                 // Install identifier binding (if any) before the then block.
                 // FLS §5.1.4: The binding is in scope for the then block only.
-                let binding_name: Option<&str> = if let Pat::Ident(span) = pat {
+                // TupleStruct/StructVariant field bindings were already pushed to
+                // bound_names inside the pattern check above.
+                if let Pat::Ident(span) = pat {
                     let name = span.text(self.source);
                     let bind_slot = self.alloc_slot()?;
                     let bind_reg = self.alloc_reg()?;
                     self.instrs.push(Instr::Load { dst: bind_reg, slot: scrut_slot });
                     self.instrs.push(Instr::Store { src: bind_reg, slot: bind_slot });
                     self.locals.insert(name, bind_slot);
-                    Some(name)
-                } else {
-                    None
-                };
+                    bound_names.push(name);
+                }
 
                 match ret_ty {
                     IrTy::I32 | IrTy::Bool => {
@@ -2189,8 +2341,8 @@ impl<'src> LowerCtx<'src> {
 
                         // Then branch.
                         let then_val = self.lower_block_to_value(then_block, ret_ty)?;
-                        if let Some(name) = binding_name {
-                            self.locals.remove(name);
+                        for name in &bound_names {
+                            self.locals.remove(*name);
                         }
                         let then_reg = self.val_to_reg(then_val)?;
                         self.instrs.push(Instr::Store { src: then_reg, slot: phi_slot });
@@ -2217,8 +2369,8 @@ impl<'src> LowerCtx<'src> {
                     IrTy::Unit => {
                         // Then branch (side effects only).
                         self.lower_block_to_value(then_block, &IrTy::Unit)?;
-                        if let Some(name) = binding_name {
-                            self.locals.remove(name);
+                        for name in &bound_names {
+                            self.locals.remove(*name);
                         }
                         self.instrs.push(Instr::Branch(end_label));
 
@@ -4023,6 +4175,23 @@ impl<'src> LowerCtx<'src> {
                 let header_label = self.alloc_label();
                 let exit_label = self.alloc_label();
 
+                // FLS §15: If the scrutinee is a plain variable holding an enum
+                // value, record its base slot for TupleStruct/StructVariant pattern
+                // field access. The base slot is a compile-time constant; each
+                // loop iteration loads field values from that fixed stack location.
+                let enum_base_slot: Option<u8> =
+                    if let ExprKind::Path(segs) = &scrutinee.kind
+                        && segs.len() == 1
+                    {
+                        let var_name = segs[0].text(self.source);
+                        self.locals
+                            .get(var_name)
+                            .copied()
+                            .filter(|s| self.local_enum_types.contains_key(s))
+                    } else {
+                        None
+                    };
+
                 // Save register watermark — same rationale as While above.
                 let reg_mark = self.next_reg;
 
@@ -4049,6 +4218,10 @@ impl<'src> LowerCtx<'src> {
                 let scrut_reg = self.val_to_reg(scrut_val)?;
                 let scrut_slot = self.alloc_slot()?;
                 self.instrs.push(Instr::Store { src: scrut_reg, slot: scrut_slot });
+
+                // Bindings introduced by TupleStruct/StructVariant/Ident patterns;
+                // all are removed before the back-edge (end of loop body).
+                let mut bound_names: Vec<&str> = Vec::new();
 
                 // Pattern check — branch to exit_label on mismatch.
                 // Uses the same per-pattern logic as IfLet.
@@ -4233,40 +4406,174 @@ impl<'src> LowerCtx<'src> {
                         });
                         self.instrs.push(Instr::CondBranch { reg: eq_reg, label: exit_label });
                     }
-                    // FLS §5.4 + §15: TupleStruct pattern in while-let — future milestone.
-                    Pat::TupleStruct { .. } => {
-                        return Err(LowerError::Unsupported(
-                            "TupleStruct pattern in while-let not yet supported".into(),
-                        ));
+                    // FLS §5.4 + §15: TupleStruct pattern in while-let.
+                    //
+                    // `while let Enum::Variant(f0, f1, ..) = x { body }`
+                    // Strategy: compare discriminant at scrut_slot against the variant's
+                    // discriminant; branch to exit_label on mismatch; then install
+                    // positional field bindings from enum_base_slot + 1 + idx.
+                    // Bindings are removed before the back-edge each iteration.
+                    //
+                    // FLS §6.15.4: mismatch terminates the loop.
+                    // FLS §6.1.2:37–45: All instructions are runtime.
+                    // Cache-line note: ~5 + 2×N instructions per iteration header.
+                    Pat::TupleStruct { path: segs, fields } => {
+                        if segs.len() != 2 {
+                            return Err(LowerError::Unsupported(
+                                "tuple struct pattern path must have two segments".into(),
+                            ));
+                        }
+                        let enum_name = segs[0].text(self.source);
+                        let variant_name = segs[1].text(self.source);
+                        let discriminant = self
+                            .enum_defs
+                            .get(enum_name)
+                            .and_then(|v| v.get(variant_name))
+                            .map(|(disc, _)| *disc)
+                            .ok_or_else(|| {
+                                LowerError::Unsupported(format!(
+                                    "unknown enum variant `{enum_name}::{variant_name}`"
+                                ))
+                            })?;
+                        let base = enum_base_slot.ok_or_else(|| {
+                            LowerError::Unsupported(
+                                "TupleStruct pattern in while-let requires enum variable scrutinee"
+                                    .into(),
+                            )
+                        })?;
+                        // Discriminant check — branch to exit on mismatch.
+                        let s_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                        let p_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(p_reg, discriminant));
+                        let cmp_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::BinOp {
+                            op: IrBinOp::Eq,
+                            dst: cmp_reg,
+                            lhs: s_reg,
+                            rhs: p_reg,
+                        });
+                        self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: exit_label });
+                        // Install positional field bindings into bound_names.
+                        for (fi, fp) in fields.iter().enumerate() {
+                            if let Pat::Ident(span) = fp {
+                                let fname = span.text(self.source);
+                                let fslot = base + 1 + fi as u8;
+                                let bslot = self.alloc_slot()?;
+                                let breg = self.alloc_reg()?;
+                                self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                self.locals.insert(fname, bslot);
+                                bound_names.push(fname);
+                            } else if !matches!(fp, Pat::Wildcard) {
+                                return Err(LowerError::Unsupported(
+                                    "only ident/wildcard fields in TupleStruct while-let pattern"
+                                        .into(),
+                                ));
+                            }
+                        }
                     }
-                    // FLS §5.3 + §15.3: StructVariant pattern in while-let — future milestone.
-                    Pat::StructVariant { .. } => {
-                        return Err(LowerError::Unsupported(
-                            "StructVariant pattern in while-let not yet supported".into(),
-                        ));
+                    // FLS §5.3 + §15.3: StructVariant pattern in while-let.
+                    //
+                    // `while let Enum::Variant { field, .. } = x { body }`
+                    // Strategy: compare discriminant at scrut_slot against the variant's
+                    // discriminant; branch to exit_label on mismatch; then install named
+                    // field bindings by declaration order.
+                    //
+                    // FLS §6.15.4: mismatch terminates the loop.
+                    // FLS §6.1.2:37–45: All instructions are runtime.
+                    // Cache-line note: ~5 + 2×N instructions per iteration header.
+                    Pat::StructVariant { path: segs, fields: pat_fields } => {
+                        if segs.len() != 2 {
+                            return Err(LowerError::Unsupported(
+                                "struct variant pattern path must have two segments".into(),
+                            ));
+                        }
+                        let enum_name = segs[0].text(self.source);
+                        let variant_name = segs[1].text(self.source);
+                        let (discriminant, field_names) = self
+                            .enum_defs
+                            .get(enum_name)
+                            .and_then(|v| v.get(variant_name))
+                            .cloned()
+                            .ok_or_else(|| {
+                                LowerError::Unsupported(format!(
+                                    "unknown enum variant `{enum_name}::{variant_name}`"
+                                ))
+                            })?;
+                        let base = enum_base_slot.ok_or_else(|| {
+                            LowerError::Unsupported(
+                                "StructVariant pattern in while-let requires enum variable scrutinee"
+                                    .into(),
+                            )
+                        })?;
+                        // Discriminant check — branch to exit on mismatch.
+                        let s_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                        let p_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(p_reg, discriminant));
+                        let cmp_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::BinOp {
+                            op: IrBinOp::Eq,
+                            dst: cmp_reg,
+                            lhs: s_reg,
+                            rhs: p_reg,
+                        });
+                        self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: exit_label });
+                        // Install named field bindings by declaration order.
+                        for (fname_span, fp) in pat_fields.iter() {
+                            let fname = fname_span.text(self.source);
+                            let field_idx = field_names
+                                .iter()
+                                .position(|n| n == fname)
+                                .ok_or_else(|| {
+                                    LowerError::Unsupported(format!(
+                                        "enum variant `{enum_name}::{variant_name}` has no field `{fname}`"
+                                    ))
+                                })?;
+                            match fp {
+                                Pat::Ident(bind_span) => {
+                                    let bind_name = bind_span.text(self.source);
+                                    let fslot = base + 1 + field_idx as u8;
+                                    let bslot = self.alloc_slot()?;
+                                    let breg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                    self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                    self.locals.insert(bind_name, bslot);
+                                    bound_names.push(bind_name);
+                                }
+                                Pat::Wildcard => {} // ignore field
+                                _ => {
+                                    return Err(LowerError::Unsupported(
+                                        "only ident/wildcard sub-patterns in StructVariant while-let fields"
+                                            .into(),
+                                    ));
+                                }
+                            }
+                        }
                     }
                 }
 
                 // Install identifier binding (if any) — in scope for body only.
                 // FLS §5.1.4: identifier pattern binds the scrutinee.
-                let binding_name: Option<&str> = if let Pat::Ident(span) = pat {
+                // TupleStruct/StructVariant field bindings were already pushed to
+                // bound_names inside the pattern check above.
+                if let Pat::Ident(span) = pat {
                     let name = span.text(self.source);
                     let bind_slot = self.alloc_slot()?;
                     let bind_reg = self.alloc_reg()?;
                     self.instrs.push(Instr::Load { dst: bind_reg, slot: scrut_slot });
                     self.instrs.push(Instr::Store { src: bind_reg, slot: bind_slot });
                     self.locals.insert(name, bind_slot);
-                    Some(name)
-                } else {
-                    None
-                };
+                    bound_names.push(name);
+                }
 
                 // Execute body.
                 self.lower_block_to_value(body, &IrTy::Unit)?;
 
-                // Remove binding before back-edge.
-                if let Some(name) = binding_name {
-                    self.locals.remove(name);
+                // Remove all bindings before back-edge.
+                for name in &bound_names {
+                    self.locals.remove(*name);
                 }
 
                 // Back-edge: re-evaluate scrutinee and re-check pattern.
