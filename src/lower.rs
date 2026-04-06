@@ -1329,6 +1329,41 @@ impl<'src> LowerCtx<'src> {
                 ))
             }
 
+            // FLS §15.3 + §6.11: Named-field enum variant `Enum::Variant { field: expr, ... }`.
+            ExprKind::EnumVariantLit { path, fields: lit_fields } if path.len() == 2 => {
+                let enum_name = path[0].text(self.source);
+                let variant_name = path[1].text(self.source);
+                if let Some((discriminant, field_names)) = self
+                    .enum_defs
+                    .get(enum_name)
+                    .and_then(|v| v.get(variant_name))
+                    .cloned()
+                {
+                    let disc_reg = self.alloc_reg()?;
+                    self.instrs.push(Instr::LoadImm(disc_reg, discriminant));
+                    self.instrs.push(Instr::Store { src: disc_reg, slot: base_slot });
+                    // Store fields in declaration order.
+                    for (field_idx, field_name) in field_names.iter().enumerate() {
+                        let slot = base_slot + 1 + field_idx as u8;
+                        let field_init = lit_fields
+                            .iter()
+                            .find(|(f, _)| f.text(self.source) == field_name.as_str())
+                            .ok_or_else(|| {
+                                LowerError::Unsupported(format!(
+                                    "missing field `{field_name}` in `{enum_name}::{variant_name}` literal"
+                                ))
+                            })?;
+                        let val = self.lower_expr(&field_init.1, &IrTy::I32)?;
+                        let src = self.val_to_reg(val)?;
+                        self.instrs.push(Instr::Store { src, slot });
+                    }
+                    return Ok(());
+                }
+                Err(LowerError::Unsupported(
+                    "enum return: unknown named-field variant".into(),
+                ))
+            }
+
             // FLS §6.3 + §15: Unit variant path `Enum::Variant`.
             ExprKind::Path(segs) if segs.len() == 2 => {
                 let enum_name = segs[0].text(self.source);
