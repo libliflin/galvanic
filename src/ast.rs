@@ -876,6 +876,21 @@ pub enum Pat {
     /// Cache-line note: each alternative adds ~3 instructions (mov + cmp + orr),
     /// so 5 alternatives fit in a 64-byte instruction cache line.
     Or(Vec<Pat>),
+    /// Path pattern — an enum unit variant path like `Color::Red`.
+    ///
+    /// FLS §5.5: Path patterns. A path that resolves to a unit enum variant
+    /// matches only that variant. The path is stored as a sequence of `Span`s;
+    /// `span.text(source)` recovers each segment.
+    ///
+    /// Example: `match c { Color::Red => 0, Color::Blue => 1, _ => 2 }`.
+    ///
+    /// Galvanic represents unit enum variant values as their integer
+    /// discriminant (0, 1, 2, ...), so this pattern lowers to an integer
+    /// equality comparison against the discriminant.
+    ///
+    /// Cache-line note: lowers identically to a LitInt pattern —
+    /// ~3 instructions (mov + cmp + cbz = 12 bytes) per arm.
+    Path(Vec<Span>),
 }
 
 // ── Operators ─────────────────────────────────────────────────────────────────

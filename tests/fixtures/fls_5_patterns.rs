@@ -78,6 +78,27 @@ fn bind_and_use(x: i32) -> i32 {
     if let n = x { n + 1 } else { 0 }
 }
 
+// FLS §5.5: Path pattern — matches an enum unit variant by its discriminant.
+// FLS §15: Enumerations. Unit variants receive discriminants 0, 1, 2, ...
+// in declaration order. The FLS does not provide a concrete path-pattern code
+// example; this is derived from the semantic description of PathPattern.
+enum Direction {
+    North,
+    South,
+    East,
+    West,
+}
+
+fn describe_direction(d: i32) -> i32 {
+    // FLS §5.5 + §6.18: Match on enum value using path patterns.
+    match d {
+        Direction::North => 0,
+        Direction::South => 1,
+        Direction::East => 2,
+        Direction::West => 3,
+    }
+}
+
 fn main() -> i32 {
     // FLS §5.1.9: inclusive range — value 2 in [1,3] → 1.
     let a = range_inclusive(2);
@@ -93,6 +114,8 @@ fn main() -> i32 {
     let f = check_range(5);
     // FLS §6.17: if-let ident — bind 3 to n, return n+1=4.
     let g = bind_and_use(3);
-    // a=1, b=2, c=1, d=1, e=1, f=1, g=4 → sum=11; exit 11 to signal correct execution.
-    a + b + c + d + e + f + g
+    // FLS §5.5: path pattern — Direction::East discriminant 2 → match arm → 2.
+    let h = describe_direction(Direction::East);
+    // a=1, b=2, c=1, d=1, e=1, f=1, g=4, h=2 → sum=13; exit 13 to signal correct execution.
+    a + b + c + d + e + f + g + h
 }

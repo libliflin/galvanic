@@ -30,6 +30,13 @@ use std::collections::HashMap;
 use crate::ast::{BinOp, Block, Expr, ExprKind, ItemKind, Pat, SourceFile, Stmt, StmtKind, StructKind, TyKind};
 use crate::ir::{IrBinOp, Instr, IrFn, IrTy, IrValue, Module};
 
+/// Enum variant registry: maps enum name → (variant name → discriminant).
+///
+/// FLS §15: Enumerations. Each unit variant is assigned an integer
+/// discriminant starting at 0, incrementing by 1 unless an explicit
+/// discriminant is specified (explicit discriminants are future work).
+type EnumDefs = HashMap<String, HashMap<String, i32>>;
+
 // ── FLS citations added in this module ───────────────────────────────────────
 // FLS §6.12.1: Call expressions — `lower_expr` handles `ExprKind::Call`.
 // FLS §9: Functions with parameters — `lower_fn` spills x0..x{n-1} to stack.
@@ -204,41 +211,71 @@ fn expr_contains_break_with_value(expr: &Expr) -> bool {
 /// FLS §18.1: A source file is a sequence of items. Each `fn` item is
 /// lowered to an `IrFn`. Struct items (FLS §14) are collected into a
 /// definition table and used during function lowering for struct literal
-/// and field-access expressions. Enum items are not yet supported.
+/// and field-access expressions. Enum items with unit variants (FLS §15)
+/// are collected into an enum definition table for path-expression and
+/// path-pattern lowering.
 pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
-    // First pass: collect struct definitions.
+    // First pass: collect struct and enum definitions.
     //
     // FLS §14: Struct definitions declare the field names and their types.
     // We store field names in declaration order; field access uses this
     // order to compute the stack-slot offset.
     //
-    // Cache-line note: each i32 field occupies one 8-byte stack slot.
-    // A struct with N fields occupies N consecutive slots starting at the
-    // base slot allocated for the variable.
+    // FLS §15: Enum definitions declare the variant names and their kinds.
+    // Unit variants are assigned discriminants 0, 1, 2, ... in declaration
+    // order (FLS §15: explicit discriminants are not yet supported).
+    //
+    // Cache-line note: each i32 field or discriminant occupies one 8-byte
+    // stack slot. A struct with N fields occupies N consecutive slots.
     let mut struct_defs: HashMap<String, Vec<String>> = HashMap::new();
+    let mut enum_defs: EnumDefs = HashMap::new();
 
     for item in &src.items {
-        if let ItemKind::Struct(s) = &item.kind {
-            let struct_name = s.name.text(source).to_owned();
-            match &s.kind {
-                StructKind::Named(fields) => {
-                    let field_names = fields
-                        .iter()
-                        .map(|f| f.name.text(source).to_owned())
-                        .collect();
-                    struct_defs.insert(struct_name, field_names);
-                }
-                StructKind::Unit => {
-                    struct_defs.insert(struct_name, vec![]);
-                }
-                StructKind::Tuple(_) => {
-                    // Tuple structs use positional .0/.1 access — deferred.
-                    // FLS §14.2: Tuple struct fields are accessed by index.
-                    return Err(LowerError::Unsupported(
-                        "tuple struct items not yet supported".into(),
-                    ));
+        match &item.kind {
+            ItemKind::Struct(s) => {
+                let struct_name = s.name.text(source).to_owned();
+                match &s.kind {
+                    StructKind::Named(fields) => {
+                        let field_names = fields
+                            .iter()
+                            .map(|f| f.name.text(source).to_owned())
+                            .collect();
+                        struct_defs.insert(struct_name, field_names);
+                    }
+                    StructKind::Unit => {
+                        struct_defs.insert(struct_name, vec![]);
+                    }
+                    StructKind::Tuple(_) => {
+                        // Tuple structs use positional .0/.1 access — deferred.
+                        // FLS §14.2: Tuple struct fields are accessed by index.
+                        return Err(LowerError::Unsupported(
+                            "tuple struct items not yet supported".into(),
+                        ));
+                    }
                 }
             }
+            ItemKind::Enum(e) => {
+                // FLS §15: Collect unit variants with auto-discriminants.
+                // Tuple and named variants are not yet supported.
+                let enum_name = e.name.text(source).to_owned();
+                let mut variants: HashMap<String, i32> = HashMap::new();
+                for (discriminant, variant) in e.variants.iter().enumerate() {
+                    use crate::ast::EnumVariantKind;
+                    match &variant.kind {
+                        EnumVariantKind::Unit => {
+                            let variant_name = variant.name.text(source).to_owned();
+                            variants.insert(variant_name, discriminant as i32);
+                        }
+                        EnumVariantKind::Tuple(_) | EnumVariantKind::Named(_) => {
+                            return Err(LowerError::Unsupported(
+                                "tuple/named enum variants not yet supported".into(),
+                            ));
+                        }
+                    }
+                }
+                enum_defs.insert(enum_name, variants);
+            }
+            ItemKind::Fn(_) => {}
         }
     }
 
@@ -247,12 +284,9 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     for item in &src.items {
         match &item.kind {
             ItemKind::Fn(fn_def) => {
-                fns.push(lower_fn(fn_def, source, &struct_defs)?);
+                fns.push(lower_fn(fn_def, source, &struct_defs, &enum_defs)?);
             }
-            ItemKind::Struct(_) => {} // already processed above
-            ItemKind::Enum(_) => {
-                return Err(LowerError::Unsupported("enum items".into()));
-            }
+            ItemKind::Struct(_) | ItemKind::Enum(_) => {} // already processed above
         }
     }
 
@@ -272,6 +306,7 @@ fn lower_fn(
     fn_def: &crate::ast::FnDef,
     source: &str,
     struct_defs: &HashMap<String, Vec<String>>,
+    enum_defs: &EnumDefs,
 ) -> Result<IrFn, LowerError> {
     let name = fn_def.name.text(source).to_owned();
 
@@ -290,7 +325,7 @@ fn lower_fn(
         Some(block) => block,
     };
 
-    let mut ctx = LowerCtx::new(source, ret_ty, struct_defs);
+    let mut ctx = LowerCtx::new(source, ret_ty, struct_defs, enum_defs);
 
     // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
     // to stack slots. Each parameter slot is allocated in parameter order
@@ -461,6 +496,17 @@ struct LowerCtx<'src> {
     /// struct's base slot. Field `i` is at `base_slot + i`, each slot 8 bytes.
     struct_defs: &'src HashMap<String, Vec<String>>,
 
+    /// Enum type definitions: maps enum name → (variant name → discriminant).
+    ///
+    /// FLS §15: Enumerations. Unit variants are assigned integer discriminants
+    /// (0, 1, 2, ...) in declaration order. Used to resolve path expressions
+    /// (`Color::Red`) and path patterns (`Color::Red` in match arms) to their
+    /// integer discriminant values.
+    ///
+    /// Cache-line note: enum values are represented as i32, occupying one
+    /// 8-byte stack slot — identical to any other i32 local.
+    enum_defs: &'src EnumDefs,
+
     /// Maps a struct variable's base stack slot to its struct type name.
     ///
     /// FLS §6.13: Field access expressions need the struct type to compute
@@ -474,6 +520,7 @@ impl<'src> LowerCtx<'src> {
         source: &'src str,
         fn_ret_ty: IrTy,
         struct_defs: &'src HashMap<String, Vec<String>>,
+        enum_defs: &'src EnumDefs,
     ) -> Self {
         LowerCtx {
             source,
@@ -486,6 +533,7 @@ impl<'src> LowerCtx<'src> {
             loop_stack: Vec::new(),
             fn_ret_ty,
             struct_defs,
+            enum_defs,
             local_struct_types: HashMap::new(),
         }
     }
@@ -518,6 +566,36 @@ impl<'src> LowerCtx<'src> {
         let id = self.next_label;
         self.next_label += 1;
         id
+    }
+
+    /// Resolve a literal or path pattern to its integer value.
+    ///
+    /// Used inside OR pattern inner loops where the alternative is a simple
+    /// scalar value. `Pat::LitInt`, `Pat::NegLitInt`, `Pat::LitBool`, and
+    /// `Pat::Path` (enum unit variant) are all valid. Other pattern kinds
+    /// (ranges, wildcards, OR, Ident) are not supported here.
+    ///
+    /// FLS §5.2: Literal patterns. FLS §5.5 + §15: Path patterns.
+    fn pat_scalar_imm(&self, pat: &Pat) -> Result<i32, LowerError> {
+        match pat {
+            Pat::LitInt(n) => Ok(*n as i32),
+            Pat::NegLitInt(n) => Ok(-(*n as i32)),
+            Pat::LitBool(b) => Ok(*b as i32),
+            Pat::Path(segs) if segs.len() == 2 => {
+                let enum_name = segs[0].text(self.source);
+                let variant_name = segs[1].text(self.source);
+                self.enum_defs
+                    .get(enum_name)
+                    .and_then(|v| v.get(variant_name))
+                    .copied()
+                    .ok_or_else(|| LowerError::Unsupported(format!(
+                        "unknown enum variant `{enum_name}::{variant_name}` in pattern"
+                    )))
+            }
+            _ => Err(LowerError::Unsupported(
+                "unsupported pattern kind inside OR pattern".into(),
+            )),
+        }
     }
 
     /// Ensure `val` is in a virtual register. If it's already a register,
@@ -745,7 +823,8 @@ impl<'src> LowerCtx<'src> {
                 self.lower_block_to_value(block, ret_ty)
             }
 
-            // FLS §6.3: Path expression — a reference to a local variable.
+            // FLS §6.3: Path expression — a reference to a local variable or
+            // an enum unit variant.
             //
             // A single-segment path is a local variable reference. Emits a
             // `Load` instruction to read the value from its stack slot at runtime.
@@ -760,6 +839,35 @@ impl<'src> LowerCtx<'src> {
                 let dst = self.alloc_reg()?;
                 self.instrs.push(Instr::Load { dst, slot });
                 Ok(IrValue::Reg(dst))
+            }
+
+            // FLS §6.3 + §15: Two-segment path expression — an enum unit variant.
+            //
+            // `Color::Red` resolves to the integer discriminant of `Red` in
+            // the `Color` enum. Emits `LoadImm(discriminant)` at runtime.
+            //
+            // FLS §6.1.2:37–45: Even though the discriminant is a compile-time
+            // constant, we emit a runtime `mov` — consistent with how integer
+            // literals are handled in non-const contexts.
+            //
+            // FLS §15 AMBIGUOUS: The spec does not specify the default discriminant
+            // values for unit variants. Galvanic assigns 0, 1, 2, ... in declaration
+            // order, which matches rustc's default behavior.
+            ExprKind::Path(segments) if segments.len() == 2 => {
+                let enum_name = segments[0].text(self.source);
+                let variant_name = segments[1].text(self.source);
+                let discriminant = self.enum_defs
+                    .get(enum_name)
+                    .and_then(|variants| variants.get(variant_name))
+                    .copied()
+                    .ok_or_else(|| {
+                        LowerError::Unsupported(format!(
+                            "unknown path `{enum_name}::{variant_name}` (not an enum variant)"
+                        ))
+                    })?;
+                let r = self.alloc_reg()?;
+                self.instrs.push(Instr::LoadImm(r, discriminant));
+                Ok(IrValue::Reg(r))
             }
 
             // FLS §6.5.5: Arithmetic binary operations — emit runtime instructions.
@@ -1091,6 +1199,37 @@ impl<'src> LowerCtx<'src> {
                         });
                         self.instrs.push(Instr::CondBranch { reg: eq_reg, label: else_label });
                     }
+                    // FLS §5.5 + §15: Path pattern — enum unit variant.
+                    // Resolves to the variant's integer discriminant; then compares
+                    // against the scrutinee exactly like a LitInt pattern.
+                    Pat::Path(segs) if segs.len() == 2 => {
+                        let enum_name = segs[0].text(self.source);
+                        let variant_name = segs[1].text(self.source);
+                        let discriminant = self.enum_defs
+                            .get(enum_name)
+                            .and_then(|v| v.get(variant_name))
+                            .copied()
+                            .ok_or_else(|| LowerError::Unsupported(format!(
+                                "unknown enum variant `{enum_name}::{variant_name}` in pattern"
+                            )))?;
+                        let s_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                        let p_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(p_reg, discriminant));
+                        let eq_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::BinOp {
+                            op: IrBinOp::Eq,
+                            dst: eq_reg,
+                            lhs: s_reg,
+                            rhs: p_reg,
+                        });
+                        self.instrs.push(Instr::CondBranch { reg: eq_reg, label: else_label });
+                    }
+                    Pat::Path(_) => {
+                        return Err(LowerError::Unsupported(
+                            "path pattern must have exactly two segments (EnumName::Variant)".into(),
+                        ));
+                    }
                     Pat::RangeInclusive { lo, hi } => {
                         let s_reg = self.alloc_reg()?;
                         self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
@@ -1168,12 +1307,7 @@ impl<'src> LowerCtx<'src> {
                                     ));
                                 }
                                 _ => {
-                                    let alt_imm = match alt {
-                                        Pat::LitInt(n) => *n as i32,
-                                        Pat::NegLitInt(n) => -(*n as i32),
-                                        Pat::LitBool(b) => *b as i32,
-                                        _ => unreachable!(),
-                                    };
+                                    let alt_imm = self.pat_scalar_imm(alt)?;
                                     let si_reg = self.alloc_reg()?;
                                     self.instrs.push(Instr::Load {
                                         dst: si_reg,
@@ -1445,12 +1579,7 @@ impl<'src> LowerCtx<'src> {
                                                 ));
                                             }
                                             _ => {
-                                                let alt_imm = match alt {
-                                                    Pat::LitInt(n) => *n as i32,
-                                                    Pat::NegLitInt(n) => -(*n as i32),
-                                                    Pat::LitBool(b) => *b as i32,
-                                                    _ => unreachable!(),
-                                                };
+                                                let alt_imm = self.pat_scalar_imm(alt)?;
                                                 let si_reg = self.alloc_reg()?;
                                                 self.instrs.push(Instr::Load {
                                                     dst: si_reg,
@@ -1561,6 +1690,41 @@ impl<'src> LowerCtx<'src> {
                                         label: next_label,
                                     });
                                 }
+                                // FLS §5.5 + §15: Path pattern — enum unit variant.
+                                // Resolve to discriminant; emit equality check like LitInt.
+                                // FLS §6.1.2:37–45: Comparison emits runtime instructions.
+                                Pat::Path(segs) => {
+                                    let pat_imm = if segs.len() == 2 {
+                                        let enum_name = segs[0].text(self.source);
+                                        let variant_name = segs[1].text(self.source);
+                                        self.enum_defs
+                                            .get(enum_name)
+                                            .and_then(|v| v.get(variant_name))
+                                            .copied()
+                                            .ok_or_else(|| LowerError::Unsupported(format!(
+                                                "unknown enum variant `{enum_name}::{variant_name}` in match pattern"
+                                            )))?
+                                    } else {
+                                        return Err(LowerError::Unsupported(
+                                            "path pattern must have exactly two segments".into(),
+                                        ));
+                                    };
+                                    let s_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                                    let pat_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::LoadImm(pat_reg, pat_imm));
+                                    let cmp_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::BinOp {
+                                        op: IrBinOp::Eq,
+                                        dst: cmp_reg,
+                                        lhs: s_reg,
+                                        rhs: pat_reg,
+                                    });
+                                    self.instrs.push(Instr::CondBranch {
+                                        reg: cmp_reg,
+                                        label: next_label,
+                                    });
+                                }
                                 _ => {
                                     // Single literal pattern: load scrutinee, compare, cbz.
                                     let s_reg = self.alloc_reg()?;
@@ -1571,7 +1735,7 @@ impl<'src> LowerCtx<'src> {
                                         // FLS §5.2: Negative literal pattern.
                                         Pat::NegLitInt(n) => -(*n as i32),
                                         Pat::LitBool(b) => *b as i32,
-                                        _ => unreachable!(),
+                                        other => return Err(LowerError::Unsupported(format!("unsupported literal pattern kind: {other:?}"))),
                                     };
                                     let pat_reg = self.alloc_reg()?;
                                     self.instrs.push(Instr::LoadImm(pat_reg, pat_imm));
@@ -1719,12 +1883,7 @@ impl<'src> LowerCtx<'src> {
                                                 ));
                                             }
                                             _ => {
-                                                let alt_imm = match alt {
-                                                    Pat::LitInt(n) => *n as i32,
-                                                    Pat::NegLitInt(n) => -(*n as i32),
-                                                    Pat::LitBool(b) => *b as i32,
-                                                    _ => unreachable!(),
-                                                };
+                                                let alt_imm = self.pat_scalar_imm(alt)?;
                                                 let si_reg = self.alloc_reg()?;
                                                 self.instrs.push(Instr::Load {
                                                     dst: si_reg,
@@ -1821,6 +1980,39 @@ impl<'src> LowerCtx<'src> {
                                         label: next_label,
                                     });
                                 }
+                                // FLS §5.5 + §15: Path pattern in unit-return match arm.
+                                Pat::Path(segs) => {
+                                    let pat_imm = if segs.len() == 2 {
+                                        let enum_name = segs[0].text(self.source);
+                                        let variant_name = segs[1].text(self.source);
+                                        self.enum_defs
+                                            .get(enum_name)
+                                            .and_then(|v| v.get(variant_name))
+                                            .copied()
+                                            .ok_or_else(|| LowerError::Unsupported(format!(
+                                                "unknown enum variant `{enum_name}::{variant_name}` in match pattern"
+                                            )))?
+                                    } else {
+                                        return Err(LowerError::Unsupported(
+                                            "path pattern must have exactly two segments".into(),
+                                        ));
+                                    };
+                                    let s_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                                    let pat_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::LoadImm(pat_reg, pat_imm));
+                                    let cmp_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::BinOp {
+                                        op: IrBinOp::Eq,
+                                        dst: cmp_reg,
+                                        lhs: s_reg,
+                                        rhs: pat_reg,
+                                    });
+                                    self.instrs.push(Instr::CondBranch {
+                                        reg: cmp_reg,
+                                        label: next_label,
+                                    });
+                                }
                                 _ => {
                                     let s_reg = self.alloc_reg()?;
                                     self.instrs
@@ -1829,7 +2021,7 @@ impl<'src> LowerCtx<'src> {
                                         Pat::LitInt(n) => *n as i32,
                                         Pat::NegLitInt(n) => -(*n as i32),
                                         Pat::LitBool(b) => *b as i32,
-                                        _ => unreachable!(),
+                                        other => return Err(LowerError::Unsupported(format!("unsupported literal pattern kind: {other:?}"))),
                                     };
                                     let pat_reg = self.alloc_reg()?;
                                     self.instrs.push(Instr::LoadImm(pat_reg, pat_imm));
@@ -2426,12 +2618,7 @@ impl<'src> LowerCtx<'src> {
                                     ));
                                 }
                                 _ => {
-                                    let alt_imm = match alt {
-                                        Pat::LitInt(n) => *n as i32,
-                                        Pat::NegLitInt(n) => -(*n as i32),
-                                        Pat::LitBool(b) => *b as i32,
-                                        _ => unreachable!(),
-                                    };
+                                    let alt_imm = self.pat_scalar_imm(alt)?;
                                     let si_reg = self.alloc_reg()?;
                                     self.instrs.push(Instr::Load {
                                         dst: si_reg,
@@ -2459,6 +2646,36 @@ impl<'src> LowerCtx<'src> {
                             reg: matched_reg,
                             label: exit_label,
                         });
+                    }
+                    // FLS §5.5 + §15: Path pattern in while-let — enum unit variant.
+                    Pat::Path(segs) => {
+                        let pat_imm = if segs.len() == 2 {
+                            let enum_name = segs[0].text(self.source);
+                            let variant_name = segs[1].text(self.source);
+                            self.enum_defs
+                                .get(enum_name)
+                                .and_then(|v| v.get(variant_name))
+                                .copied()
+                                .ok_or_else(|| LowerError::Unsupported(format!(
+                                    "unknown enum variant `{enum_name}::{variant_name}` in while-let pattern"
+                                )))?
+                        } else {
+                            return Err(LowerError::Unsupported(
+                                "path pattern must have exactly two segments".into(),
+                            ));
+                        };
+                        let s_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                        let p_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(p_reg, pat_imm));
+                        let eq_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::BinOp {
+                            op: IrBinOp::Eq,
+                            dst: eq_reg,
+                            lhs: s_reg,
+                            rhs: p_reg,
+                        });
+                        self.instrs.push(Instr::CondBranch { reg: eq_reg, label: exit_label });
                     }
                 }
 
