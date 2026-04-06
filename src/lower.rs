@@ -4691,6 +4691,16 @@ impl<'src> LowerCtx<'src> {
                     let val = self.lower_expr(init_expr, &IrTy::I32)?;
                     let src = self.val_to_reg(val)?;
                     self.instrs.push(Instr::Store { src, slot });
+                    // FLS §4.9: If the initializer is a path naming a known
+                    // function, this local holds a function pointer. Track the
+                    // slot so that `f(args)` emits `CallIndirect` (blr) rather
+                    // than a direct `bl f` (which would be an undefined symbol).
+                    if let ExprKind::Path(segs) = &init_expr.kind
+                        && segs.len() == 1
+                        && self.fn_names.contains(segs[0].text(self.source))
+                    {
+                        self.local_fn_ptr_slots.insert(slot);
+                    }
                 }
                 // Bring the new binding into scope only after the initializer
                 // has been fully evaluated. FLS §8.1: uninitialized let
