@@ -3629,13 +3629,15 @@ enum Color { Black, Rgb { r: i32, g: i32, b: i32 } }
 fn main() -> i32 {
     let c = Color::Rgb { b: 5, r: 3, g: 4 };
     match c {
-        Color::Rgb { r, g, b } => r * 100 + g * 10 + b,
+        Color::Rgb { r, g, b } => r * 10 + g * 3 + b,
         Color::Black => 0,
     }
 }
 "#;
+    // r=3, g=4, b=5 in declaration order → 3*10 + 4*3 + 5 = 47 (fits in 8-bit exit code).
+    // If fields were stored in source order (b,r,g), the result would be 5*10+3*3+4=63.
     let Some(exit_code) = compile_and_run(src) else { return; };
-    assert_eq!(exit_code, 345, "expected exit 345, got {exit_code}");
+    assert_eq!(exit_code, 47, "expected exit 47, got {exit_code}");
 }
 
 /// Milestone 42: non-matching variant arm falls to wildcard.
