@@ -3461,6 +3461,53 @@ impl<'src> LowerCtx<'src> {
                             });
                             arg_regs.push(field_reg);
                         }
+                    } else if let ExprKind::Call { callee, args: variant_args } = &arg.kind
+                        && let ExprKind::Path(segs) = &callee.kind
+                        && segs.len() == 2
+                    {
+                        // FLS §15: Enum tuple variant constructor used directly as
+                        // a function argument — e.g., `compute(Shape::Circle(7))`.
+                        //
+                        // Inline-construct the enum value into registers without
+                        // allocating a named variable. Emit the discriminant as an
+                        // immediate, then each field expression, then zero-pad to
+                        // the enum's max_fields count so the callee's slot layout
+                        // matches regardless of which variant is passed.
+                        //
+                        // FLS §6.1.2:37–45: All instructions emitted at runtime.
+                        let tn = segs[0].text(self.source);
+                        let vn = segs[1].text(self.source);
+                        if let Some((discriminant, field_names)) = self.enum_defs
+                            .get(tn)
+                            .and_then(|v| v.get(vn))
+                            .cloned()
+                        {
+                            let field_count = field_names.len();
+                            let max_fields_enum = self.enum_defs
+                                .get(tn)
+                                .map(|v| v.values().map(|(_, n)| n.len()).max().unwrap_or(0))
+                                .unwrap_or(0);
+                            // Discriminant register.
+                            let disc_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::LoadImm(disc_reg, discriminant));
+                            arg_regs.push(disc_reg);
+                            // Field registers.
+                            for variant_arg in variant_args.iter() {
+                                let val = self.lower_expr(variant_arg, &IrTy::I32)?;
+                                let reg = self.val_to_reg(val)?;
+                                arg_regs.push(reg);
+                            }
+                            // Padding for unused field slots.
+                            for _ in field_count..max_fields_enum {
+                                let pad_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::LoadImm(pad_reg, 0));
+                                arg_regs.push(pad_reg);
+                            }
+                        } else {
+                            let val = self.lower_expr(arg, &IrTy::I32)?;
+                            let reg = self.val_to_reg(val)?;
+                            arg_regs.push(reg);
+                        }
                     } else {
                         let val = self.lower_expr(arg, &IrTy::I32)?;
                         let reg = self.val_to_reg(val)?;
