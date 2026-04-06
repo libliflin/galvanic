@@ -14,9 +14,10 @@ fn main() {
     let _d = !42;
     let _e = !false;
 
-    // FLS §6.5.6 — Arithmetic expressions
+    // FLS §6.5.6 — Arithmetic expressions (FLS §6.5.5)
     let _f = 1 + 2;
-    let _g = 10 % 4;
+    let _g = 10 % 4;   // remainder: 10 % 4 = 2
+    let _ga = 10 / 2;  // division: 10 / 2 = 5
     let _h = 3 - 2;
 
     // FLS §6.5.7 — Bit expressions

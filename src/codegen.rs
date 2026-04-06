@@ -232,6 +232,34 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool) 
                     out,
                     "    mul     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: mul"
                 )?,
+                // FLS §6.5.5: Signed integer division.
+                // ARM64: `sdiv x{dst}, x{lhs}, x{rhs}` — signed division.
+                // FLS §6.23: Division by zero panics; no check is emitted yet.
+                // FLS §6.23 AMBIGUOUS: the spec requires a panic but the mechanism
+                // (how to raise it without libc) is unspecified at this milestone.
+                // Cache-line note: one 4-byte instruction per division.
+                IrBinOp::Div => writeln!(
+                    out,
+                    "    sdiv    x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: div (signed)"
+                )?,
+                // FLS §6.5.5: Signed integer remainder.
+                // Computed as `lhs - (lhs / rhs) * rhs` using two ARM64 instructions:
+                //   sdiv x{dst}, x{lhs}, x{rhs}        → x{dst} = lhs / rhs (quotient)
+                //   msub x{dst}, x{dst}, x{rhs}, x{lhs} → x{dst} = lhs - dst * rhs
+                // ARM64 `msub xd, xn, xm, xa` reads all sources before writing xd,
+                // so reusing dst for the intermediate quotient is safe.
+                // FLS §6.23: Remainder by zero panics; no check is emitted yet.
+                // Cache-line note: two 4-byte instructions = 8 bytes per remainder.
+                IrBinOp::Rem => {
+                    writeln!(
+                        out,
+                        "    sdiv    x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: rem step 1: quotient"
+                    )?;
+                    writeln!(
+                        out,
+                        "    msub    x{dst}, x{dst}, x{rhs}, x{lhs}  // FLS §6.5.5: rem step 2: lhs - q*rhs"
+                    )?;
+                }
                 // Comparison ops: signed integer comparison on ARM64.
                 // `cmp xA, xB` is an alias for `subs xzr, xA, xB` — sets N, Z, C, V flags.
                 // `cset xD, cond` sets xD to 1 if the condition holds, 0 otherwise.
