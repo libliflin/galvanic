@@ -532,6 +532,57 @@ pub enum Instr {
         name: String,
     },
 
+    /// Load the address of a named function into a register.
+    ///
+    /// `LoadFnAddr { dst, name }` emits:
+    ///   `adrp x{dst}, {name}`
+    ///   `add  x{dst}, x{dst}, :lo12:{name}`
+    ///
+    /// FLS §4.9: Function pointer types. A function's address is loaded using
+    /// PC-relative addressing. Unlike `bl {name}` (which transfers control),
+    /// this instruction materializes the address as a data value that can be
+    /// stored, passed as an argument, and later called via `blr`.
+    ///
+    /// ARM64 addressing: ADRP loads the page-aligned base of the function into
+    /// the register; ADD applies the :lo12: offset to form the full address.
+    ///
+    /// Cache-line note: two 4-byte instructions (8 bytes) to load a function
+    /// address — half the cost of a static load (which also dereferences the
+    /// pointer).
+    LoadFnAddr {
+        /// Destination register for the function address.
+        dst: u8,
+        /// The assembly label of the function (its mangled name).
+        name: String,
+    },
+
+    /// Call through a function pointer stored in a stack slot.
+    ///
+    /// `CallIndirect { dst, ptr_slot, args }` emits:
+    ///   `mov x{i}, x{args[i]}` (for each arg not already in the right register)
+    ///   `ldr x9, [sp, #{ptr_slot*8}]`  // load fn ptr into scratch register
+    ///   `blr x9`                        // indirect call
+    ///   `mov x{dst}, x0`               // capture return value
+    ///
+    /// FLS §4.9: Function pointer types. Calling through a function pointer
+    /// uses the ARM64 `blr` (branch with link to register) instruction.
+    ///
+    /// ARM64 ABI: same register convention as direct calls — args in x0–x7,
+    /// return value in x0. The link register (x30) is set by `blr`, so
+    /// the caller must save x30 if it also makes direct calls.
+    ///
+    /// Cache-line note: N arg moves + ldr + blr + 1 result move = N+3
+    /// instructions. The extra `ldr` (vs direct call) is the pointer
+    /// indirection cost of using `fn(T) -> U` rather than a named function.
+    CallIndirect {
+        /// Destination virtual register for the return value.
+        dst: u8,
+        /// Stack slot holding the function pointer address.
+        ptr_slot: u8,
+        /// Argument virtual registers, in left-to-right parameter order.
+        args: Vec<u8>,
+    },
+
     /// Call a `&mut self` method and write modified fields back to the caller's struct.
     ///
     /// `CallMut { name, args, write_back_slot, n_fields }` emits:
@@ -760,4 +811,13 @@ pub enum IrTy {
     ///
     /// Cache-line note: same register width as `IrTy::I32`.
     U32,
+
+    /// A function pointer type `fn(T1, ...) -> R`. FLS §4.9.
+    ///
+    /// Function pointers are 64-bit addresses — one ARM64 register, identical
+    /// in layout to any scalar value. They are passed as a single integer
+    /// argument register and stored in a single stack slot.
+    ///
+    /// Cache-line note: same register/slot footprint as `IrTy::I32`.
+    FnPtr,
 }

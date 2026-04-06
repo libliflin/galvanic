@@ -10924,3 +10924,140 @@ fn main() -> i32 {
         in_pick.join("\n")
     );
 }
+
+// ── Milestone 88: function pointer types (FLS §4.9) ──────────────────────────
+
+/// Milestone 88: basic function pointer — pass a function and call through it.
+///
+/// FLS §4.9: Function pointer types. `fn(i32) -> i32` is a function pointer
+/// type. Passing `double` as an argument materializes its address.
+#[test]
+fn milestone_88_fn_ptr_basic() {
+    let src = r#"
+fn double(x: i32) -> i32 { x * 2 }
+fn apply(f: fn(i32) -> i32, x: i32) -> i32 { f(x) }
+fn main() -> i32 { apply(double, 5) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "double(5)=10, got {exit_code}");
+}
+
+/// Milestone 88: function pointer with arithmetic on result.
+///
+/// FLS §4.9: The result of calling through a function pointer is an ordinary
+/// value that can be used in expressions.
+#[test]
+fn milestone_88_fn_ptr_result_in_arithmetic() {
+    let src = r#"
+fn triple(x: i32) -> i32 { x * 3 }
+fn apply(f: fn(i32) -> i32, x: i32) -> i32 { f(x) }
+fn main() -> i32 { apply(triple, 4) - 2 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "triple(4)-2 = 10, got {exit_code}");
+}
+
+/// Milestone 88: function pointer with two-parameter callee.
+///
+/// FLS §4.9: Function pointer types carry the full signature including
+/// all parameter types.
+#[test]
+fn milestone_88_fn_ptr_two_params() {
+    let src = r#"
+fn add(a: i32, b: i32) -> i32 { a + b }
+fn apply2(f: fn(i32, i32) -> i32, a: i32, b: i32) -> i32 { f(a, b) }
+fn main() -> i32 { apply2(add, 7, 3) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "add(7,3)=10, got {exit_code}");
+}
+
+/// Milestone 88: function pointer zero return.
+///
+/// FLS §4.9: Calling through a null-equivalent result (zero) case.
+#[test]
+fn milestone_88_fn_ptr_zero_return() {
+    let src = r#"
+fn zero(_x: i32) -> i32 { 0 }
+fn apply(f: fn(i32) -> i32, x: i32) -> i32 { f(x) }
+fn main() -> i32 { apply(zero, 99) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "zero(99)=0, got {exit_code}");
+}
+
+/// Milestone 88: function pointer passed from parameter.
+///
+/// FLS §4.9: A function pointer parameter can be forwarded to another call.
+#[test]
+fn milestone_88_fn_ptr_forwarded() {
+    let src = r#"
+fn inc(x: i32) -> i32 { x + 1 }
+fn double_apply(f: fn(i32) -> i32, x: i32) -> i32 { f(f(x)) }
+fn main() -> i32 { double_apply(inc, 8) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "inc(inc(8))=10, got {exit_code}");
+}
+
+/// Milestone 88: function pointer on direct local.
+///
+/// FLS §4.9: A function pointer stored in a local variable and called.
+#[test]
+fn milestone_88_fn_ptr_local_variable() {
+    let src = r#"
+fn square(x: i32) -> i32 { x * x }
+fn main() -> i32 {
+    let f: fn(i32) -> i32 = square;
+    f(3) + 1
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "square(3)+1=10, got {exit_code}");
+}
+
+/// Milestone 88: function pointer called with a parameter value.
+///
+/// FLS §4.9: Function pointer calls use the same ABI as direct calls.
+#[test]
+fn milestone_88_fn_ptr_on_parameter() {
+    let src = r#"
+fn negate(x: i32) -> i32 { 0 - x }
+fn apply(f: fn(i32) -> i32, x: i32) -> i32 { f(x) }
+fn main() -> i32 { apply(negate, 0 - 5) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "negate(-5)=5, got {exit_code}");
+}
+
+/// Assembly check: function pointer call emits adrp+add for address and blr for call.
+///
+/// FLS §4.9: Loading a function's address uses PC-relative addressing (ADRP+ADD).
+/// Calling through a pointer uses `blr` (branch with link to register).
+/// FLS §6.1.2:37–45: All instructions are runtime.
+#[test]
+fn runtime_fn_ptr_emits_adrp_and_blr() {
+    let src = r#"
+fn double(x: i32) -> i32 { x * 2 }
+fn apply(f: fn(i32) -> i32, x: i32) -> i32 { f(x) }
+fn main() -> i32 { apply(double, 5) }
+"#;
+    let asm = compile_to_asm(src);
+
+    // main must contain adrp for the function address load.
+    let in_main: Vec<&str> = asm
+        .lines()
+        .skip_while(|l| !l.starts_with("main:"))
+        .collect();
+    let has_adrp = in_main.iter().any(|l| l.contains("adrp") && l.contains("double"));
+    assert!(has_adrp, "expected adrp for double in main:\n{}", in_main.join("\n"));
+
+    // apply must contain blr for the indirect call.
+    let in_apply: Vec<&str> = asm
+        .lines()
+        .skip_while(|l| !l.starts_with("apply:"))
+        .take_while(|l| !l.starts_with("main:"))
+        .collect();
+    let has_blr = in_apply.iter().any(|l| l.trim_start().starts_with("blr"));
+    assert!(has_blr, "expected blr in apply for indirect call:\n{}", in_apply.join("\n"));
+}
