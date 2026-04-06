@@ -6390,3 +6390,154 @@ fn runtime_factory_fn_emits_ret_fields_and_call_mut_write_back() {
         "expected `str` for CallMut write-back in assembly:\n{asm}"
     );
 }
+
+// ── Milestone 57: shorthand field initialization (FLS §6.11) ─────────────────
+
+/// Milestone 57: single shorthand field — `Point { x }` compiles end-to-end.
+///
+/// FLS §6.11: Shorthand field initialization — `S { field }` is equivalent
+/// to `S { field: field }`. The field identifier resolves to the local variable
+/// or parameter of the same name.
+#[test]
+fn milestone_57_shorthand_single_field() {
+    let src = r#"
+struct Wrap { val: i32 }
+fn make(val: i32) -> Wrap { Wrap { val } }
+fn main() -> i32 {
+    let w = make(42);
+    w.val
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+/// Milestone 57: two shorthand fields — `Point { x, y }` compiles end-to-end.
+///
+/// FLS §6.11: Each shorthand field resolves to the parameter of the same name.
+#[test]
+fn milestone_57_shorthand_two_fields() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(x: i32, y: i32) -> Point { Point { x, y } }
+fn main() -> i32 {
+    let p = make(3, 4);
+    p.x + p.y
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected exit 7, got {exit_code}");
+}
+
+/// Milestone 57: shorthand field used in method body.
+///
+/// FLS §6.11: Shorthand field initialization works inside `impl` methods
+/// just as in free functions.
+#[test]
+fn milestone_57_shorthand_in_method() {
+    let src = r#"
+struct Counter { count: i32 }
+impl Counter {
+    fn new(count: i32) -> Counter { Counter { count } }
+    fn get(self) -> i32 { self.count }
+}
+fn main() -> i32 {
+    let c = Counter::new(7);
+    c.get()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected exit 7, got {exit_code}");
+}
+
+/// Milestone 57: shorthand field mixed with explicit field.
+///
+/// FLS §6.11: Shorthand and explicit field init may appear in the same literal.
+#[test]
+fn milestone_57_shorthand_mixed_with_explicit() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make_x(x: i32) -> Point { Point { x, y: 0 } }
+fn main() -> i32 {
+    let p = make_x(5);
+    p.x
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "expected exit 5, got {exit_code}");
+}
+
+/// Milestone 57: three-field struct with all shorthand fields.
+///
+/// FLS §6.11: Works for any number of fields.
+#[test]
+fn milestone_57_shorthand_three_fields() {
+    let src = r#"
+struct Triple { a: i32, b: i32, c: i32 }
+fn make(a: i32, b: i32, c: i32) -> Triple { Triple { a, b, c } }
+fn main() -> i32 {
+    let t = make(1, 2, 4);
+    t.a + t.b + t.c
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected exit 7, got {exit_code}");
+}
+
+/// Milestone 57: shorthand field where variable is a local let binding.
+///
+/// FLS §6.11: The shorthand field `x` resolves to any in-scope binding named `x`.
+#[test]
+fn milestone_57_shorthand_from_let_binding() {
+    let src = r#"
+struct Wrap { val: i32 }
+fn main() -> i32 {
+    let val = 13;
+    let w = Wrap { val };
+    w.val
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 13, "expected exit 13, got {exit_code}");
+}
+
+/// Milestone 57: shorthand field used when returning a struct from free function.
+///
+/// FLS §6.11 + §9: Shorthand works in factory functions (milestone 56 pattern).
+#[test]
+fn milestone_57_shorthand_factory_fn() {
+    let src = r#"
+struct Rect { w: i32, h: i32 }
+fn rect(w: i32, h: i32) -> Rect { Rect { w, h } }
+fn area(r: Rect) -> i32 { r.w * r.h }
+fn main() -> i32 {
+    let r = rect(3, 4);
+    area(r)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 12, "expected exit 12, got {exit_code}");
+}
+
+// ── Assembly inspection: milestone 57 ────────────────────────────────────────
+
+/// Milestone 57: shorthand field init emits the same stores as explicit init.
+///
+/// FLS §6.11: `Point { x, y }` must emit the same runtime stores as
+/// `Point { x: x, y: y }`. Both must use `str` instructions, not immediates.
+/// FLS §6.1.2:37–45: All stores are runtime instructions.
+#[test]
+fn runtime_shorthand_field_emits_same_as_explicit() {
+    let src = "struct Point { x: i32, y: i32 }\nfn make(x: i32, y: i32) -> Point { Point { x, y } }\nfn main() -> i32 { let p = make(1, 2); p.x }\n";
+    let asm = compile_to_asm(src);
+    // Shorthand init must produce `str` instructions in the callee.
+    assert!(
+        asm.contains("str"),
+        "expected `str` instructions from shorthand field init:\n{asm}"
+    );
+    // The callee must spill parameters to stack slots before using them.
+    assert!(
+        asm.contains("ldr"),
+        "expected `ldr` instructions for RetFields:\n{asm}"
+    );
+}

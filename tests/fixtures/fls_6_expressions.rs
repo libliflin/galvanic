@@ -307,6 +307,20 @@ fn struct_expr_example() -> i32 {
     p.x + p.y   // FLS §6.13: field access — loads x then y
 }
 
+// FLS §6.11 — Shorthand field initialization.
+//
+// FLS §6.11: "If a StructExpressionField consists of only an identifier,
+// that identifier is both the field name and the value of the field."
+// `Point { x, y }` is equivalent to `Point { x: x, y: y }`.
+//
+// Note: FLS §6.11 describes shorthand field initialization as a syntactic
+// convenience; no separate code example is provided. This is derived from
+// the spec's semantic description.
+fn struct_expr_shorthand_example(x: i32, y: i32) -> i32 {
+    let p = TestPoint { x, y };   // FLS §6.11: shorthand — x resolves to param x
+    p.x + p.y
+}
+
 // FLS §6.13 — Field access expressions.
 //
 // FLS §6.13: "A field access expression evaluates the receiver operand and

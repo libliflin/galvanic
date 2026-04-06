@@ -720,8 +720,17 @@ impl<'src> Parser<'src> {
             }
             let field_name = self.current_span();
             self.advance();
-            self.expect(TokenKind::Colon)?;
-            let value = self.parse_expr()?;
+            // FLS §6.11: Shorthand field initialization — `Point { x, y }` is
+            // equivalent to `Point { x: x, y: y }`. If the next token is not
+            // `:`, treat the field name as both name and value expression.
+            let value = if self.eat(TokenKind::Colon) {
+                self.parse_expr()?
+            } else {
+                Expr {
+                    kind: ExprKind::Path(vec![field_name]),
+                    span: field_name,
+                }
+            };
             fields.push((field_name, Box::new(value)));
 
             if !self.eat(TokenKind::Comma) {
@@ -1597,7 +1606,10 @@ impl<'src> Parser<'src> {
                     && self.peek_kind() == TokenKind::OpenBrace
                     && (self.peek_nth(1) == TokenKind::CloseBrace
                         || (self.peek_nth(1) == TokenKind::Ident
-                            && self.peek_nth(2) == TokenKind::Colon))
+                            && (self.peek_nth(2) == TokenKind::Colon
+                                // FLS §6.11: Shorthand field — `Name { field, … }`.
+                                || self.peek_nth(2) == TokenKind::Comma
+                                || self.peek_nth(2) == TokenKind::CloseBrace)))
                 {
                     return self.parse_struct_lit(segments[0]);
                 }
@@ -1616,7 +1628,10 @@ impl<'src> Parser<'src> {
                     && self.peek_kind() == TokenKind::OpenBrace
                     && (self.peek_nth(1) == TokenKind::CloseBrace
                         || (self.peek_nth(1) == TokenKind::Ident
-                            && self.peek_nth(2) == TokenKind::Colon))
+                            && (self.peek_nth(2) == TokenKind::Colon
+                                // FLS §6.11: Shorthand field — `Enum::Variant { field, … }`.
+                                || self.peek_nth(2) == TokenKind::Comma
+                                || self.peek_nth(2) == TokenKind::CloseBrace)))
                 {
                     let path = segments;
                     let path_start = path[0];
@@ -1624,8 +1639,15 @@ impl<'src> Parser<'src> {
                     let mut fields: Vec<(crate::ast::Span, Box<crate::ast::Expr>)> = Vec::new();
                     while self.peek_kind() != TokenKind::CloseBrace {
                         let field_name = self.expect(TokenKind::Ident)?;
-                        self.expect(TokenKind::Colon)?;
-                        let val = self.parse_expr()?;
+                        // FLS §6.11: Shorthand field — `Variant { field }` = `Variant { field: field }`.
+                        let val = if self.eat(TokenKind::Colon) {
+                            self.parse_expr()?
+                        } else {
+                            crate::ast::Expr {
+                                kind: crate::ast::ExprKind::Path(vec![field_name]),
+                                span: field_name,
+                            }
+                        };
                         fields.push((field_name, Box::new(val)));
                         if !self.eat(TokenKind::Comma) {
                             break;
@@ -3464,6 +3486,61 @@ mod tests {
             panic!("expected inner FieldAccess");
         };
         assert_eq!(inner_field.text(src), "b");
+    }
+
+    #[test]
+    fn struct_lit_shorthand_single_field() {
+        // FLS §6.11: `Point { x }` is shorthand for `Point { x: x }`.
+        let src = "fn f(x: i32) -> Point { Point { x } }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn") };
+        let body = f.body.as_ref().unwrap();
+        // Tail expression is the struct literal.
+        let ExprKind::StructLit { ref fields, .. } = body.tail.as_ref().unwrap().kind else {
+            panic!("expected StructLit tail");
+        };
+        assert_eq!(fields.len(), 1);
+        // Field value is a path expression with the same name as the field.
+        let ExprKind::Path(ref segs) = fields[0].1.kind else {
+            panic!("expected Path value in shorthand field");
+        };
+        assert_eq!(segs[0].text(src), "x");
+    }
+
+    #[test]
+    fn struct_lit_shorthand_two_fields() {
+        // FLS §6.11: `Point { x, y }` is shorthand for `Point { x: x, y: y }`.
+        let src = "fn f(x: i32, y: i32) -> Point { Point { x, y } }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn") };
+        let body = f.body.as_ref().unwrap();
+        let ExprKind::StructLit { ref fields, .. } = body.tail.as_ref().unwrap().kind else {
+            panic!("expected StructLit tail");
+        };
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].0.text(src), "x");
+        assert_eq!(fields[1].0.text(src), "y");
+    }
+
+    #[test]
+    fn struct_lit_shorthand_mixed() {
+        // FLS §6.11: shorthand and explicit fields can be mixed.
+        let src = "fn f(x: i32) -> Point { Point { x, y: 0 } }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn") };
+        let body = f.body.as_ref().unwrap();
+        let ExprKind::StructLit { ref fields, .. } = body.tail.as_ref().unwrap().kind else {
+            panic!("expected StructLit tail");
+        };
+        assert_eq!(fields.len(), 2);
+        // First field: shorthand — value is a path expression.
+        let ExprKind::Path(_) = fields[0].1.kind else {
+            panic!("expected Path for shorthand field");
+        };
+        // Second field: explicit — value is a literal.
+        let ExprKind::LitInt(_) = fields[1].1.kind else {
+            panic!("expected LitInt for explicit field");
+        };
     }
 
     #[test]
