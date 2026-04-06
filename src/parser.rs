@@ -1522,6 +1522,7 @@ impl<'src> Parser<'src> {
     /// Parse a single pattern alternative (no `|`).
     ///
     /// FLS §5.1: Wildcard pattern — `_`.
+    /// FLS §5.1.4: Identifier patterns — a bare lowercase identifier binds the value.
     /// FLS §5.2: Literal patterns — integer and boolean literals.
     fn parse_single_pattern(&mut self) -> Result<crate::ast::Pat, ParseError> {
         use crate::ast::Pat;
@@ -1530,6 +1531,24 @@ impl<'src> Parser<'src> {
             TokenKind::Underscore => {
                 self.advance();
                 Ok(Pat::Wildcard)
+            }
+            // Identifier pattern: `name` — binds matched value to a local.
+            //
+            // FLS §5.1.4: An identifier pattern matches any value and binds it
+            // to the given name in the match arm body.
+            //
+            // Note: In full Rust, an unqualified uppercase identifier may refer to
+            // a unit enum variant (a path pattern, FLS §5.5). Galvanic does not yet
+            // support enum variants, so all identifiers are treated as bindings.
+            // This is consistent with how rustc resolves them when no matching item
+            // is in scope.
+            //
+            // FLS §5.1.4 AMBIGUOUS: The spec does not specify how identifier
+            // patterns interact with `ref`/`mut` qualifiers. Galvanic supports
+            // only the simplest form: `match x { n => ... }`.
+            TokenKind::Ident => {
+                let tok = self.advance();
+                Ok(Pat::Ident(Self::span_of(&tok)))
             }
             // Integer literal pattern. FLS §5.2.
             TokenKind::LitInteger => {
@@ -1570,7 +1589,7 @@ impl<'src> Parser<'src> {
                 Ok(Pat::LitBool(false))
             }
             kind => Err(self.error(format!(
-                "expected pattern (integer literal, `-` integer, `true`, `false`, or `_`), found {kind:?}"
+                "expected pattern (identifier, integer literal, `-` integer, `true`, `false`, or `_`), found {kind:?}"
             ))),
         }
     }
@@ -3232,5 +3251,25 @@ mod tests {
         assert!(matches!(alts[0], Pat::LitInt(1)));
         assert!(matches!(alts[1], Pat::LitInt(2)));
         assert!(matches!(alts[2], Pat::LitInt(3)));
+    }
+
+    #[test]
+    fn identifier_pattern_in_match() {
+        // FLS §5.1.4: Identifier pattern `n` matches any value and binds it.
+        // Example: `match x { 0 => 0, n => n * 2 }` — second arm uses ident pat.
+        use crate::ast::{ExprKind, Pat};
+        let src = "fn f(x: i32) -> i32 { match x { 0 => 0, n => n * 2 } }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!() };
+        let body = f.body.as_ref().unwrap();
+        let tail = body.tail.as_ref().expect("expected tail");
+        let ExprKind::Match { ref arms, .. } = tail.kind else { panic!() };
+        assert_eq!(arms.len(), 2);
+        assert!(matches!(arms[0].pat, Pat::LitInt(0)));
+        // Second arm should be Pat::Ident pointing to "n".
+        assert!(matches!(arms[1].pat, Pat::Ident(_)));
+        if let Pat::Ident(span) = &arms[1].pat {
+            assert_eq!(span.text(src), "n");
+        }
     }
 }

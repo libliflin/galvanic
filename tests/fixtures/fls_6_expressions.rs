@@ -274,3 +274,20 @@ fn match_negative_pattern(n: i32) -> i32 {
         _  => 40,   // FLS §5.1: wildcard — matches remaining values
     }
 }
+
+// FLS §5.1.4 — Identifier patterns.
+//
+// FLS §5.1.4: "An identifier pattern matches any value and optionally binds
+// it to the identifier." When used as a catch-all arm in a match expression,
+// an identifier pattern both matches and binds the scrutinee value, making it
+// available as a local variable in the arm body.
+//
+// Note: FLS §5.1.4 describes identifier patterns but does not provide a
+// direct code example. This function is derived from the spec's description.
+fn match_ident_pattern(x: i32) -> i32 {
+    match x {
+        0 => 0,     // FLS §5.2: literal pattern — matches zero exactly
+        n => n * 2, // FLS §5.1.4: identifier pattern — binds x to n, doubles it
+    }
+}
+
