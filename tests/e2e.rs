@@ -9586,3 +9586,167 @@ fn main() -> i32 { sum3((1, (2, 3))) }\n";
         "nested tuple param spill must emit ≥3 str instructions, got {str_count}:\n{asm}"
     );
 }
+
+// ── Milestone 81: nested struct pattern destructuring in function parameters ──
+
+/// Milestone 81: `fn f(Outer { inner: Inner { a, b }, c }: Outer)` — nested
+/// struct pattern in a function parameter compiles to runtime ARM64.
+///
+/// FLS §5.10.2: Struct patterns may nest arbitrarily deep; irrefutable struct
+/// patterns may appear in function parameter position (FLS §9.2).
+///
+/// The nested struct arrives flat: one register per leaf scalar (a, b, c).
+/// All three are spilled to stack slots and bound to local names.
+#[test]
+fn milestone_81_nested_struct_param_sum() {
+    let src = "\
+struct Inner { a: i32, b: i32 }\n\
+struct Outer { inner: Inner, c: i32 }\n\
+fn sum(Outer { inner: Inner { a, b }, c }: Outer) -> i32 { a + b + c }\n\
+fn main() -> i32 { sum(Outer { inner: Inner { a: 1, b: 2 }, c: 3 }) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "1+2+3=6, got {exit_code}");
+}
+
+/// Milestone 81: access the first field of the nested struct.
+///
+/// FLS §5.10.2, §9.2: `a` is bound from `Inner { a, b }` at the first slot of
+/// the inner struct, which is also slot 0 of the outer parameter.
+#[test]
+fn milestone_81_nested_struct_param_inner_first() {
+    let src = "\
+struct Inner { a: i32, b: i32 }\n\
+struct Outer { inner: Inner, c: i32 }\n\
+fn get_a(Outer { inner: Inner { a, b: _ }, c: _ }: Outer) -> i32 { a }\n\
+fn main() -> i32 { get_a(Outer { inner: Inner { a: 7, b: 5 }, c: 0 }) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 7, got {exit_code}");
+}
+
+/// Milestone 81: access the scalar field that follows the nested struct field.
+///
+/// FLS §5.10.2, §9.2: `c` is in the register after the inner struct's two
+/// fields, at slot offset 2 of the outer parameter.
+#[test]
+fn milestone_81_nested_struct_param_outer_scalar() {
+    let src = "\
+struct Inner { a: i32, b: i32 }\n\
+struct Outer { inner: Inner, c: i32 }\n\
+fn get_c(Outer { inner: Inner { a: _, b: _ }, c }: Outer) -> i32 { c }\n\
+fn main() -> i32 { get_c(Outer { inner: Inner { a: 10, b: 20 }, c: 42 }) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected 42, got {exit_code}");
+}
+
+/// Milestone 81: nested struct param mixed with a plain scalar parameter.
+///
+/// FLS §5.10.2, §9.2: the nested struct pattern and the scalar param occupy
+/// consecutive registers; both must be spilled correctly.
+#[test]
+fn milestone_81_nested_struct_param_mixed_with_scalar() {
+    let src = "\
+struct Inner { a: i32, b: i32 }\n\
+struct Outer { inner: Inner, c: i32 }\n\
+fn f(Outer { inner: Inner { a, b }, c }: Outer, extra: i32) -> i32 { a + b + c + extra }\n\
+fn main() -> i32 { f(Outer { inner: Inner { a: 1, b: 2 }, c: 3 }, 4) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "1+2+3+4=10, got {exit_code}");
+}
+
+/// Milestone 81: use nested struct param result in an if expression.
+///
+/// FLS §5.10.2, §9.2, §6.17: the bound names from the nested pattern are
+/// in scope for the entire function body including conditional expressions.
+#[test]
+fn milestone_81_nested_struct_param_in_if() {
+    let src = "\
+struct Inner { a: i32, b: i32 }\n\
+struct Outer { inner: Inner, c: i32 }\n\
+fn sign(Outer { inner: Inner { a, b: _ }, c: _ }: Outer) -> i32 {\n\
+    if a > 0 { 1 } else { 0 }\n\
+}\n\
+fn main() -> i32 { sign(Outer { inner: Inner { a: 5, b: 0 }, c: 0 }) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected 1, got {exit_code}");
+}
+
+/// Milestone 81: nested struct param passed from a variable.
+///
+/// FLS §5.10.2, §9.2: the calling convention is unchanged — the struct fields
+/// are passed as individual registers whether the caller passes a literal or
+/// a variable.
+#[test]
+fn milestone_81_nested_struct_param_from_variable() {
+    let src = "\
+struct Inner { a: i32, b: i32 }\n\
+struct Outer { inner: Inner, c: i32 }\n\
+fn sum(Outer { inner: Inner { a, b }, c }: Outer) -> i32 { a + b + c }\n\
+fn main() -> i32 {\n\
+    let s = Outer { inner: Inner { a: 10, b: 20 }, c: 30 };\n\
+    sum(s)\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 60, "10+20+30=60, got {exit_code}");
+}
+
+/// Milestone 81: three-level nesting — inner struct containing another struct.
+///
+/// FLS §5.10.2: struct patterns nest arbitrarily deep. This test uses two
+/// levels of nesting in the parameter: `Outer { inner: Mid { deep: Inner { a, b }, d }, c }`.
+#[test]
+fn milestone_81_three_level_nesting() {
+    let src = "\
+struct Inner { a: i32, b: i32 }\n\
+struct Mid { deep: Inner, d: i32 }\n\
+struct Outer { inner: Mid, c: i32 }\n\
+fn sum(Outer { inner: Mid { deep: Inner { a, b }, d }, c }: Outer) -> i32 { a + b + d + c }\n\
+fn main() -> i32 {\n\
+    sum(Outer { inner: Mid { deep: Inner { a: 1, b: 2 }, d: 3 }, c: 4 })\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "1+2+3+4=10, got {exit_code}");
+}
+
+/// Milestone 81: wildcard in the nested struct binding.
+///
+/// FLS §5.10.2, §9.2: `_` in a nested struct pattern discards the field.
+#[test]
+fn milestone_81_nested_struct_param_wildcard_inner() {
+    let src = "\
+struct Inner { a: i32, b: i32 }\n\
+struct Outer { inner: Inner, c: i32 }\n\
+fn just_b(Outer { inner: Inner { a: _, b }, c: _ }: Outer) -> i32 { b }\n\
+fn main() -> i32 { just_b(Outer { inner: Inner { a: 99, b: 13 }, c: 0 }) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 13, "expected 13, got {exit_code}");
+}
+
+/// Runtime inspection: nested struct parameter spills all leaf slots.
+///
+/// FLS §5.10.2, §9.2, §6.1.2:37–45: Each scalar leaf must emit a `str`
+/// instruction at function entry. `Outer { inner: Inner { a, b }, c }` has
+/// 3 leaves → at least 3 `str` instructions in the `sum` function prologue.
+///
+/// Cache-line note: 3 leaves × 4 bytes each = 12 bytes (3 instructions per
+/// 64-byte instruction cache line).
+#[test]
+fn runtime_nested_struct_param_emits_spill_stores() {
+    let src = "\
+struct Inner { a: i32, b: i32 }\n\
+struct Outer { inner: Inner, c: i32 }\n\
+fn sum(Outer { inner: Inner { a, b }, c }: Outer) -> i32 { a + b + c }\n\
+fn main() -> i32 { sum(Outer { inner: Inner { a: 1, b: 2 }, c: 3 }) }\n";
+    let asm = compile_to_asm(src);
+    // Count `str` instructions in the `sum` function (excluding lr saves in main).
+    let in_sum: Vec<&str> = asm
+        .lines()
+        .skip_while(|l| !l.starts_with("sum:"))
+        .take_while(|l| !l.starts_with("main:"))
+        .filter(|l| l.trim_start().starts_with("str") && !l.contains("lr"))
+        .collect();
+    assert!(
+        in_sum.len() >= 3,
+        "expected ≥3 str spill instructions in sum, got {}:\n{asm}",
+        in_sum.len()
+    );
+}

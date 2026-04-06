@@ -229,6 +229,27 @@ fn nested_param_sum((a, (b, c)): (i32, (i32, i32))) -> i32 {
     a + b + c
 }
 
+// FLS §5.10.2, §9.2: Nested struct pattern in parameter position.
+// `Outer { inner: Inner { a, b }, c }: Outer` — three scalar leaves arrive in
+// x0 (inner.a), x1 (inner.b), x2 (c) and bind to `a`, `b`, `c`.
+//
+// FLS §5.10.2: "A struct pattern matches a struct [...] by its field patterns."
+// Field patterns may themselves be struct patterns (nested). FLS §9.2:
+// Irrefutable patterns (including nested struct patterns) are valid in
+// parameter position.
+//
+// FLS §9.2 AMBIGUOUS: The spec does not provide a concrete code example for
+// nested struct patterns in parameter position; this is derived from the
+// recursive field-pattern grammar in §5.10.2 and the parameter grammar §9.2.
+struct Inner { a: i32, b: i32 }
+struct Outer { inner: Inner, c: i32 }
+
+fn nested_struct_param_sum(Outer { inner: Inner { a, b }, c }: Outer) -> i32 {
+    // FLS §5.10.2: `a` and `b` are bound from the inner struct's registers;
+    // `c` is bound from the register following the inner struct's fields.
+    a + b + c
+}
+
 fn main() -> i32 {
     // FLS §5.1.9: inclusive range — value 2 in [1,3] → 1.
     let a = range_inclusive(2);
@@ -271,6 +292,10 @@ fn main() -> i32 {
     let r3 = scaled_diff(sc);
     // FLS §5.10.3, §9.2: nested tuple pattern param — nested_param_sum((1,(2,3))) = 6.
     let r4 = nested_param_sum((1, (2, 3)));
-    // a=1, b=2, c=1, d=1, e=1, f=1, g=4, h=2, i=3, j=0, k=2, m=3, n2=1, n3=1, q=7, r2=12, r3=2, r4=6 → sum=50
-    a + b + c + d + e + f + g + h + i + j + k + m + n2 + n3 + q + r2 + r3 + r4
+    // FLS §5.10.2, §9.2: nested struct pattern param — nested_struct_param_sum(Outer { inner: Inner { a:1, b:2 }, c:3 }) = 6.
+    let inner = Inner { a: 1, b: 2 };
+    let outer = Outer { inner, c: 3 };
+    let r5 = nested_struct_param_sum(outer);
+    // a=1, b=2, c=1, d=1, e=1, f=1, g=4, h=2, i=3, j=0, k=2, m=3, n2=1, n3=1, q=7, r2=12, r3=2, r4=6, r5=6 → sum=56
+    a + b + c + d + e + f + g + h + i + j + k + m + n2 + n3 + q + r2 + r3 + r4 + r5
 }

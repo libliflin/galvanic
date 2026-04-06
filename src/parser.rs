@@ -924,15 +924,16 @@ impl<'src> Parser<'src> {
             {
                 // FLS §5.10.2, §9.2: Struct pattern in parameter position
                 // `Point { x, y }: Point`.
+                // Supports nested struct patterns: `Outer { inner: Inner { a, b }, c }`.
                 let type_span = self.current_span();
                 self.advance(); // consume struct type name
                 self.advance(); // consume `{`
-                let mut fields: Vec<(Span, Option<Span>)> = Vec::new();
+                let mut fields: Vec<(Span, crate::ast::Pat)> = Vec::new();
                 loop {
                     if self.peek_kind() == TokenKind::CloseBrace {
                         break;
                     }
-                    // Each entry is `field_name` (shorthand) or `field_name: binding`.
+                    // Each entry is `field_name` (shorthand) or `field_name: binding_pat`.
                     let field_name = if self.peek_kind() == TokenKind::Ident {
                         let s = self.current_span();
                         self.advance();
@@ -944,23 +945,13 @@ impl<'src> Parser<'src> {
                         )));
                     };
                     let binding = if self.eat(TokenKind::Colon) {
-                        // Explicit binding: `field: name` or `field: _`.
-                        if self.peek_kind() == TokenKind::Underscore {
-                            self.advance();
-                            None
-                        } else if self.peek_kind() == TokenKind::Ident {
-                            let b = self.current_span();
-                            self.advance();
-                            Some(b)
-                        } else {
-                            return Err(self.error(format!(
-                                "expected identifier or `_` after `:` in struct parameter pattern, found {:?}",
-                                self.peek_kind()
-                            )));
-                        }
+                        // Explicit binding: `field: _`, `field: name`, or
+                        // `field: Inner { a, b }` (nested struct).
+                        // Reuse parse_single_pattern which handles all these forms.
+                        self.parse_single_pattern()?
                     } else {
                         // Shorthand: `{ x }` is sugar for `{ x: x }`.
-                        Some(field_name)
+                        crate::ast::Pat::Ident(field_name)
                     };
                     fields.push((field_name, binding));
                     if !self.eat(TokenKind::Comma) {
@@ -2791,9 +2782,9 @@ mod tests {
         assert_eq!(type_span.text(src), "Point");
         assert_eq!(fields.len(), 2);
         assert_eq!(fields[0].0.text(src), "x");
-        assert!(fields[0].1.is_some_and(|b| b.text(src) == "x"));
+        assert!(matches!(&fields[0].1, Pat::Ident(s) if s.text(src) == "x"));
         assert_eq!(fields[1].0.text(src), "y");
-        assert!(fields[1].1.is_some_and(|b| b.text(src) == "y"));
+        assert!(matches!(&fields[1].1, Pat::Ident(s) if s.text(src) == "y"));
     }
 
     #[test]
@@ -2809,9 +2800,9 @@ mod tests {
         assert_eq!(type_span.text(src), "Point");
         assert_eq!(fields.len(), 2);
         assert_eq!(fields[0].0.text(src), "x");
-        assert!(fields[0].1.is_some_and(|b| b.text(src) == "a"));
+        assert!(matches!(&fields[0].1, Pat::Ident(s) if s.text(src) == "a"));
         assert_eq!(fields[1].0.text(src), "y");
-        assert!(fields[1].1.is_some_and(|b| b.text(src) == "b"));
+        assert!(matches!(&fields[1].1, Pat::Ident(s) if s.text(src) == "b"));
     }
 
     #[test]
@@ -2824,10 +2815,10 @@ mod tests {
             panic!("expected ParamKind::Struct")
         };
         assert_eq!(fields.len(), 2);
-        // First field: shorthand x → binding Some(x).
-        assert!(fields[0].1.is_some());
-        // Second field: wildcard y: _ → binding None.
-        assert!(fields[1].1.is_none());
+        // First field: shorthand x → Pat::Ident(x).
+        assert!(matches!(&fields[0].1, Pat::Ident(_)));
+        // Second field: wildcard y: _ → Pat::Wildcard.
+        assert!(matches!(&fields[1].1, Pat::Wildcard));
     }
 
     #[test]
