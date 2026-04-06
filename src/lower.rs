@@ -2122,6 +2122,52 @@ impl<'src> LowerCtx<'src> {
     /// x0 = 1, x1 = 2, x2 = 3. This helper recurses into nested tuple elements
     /// so that the correct number and order of registers are pushed to `arg_regs`.
     ///
+    /// FLS §6.10, §5.10.3: Count total scalar leaves in a tuple expression.
+    ///
+    /// For flat `(a, b, c)` → 3. For nested `(a, (b, c))` → 3.
+    /// Used to determine how many stack slots to allocate when storing
+    /// a tuple literal in a `let` binding.
+    fn count_tuple_leaves(elements: &[Expr]) -> usize {
+        let mut count = 0;
+        for elem in elements {
+            if let ExprKind::Tuple(inner) = &elem.kind {
+                count += Self::count_tuple_leaves(inner);
+            } else {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// FLS §6.10, §5.10.3: Store all scalar leaves of a nested tuple literal
+    /// into consecutive stack slots starting at `base_slot + *offset`.
+    ///
+    /// Recurses into nested `ExprKind::Tuple` elements. Each scalar leaf is
+    /// evaluated at runtime and stored in the next available slot.
+    ///
+    /// FLS §6.4:14: Elements evaluated and stored left-to-right.
+    /// FLS §6.1.2:37–45: All stores are runtime instructions.
+    ///
+    /// Cache-line note: N leaves → N × 4-byte `str` instructions.
+    fn store_tuple_leaves(
+        &mut self,
+        elements: &[Expr],
+        base_slot: u8,
+        offset: &mut u8,
+    ) -> Result<(), LowerError> {
+        for elem in elements {
+            if let ExprKind::Tuple(inner) = &elem.kind {
+                self.store_tuple_leaves(inner, base_slot, offset)?;
+            } else {
+                let val = self.lower_expr(elem, &IrTy::I32)?;
+                let src = self.val_to_reg(val)?;
+                self.instrs.push(Instr::Store { src, slot: base_slot + *offset });
+                *offset += 1;
+            }
+        }
+        Ok(())
+    }
+
     /// FLS §5.10.3, §6.10, §9.2: Nested tuple patterns in parameter position
     /// flatten to consecutive registers. The tuple literal argument must match
     /// the structure of the parameter pattern.
@@ -3604,31 +3650,36 @@ impl<'src> LowerCtx<'src> {
 
                 // FLS §6.10: Tuple literal `let t = (e0, e1, ...)`.
                 //
-                // A tuple of N elements is laid out as N consecutive 8-byte
-                // stack slots, identical to a struct or array. The variable
-                // name maps to the base slot (slot of element 0). Elements
-                // are evaluated and stored left-to-right (FLS §6.4:14).
+                // All scalar leaves of the tuple are stored in consecutive
+                // 8-byte stack slots. For flat `(1, 2, 3)` this is 3 slots;
+                // for nested `(1, (2, 3))` this is also 3 slots (leaves
+                // flattened left-to-right). The variable name maps to the
+                // base slot (slot of the first leaf).
                 //
-                // `local_tuple_lens` records the field count so that `.0`,
-                // `.1` field accesses can compute `base_slot + index`.
+                // `local_tuple_lens` records the **total leaf count** so that
+                // the call-site argument expansion (passing a tuple variable
+                // to a function expecting a tuple/nested-tuple parameter) loads
+                // the correct number of slots.
                 //
-                // Cache-line note: same layout as arrays — N stores per init.
+                // FLS §5.10.3, §9.2: A nested tuple parameter receives one
+                // register per scalar leaf, so the storage layout must match.
+                // FLS §6.4:14: Elements evaluated and stored left-to-right.
+                // FLS §6.1.2:37–45: All stores are runtime instructions.
+                //
+                // Cache-line note: N leaf stores = N × 4-byte `str` instructions.
                 if let Some(init_expr) = init.as_ref()
                     && let ExprKind::Tuple(elems) = &init_expr.kind
                 {
-                    let n = elems.len();
+                    let n_leaves = Self::count_tuple_leaves(elems);
                     let base_slot = self.alloc_slot()?;
-                    for _ in 1..n {
+                    for _ in 1..n_leaves {
                         self.alloc_slot()?;
                     }
                     self.locals.insert(var_name, base_slot);
-                    self.local_tuple_lens.insert(base_slot, n);
-                    // FLS §6.10: Elements evaluated left-to-right.
-                    for (i, elem_expr) in elems.iter().enumerate() {
-                        let val = self.lower_expr(elem_expr, &IrTy::I32)?;
-                        let src = self.val_to_reg(val)?;
-                        self.instrs.push(Instr::Store { src, slot: base_slot + i as u8 });
-                    }
+                    self.local_tuple_lens.insert(base_slot, n_leaves);
+                    // FLS §6.10, §5.10.3: Store all leaves left-to-right.
+                    let mut offset: u8 = 0;
+                    self.store_tuple_leaves(elems, base_slot, &mut offset)?;
                     return Ok(());
                 }
 
