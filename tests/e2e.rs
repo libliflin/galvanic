@@ -541,3 +541,92 @@ fn runtime_let_binding_emits_str_and_ldr() {
         "expected `add sp` for stack restore before ret, got:\n{asm}"
     );
 }
+
+// ── Milestone 7: while loops ─────────────────────────────────────────────────
+//
+// FLS §6.15.3: While loop expressions. The condition is evaluated before each
+// iteration; if true, the body executes and the loop repeats. If false, the
+// loop terminates with value `()`.
+//
+// FLS §6.5.3: Comparison operators produce boolean values (0 or 1) used as
+// the while condition. The comparison runs at runtime via `cmp`+`cset`.
+//
+// FLS §6.1.2:37–45: The condition and body must execute at runtime — even
+// `while x < 5 { ... }` with a statically-knowable bound emits runtime branches.
+
+/// Milestone 7: count from 0 to 5 with `while`.
+///
+/// ```rust
+/// fn main() -> i32 {
+///     let mut x = 0;
+///     while x < 5 { x = x + 1; }
+///     x
+/// }
+/// ```
+/// The loop body runs 5 times; `x` ends at 5.
+///
+/// FLS §6.15.3: While loop with `<` comparison.
+/// FLS §6.5.3: `x < 5` emits `cmp`+`cset` at runtime.
+#[test]
+fn milestone_7_while_count_to_five() {
+    let src = "fn main() -> i32 { let mut x = 0; while x < 5 { x = x + 1; } x }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 5, "expected exit 5 from while-count-to-five, got {exit_code}");
+}
+
+/// Milestone 7 (variant): while with immediately-false condition never executes.
+///
+/// FLS §6.15.3: "The block is repeatedly executed as long as the condition holds."
+/// When the condition is false on entry, the body is skipped and the loop exits.
+/// FLS §6.5.3: `x < 0` with x=0 is false; cbz branches directly to exit.
+#[test]
+fn milestone_7_while_false_condition() {
+    let src = "fn main() -> i32 { let mut x = 0; while x < 0 { x = x + 1; } x }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 0, "expected exit 0 (loop body never runs), got {exit_code}");
+}
+
+/// Milestone 7 (variant): while loop with `<=` comparison.
+///
+/// FLS §6.5.3: `<=` comparison emits `cmp`+`cset le`.
+/// Loop runs while `x <= 3`; x ends at 4.
+#[test]
+fn milestone_7_while_le_comparison() {
+    let src = "fn main() -> i32 { let mut x = 0; while x <= 3 { x = x + 1; } x }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 4, "expected exit 4 from while x <= 3, got {exit_code}");
+}
+
+/// Assembly inspection: while loop must emit `cmp`, `cset`, `cbz`, and `b`.
+///
+/// FLS §6.15.3: The loop condition is checked at runtime via `cbz`.
+/// FLS §6.5.3: The comparison `x < 5` emits `cmp`+`cset` at runtime.
+/// FLS §6.1.2:37–45: No compile-time folding of the loop — both `cmp`+`cset`
+/// and `cbz` must appear, along with the back-edge `b .L{n}`.
+#[test]
+fn runtime_while_emits_cmp_cset_cbz_and_b() {
+    let asm = compile_to_asm("fn main() -> i32 { let mut x = 0; while x < 5 { x = x + 1; } x }\n");
+    assert!(
+        asm.contains("cmp"),
+        "expected `cmp` instruction for while condition, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("cset"),
+        "expected `cset` instruction to materialise comparison result, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("cbz"),
+        "expected `cbz` instruction for while exit test, got:\n{asm}"
+    );
+    // The back-edge `b .L{n}` must appear — this is what makes it a loop.
+    assert!(
+        asm.contains("\n    b "),
+        "expected unconditional `b` back-edge instruction in while loop, got:\n{asm}"
+    );
+}

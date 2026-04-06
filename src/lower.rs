@@ -33,6 +33,8 @@ use crate::ir::{IrBinOp, Instr, IrFn, IrTy, IrValue, Module};
 // ── FLS citations added in this module ───────────────────────────────────────
 // FLS §6.12.1: Call expressions — `lower_expr` handles `ExprKind::Call`.
 // FLS §9: Functions with parameters — `lower_fn` spills x0..x{n-1} to stack.
+// FLS §6.15.3: While loop expressions — `lower_expr` handles `ExprKind::While`.
+// FLS §6.5.3: Comparison operator expressions — `lower_expr` handles Lt/Le/Gt/Ge/Eq/Ne.
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
@@ -625,6 +627,98 @@ impl<'src> LowerCtx<'src> {
                 self.instrs.push(Instr::Store { src, slot });
 
                 // FLS §6.5.10: assignment expressions have type `()`.
+                Ok(IrValue::Unit)
+            }
+
+            // FLS §6.5.3: Comparison operator expressions.
+            //
+            // Comparisons evaluate both operands (i32) at runtime and produce a
+            // boolean result as 0 (false) or 1 (true). ARM64 codegen emits
+            // `cmp x{lhs}, x{rhs}` followed by `cset x{dst}, <cond>` to
+            // materialise the result into a register.
+            //
+            // FLS §6.1.2:37–45: Even statically-known comparisons emit runtime
+            // instructions — `5 < 10` emits `cmp`+`cset`, not `mov x0, #1`.
+            //
+            // The result type is boolean (represented as i32: 0 or 1). This matches
+            // the representation used by `CondBranch` (cbz tests for zero).
+            ExprKind::Binary { op, lhs, rhs }
+                if matches!(
+                    op,
+                    BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne
+                ) =>
+            {
+                // Both operands must be i32 at this milestone.
+                // FLS §6.5.3 AMBIGUOUS: the spec does not separately describe
+                // the type-checking rules for comparisons in the absence of
+                // type inference. We assume both sides are i32.
+                let lhs_val = self.lower_expr(lhs, &IrTy::I32)?;
+                let rhs_val = self.lower_expr(rhs, &IrTy::I32)?;
+                let lhs_reg = self.val_to_reg(lhs_val)?;
+                let rhs_reg = self.val_to_reg(rhs_val)?;
+                let dst = self.alloc_reg()?;
+                let ir_op = match op {
+                    BinOp::Lt => IrBinOp::Lt,
+                    BinOp::Le => IrBinOp::Le,
+                    BinOp::Gt => IrBinOp::Gt,
+                    BinOp::Ge => IrBinOp::Ge,
+                    BinOp::Eq => IrBinOp::Eq,
+                    BinOp::Ne => IrBinOp::Ne,
+                    _ => unreachable!("matched above"),
+                };
+                self.instrs.push(Instr::BinOp { op: ir_op, dst, lhs: lhs_reg, rhs: rhs_reg });
+                Ok(IrValue::Reg(dst))
+            }
+
+            // FLS §6.15.3: While loop expression.
+            //
+            // A while loop evaluates the condition before each iteration. If the
+            // condition is true, the body executes; the loop then repeats. If the
+            // condition is false, the loop terminates with value `()`.
+            //
+            // Lowering strategy (standard "loop with pre-test" pattern):
+            //   1. Emit header label — the branch-back target for the loop back-edge.
+            //   2. Lower condition → cond_reg.
+            //   3. Emit CondBranch (cbz): jump to exit_label if cond_reg == 0 (false).
+            //   4. Lower body block (statements; tail value discarded — type is `()`).
+            //   5. Emit unconditional Branch back to header_label.
+            //   6. Emit exit_label.
+            //   7. Return IrValue::Unit (while loops always have type `()`).
+            //
+            // FLS §6.15.3: "A while expression has the unit type."
+            // FLS §6.1.2:37–45: The condition is evaluated at runtime every iteration,
+            // even when statically known — `while true { ... }` emits a `mov`+`cbz`.
+            //
+            // Cache-line note: the header and exit labels carry no instruction cost.
+            // The back-edge `b .L{header}` is one 4-byte instruction — it fits in
+            // the same cache line as the last instruction of the body.
+            ExprKind::While { cond, body } => {
+                let header_label = self.alloc_label();
+                let exit_label = self.alloc_label();
+
+                // Loop top: the branch target for the back-edge.
+                self.instrs.push(Instr::Label(header_label));
+
+                // Evaluate condition. Booleans are i32 (0 or 1) in the IR.
+                // FLS §6.15.3: the condition of a while expression must be bool.
+                let cond_val = self.lower_expr(cond, &IrTy::I32)?;
+                let cond_reg = self.val_to_reg(cond_val)?;
+
+                // cbz: exit if condition is false (0).
+                self.instrs.push(Instr::CondBranch { reg: cond_reg, label: exit_label });
+
+                // Execute body. The body has type `()` and its value is discarded.
+                // FLS §6.15.3: "The block of the while loop is repeatedly executed
+                // as long as the condition is true."
+                self.lower_block_to_value(body, &IrTy::Unit)?;
+
+                // Back-edge: unconditionally re-evaluate the condition.
+                self.instrs.push(Instr::Branch(header_label));
+
+                // Exit: the while expression produces `()`.
+                self.instrs.push(Instr::Label(exit_label));
+
+                // FLS §6.15.3: "The type of a while expression is the unit type ()."
                 Ok(IrValue::Unit)
             }
 

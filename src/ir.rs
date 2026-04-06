@@ -78,9 +78,10 @@ pub struct IrFn {
 
 // ── Instructions ──────────────────────────────────────────────────────────────
 
-/// An arithmetic binary operation kind for the IR.
+/// An arithmetic or comparison binary operation kind for the IR.
 ///
 /// FLS §6.5.5: Arithmetic operator expressions.
+/// FLS §6.5.3: Comparison operator expressions.
 /// Cache-line note: fits in 1 byte as a discriminant — negligible overhead.
 #[derive(Debug, Clone, Copy)]
 pub enum IrBinOp {
@@ -90,6 +91,18 @@ pub enum IrBinOp {
     Sub,
     /// Integer multiplication `*`. FLS §6.5.5.
     Mul,
+    /// Signed less-than `<`. FLS §6.5.3. Result: 1 if true, 0 if false.
+    Lt,
+    /// Signed less-than-or-equal `<=`. FLS §6.5.3.
+    Le,
+    /// Signed greater-than `>`. FLS §6.5.3.
+    Gt,
+    /// Signed greater-than-or-equal `>=`. FLS §6.5.3.
+    Ge,
+    /// Equality `==`. FLS §6.5.3.
+    Eq,
+    /// Inequality `!=`. FLS §6.5.3.
+    Ne,
 }
 
 /// An IR instruction.
@@ -99,6 +112,7 @@ pub enum IrBinOp {
 /// Milestone 12 adds `Store` and `Load` for let bindings.
 /// Milestone 13 adds `Label`, `Branch`, and `CondBranch` for if/else control flow.
 /// Milestone 14 adds `Call` for function call expressions (FLS §6.12.1).
+/// Milestone 16 adds comparison ops to `IrBinOp` and while loop lowering.
 pub enum Instr {
     /// Return a value to the caller.
     ///
