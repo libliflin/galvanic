@@ -1934,6 +1934,74 @@ impl<'src> LowerCtx<'src> {
         Ok(())
     }
 
+    /// Expand a struct literal expression into leaf-field argument registers.
+    ///
+    /// For `Outer { x: 3, inner: Inner { a: 4 } }` passed to `fn f(o: Outer)`,
+    /// the calling convention passes each leaf slot as a separate register:
+    /// x0 = 3 (outer.x), x1 = 4 (inner.a). This helper recurses into nested
+    /// struct-type fields so that the correct number and order of registers are
+    /// pushed to `arg_regs`.
+    ///
+    /// FLS §6.11 + §11: Struct literal arguments are expanded field-by-field in
+    /// declaration order. Nested struct fields are recursively expanded.
+    /// FLS §6.1.2:37–45: All register loads are runtime instructions.
+    ///
+    /// Cache-line note: N leaf registers = N × 4-byte `mov`/load instructions,
+    /// matching the N-slot parameter spill in `lower_fn`.
+    fn push_struct_lit_arg_regs(
+        &mut self,
+        expr: &Expr,
+        struct_name: &str,
+        arg_regs: &mut Vec<u8>,
+    ) -> Result<(), LowerError> {
+        let ExprKind::StructLit { fields: lit_fields, .. } = &expr.kind else {
+            return Err(LowerError::Unsupported(format!(
+                "expected struct literal of type `{struct_name}` as function argument"
+            )));
+        };
+
+        let field_names = self
+            .struct_defs
+            .get(struct_name)
+            .ok_or_else(|| {
+                LowerError::Unsupported(format!(
+                    "unknown struct type `{struct_name}` in function argument"
+                ))
+            })?
+            .clone();
+
+        let field_types = self
+            .struct_field_types
+            .get(struct_name)
+            .cloned()
+            .unwrap_or_default();
+
+        for (fi, field_name) in field_names.iter().enumerate() {
+            let (_, field_val_expr) = lit_fields
+                .iter()
+                .find(|(f, _)| f.text(self.source) == field_name.as_str())
+                .ok_or_else(|| {
+                    LowerError::Unsupported(format!(
+                        "missing field `{field_name}` in `{struct_name}` literal argument"
+                    ))
+                })?;
+
+            let nested_ty = field_types.get(fi).cloned().flatten();
+            if let Some(inner_type) = nested_ty {
+                // This field is a nested struct — recurse to expand its leaf fields.
+                // FLS §6.11: Field initializers of struct type must themselves be
+                // struct literals (or struct variables handled by the var-path path).
+                self.push_struct_lit_arg_regs(field_val_expr, &inner_type, arg_regs)?;
+            } else {
+                // Scalar field — lower to a register and push.
+                let val = self.lower_expr(field_val_expr, &IrTy::I32)?;
+                let reg = self.val_to_reg(val)?;
+                arg_regs.push(reg);
+            }
+        }
+        Ok(())
+    }
+
     /// Bind struct field patterns recursively from a known base slot.
     ///
     /// After a struct value is on the stack (slots `base_slot .. base_slot + size`),
@@ -5864,42 +5932,24 @@ impl<'src> LowerCtx<'src> {
                         }
                     } else if let ExprKind::StructLit {
                         name: struct_name_span,
-                        fields: lit_fields,
                         ..
                     } = &arg.kind
                     {
                         // FLS §6.11 + §11: Struct literal used directly as a function
-                        // argument — e.g., `sum(Point { x: 3, y: 4 })`.
+                        // argument — e.g., `sum(Point { x: 3, y: 4 })` or a nested
+                        // struct literal `f(Outer { x: 1, inner: Inner { a: 2 } })`.
                         //
-                        // Inline-evaluate each field expression in declaration order and
-                        // pass the results as separate registers. This mirrors the struct
-                        // parameter calling convention set up in `lower_fn` (field 0 →
-                        // x{i}, field 1 → x{i+1}, …) without allocating a named slot.
+                        // Uses `push_struct_lit_arg_regs` to recursively expand nested
+                        // struct-type fields into their leaf registers, matching the
+                        // N-slot calling convention established in `lower_fn`.
                         //
                         // FLS §6.11: Field initializers may appear in any source order;
-                        // galvanic stores and passes them in struct declaration order for
-                        // layout stability.
+                        // galvanic stores and passes them in struct declaration order.
                         // FLS §6.1.2:37–45: All field evaluations emit runtime instructions.
-                        // Cache-line note: N field registers = N × 4-byte `mov` or load
-                        // instructions, one per field.
-                        let struct_name = struct_name_span.text(self.source);
-                        let field_names = self.struct_defs
-                            .get(struct_name)
-                            .cloned()
-                            .ok_or_else(|| LowerError::Unsupported(format!(
-                                "unknown struct type `{struct_name}` in function argument"
-                            )))?;
-                        for field_name in &field_names {
-                            let (_, field_val_expr) = lit_fields
-                                .iter()
-                                .find(|(f, _)| f.text(self.source) == field_name.as_str())
-                                .ok_or_else(|| LowerError::Unsupported(format!(
-                                    "missing field `{field_name}` in `{struct_name}` literal argument"
-                                )))?;
-                            let val = self.lower_expr(field_val_expr, &IrTy::I32)?;
-                            let reg = self.val_to_reg(val)?;
-                            arg_regs.push(reg);
-                        }
+                        // Cache-line note: N leaf registers = N × 4-byte instructions,
+                        // one per leaf field of the outermost struct.
+                        let struct_name = struct_name_span.text(self.source).to_owned();
+                        self.push_struct_lit_arg_regs(arg, &struct_name, &mut arg_regs)?;
                     } else {
                         let val = self.lower_expr(arg, &IrTy::I32)?;
                         let reg = self.val_to_reg(val)?;
