@@ -1491,6 +1491,29 @@ fn runtime_not_emits_mvn_instruction() {
     );
 }
 
+/// Assembly inspection: `!b` for a bool parameter must emit `eor ... #1` (not `mvn`).
+///
+/// FLS §6.5.4: Logical NOT on bool. `eor x{dst}, x{src}, #1` XORs bit 0,
+/// producing the correct logical complement for a 0/1 boolean value.
+///
+/// If `mvn` were emitted instead: `!true` = `mvn 1` = -2 (wrong, should be 0),
+/// and `!false` = `mvn 0` = -1 (wrong, should be 1).
+///
+/// FLS §6.1.2:37–45: Non-const `!bool_param` must emit a runtime instruction.
+#[test]
+fn runtime_bool_not_emits_eor_instruction() {
+    let asm = compile_to_asm("fn negate(b: bool) -> bool { !b }\nfn main() -> i32 { 0 }\n");
+    assert!(
+        asm.contains("eor") && asm.contains("#1"),
+        "expected `eor ... #1` instruction for `!b` (logical NOT), got:\n{asm}"
+    );
+    // Must NOT use bitwise NOT (mvn) for a bool operand.
+    assert!(
+        !asm.contains("mvn"),
+        "assembly must not use `mvn` for bool `!b` — should be `eor ... #1`:\n{asm}"
+    );
+}
+
 // ── Milestone 15: type cast expressions `as` ─────────────────────────────────
 //
 // FLS §6.5.9: Type cast expressions. The `as` operator converts a value of
@@ -1682,8 +1705,8 @@ fn milestone_16_bool_return_false() {
 /// `negate(false)` takes bool param (0), applies `!` (mvn), returns bool (1).
 /// The caller uses the returned bool as an if condition.
 ///
-/// FLS §4.3: bool param and return use the same i32 register layout.
-/// FLS §6.5.4: `!` on a bool (represented as i32) emits `mvn`.
+/// FLS §4.3: bool param and return use the same register layout as i32.
+/// FLS §6.5.4: `!` on a bool emits `eor reg, #1` (logical NOT).
 #[test]
 fn milestone_16_bool_param_and_return() {
     let src = "fn negate(b: bool) -> bool { !b }\nfn main() -> i32 { if negate(false) { 1 } else { 0 } }\n";
@@ -1691,4 +1714,59 @@ fn milestone_16_bool_param_and_return() {
         return;
     };
     assert_eq!(exit_code, 1, "expected exit 1 from if negate(false) {{1}} else {{0}}, got {exit_code}");
+}
+
+// ── Milestone 17: boolean logical NOT emits runtime `eor` ───────────────────
+//
+// FLS §6.5.4: The unary `!` applied to a `bool` value produces its logical
+// complement: `!true` = `false` (0), `!false` = `true` (1).
+//
+// ARM64 codegen: `eor x{dst}, x{src}, #1` — XOR with 1 flips bit 0.
+// This is distinct from bitwise NOT (Instr::Not → `mvn`), which would produce
+// -2 for `!true` and -1 for `!false` — wrong for boolean semantics.
+//
+// FLS §6.1.2:37–45: Even `!true` in a non-const context emits a runtime `eor`.
+
+/// Milestone 17: `!true` must return `false` (0), not `-2` (from `mvn`).
+///
+/// FLS §6.5.4: Logical NOT for bool — `!true` = `false`.
+/// FLS §4.3: `false` is represented as 0 in a 64-bit register.
+#[test]
+fn milestone_17_bool_not_true() {
+    let src = "fn negate(b: bool) -> bool { !b }\nfn main() -> i32 { if negate(true) { 1 } else { 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 0, "expected exit 0 from if negate(true) {{1}} else {{0}}: !true = false, got {exit_code}");
+}
+
+/// Milestone 17: `!false` must return `true` (1).
+///
+/// FLS §6.5.4: Logical NOT for bool — `!false` = `true`.
+/// FLS §4.3: `true` is represented as 1 in a 64-bit register.
+#[test]
+fn milestone_17_bool_not_false() {
+    let src = "fn negate(b: bool) -> bool { !b }\nfn main() -> i32 { if negate(false) { 1 } else { 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "expected exit 1 from if negate(false) {{1}} else {{0}}: !false = true, got {exit_code}");
+}
+
+/// Milestone 17: `!b` used directly as an if condition lowers correctly.
+///
+/// Tests `if !b { 1 } else { 0 }` where b is a bool parameter. The condition
+/// `!b` must emit `eor` (logical NOT) so that `cbz` behaves correctly.
+///
+/// FLS §6.5.4: `!` on bool is logical NOT.
+/// FLS §6.17: The if condition is evaluated at runtime.
+#[test]
+fn milestone_17_bool_not_as_condition() {
+    let src = "fn main(b: bool) -> i32 { if !b { 1 } else { 0 } }\n";
+    // We test via the fixture: negate(false) → true → if-then branch → 1
+    let src2 = "fn check(b: bool) -> i32 { if !b { 1 } else { 0 } }\nfn main() -> i32 { check(false) }\n";
+    let Some(exit_code) = compile_and_run(src2) else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "expected exit 1 from check(false) with if !b {{1}} else {{0}}, got {exit_code}");
 }

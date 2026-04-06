@@ -129,9 +129,10 @@ fn lower_fn(fn_def: &crate::ast::FnDef, source: &str) -> Result<IrFn, LowerError
             ));
         }
         let param_ty = lower_ty(&param.ty, source)?;
-        // Only i32 (and bool, which maps to i32) parameters are supported.
+        // Only i32 and bool parameters are supported (both use integer registers).
         // FLS §4.3: bool is passed as a 32-bit integer register on ARM64.
-        if !matches!(param_ty, IrTy::I32) {
+        // FLS §4.1: i32 parameters occupy one 64-bit register (x0–x7).
+        if !matches!(param_ty, IrTy::I32 | IrTy::Bool) {
             return Err(LowerError::Unsupported("parameter type other than i32/bool".into()));
         }
         let slot = ctx.alloc_slot()?;
@@ -168,8 +169,11 @@ fn lower_ty(ty: &crate::ast::Ty, source: &str) -> Result<IrTy, LowerError> {
         TyKind::Path(segments) if segments.len() == 1 => {
             match segments[0].text(source) {
                 "i32" => Ok(IrTy::I32),
-                // FLS §4.3: bool maps to i32 in the IR — same register layout.
-                "bool" => Ok(IrTy::I32),
+                // FLS §4.3: bool is a distinct type in the IR so that `!` can
+                // emit logical NOT (eor, XOR with 1) rather than bitwise NOT (mvn).
+                // On ARM64, bool and i32 share the same register layout (0/1 as i64),
+                // but the semantics of `!` differ.
+                "bool" => Ok(IrTy::Bool),
                 name => Err(LowerError::Unsupported(format!("type `{name}`"))),
             }
         }
@@ -572,11 +576,16 @@ impl<'src> LowerCtx<'src> {
             //
             ExprKind::If { cond, then_block, else_expr } => {
                 match ret_ty {
-                    // FLS §6.17: If expression producing an i32 value.
+                    // FLS §6.17: If expression producing an i32 or bool value.
                     //
-                    // Lowering uses a "phi slot": a stack slot written by both
-                    // branches and read once after the if expression to yield
-                    // the result in a virtual register.
+                    // Both types use the same phi-slot lowering pattern — the
+                    // result is a 0/1 or signed integer in a register. The
+                    // branches write to a shared stack slot; the result is
+                    // loaded once after the if expression completes.
+                    //
+                    // Conditions are always lowered as `IrTy::Bool` so that
+                    // `!bool_var` in a condition emits logical NOT (`eor`) rather
+                    // than bitwise NOT (`mvn`). FLS §6.5.4: `!` on bool is logical.
                     //
                     // FLS §6.17: "The type of the if expression is the type of
                     // the last expression in the block." Both branches must have
@@ -587,7 +596,7 @@ impl<'src> LowerCtx<'src> {
                     //
                     // Cache-line note: the phi slot is one 8-byte stack entry;
                     // read exactly once after the if expression completes.
-                    IrTy::I32 => {
+                    IrTy::I32 | IrTy::Bool => {
                         let else_label = self.alloc_label();
                         let end_label = self.alloc_label();
 
@@ -595,9 +604,10 @@ impl<'src> LowerCtx<'src> {
                         // both branches write to the same stack location.
                         let phi_slot = self.alloc_slot()?;
 
-                        // Lower condition (bool → 0 or 1 in a register).
-                        // We pass IrTy::I32 since booleans are represented as integers.
-                        let cond_val = self.lower_expr(cond, &IrTy::I32)?;
+                        // Lower condition as bool so that `!bool_var` emits
+                        // logical NOT (BoolNot) rather than bitwise NOT (Not).
+                        // FLS §6.5.4: `!` on bool must be logical NOT.
+                        let cond_val = self.lower_expr(cond, &IrTy::Bool)?;
                         let cond_reg = self.val_to_reg(cond_val)?;
 
                         // CondBranch: jump to else_label if condition is false (0).
@@ -615,9 +625,9 @@ impl<'src> LowerCtx<'src> {
                             Some(e) => self.lower_expr(e, ret_ty)?,
                             None => {
                                 // FLS §6.17: if without else has type `()`. Using it
-                                // where i32 is expected is a type error — unsupported.
+                                // where i32/bool is expected is a type error — unsupported.
                                 return Err(LowerError::Unsupported(
-                                    "if expression without else in i32 context".into(),
+                                    "if expression without else in non-unit context".into(),
                                 ));
                             }
                         };
@@ -639,6 +649,9 @@ impl<'src> LowerCtx<'src> {
                     //
                     // No phi slot is allocated — the branches run for side effects.
                     //
+                    // Conditions are lowered as `IrTy::Bool` so that `!b` as an
+                    // if condition emits logical NOT. FLS §6.5.4.
+                    //
                     // FLS §6.17: "If an if expression does not have an else expression,
                     // its type is the unit type."
                     //
@@ -647,7 +660,9 @@ impl<'src> LowerCtx<'src> {
                         let else_label = self.alloc_label();
                         let end_label = self.alloc_label();
 
-                        let cond_val = self.lower_expr(cond, &IrTy::I32)?;
+                        // Lower condition as bool — ensures `!bool_var` uses BoolNot.
+                        // FLS §6.5.4: `!` on bool is logical NOT (eor), not bitwise (mvn).
+                        let cond_val = self.lower_expr(cond, &IrTy::Bool)?;
                         let cond_reg = self.val_to_reg(cond_val)?;
 
                         // Jump to else (or end) if condition is false.
@@ -913,9 +928,11 @@ impl<'src> LowerCtx<'src> {
                 // Loop top: the branch target for the back-edge.
                 self.instrs.push(Instr::Label(header_label));
 
-                // Evaluate condition. Booleans are i32 (0 or 1) in the IR.
+                // Evaluate condition as IrTy::Bool so that `!bool_var` used
+                // as a while condition emits logical NOT (BoolNot/eor) rather
+                // than bitwise NOT (Not/mvn). FLS §6.5.4.
                 // FLS §6.15.3: the condition of a while expression must be bool.
-                let cond_val = self.lower_expr(cond, &IrTy::I32)?;
+                let cond_val = self.lower_expr(cond, &IrTy::Bool)?;
                 let cond_reg = self.val_to_reg(cond_val)?;
 
                 // cbz: exit if condition is false (0).
@@ -1225,24 +1242,46 @@ impl<'src> LowerCtx<'src> {
                 Ok(IrValue::Reg(dst))
             }
 
-            // FLS §6.5.4: Bitwise NOT `!operand` — complement all bits.
+            // FLS §6.5.4: Negation operator `!operand` — two cases:
             //
-            // Lowering:
-            //   1. Lower the operand to a register.
-            //   2. Emit `Instr::Not { dst, src }` → `mvn x{dst}, x{src}` on ARM64.
+            //   1. `!bool_value` → logical NOT: `false` (0) ↔ `true` (1).
+            //      ARM64: `eor x{dst}, x{src}, #1` (XOR with 1 flips bit 0).
+            //      Emits `Instr::BoolNot`. Triggered when `ret_ty == IrTy::Bool`.
             //
-            // FLS §6.1.2:37–45: Even `!5` in a non-const context emits a runtime `mvn`
-            // instruction — no compile-time folding to a complemented immediate.
+            //   2. `!integer_value` → bitwise NOT: flip all bits.
+            //      ARM64: `mvn x{dst}, x{src}` (alias for orn xD, xzr, xS).
+            //      Emits `Instr::Not`. Triggered for all other `ret_ty`.
+            //
+            // The distinction is necessary because `mvn` of 0 is -1 (not 1),
+            // and `mvn` of 1 is -2 (not 0). Using `mvn` for booleans produces
+            // non-boolean results that break downstream `cbz` conditions.
+            //
+            // `ret_ty` determines which case applies:
+            //   - `IrTy::Bool`: the expression is expected to produce a bool → logical NOT.
+            //   - `IrTy::I32` or other: integer context → bitwise NOT.
             //
             // FLS §6.5.4: "The type of a negation expression is the type of the operand."
+            // FLS §6.1.2:37–45: Both variants emit runtime instructions — no folding.
             //
-            // Cache-line note: `mvn` is 4 bytes (alias for `orn xD, xzr, xS`).
+            // Cache-line note: both `eor` (bool) and `mvn` (int) are 4 bytes.
             ExprKind::Unary { op: crate::ast::UnaryOp::Not, operand } => {
-                let val = self.lower_expr(operand, &IrTy::I32)?;
-                let src = self.val_to_reg(val)?;
-                let dst = self.alloc_reg()?;
-                self.instrs.push(Instr::Not { dst, src });
-                Ok(IrValue::Reg(dst))
+                if *ret_ty == IrTy::Bool {
+                    // Logical NOT: lower operand as bool, emit BoolNot (eor).
+                    // The operand is a bool expression (0 or 1); XOR with 1 flips it.
+                    let val = self.lower_expr(operand, &IrTy::Bool)?;
+                    let src = self.val_to_reg(val)?;
+                    let dst = self.alloc_reg()?;
+                    self.instrs.push(Instr::BoolNot { dst, src });
+                    Ok(IrValue::Reg(dst))
+                } else {
+                    // Bitwise NOT: lower operand as i32, emit Not (mvn).
+                    // FLS §6.5.4: `!n` for integers flips all bits.
+                    let val = self.lower_expr(operand, &IrTy::I32)?;
+                    let src = self.val_to_reg(val)?;
+                    let dst = self.alloc_reg()?;
+                    self.instrs.push(Instr::Not { dst, src });
+                    Ok(IrValue::Reg(dst))
+                }
             }
 
             // FLS §6.5.9: Type cast expression `expr as Ty`.
