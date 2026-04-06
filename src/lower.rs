@@ -5473,6 +5473,39 @@ impl<'src> LowerCtx<'src> {
                         // FLS §6.5.10: assignment expressions have type `()`.
                         return Ok(IrValue::Unit);
                     }
+                    // FLS §6.5.10: Assignment through a mutable reference `*ref_var = value`.
+                    //
+                    // When the LHS is a dereference expression, the operand must resolve to
+                    // a register holding a pointer (an `&mut T` reference). The value is
+                    // stored through that pointer using `StorePtr`.
+                    //
+                    // Lowering strategy:
+                    // 1. Lower the pointer operand to a register (e.g., the `&mut` parameter).
+                    // 2. Lower the RHS value to a register.
+                    // 3. Emit `StorePtr { src: rhs_reg, addr: ptr_reg }`.
+                    //
+                    // FLS §6.1.2:37–45: Both the pointer computation and the store are
+                    // runtime instructions; no compile-time evaluation is permitted.
+                    //
+                    // Cache-line note: one `str` instruction (4 bytes) — identical footprint
+                    // to a plain variable store (`str xS, [sp, #offset]`).
+                    ExprKind::Unary {
+                        op: crate::ast::UnaryOp::Deref,
+                        operand,
+                    } => {
+                        // Lower the pointer (e.g., the &mut parameter).
+                        let ptr_val = self.lower_expr(operand, &IrTy::I32)?;
+                        let ptr_reg = self.val_to_reg(ptr_val)?;
+
+                        // Lower the RHS.
+                        let rhs_val = self.lower_expr(rhs, &IrTy::I32)?;
+                        let src_reg = self.val_to_reg(rhs_val)?;
+
+                        self.instrs.push(Instr::StorePtr { src: src_reg, addr: ptr_reg });
+
+                        // FLS §6.5.10: assignment has type `()`.
+                        return Ok(IrValue::Unit);
+                    }
                     _ => {
                         return Err(LowerError::Unsupported(
                             "assignment to non-variable place expression not yet supported".into(),

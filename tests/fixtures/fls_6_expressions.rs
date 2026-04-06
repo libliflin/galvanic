@@ -544,3 +544,24 @@ fn deref_ref_example(n: i32) -> i32 {
     *x                  // deref: load the value at that address
 }
 
+
+// FLS §6.5.10: Assignment through a mutable reference.
+//
+// "An assignment expression is an expression that assigns the value of its
+// right operand to its left operand." When the left operand is a dereference
+// expression `*place`, the value is written through the pointer held in `place`.
+//
+// The FLS does not provide a standalone code example for `*ref = value`; this
+// function is derived from the semantic descriptions in §6.5.10 and §6.5.1.
+//
+// ARM64 codegen:
+//   `&mut n`  → `add x{dst}, sp, #{slot * 8}`   (one instruction, FLS §6.5.1)
+//   `*x = v`  → `str x{src}, [x{addr}]`         (one instruction, FLS §6.5.10)
+//
+// Cache-line note: `str [xN]` is one 4-byte instruction — identical footprint
+// to a plain stack store (`str [sp, #offset]`). Mutable reference writes carry
+// no extra instruction cost when the pointer is already in a register.
+fn mut_ref_assign_example(x: &mut i32, v: i32) {
+    // FLS §6.5.10: `*x = v` — store v through the pointer x.
+    *x = v;
+}

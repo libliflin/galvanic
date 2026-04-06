@@ -775,6 +775,21 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool) 
                 "    ldr     x{dst}, [x{src}]           // FLS §6.5.2: deref pointer in x{src}"
             )?;
         }
+
+        // FLS §6.5.10: Assignment through a mutable reference `*ref_var = value`.
+        //
+        // Stores the value in register `src` to the memory address in register `addr`.
+        // ARM64: `str x{src}, [x{addr}]` — register-indirect store.
+        //
+        // Cache-line note: one 4-byte instruction. The store targets the same
+        // cache line as the referent value (8-byte aligned). Symmetric with
+        // `LoadPtr` — same instruction count, same cache footprint.
+        Instr::StorePtr { src, addr } => {
+            writeln!(
+                out,
+                "    str     x{src}, [x{addr}]           // FLS §6.5.10: store through pointer in x{addr}"
+            )?;
+        }
     }
     Ok(())
 }
