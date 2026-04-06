@@ -9250,3 +9250,120 @@ fn main() -> i32 { sum_pair((3, 4)) }\n";
         "tuple param spill must emit ≥2 str instructions, got {str_count}:\n{asm}"
     );
 }
+
+// ── Milestone 78: struct pattern destructuring in function parameters ─────────
+//
+// FLS §5.10.2, §9.2: Named struct patterns are irrefutable and may appear in
+// parameter position. `fn f(Point { x, y }: Point)` binds `x` and `y` directly
+// from the incoming registers, equivalent to `fn f(p: Point)` + `let Point { x, y } = p;`.
+//
+// No FLS code example for this specific form; derived from §5.10.2 semantics.
+
+/// FLS §5.10.2, §9.2: Basic two-field struct pattern — `Point { x, y }`.
+/// The function receives `x0 = x`, `x1 = y` and binds them by name.
+#[test]
+fn milestone_78_struct_param_sum() {
+    let src = "\
+struct Point { x: i32, y: i32 }\n\
+fn sum(Point { x, y }: Point) -> i32 { x + y }\n\
+fn main() -> i32 { let p = Point { x: 3, y: 4 }; sum(p) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 3 + 4 = 7, got {exit_code}");
+}
+
+/// FLS §5.10.2, §9.2: First field of struct pattern.
+#[test]
+fn milestone_78_struct_param_first_field() {
+    let src = "\
+struct Point { x: i32, y: i32 }\n\
+fn get_x(Point { x, y: _ }: Point) -> i32 { x }\n\
+fn main() -> i32 { let p = Point { x: 42, y: 99 }; get_x(p) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected x=42, got {exit_code}");
+}
+
+/// FLS §5.10.2, §9.2: Second field of struct pattern.
+#[test]
+fn milestone_78_struct_param_second_field() {
+    let src = "\
+struct Point { x: i32, y: i32 }\n\
+fn get_y(Point { x: _, y }: Point) -> i32 { y }\n\
+fn main() -> i32 { let p = Point { x: 1, y: 13 }; get_y(p) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 13, "expected y=13, got {exit_code}");
+}
+
+/// FLS §5.10.2, §9.2: Struct pattern in arithmetic with caller passing literals.
+#[test]
+fn milestone_78_struct_param_result_in_arithmetic() {
+    let src = "\
+struct Pair { a: i32, b: i32 }\n\
+fn diff(Pair { a, b }: Pair) -> i32 { a - b }\n\
+fn main() -> i32 { let p = Pair { a: 10, b: 3 }; diff(p) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 10 - 3 = 7, got {exit_code}");
+}
+
+/// FLS §5.10.2, §9.2: Struct pattern with parameter passed from function argument.
+#[test]
+fn milestone_78_struct_param_from_variable() {
+    let src = "\
+struct Point { x: i32, y: i32 }\n\
+fn scale(Point { x, y }: Point, factor: i32) -> i32 { (x + y) * factor }\n\
+fn main() -> i32 { let p = Point { x: 2, y: 3 }; scale(p, 5) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 25, "expected (2+3)*5=25, got {exit_code}");
+}
+
+/// FLS §5.10.2, §9.2: Three-field struct pattern.
+#[test]
+fn milestone_78_struct_param_three_fields() {
+    let src = "\
+struct Triple { a: i32, b: i32, c: i32 }\n\
+fn sum3(Triple { a, b, c }: Triple) -> i32 { a + b + c }\n\
+fn main() -> i32 { let t = Triple { a: 1, b: 2, c: 3 }; sum3(t) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "expected 1+2+3=6, got {exit_code}");
+}
+
+/// FLS §5.10.2, §9.2: Struct pattern mixed with a scalar parameter.
+#[test]
+fn milestone_78_struct_param_mixed_with_scalar() {
+    let src = "\
+struct Point { x: i32, y: i32 }\n\
+fn dot(Point { x, y }: Point, scale: i32) -> i32 { x * scale + y * scale }\n\
+fn main() -> i32 { let p = Point { x: 3, y: 4 }; dot(p, 2) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 14, "expected (3+4)*2=14, got {exit_code}");
+}
+
+/// FLS §5.10.2, §9.2: Struct pattern parameter used in an if expression.
+#[test]
+fn milestone_78_struct_param_in_if() {
+    let src = "\
+struct Point { x: i32, y: i32 }\n\
+fn dominant(Point { x, y }: Point) -> i32 { if x > y { x } else { y } }\n\
+fn main() -> i32 { let p = Point { x: 5, y: 3 }; dominant(p) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "expected dominant=5, got {exit_code}");
+}
+
+/// Runtime inspection: struct pattern parameter generates runtime spill stores.
+///
+/// FLS §6.1.2:37–45, §5.10.2: The parameter spill must emit `str` instructions
+/// at the function entry regardless of whether the caller passes literals or variables.
+///
+/// Cache-line note: 2 fields → 2 × 4-byte `str` = 8 bytes, same as tuple params.
+#[test]
+fn runtime_struct_param_emits_spill_stores() {
+    let src = "\
+struct Point { x: i32, y: i32 }\n\
+fn sum(Point { x, y }: Point) -> i32 { x + y }\n\
+fn main() -> i32 { let p = Point { x: 1, y: 2 }; sum(p) }\n";
+    let asm = compile_to_asm(src);
+    let str_count = asm.lines().filter(|l: &&str| l.trim_start().starts_with("str ")).count();
+    assert!(
+        str_count >= 2,
+        "struct param spill must emit ≥2 str instructions, got {str_count}:\n{asm}"
+    );
+}

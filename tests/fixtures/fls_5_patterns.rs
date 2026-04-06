@@ -184,6 +184,22 @@ fn dist_sq(c: Coord) -> i32 {
     x * x + y * y
 }
 
+// FLS §5.10.2, §9.2: Struct pattern in parameter position.
+// `Point { x, y }: Point` binds `x` and `y` directly from the incoming
+// registers — equivalent to `p: Point` followed by `let Point { x, y } = p;`.
+//
+// FLS §9.2 AMBIGUOUS: The spec allows arbitrary irrefutable patterns in
+// parameter position but does not enumerate them independently — the reader
+// must cross-reference §5. No concrete code example is provided in the spec;
+// this is derived from §5.10.2 semantics (struct patterns are irrefutable and
+// bind each named field) applied to the parameter context from §9.2.
+struct Rect { w: i32, h: i32 }
+
+fn area(Rect { w, h }: Rect) -> i32 {
+    // FLS §5.10.2: `w` and `h` are bound directly from the incoming registers.
+    w * h
+}
+
 fn main() -> i32 {
     // FLS §5.1.9: inclusive range — value 2 in [1,3] → 1.
     let a = range_inclusive(2);
@@ -218,6 +234,9 @@ fn main() -> i32 {
     let n3 = dist_sq(p);
     // FLS §5.10.3: nested tuple — nested_sum(1,2,4) = 7.
     let q = nested_sum(1, 2, 4);
-    // a=1, b=2, c=1, d=1, e=1, f=1, g=4, h=2, i=3, j=0, k=2, m=3, n2=1, n3=1, q=7 → sum=30
-    a + b + c + d + e + f + g + h + i + j + k + m + n2 + n3 + q
+    // FLS §5.10.2, §9.2: struct pattern param — area(Rect { w:3, h:4 }) = 12.
+    let r = Rect { w: 3, h: 4 };
+    let r2 = area(r);
+    // a=1, b=2, c=1, d=1, e=1, f=1, g=4, h=2, i=3, j=0, k=2, m=3, n2=1, n3=1, q=7, r2=12 → sum=42
+    a + b + c + d + e + f + g + h + i + j + k + m + n2 + n3 + q + r2
 }

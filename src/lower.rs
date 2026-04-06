@@ -1022,9 +1022,65 @@ fn lower_fn(
             continue;
         }
 
+        // FLS §5.10.2, §9.2: Struct pattern parameter `Point { x, y }: Point`.
+        //
+        // The struct value arrives in consecutive registers (one per flat slot),
+        // matching the named struct calling convention used for `p: Point`
+        // parameters. Spill each register to a slot and bind each named field
+        // directly, skipping the intermediate struct-variable binding.
+        //
+        // Cache-line note: N flat slots → N × 4-byte `str` spill instructions.
+        // Same instruction density as the plain `p: Point` path; no extra cost.
+        if let crate::ast::ParamKind::Struct { type_span, fields } = &param.kind {
+            let type_name = type_span.text(source);
+            if let Some(field_names) = struct_defs.get(type_name) {
+                let n_slots = struct_sizes.get(type_name).copied().unwrap_or(field_names.len());
+                if n_slots > 0 && reg_idx + n_slots > 8 {
+                    return Err(LowerError::Unsupported(
+                        "struct pattern parameter exceeds ARM64 register window (>8 total registers)".into(),
+                    ));
+                }
+                // Allocate consecutive stack slots for all fields.
+                let base_slot = ctx.alloc_slot()?;
+                for _ in 1..n_slots {
+                    ctx.alloc_slot()?;
+                }
+                // Spill each incoming register to its slot.
+                for fi in 0..n_slots {
+                    ctx.instrs.push(Instr::Store {
+                        src: (reg_idx + fi) as u8,
+                        slot: base_slot + fi as u8,
+                    });
+                }
+                // Bind each named field in the pattern to its slot.
+                // FLS §5.10.2: The struct field binding order is determined by
+                // the *struct definition*, not the pattern source order.
+                // Each named field `x` in the pattern is resolved to its
+                // declaration-order index in `field_names`.
+                for (field_name_span, binding_span) in fields {
+                    let fname = field_name_span.text(source);
+                    if let Some(binding) = binding_span {
+                        let bname = binding.text(source);
+                        if bname != "_"
+                            && let Some(fi) = field_names.iter().position(|f| f == fname)
+                        {
+                            ctx.locals.insert(bname, base_slot + fi as u8);
+                        }
+                    }
+                }
+                reg_idx += n_slots;
+                continue;
+            }
+            return Err(LowerError::Unsupported(format!(
+                "struct pattern parameter for unknown struct type `{type_name}`"
+            )));
+        }
+
         let param_name = match &param.kind {
             crate::ast::ParamKind::Ident(s) => s.text(source),
-            crate::ast::ParamKind::Tuple(_) => unreachable!(), // handled above
+            crate::ast::ParamKind::Tuple(_) | crate::ast::ParamKind::Struct { .. } => {
+                unreachable!() // handled above
+            }
         };
 
         // FLS §15: Enum type parameters — `fn f(o: Opt)`.

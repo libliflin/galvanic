@@ -315,13 +315,14 @@ pub struct TraitDef {
 
 /// The binding pattern of a function parameter.
 ///
-/// FLS §5.10.3, §9.2: Parameters may use irrefutable patterns. This
-/// implementation supports identifier patterns and flat tuple patterns.
+/// FLS §5.10.2, §5.10.3, §9.2: Parameters may use irrefutable patterns.
+/// This implementation supports identifier patterns, flat tuple patterns,
+/// and named struct patterns.
 ///
 /// FLS §9.2 AMBIGUOUS: the spec allows arbitrary irrefutable patterns in
 /// parameter position but does not enumerate them independently — the reader
-/// must cross-reference §5. Nested tuple patterns and struct patterns in
-/// parameter position are future work.
+/// must cross-reference §5. Nested patterns in parameter position are
+/// future work.
 #[derive(Debug, Clone)]
 pub enum ParamKind {
     /// Simple `name: ty` or `mut name: ty` parameter. FLS §9.2, §5.1.
@@ -330,6 +331,20 @@ pub enum ParamKind {
     ///
     /// Each element is the span of the bound name or `_` (wildcard).
     Tuple(Vec<Span>),
+    /// Named struct destructuring `StructName { field1, field2 }: StructTy`.
+    ///
+    /// FLS §5.10.2, §9.2: Struct patterns are irrefutable and may appear
+    /// in parameter position.
+    ///
+    /// Each entry is `(field_name_span, binding_span)`. `binding_span` is
+    /// `None` for wildcard `_` bindings. The shorthand form `{ x }` is sugar
+    /// for `{ x: x }` and is represented as `(x_span, Some(x_span))`.
+    Struct {
+        /// Span of the struct type name (e.g. `Point` in `Point { x, y }`).
+        type_span: Span,
+        /// Field bindings in source order.
+        fields: Vec<(Span, Option<Span>)>,
+    },
 }
 
 /// A function parameter.
