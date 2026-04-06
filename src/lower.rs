@@ -377,6 +377,32 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         }
     }
 
+    // Build struct-returning free function registry: fn name → struct type name.
+    //
+    // FLS §9: Free functions that return a named struct type use the same
+    // write-back calling convention as struct-returning associated functions:
+    // the callee stores field values in x0..x{N-1} via `RetFields`; the call
+    // site writes them to the destination variable's consecutive stack slots
+    // via `CallMut`. This registry lets the call site identify such functions.
+    //
+    // Cache-line note: populated once at compile time, not on any hot path.
+    let mut struct_return_free_fns: HashMap<String, String> = HashMap::new();
+    for item in &src.items {
+        if let ItemKind::Fn(fn_def) = &item.kind {
+            let fn_name = fn_def.name.text(source);
+            if let Some(ret_ty) = &fn_def.ret_ty
+                && let TyKind::Path(segs) = &ret_ty.kind
+                && segs.len() == 1
+            {
+                let ret_name = segs[0].text(source);
+                if struct_defs.contains_key(ret_name) {
+                    // FLS §9: Free function returning a named struct.
+                    struct_return_free_fns.insert(fn_name.to_owned(), ret_name.to_owned());
+                }
+            }
+        }
+    }
+
     // Build enum-returning free function registry: fn name → enum type name.
     //
     // FLS §9, §15: Free functions that return an enum type use a write-back
@@ -413,7 +439,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     for item in &src.items {
         match &item.kind {
             ItemKind::Fn(fn_def) => {
-                let (ir_fn, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &enum_defs, &method_self_kinds, &struct_return_fns, &enum_return_fns, None, label_base)?;
+                let (ir_fn, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &enum_defs, &method_self_kinds, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, None, label_base)?;
                 label_base = next_label;
                 fns.push(ir_fn);
             }
@@ -446,6 +472,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         &enum_defs,
                         &method_self_kinds,
                         &struct_return_fns,
+                        &struct_return_free_fns,
                         &enum_return_fns,
                         mctx,
                         label_base,
@@ -504,6 +531,7 @@ fn lower_fn(
     enum_defs: &EnumDefs,
     method_self_kinds: &HashMap<String, SelfKind>,
     struct_return_fns: &HashMap<String, String>,
+    struct_return_free_fns: &HashMap<String, String>,
     enum_return_fns: &HashMap<String, String>,
     method: Option<MethodCtx<'_>>,
     start_label: u32,
@@ -567,7 +595,7 @@ fn lower_fn(
         Some(block) => block,
     };
 
-    let mut ctx = LowerCtx::new(source, ret_ty, struct_defs, tuple_struct_defs, enum_defs, method_self_kinds, struct_return_fns, enum_return_fns, start_label);
+    let mut ctx = LowerCtx::new(source, ret_ty, struct_defs, tuple_struct_defs, enum_defs, method_self_kinds, struct_return_fns, struct_return_free_fns, enum_return_fns, start_label);
 
     // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
     // to stack slots. Each parameter slot is allocated in parameter order
@@ -1185,6 +1213,16 @@ struct LowerCtx<'src> {
     /// Cache-line note: read-only during lowering; not on any hot path.
     struct_return_fns: &'src HashMap<String, String>,
 
+    /// Struct-returning free function registry: fn name → struct type name.
+    ///
+    /// FLS §9: Free functions that return a named struct type use the same
+    /// write-back calling convention as struct-returning associated functions:
+    /// fields returned in x0..x{N-1} via RetFields; the call site writes them
+    /// to the destination variable's consecutive stack slots via CallMut.
+    ///
+    /// Cache-line note: read-only during lowering; not on any hot path.
+    struct_return_free_fns: &'src HashMap<String, String>,
+
     /// Enum-returning free function registry: fn name → enum type name.
     ///
     /// FLS §9, §15: Free functions that return an enum type use the same
@@ -1255,6 +1293,7 @@ impl<'src> LowerCtx<'src> {
         enum_defs: &'src EnumDefs,
         method_self_kinds: &'src HashMap<String, SelfKind>,
         struct_return_fns: &'src HashMap<String, String>,
+        struct_return_free_fns: &'src HashMap<String, String>,
         enum_return_fns: &'src HashMap<String, String>,
         start_label: u32,
     ) -> Self {
@@ -1273,6 +1312,7 @@ impl<'src> LowerCtx<'src> {
             enum_defs,
             method_self_kinds,
             struct_return_fns,
+            struct_return_free_fns,
             enum_return_fns,
             local_struct_types: HashMap::new(),
             local_enum_types: HashMap::new(),
@@ -1653,6 +1693,67 @@ impl<'src> LowerCtx<'src> {
                         // The callee's RetFields has already put field values in x0..x{N-1}.
                         self.instrs.push(Instr::CallMut {
                             name: mangled,
+                            args: arg_regs,
+                            write_back_slot: base_slot,
+                            n_fields: n_fields as u8,
+                        });
+                        return Ok(());
+                    }
+                }
+
+                // FLS §9: Struct-returning free function call as let-binding init.
+                //
+                // `let p = make_point(a, b)` where `make_point` is in
+                // `struct_return_free_fns`. The callee returns field values in
+                // x0..x{N-1} via RetFields. We allocate N consecutive slots for
+                // the variable and emit CallMut to write x0..x{N-1} into those
+                // slots after the bl.
+                //
+                // This uses the same write-back mechanism as struct-returning
+                // associated functions (`struct_return_fns`), extended here to
+                // free functions.
+                //
+                // FLS §6.12.1: Call expressions. FLS §9: Functions.
+                // Cache-line note: arg moves + bl + N stores per construction.
+                if let Some(init_expr) = init.as_ref()
+                    && let ExprKind::Call { callee, args } = &init_expr.kind
+                    && let ExprKind::Path(segs) = &callee.kind
+                    && segs.len() == 1
+                {
+                    let fn_name = segs[0].text(self.source);
+                    if let Some(struct_name) = self.struct_return_free_fns.get(fn_name).cloned() {
+                        let field_names = self.struct_defs
+                            .get(&struct_name)
+                            .ok_or_else(|| {
+                                LowerError::Unsupported(format!(
+                                    "unknown struct `{struct_name}` from free fn `{fn_name}`"
+                                ))
+                            })?
+                            .clone();
+                        let n_fields = field_names.len();
+
+                        // Allocate N consecutive slots for the new struct variable.
+                        let base_slot = self.alloc_slot()?;
+                        for _ in 1..n_fields {
+                            self.alloc_slot()?;
+                        }
+                        self.locals.insert(var_name, base_slot);
+                        self.local_struct_types.insert(base_slot, struct_name.clone());
+
+                        // Evaluate arguments and collect their virtual registers.
+                        let mut arg_regs: Vec<u8> = Vec::new();
+                        for arg_expr in args.iter() {
+                            let val = self.lower_expr(arg_expr, &IrTy::I32)?;
+                            let reg = self.val_to_reg(val)?;
+                            arg_regs.push(reg);
+                        }
+
+                        self.has_calls = true;
+                        // Emit CallMut: args → bl → store x0..x{N-1} to base_slot..
+                        // The callee's RetFields has already put field values in
+                        // x0..x{N-1}.
+                        self.instrs.push(Instr::CallMut {
+                            name: fn_name.to_owned(),
                             args: arg_regs,
                             write_back_slot: base_slot,
                             n_fields: n_fields as u8,

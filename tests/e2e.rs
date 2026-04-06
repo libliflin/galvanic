@@ -6215,3 +6215,178 @@ fn runtime_tuple_struct_method_emits_bl_mangled_name() {
         "expected `bl` instruction for method call in assembly:\n{asm}"
     );
 }
+
+// ── Milestone 56: free functions returning named structs ──────────────────────
+
+/// Milestone 56: free function returns a named struct; caller accesses first field.
+///
+/// FLS §9: Functions may return named struct types.
+/// FLS §6.13: Field access on the returned struct reads the correct slot.
+#[test]
+fn milestone_56_factory_fn_first_field() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(a: i32, b: i32) -> Point { Point { x: a, y: b } }
+fn main() -> i32 {
+    let p = make(3, 4);
+    p.x
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "expected exit 3, got {exit_code}");
+}
+
+/// Milestone 56: free function returns a named struct; caller accesses second field.
+///
+/// FLS §9: Function return value is placed in x0..x{N-1} via RetFields.
+/// FLS §6.13: Second field at base_slot + 1.
+#[test]
+fn milestone_56_factory_fn_second_field() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(a: i32, b: i32) -> Point { Point { x: a, y: b } }
+fn main() -> i32 {
+    let p = make(3, 4);
+    p.y
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 4, "expected exit 4, got {exit_code}");
+}
+
+/// Milestone 56: fields of the returned struct used in arithmetic.
+///
+/// FLS §9, §6.5.5: Field values from the returned struct participate in
+/// an addition expression.
+#[test]
+fn milestone_56_factory_fn_field_sum() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(a: i32, b: i32) -> Point { Point { x: a, y: b } }
+fn main() -> i32 {
+    let p = make(3, 4);
+    p.x + p.y
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected exit 7, got {exit_code}");
+}
+
+/// Milestone 56: factory function called with runtime parameters.
+///
+/// FLS §9: The factory function receives its arguments at runtime; the returned
+/// struct fields are runtime values, not compile-time constants.
+#[test]
+fn milestone_56_factory_fn_from_params() {
+    let src = r#"
+struct Pair { a: i32, b: i32 }
+fn make_pair(x: i32, y: i32) -> Pair { Pair { a: x, b: y } }
+fn sum(p: Pair) -> i32 { p.a + p.b }
+fn main() -> i32 {
+    let p = make_pair(2, 5);
+    sum(p)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected exit 7, got {exit_code}");
+}
+
+/// Milestone 56: struct returned from a factory function used in an if expression.
+///
+/// FLS §9, §6.17: A field of the returned struct is used as the condition
+/// of an if/else expression.
+#[test]
+fn milestone_56_factory_fn_field_in_if() {
+    let src = r#"
+struct Wrapper { val: i32 }
+fn wrap(n: i32) -> Wrapper { Wrapper { val: n } }
+fn main() -> i32 {
+    let w = wrap(5);
+    if w.val > 3 { 1 } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected exit 1, got {exit_code}");
+}
+
+/// Milestone 56: three-field struct returned from a free function.
+///
+/// FLS §9: Multi-field struct return uses RetFields for fields 0..2.
+/// FLS §6.13: Middle field accessed by name.
+#[test]
+fn milestone_56_factory_fn_three_fields_middle() {
+    let src = r#"
+struct Triple { a: i32, b: i32, c: i32 }
+fn triple(x: i32, y: i32, z: i32) -> Triple { Triple { a: x, b: y, c: z } }
+fn main() -> i32 {
+    let t = triple(1, 5, 3);
+    t.b
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "expected exit 5, got {exit_code}");
+}
+
+/// Milestone 56: factory function with no parameters.
+///
+/// FLS §9: A free function with no parameters can still return a struct.
+/// FLS §6.11: Struct literal with constant fields.
+#[test]
+fn milestone_56_factory_fn_no_params() {
+    let src = r#"
+struct Origin { x: i32, y: i32 }
+fn origin() -> Origin { Origin { x: 0, y: 0 } }
+fn main() -> i32 {
+    let o = origin();
+    o.x + o.y
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected exit 0, got {exit_code}");
+}
+
+/// Milestone 56: struct field from factory function passed to another function.
+///
+/// FLS §9, §6.12.1: A field extracted from the returned struct is passed as
+/// an argument to a second function call.
+#[test]
+fn milestone_56_factory_fn_field_passed_to_fn() {
+    let src = r#"
+struct Wrap { val: i32 }
+fn wrap(n: i32) -> Wrap { Wrap { val: n } }
+fn double(n: i32) -> i32 { n * 2 }
+fn main() -> i32 {
+    let w = wrap(4);
+    double(w.val)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 8, "expected exit 8, got {exit_code}");
+}
+
+// ── Assembly inspection: milestone 56 ────────────────────────────────────────
+
+/// Milestone 56: factory function emits RetFields and caller emits CallMut write-back.
+///
+/// FLS §9: The callee stores field values in x0..x{N-1} via RetFields.
+/// The call site writes them to consecutive stack slots via CallMut.
+/// FLS §6.1.2:37–45: All stores and loads are runtime instructions.
+#[test]
+fn runtime_factory_fn_emits_ret_fields_and_call_mut_write_back() {
+    let src = "struct Point { x: i32, y: i32 }\nfn make(a: i32, b: i32) -> Point { Point { x: a, y: b } }\nfn main() -> i32 { let p = make(3, 4); p.x + p.y }\n";
+    let asm = compile_to_asm(src);
+    // Callee side: two `ldr` instructions before `ret` for RetFields.
+    assert!(
+        asm.contains("ldr"),
+        "expected `ldr` for RetFields in assembly:\n{asm}"
+    );
+    // Call site: `bl make` followed by two `str` write-back instructions.
+    assert!(
+        asm.contains("bl\t\tmake") || asm.contains("bl      make"),
+        "expected `bl make` in assembly:\n{asm}"
+    );
+    assert!(
+        asm.contains("str"),
+        "expected `str` for CallMut write-back in assembly:\n{asm}"
+    );
+}
