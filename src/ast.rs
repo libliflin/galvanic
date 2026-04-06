@@ -577,6 +577,27 @@ pub enum ExprKind {
         args: Vec<Expr>,
     },
 
+    /// A range expression. FLS §6.16.
+    ///
+    /// `start..end` (exclusive) or `start..=end` (inclusive).
+    ///
+    /// FLS §6.16: A range expression produces a value of the standard library
+    /// range type. Galvanic supports integer ranges only, used as the iterator
+    /// in `for` loop expressions.
+    ///
+    /// FLS §6.16 AMBIGUOUS: The spec defines range expressions as producing
+    /// `Range`, `RangeFrom`, `RangeTo`, etc. values. Galvanic restricts support
+    /// to `start..end` with integer operands, desugaring directly to a while loop
+    /// in the lowering pass rather than creating a library range value.
+    Range {
+        /// Lower bound (inclusive). `None` for `..end` (RangeTo).
+        start: Option<Box<Expr>>,
+        /// Upper bound. `None` for `start..` (RangeFrom).
+        end: Option<Box<Expr>>,
+        /// `true` for `..=` (inclusive), `false` for `..` (exclusive).
+        inclusive: bool,
+    },
+
     /// A loop expression. FLS §6.8.1.
     ///
     /// `loop { body }`

@@ -96,6 +96,13 @@ fn expr_contains_call(expr: &Expr) -> bool {
         ExprKind::Loop(body) => block_contains_call(body),
         ExprKind::Break(opt_val) => opt_val.as_ref().is_some_and(|e| expr_contains_call(e)),
         ExprKind::Return(opt_val) => opt_val.as_ref().is_some_and(|e| expr_contains_call(e)),
+        ExprKind::Range { start, end, .. } => {
+            start.as_ref().is_some_and(|e| expr_contains_call(e))
+                || end.as_ref().is_some_and(|e| expr_contains_call(e))
+        }
+        ExprKind::For { iter, body, .. } => {
+            expr_contains_call(iter) || block_contains_call(body)
+        }
         // Leaves: literals, paths, unit — none contain calls.
         _ => false,
     }
@@ -1072,6 +1079,122 @@ impl<'src> LowerCtx<'src> {
                 self.loop_stack.pop();
 
                 // FLS §6.15.3: "The type of a while expression is the unit type ()."
+                Ok(IrValue::Unit)
+            }
+
+            // FLS §6.15.1: For loop expression `for pat in start..end { body }`.
+            //
+            // Galvanic supports `for i in start..end` (exclusive integer range) and
+            // `for i in start..=end` (inclusive integer range) as the first for-loop
+            // milestone. The range iterator is desugared directly to a while-loop
+            // equivalent — no library `IntoIterator` trait is involved.
+            //
+            // Lowering strategy:
+            //   1. Lower `start` → store in a new stack slot for the loop variable.
+            //   2. Lower `end` → store in a new stack slot for the end bound.
+            //   3. Emit cond_label (back-edge target after increment).
+            //   4. Load loop var, load end bound, compare (<  for exclusive, <= for inclusive).
+            //   5. CondBranch to exit_label if condition is false (loop var >= end).
+            //   6. Lower body (loop var visible in `locals`).
+            //   7. emit incr_label (target for `continue`).
+            //   8. Increment loop var slot by 1.
+            //   9. Branch cond_label.
+            //  10. Emit exit_label.
+            //
+            // `continue` in the body jumps to incr_label (increments then re-checks).
+            // `break` in the body jumps to exit_label.
+            //
+            // FLS §6.15.1: "A for loop expression iterates over an iterator."
+            // FLS §6.16: Range expressions produce iterators over integers.
+            // FLS §6.1.2:37–45: The back-edge is a runtime branch — never elided.
+            // FLS §6.15.7: `continue` advances to the next iteration (= increment step).
+            //
+            // Cache-line note: the loop generates ~7 instructions for the control
+            // flow skeleton (load, cmp, cbz, load, add imm, str, b) — 28 bytes, fits
+            // in one 32-byte half of a 64-byte instruction cache line.
+            ExprKind::For { pat, iter, body } => {
+                // Only integer range iterators are supported at this milestone.
+                let (start_expr, end_expr, inclusive) = match iter.as_ref() {
+                    Expr { kind: ExprKind::Range { start: Some(s), end: Some(e), inclusive }, .. } => {
+                        (s.as_ref(), e.as_ref(), *inclusive)
+                    }
+                    _ => return Err(LowerError::Unsupported(
+                        "for loop requires an integer range iterator (start..end or start..=end)".into(),
+                    )),
+                };
+
+                // Allocate the loop variable slot and record the name.
+                let i_slot = self.alloc_slot()?;
+                let pat_name = pat.text(self.source);
+
+                // Allocate a slot for the end bound (evaluated once before the loop).
+                // FLS §6.16: The range bounds are evaluated once, not on each iteration.
+                let end_slot = self.alloc_slot()?;
+
+                // Lower and store the start bound into the loop variable slot.
+                // FLS §6.16: `start` is evaluated first (left-to-right, FLS §6:3).
+                let start_val = self.lower_expr(start_expr, &IrTy::I32)?;
+                let start_reg = self.val_to_reg(start_val)?;
+                self.instrs.push(Instr::Store { src: start_reg, slot: i_slot });
+
+                // Lower and store the end bound.
+                let end_val = self.lower_expr(end_expr, &IrTy::I32)?;
+                let end_reg = self.val_to_reg(end_val)?;
+                self.instrs.push(Instr::Store { src: end_reg, slot: end_slot });
+
+                // Labels: cond (condition check / back-edge), incr (increment / continue
+                // target), exit (after loop / break target).
+                let cond_label = self.alloc_label();
+                let incr_label = self.alloc_label();
+                let exit_label = self.alloc_label();
+
+                // Push loop context: `continue` → incr_label, `break` → exit_label.
+                // FLS §6.15.7: `continue` in a for loop advances to the next iteration.
+                // For a range-based for loop, the "next iteration" is the increment step.
+                self.loop_stack.push(LoopCtx { header_label: incr_label, exit_label });
+
+                // Bind the loop variable name so body can load it via Path.
+                self.locals.insert(pat_name, i_slot);
+
+                // Condition check: load loop var and end bound, compare.
+                self.instrs.push(Instr::Label(cond_label));
+                let i_reg = self.alloc_reg()?;
+                self.instrs.push(Instr::Load { dst: i_reg, slot: i_slot });
+                let end_reg2 = self.alloc_reg()?;
+                self.instrs.push(Instr::Load { dst: end_reg2, slot: end_slot });
+                let cmp_reg = self.alloc_reg()?;
+                // Exclusive `..`: continue while i < end (IrBinOp::Lt).
+                // Inclusive `..=`: continue while i <= end (IrBinOp::Le).
+                let cmp_op = if inclusive { IrBinOp::Le } else { IrBinOp::Lt };
+                self.instrs.push(Instr::BinOp { op: cmp_op, dst: cmp_reg, lhs: i_reg, rhs: end_reg2 });
+                // Exit if condition is false (i >= end for exclusive, i > end for inclusive).
+                self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: exit_label });
+
+                // Lower body. The body result is discarded (for loops yield `()`).
+                // FLS §6.15.1: "A for loop evaluates to the unit type."
+                self.lower_block_to_value(body, &IrTy::Unit)?;
+
+                // Increment step: i += 1. This is the `continue` target.
+                // FLS §6.15.7: After a `continue`, the loop variable is incremented
+                // before the condition is re-evaluated.
+                self.instrs.push(Instr::Label(incr_label));
+                let i_reg2 = self.alloc_reg()?;
+                self.instrs.push(Instr::Load { dst: i_reg2, slot: i_slot });
+                let one_reg = self.alloc_reg()?;
+                self.instrs.push(Instr::LoadImm(one_reg, 1));
+                let inc_reg = self.alloc_reg()?;
+                self.instrs.push(Instr::BinOp { op: IrBinOp::Add, dst: inc_reg, lhs: i_reg2, rhs: one_reg });
+                self.instrs.push(Instr::Store { src: inc_reg, slot: i_slot });
+
+                // Back-edge: jump to condition check.
+                self.instrs.push(Instr::Branch(cond_label));
+
+                // Exit label: loop done.
+                self.instrs.push(Instr::Label(exit_label));
+
+                self.loop_stack.pop();
+
+                // FLS §6.15.1: "The type of a for loop expression is the unit type ()."
                 Ok(IrValue::Unit)
             }
 

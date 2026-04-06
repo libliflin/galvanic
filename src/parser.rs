@@ -766,7 +766,7 @@ impl<'src> Parser<'src> {
     /// FLS §6.5.11: Compound assignment operators are distinct expression forms
     /// from plain assignment. The left-hand side must be a place expression.
     fn parse_assign(&mut self) -> Result<Expr, ParseError> {
-        let lhs = self.parse_or()?;
+        let lhs = self.parse_range()?;
 
         if self.eat(TokenKind::Eq) {
             let rhs = self.parse_assign()?; // right-associative
@@ -809,6 +809,37 @@ impl<'src> Parser<'src> {
                     op,
                     target: Box::new(lhs),
                     value: Box::new(value),
+                },
+                span,
+            });
+        }
+
+        Ok(lhs)
+    }
+
+    /// Range expressions `start..end` and `start..=end` — FLS §6.16.
+    ///
+    /// Ranges have lower precedence than logical operators but higher than
+    /// assignment (FLS §6.21). Only `start..end` (exclusive) and `start..=end`
+    /// (inclusive) with both operands present are supported at this milestone.
+    ///
+    /// FLS §6.16: "A range expression constructs a range value."
+    /// FLS §6.16 AMBIGUOUS: The spec allows `..`, `start..`, `..end`, `..=end`,
+    /// `start..end`, `start..=end`. Galvanic restricts to `start..end` for now;
+    /// partial ranges used as iterators are future work.
+    fn parse_range(&mut self) -> Result<Expr, ParseError> {
+        let lhs = self.parse_or()?;
+
+        if self.peek_kind() == TokenKind::DotDot || self.peek_kind() == TokenKind::DotDotEq {
+            let inclusive = self.peek_kind() == TokenKind::DotDotEq;
+            self.advance();
+            let rhs = self.parse_or()?;
+            let span = lhs.span.to(rhs.span);
+            return Ok(Expr {
+                kind: ExprKind::Range {
+                    start: Some(Box::new(lhs)),
+                    end: Some(Box::new(rhs)),
+                    inclusive,
                 },
                 span,
             });
@@ -2875,6 +2906,50 @@ mod tests {
         // `for x items {}` — missing `in` keyword.
         let err = parse_err("fn f() { for x items {} }");
         assert!(err.message.contains("KwIn"), "{}", err.message);
+    }
+
+    // ── Range expressions (FLS §6.16) ─────────────────────────────────────────
+
+    #[test]
+    fn range_exclusive() {
+        // FLS §6.16: `0..10` produces an exclusive range.
+        let src = "fn f() -> i32 { for i in 0..10 { } 0 }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!() };
+        let body = f.body.as_ref().unwrap();
+        let StmtKind::Expr(ref for_expr) = body.stmts[0].kind else { panic!() };
+        let ExprKind::For { ref iter, .. } = for_expr.kind else { panic!() };
+        let ExprKind::Range { start: Some(_), end: Some(_), inclusive } = iter.kind else {
+            panic!("expected Range, got {:?}", iter.kind)
+        };
+        assert!(!inclusive, "expected exclusive range");
+    }
+
+    #[test]
+    fn range_inclusive() {
+        // FLS §6.16: `0..=9` produces an inclusive range.
+        let src = "fn f() -> i32 { for i in 0..=9 { } 0 }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!() };
+        let body = f.body.as_ref().unwrap();
+        let StmtKind::Expr(ref for_expr) = body.stmts[0].kind else { panic!() };
+        let ExprKind::For { ref iter, .. } = for_expr.kind else { panic!() };
+        let ExprKind::Range { start: Some(_), end: Some(_), inclusive } = iter.kind else {
+            panic!("expected Range, got {:?}", iter.kind)
+        };
+        assert!(inclusive, "expected inclusive range");
+    }
+
+    #[test]
+    fn range_lower_precedence_than_comparison() {
+        // FLS §6.21: `a < b..c` parses as `(a < b)..c`, not `a < (b..c)`.
+        // Range has lower precedence than comparison operators.
+        let src = "fn f() { let _x = 0..10; }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!() };
+        let body = f.body.as_ref().unwrap();
+        let StmtKind::Let { init: Some(ref init), .. } = body.stmts[0].kind else { panic!() };
+        assert!(matches!(init.kind, ExprKind::Range { .. }), "expected Range expr in let binding");
     }
 
     // ── Type cast expressions (FLS §6.5.9) ───────────────────────────────────
