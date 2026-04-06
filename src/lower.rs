@@ -1236,6 +1236,61 @@ impl<'src> LowerCtx<'src> {
                 Ok(IrValue::Reg(dst))
             }
 
+            // FLS §6.5.9: Type cast expression `expr as Ty`.
+            //
+            // A type cast expression converts the value of `expr` to the
+            // target type. At this milestone, only casts to `i32` and `bool`
+            // are supported — both are represented identically as 32-bit
+            // integer values in the IR (bool: 0 = false, 1 = true), so the
+            // cast is a no-op at the instruction level: lower the operand as
+            // i32 and return the result register unchanged.
+            //
+            // FLS §6.5.9: Supported numeric casts (at this milestone):
+            //   i32 as i32  → identity (no instruction emitted)
+            //   bool as i32 → identity (bool is already 0/1 in IR)
+            //
+            // FLS §6.1.2:37–45: The operand is lowered at runtime even if its
+            // value is statically known — no constant folding.
+            //
+            // FLS §6.5.9 AMBIGUOUS: The spec enumerates valid cast combinations
+            // in terms of "permitted coercions" but does not specify the exact
+            // set of allowed source→target pairs. The Rust reference lists them;
+            // galvanic follows the reference. Unsupported casts return an error.
+            //
+            // Cache-line note: no new instruction is emitted for identity casts
+            // (i32→i32, bool→i32). The source value's register is reused directly.
+            ExprKind::Cast { expr: inner, ty } => {
+                // Determine the target type name from the type path.
+                let target_name = match &ty.kind {
+                    crate::ast::TyKind::Path(segments) if segments.len() == 1 => {
+                        segments[0].text(self.source)
+                    }
+                    _ => {
+                        return Err(LowerError::Unsupported(
+                            "cast to non-path type (only named types like i32 supported)".into(),
+                        ));
+                    }
+                };
+
+                match target_name {
+                    // FLS §6.5.9: Numeric casts to i32.
+                    // Includes bool → i32 (0/1 → 0/1), i32 → i32 (identity).
+                    // Both source types are already represented as 32-bit
+                    // integers in the IR, so no instruction is emitted.
+                    "i32" => {
+                        // Lower the operand using i32 context. Boolean values
+                        // (FLS §2.4.7) are already 0/1 integers in the IR, so
+                        // this handles `bool as i32` correctly without any
+                        // additional instruction.
+                        self.lower_expr(inner, &IrTy::I32)
+                    }
+
+                    other => Err(LowerError::Unsupported(format!(
+                        "cast to `{other}` (only `i32` target supported at this milestone)"
+                    ))),
+                }
+            }
+
             // Anything else: not yet supported as runtime codegen.
             _ => Err(LowerError::Unsupported(
                 "expression kind in non-const context (runtime codegen not yet implemented)".into(),
