@@ -115,6 +115,39 @@ pub enum IrBinOp {
     /// Computed as `lhs - (lhs / rhs) * rhs` using `sdiv` + `msub`.
     /// ARM64: two instructions — see codegen for details.
     Rem,
+
+    /// Bitwise AND `&`. FLS §6.5.6.
+    ///
+    /// ARM64: `and x{dst}, x{lhs}, x{rhs}`.
+    /// Cache-line note: one 4-byte instruction per BitAnd.
+    BitAnd,
+
+    /// Bitwise OR `|`. FLS §6.5.6.
+    ///
+    /// ARM64: `orr x{dst}, x{lhs}, x{rhs}`.
+    /// Cache-line note: one 4-byte instruction per BitOr.
+    BitOr,
+
+    /// Bitwise XOR `^`. FLS §6.5.6.
+    ///
+    /// ARM64: `eor x{dst}, x{lhs}, x{rhs}`.
+    /// Cache-line note: one 4-byte instruction per BitXor.
+    BitXor,
+
+    /// Left shift `<<`. FLS §6.5.7.
+    ///
+    /// ARM64: `lsl x{dst}, x{lhs}, x{rhs}` (logical shift left).
+    /// FLS §6.5.7: The shift amount is taken modulo the bit width (64 on ARM64).
+    /// Cache-line note: one 4-byte instruction per Shl.
+    Shl,
+
+    /// Arithmetic right shift `>>`. FLS §6.5.7.
+    ///
+    /// ARM64: `asr x{dst}, x{lhs}, x{rhs}` (arithmetic shift right).
+    /// Signed integers use arithmetic shift (sign-extending) per FLS §6.5.7.
+    /// FLS §6.5.7: The shift amount is taken modulo the bit width (64 on ARM64).
+    /// Cache-line note: one 4-byte instruction per Shr.
+    Shr,
 }
 
 /// An IR instruction.
@@ -125,6 +158,7 @@ pub enum IrBinOp {
 /// Milestone 13 adds `Label`, `Branch`, and `CondBranch` for if/else control flow.
 /// Milestone 14 adds `Call` for function call expressions (FLS §6.12.1).
 /// Milestone 16 adds comparison ops to `IrBinOp` and while loop lowering.
+/// Milestone 21 adds bitwise and shift ops to `IrBinOp` (FLS §6.5.6, §6.5.7).
 pub enum Instr {
     /// Return a value to the caller.
     ///
