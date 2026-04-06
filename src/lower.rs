@@ -6839,6 +6839,78 @@ impl<'src> LowerCtx<'src> {
                             self.instrs.push(Instr::Load { dst: reg, slot: base_slot + i as u8 });
                             arg_regs.push(reg);
                         }
+                    } else if let ExprKind::Call { callee: inner_callee, args: inner_args } = &arg.kind
+                        && let ExprKind::Path(inner_segs) = &inner_callee.kind
+                        && inner_segs.len() == 1
+                        && self.struct_return_free_fns.contains_key(inner_segs[0].text(self.source))
+                    {
+                        // FLS §9, §6.12.1: Struct-returning free function used directly as a
+                        // function argument — e.g., `sum(make(1))` where `make` returns a struct.
+                        //
+                        // Problem: a plain `Instr::Call` captures only x0 (the scalar return
+                        // register). After `bl make`, x0..x{N-1} hold the N struct fields
+                        // (via `RetFields`). If we capture only x0 and then emit
+                        // `mov x{dst}, x0`, that overwrites x1 (which held field[1]) before
+                        // we can pass it to the outer call. The result is that the outer
+                        // function receives x1 = field[0] instead of x1 = field[1].
+                        //
+                        // Fix: use `CallMut` to store all N return registers into temporary
+                        // stack slots, then load them back as individual argument registers.
+                        // This matches the `let p = make(1); sum(p)` path but without a
+                        // named binding.
+                        //
+                        // FLS §6.1.2:37–45: All instructions are runtime.
+                        // Cache-line note: CallMut emits bl + N stores; the subsequent N
+                        // loads re-materialize the fields. For N=2: 4 instructions = 16 bytes.
+                        let inner_fn_name = inner_segs[0].text(self.source);
+                        let struct_name = self
+                            .struct_return_free_fns
+                            .get(inner_fn_name)
+                            .cloned()
+                            .unwrap();
+                        let field_names = self
+                            .struct_defs
+                            .get(&struct_name)
+                            .ok_or_else(|| {
+                                LowerError::Unsupported(format!(
+                                    "struct-returning arg: unknown struct `{struct_name}`"
+                                ))
+                            })?
+                            .clone();
+                        let n_fields = field_names.len();
+
+                        // Allocate N temporary slots for the struct return value.
+                        let base_slot = self.alloc_slot()?;
+                        for _ in 1..n_fields {
+                            self.alloc_slot()?;
+                        }
+
+                        // Evaluate inner call arguments.
+                        let mut inner_arg_regs: Vec<u8> = Vec::new();
+                        for inner_arg in inner_args.iter() {
+                            let val = self.lower_expr(inner_arg, &IrTy::I32)?;
+                            let reg = self.val_to_reg(val)?;
+                            inner_arg_regs.push(reg);
+                        }
+
+                        self.has_calls = true;
+                        // Emit CallMut: bl inner_fn, then store x0..x{N-1} to temp slots.
+                        self.instrs.push(Instr::CallMut {
+                            name: inner_fn_name.to_owned(),
+                            args: inner_arg_regs,
+                            write_back_slot: base_slot,
+                            n_fields: n_fields as u8,
+                        });
+
+                        // Load fields from temp slots as arguments to the outer call.
+                        for fi in 0..n_fields {
+                            let field_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load {
+                                dst: field_reg,
+                                slot: base_slot + fi as u8,
+                            });
+                            arg_regs.push(field_reg);
+                        }
                     } else {
                         let val = self.lower_expr(arg, &IrTy::I32)?;
                         let reg = self.val_to_reg(val)?;

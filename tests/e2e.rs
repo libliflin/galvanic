@@ -10255,10 +10255,8 @@ fn main() -> i32 {
 }
 "#;
     let Some(exit_code) = compile_and_run(src) else { return; };
-    assert_eq!(
-        exit_code as i32, -2i32,
-        "flag=0, false branch y=-2, got {exit_code}"
-    );
+    // Linux exit codes are 0–255 (unsigned); -2 wraps to 254.
+    assert_eq!(exit_code, 254, "flag=0, false branch y=-2 (wraps to 254), got {exit_code}");
 }
 
 /// Milestone 85: both fields from a struct-returning if/else.
@@ -10392,4 +10390,44 @@ fn main() -> i32 {
         .iter()
         .any(|l| l.trim_start().starts_with("cbz") || l.trim_start().starts_with("b."));
     assert!(has_branch, "expected conditional branch in make:\n{}", in_make.join("\n"));
+}
+
+/// Assembly check: struct-returning free function used directly as argument.
+///
+/// `sum(make(1))` must NOT capture only x0 after `bl make` — it must store
+/// both x0 and x1 (the struct fields) before they get clobbered.
+///
+/// FLS §9: struct-returning functions return fields in x0..x{N-1}.
+/// FLS §6.12.1: the call site must preserve all return registers before use.
+/// FLS §6.1.2:37–45: all instructions are runtime.
+#[test]
+fn runtime_struct_return_used_as_arg_stores_all_fields() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(flag: i32) -> Point {
+    if flag > 0 { Point { x: 3, y: 4 } } else { Point { x: 0, y: 0 } }
+}
+fn sum(p: Point) -> i32 { p.x + p.y }
+fn main() -> i32 {
+    sum(make(1))
+}
+"#;
+    let asm = compile_to_asm(src);
+    // In `main`, after `bl make` there must be at least two `str` instructions
+    // that save x0 and x1 to stack slots before the `bl sum`. This is the
+    // CallMut write-back that prevents x1 from being overwritten.
+    let in_main: Vec<&str> = asm
+        .lines()
+        .skip_while(|l| !l.starts_with("main:"))
+        .collect();
+    let str_count = in_main
+        .iter()
+        .take_while(|l| !l.trim_start().starts_with("bl      sum"))
+        .filter(|l| l.trim_start().starts_with("str"))
+        .count();
+    assert!(
+        str_count >= 2,
+        "expected ≥2 str instructions before bl sum (to save both struct fields), got {str_count}:\n{}",
+        in_main.join("\n")
+    );
 }
