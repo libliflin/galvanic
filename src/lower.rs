@@ -3474,6 +3474,71 @@ impl<'src> LowerCtx<'src> {
                             })?;
                         base_slot + field_idx as u8
                     }
+                    // FLS §6.5.10: Assignment to an indexed place expression `arr[index] = value`.
+                    // FLS §6.9: The base must be a known array variable; the index is a runtime value.
+                    //
+                    // Lowering strategy:
+                    // 1. Resolve base to its array stack slot.
+                    // 2. Lower index to a virtual register.
+                    // 3. Lower RHS to a virtual register.
+                    // 4. Allocate a scratch register for base address computation.
+                    // 5. Emit `StoreIndexed { src, base_slot, index_reg, scratch }`.
+                    //
+                    // Evaluation order: FLS §6.5.10 evaluates the place (base, index)
+                    // before the value, but since both are side-effect-free in the
+                    // current subset, we lower RHS first to keep register allocation
+                    // linear (index_reg < scratch so scratch doesn't alias either).
+                    //
+                    // FLS §14.1 AMBIGUOUS: The spec does not enumerate which place
+                    // expressions are valid LHS for assignment. We restrict the base
+                    // to a simple variable path (consistent with plain assignment).
+                    ExprKind::Index { base, index } => {
+                        // Resolve base array variable to its stack slot.
+                        let base_slot = match &base.kind {
+                            ExprKind::Path(segs) if segs.len() == 1 => {
+                                let var_name = segs[0].text(self.source);
+                                let slot =
+                                    self.locals.get(var_name).copied().ok_or_else(|| {
+                                        LowerError::Unsupported(format!(
+                                            "undefined variable `{var_name}` in index assignment"
+                                        ))
+                                    })?;
+                                if !self.local_array_lens.contains_key(&slot) {
+                                    return Err(LowerError::Unsupported(format!(
+                                        "variable `{var_name}` is not an array (index assignment on non-arrays not supported)"
+                                    )));
+                                }
+                                slot
+                            }
+                            _ => {
+                                return Err(LowerError::Unsupported(
+                                    "index assignment on non-variable base not yet supported"
+                                        .into(),
+                                ));
+                            }
+                        };
+
+                        // Lower the RHS (value to store).
+                        let rhs_val = self.lower_expr(rhs, &IrTy::I32)?;
+                        let src_reg = self.val_to_reg(rhs_val)?;
+
+                        // Lower the index.
+                        let idx_val = self.lower_expr(index, &IrTy::I32)?;
+                        let index_reg = self.val_to_reg(idx_val)?;
+
+                        // Allocate scratch for base-address computation.
+                        let scratch = self.alloc_reg()?;
+
+                        self.instrs.push(Instr::StoreIndexed {
+                            src: src_reg,
+                            base_slot,
+                            index_reg,
+                            scratch,
+                        });
+
+                        // FLS §6.5.10: assignment expressions have type `()`.
+                        return Ok(IrValue::Unit);
+                    }
                     _ => {
                         return Err(LowerError::Unsupported(
                             "assignment to non-variable place expression not yet supported".into(),

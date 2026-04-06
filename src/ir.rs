@@ -432,6 +432,38 @@ pub enum Instr {
         index_reg: u8,
     },
 
+    /// Store a value into an array element: `arr[index] = src`.
+    ///
+    /// `StoreIndexed { src, base_slot, index_reg, scratch }` emits:
+    ///   `add x{scratch}, sp, #{base_slot*8}` — base address of arr[0]
+    ///   `str x{src}, [x{scratch}, x{index_reg}, lsl #3]` — store at arr[index]
+    ///
+    /// FLS §6.5.10: Assignment to an indexed place expression.
+    /// FLS §6.9: The index operand selects an element of the array.
+    ///
+    /// The `lsl #3` scales the index by 8 (bytes per i64 slot), matching the
+    /// layout established by array literal lowering (one slot per element).
+    ///
+    /// FLS §6.9 AMBIGUOUS: Out-of-bounds store must panic, but the panic
+    /// mechanism without the standard library is not specified. No bounds
+    /// check is emitted at this milestone.
+    ///
+    /// FLS §6.1.2:37–45: All instructions are runtime — no constant folding.
+    ///
+    /// Cache-line note: two 4-byte instructions (add + str) = 8 bytes,
+    /// mirroring `LoadIndexed`. The add+str pair fits in one adjacent
+    /// instruction slot pair in a 64-byte cache line.
+    StoreIndexed {
+        /// Register holding the value to store.
+        src: u8,
+        /// Stack slot index of the first array element (slot 0).
+        base_slot: u8,
+        /// Register holding the runtime array index (0-based).
+        index_reg: u8,
+        /// Scratch register for base address computation (must not alias src or index_reg).
+        scratch: u8,
+    },
+
     /// Call a `&mut self` method and write modified fields back to the caller's struct.
     ///
     /// `CallMut { name, args, write_back_slot, n_fields }` emits:

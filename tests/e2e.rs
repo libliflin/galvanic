@@ -4695,6 +4695,200 @@ fn main() -> i32 {
     );
 }
 
+// ── Milestone 48: array element stores ──────────────────────────────────────
+//
+// FLS §6.5.10: Assignment expression where the LHS is an indexed place expression.
+// FLS §6.9: Indexing expressions identify elements of an array.
+// FLS §6.1.2:37–45: The store must be a runtime instruction.
+
+/// Milestone 48: basic array element store — `a[0] = 99`.
+///
+/// FLS §6.5.10: The assignment `a[0] = 99` stores to the first element of the array.
+/// FLS §6.9: The constant index 0 selects the first element at `base_slot + 0*8`.
+#[test]
+fn milestone_48_array_store_first_element() {
+    let src = r#"
+fn main() -> i32 {
+    let mut a = [1, 2, 3];
+    a[0] = 99;
+    a[0]
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 99, "expected exit 99, got {exit_code}");
+}
+
+/// Milestone 48: store to middle element — `a[1] = 42`.
+///
+/// FLS §6.5.10: Store to the second element; first and third must be unchanged.
+#[test]
+fn milestone_48_array_store_middle_element() {
+    let src = r#"
+fn main() -> i32 {
+    let mut a = [1, 2, 3];
+    a[1] = 42;
+    a[1]
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+/// Milestone 48: store to last element — `a[2] = 7`.
+///
+/// FLS §6.9: The last element at index N-1 must be addressable.
+#[test]
+fn milestone_48_array_store_last_element() {
+    let src = r#"
+fn main() -> i32 {
+    let mut a = [1, 2, 3];
+    a[2] = 7;
+    a[2]
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected exit 7, got {exit_code}");
+}
+
+/// Milestone 48: store does not clobber adjacent elements.
+///
+/// FLS §6.5.10: Only the element at the assigned index changes.
+/// Adjacent elements (`a[0]`, `a[2]`) must retain their original values.
+#[test]
+fn milestone_48_array_store_does_not_clobber_neighbors() {
+    let src = r#"
+fn main() -> i32 {
+    let mut a = [10, 20, 30];
+    a[1] = 99;
+    a[0] + a[2]
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 40, "expected exit 40 (10+30), got {exit_code}");
+}
+
+/// Milestone 48: store with runtime index from a variable.
+///
+/// FLS §6.9: The index operand is a runtime value; the store must use
+/// `str x{src}, [x{base}, x{index}, lsl #3]` rather than a fixed offset.
+#[test]
+fn milestone_48_array_store_variable_index() {
+    let src = r#"
+fn main() -> i32 {
+    let mut a = [0, 0, 0];
+    let i = 2;
+    a[i] = 55;
+    a[i]
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 55, "expected exit 55, got {exit_code}");
+}
+
+/// Milestone 48: store from an expression RHS.
+///
+/// FLS §6.5.10: The RHS is fully evaluated before storing. The result of
+/// `3 * 4` must be computed at runtime and stored into the element.
+#[test]
+fn milestone_48_array_store_expr_rhs() {
+    let src = r#"
+fn main() -> i32 {
+    let mut a = [0, 0, 0];
+    a[0] = 3 * 4;
+    a[0]
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 12, "expected exit 12, got {exit_code}");
+}
+
+/// Milestone 48: multiple stores to the same array.
+///
+/// FLS §6.5.10: Each assignment is a distinct runtime store instruction.
+/// All three stores must complete in order before any read.
+#[test]
+fn milestone_48_array_multiple_stores() {
+    let src = r#"
+fn main() -> i32 {
+    let mut a = [1, 2, 3];
+    a[0] = 10;
+    a[1] = 20;
+    a[2] = 30;
+    a[0] + a[1] + a[2]
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 60, "expected exit 60, got {exit_code}");
+}
+
+/// Milestone 48: array store in a loop fills all elements.
+///
+/// FLS §6.15.3: While loop executes until condition is false.
+/// FLS §6.5.10: Each iteration stores to a different element via a runtime index.
+#[test]
+fn milestone_48_array_store_in_loop() {
+    let src = r#"
+fn main() -> i32 {
+    let mut a = [0, 0, 0, 0, 0];
+    let mut i = 0;
+    while i < 5 {
+        a[i] = i + 1;
+        i = i + 1;
+    }
+    a[0] + a[1] + a[2] + a[3] + a[4]
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 15, "expected exit 15 (1+2+3+4+5), got {exit_code}");
+}
+
+/// Milestone 48: store from a function parameter.
+///
+/// FLS §6.5.10: The RHS may be any expression, including a function parameter.
+#[test]
+fn milestone_48_array_store_from_param() {
+    let src = r#"
+fn fill(v: i32) -> i32 {
+    let mut a = [0, 0, 0];
+    a[1] = v;
+    a[1]
+}
+fn main() -> i32 {
+    fill(77)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 77, "expected exit 77, got {exit_code}");
+}
+
+// ── Assembly inspection: milestone 48 ────────────────────────────────────────
+
+/// Milestone 48: array store emits `add` + `str` with `lsl #3`.
+///
+/// FLS §6.5.10 + §6.9: The store `a[i] = v` must compute `sp + base*8`
+/// into a scratch register, then use `str x{src}, [x{scratch}, x{idx}, lsl #3]`.
+/// The `lsl #3` confirms element size scaling (8 bytes per slot).
+#[test]
+fn runtime_array_store_emits_add_and_str_lsl3() {
+    let src = r#"
+fn main() -> i32 {
+    let mut a = [10, 20, 30];
+    let i = 1;
+    a[i] = 99;
+    a[i]
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("str") && asm.contains("lsl #3"),
+        "expected `str ... lsl #3` for indexed store:\n{asm}"
+    );
+    assert!(
+        asm.contains("add") && asm.contains("sp,"),
+        "expected `add xN, sp, #offset` for base address:\n{asm}"
+    );
+}
+
 /// Milestone 46: trait impl method emitted under `TypeName__method_name`.
 ///
 /// FLS §13: Trait methods resolve via static dispatch using the same mangling
