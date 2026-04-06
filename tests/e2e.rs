@@ -9477,3 +9477,112 @@ fn main() -> i32 { let p = Pair(1, 2); sum(p) }\n";
         "tuple struct param spill must emit ≥2 str instructions, got {str_count}:\n{asm}"
     );
 }
+
+// ── Milestone 80: Nested tuple pattern destructuring in function parameters ──
+
+/// FLS §5.10.3, §9.2: Nested tuple pattern parameter — sum of all leaves.
+///
+/// `fn f((a, (b, c)): (i32, (i32, i32))) -> i32 { a + b + c }`
+/// Three scalar values arrive in x0, x1, x2; the nested pattern binds them
+/// to `a`, `b`, `c` respectively.
+///
+/// Cache-line note: 3 leaves → 3 × 4-byte `str` spill = 12 bytes, just under
+/// the 16-byte alignment boundary.
+#[test]
+fn milestone_80_nested_tuple_param_sum() {
+    let src = "\
+fn sum3((a, (b, c)): (i32, (i32, i32))) -> i32 { a + b + c }\n\
+fn main() -> i32 { sum3((1, (2, 3))) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "expected 1+2+3=6, got {exit_code}");
+}
+
+/// FLS §5.10.3, §9.2: Nested tuple pattern — first leaf of inner tuple.
+#[test]
+fn milestone_80_nested_tuple_param_inner_first() {
+    let src = "\
+fn inner_first((_, (b, _)): (i32, (i32, i32))) -> i32 { b }\n\
+fn main() -> i32 { inner_first((10, (5, 20))) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "expected 5, got {exit_code}");
+}
+
+/// FLS §5.10.3, §9.2: Nested tuple pattern — outer element accessed.
+#[test]
+fn milestone_80_nested_tuple_param_outer_element() {
+    let src = "\
+fn outer((a, (_, _)): (i32, (i32, i32))) -> i32 { a }\n\
+fn main() -> i32 { outer((7, (1, 2))) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 7, got {exit_code}");
+}
+
+/// FLS §5.10.3, §9.2: Nested tuple pattern mixed with a scalar parameter.
+#[test]
+fn milestone_80_nested_tuple_param_mixed_with_scalar() {
+    let src = "\
+fn scaled((a, (b, c)): (i32, (i32, i32)), scale: i32) -> i32 { (a + b + c) * scale }\n\
+fn main() -> i32 { scaled((1, (2, 3)), 2) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 12, "expected (1+2+3)*2=12, got {exit_code}");
+}
+
+/// FLS §5.10.3, §9.2: Nested tuple pattern — result used in an if expression.
+#[test]
+fn milestone_80_nested_tuple_param_in_if() {
+    let src = "\
+fn larger_leaf((a, (b, _)): (i32, (i32, i32))) -> i32 { if a > b { a } else { b } }\n\
+fn main() -> i32 { larger_leaf((3, (7, 0))) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 7, got {exit_code}");
+}
+
+/// FLS §5.10.3, §9.2: Nested tuple pattern parameter passed from a variable.
+#[test]
+fn milestone_80_nested_tuple_param_from_variable() {
+    let src = "\
+fn diff((a, (b, c)): (i32, (i32, i32))) -> i32 { a - b - c }\n\
+fn main() -> i32 { let t = (10, (3, 2)); diff(t) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "expected 10-3-2=5, got {exit_code}");
+}
+
+/// FLS §5.10.3, §9.2: Three-level nested tuple pattern.
+#[test]
+fn milestone_80_three_level_nesting() {
+    let src = "\
+fn sum4((a, (b, (c, d))): (i32, (i32, (i32, i32)))) -> i32 { a + b + c + d }\n\
+fn main() -> i32 { sum4((1, (2, (3, 4)))) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "expected 1+2+3+4=10, got {exit_code}");
+}
+
+/// FLS §5.10.3, §9.2: Nested tuple pattern — all wildcards except one leaf.
+#[test]
+fn milestone_80_nested_tuple_param_wildcard() {
+    let src = "\
+fn third((_, (_, c)): (i32, (i32, i32))) -> i32 { c }\n\
+fn main() -> i32 { third((10, (20, 30))) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 30, "expected 30, got {exit_code}");
+}
+
+/// Runtime inspection: nested tuple parameter generates runtime spill stores.
+///
+/// FLS §6.1.2:37–45, §5.10.3: Each leaf, including those inside nested tuples,
+/// must emit a `str` instruction at function entry regardless of whether the
+/// caller passes literals or variables.
+///
+/// Cache-line note: 3 leaves → 3 × 4-byte `str` = 12 bytes.
+#[test]
+fn runtime_nested_tuple_param_emits_spill_stores() {
+    let src = "\
+fn sum3((a, (b, c)): (i32, (i32, i32))) -> i32 { a + b + c }\n\
+fn main() -> i32 { sum3((1, (2, 3))) }\n";
+    let asm = compile_to_asm(src);
+    let str_count = asm.lines().filter(|l: &&str| l.trim_start().starts_with("str ")).count();
+    assert!(
+        str_count >= 3,
+        "nested tuple param spill must emit ≥3 str instructions, got {str_count}:\n{asm}"
+    );
+}

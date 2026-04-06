@@ -329,8 +329,10 @@ pub enum ParamKind {
     Ident(Span),
     /// Tuple destructuring `(a, b, ...): (ty1, ty2, ...)`. FLS §5.10.3, §9.2.
     ///
-    /// Each element is the span of the bound name or `_` (wildcard).
-    Tuple(Vec<Span>),
+    /// Each element is a `Pat`: `Pat::Ident` for a named binding, `Pat::Wildcard`
+    /// for `_`, or `Pat::Tuple` for a nested tuple pattern such as `(a, (b, c))`.
+    /// All leaves are bound to consecutive ARM64 registers in depth-first order.
+    Tuple(Vec<Pat>),
     /// Named struct destructuring `StructName { field1, field2 }: StructTy`.
     ///
     /// FLS §5.10.2, §9.2: Struct patterns are irrefutable and may appear

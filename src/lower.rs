@@ -778,6 +778,42 @@ struct MethodCtx<'a> {
 /// per the ARM64 ABI. We spill each parameter to a stack slot so that
 /// path expressions can reference them via `Load` — reusing the same
 /// infrastructure as let-binding locals.
+/// Collect all leaf patterns from a nested tuple parameter pattern in
+/// left-to-right, depth-first order.
+///
+/// Each leaf is `Some(&Span)` for a named binding (`Pat::Ident`) or `None`
+/// for a wildcard (`Pat::Wildcard`). The length of the returned vec equals the
+/// number of consecutive ARM64 registers consumed by the nested tuple pattern.
+///
+/// Nested `Pat::Tuple` elements are flattened recursively.
+///
+/// FLS §5.10.3, §9.2: Nested tuple patterns in parameter position flatten to
+/// consecutive registers matching the ARM64 calling convention. For example,
+/// `(a, (b, c)): (i32, (i32, i32))` passes three values in x0, x1, x2,
+/// which bind to `a`, `b`, `c` respectively.
+///
+/// FLS §6.1.2:37–45: All spill stores are runtime instructions.
+fn collect_tuple_param_leaves(pats: &[Pat]) -> Result<Vec<Option<&crate::ast::Span>>, LowerError> {
+    let mut leaves = Vec::new();
+    for pat in pats {
+        match pat {
+            Pat::Ident(span) => leaves.push(Some(span)),
+            Pat::Wildcard => leaves.push(None),
+            Pat::Tuple(inner) => {
+                leaves.extend(collect_tuple_param_leaves(inner)?);
+            }
+            _ => {
+                return Err(LowerError::Unsupported(
+                    "only identifier, wildcard, and nested tuple patterns are \
+                     supported inside tuple parameter patterns"
+                        .into(),
+                ));
+            }
+        }
+    }
+    Ok(leaves)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn lower_fn(
     fn_def: &crate::ast::FnDef,
@@ -999,24 +1035,36 @@ fn lower_fn(
         }
     }
     for param in fn_def.params.iter() {
-        // FLS §5.10.3, §9.2: Tuple pattern parameter `(a, b): (i32, i32)`.
-        // Each element occupies one ARM64 register; spill each to its own slot.
+        // FLS §5.10.3, §9.2: Tuple pattern parameter, flat or nested.
         //
-        // Cache-line note: N elements → N × 4-byte `str` spill instructions,
-        // same density as struct parameters.
-        if let crate::ast::ParamKind::Tuple(names) = &param.kind {
-            for name_span in names {
-                if reg_idx >= 8 {
-                    return Err(LowerError::Unsupported(
-                        "tuple parameter exceeds ARM64 register window (>8 total registers)".into(),
-                    ));
-                }
-                let name = name_span.text(source);
+        // `(a, b): (T1, T2)` — each leaf occupies one ARM64 register.
+        // `(a, (b, c)): (T1, (T2, T3))` — three leaves, three registers.
+        // The nested structure is purely syntactic: the calling convention is
+        // always flat (one register per scalar leaf), matching how the caller
+        // passes a tuple value as a sequence of individual register arguments.
+        //
+        // `collect_tuple_param_leaves` flattens the pattern tree left-to-right,
+        // depth-first, yielding one entry per leaf in register order.
+        //
+        // Cache-line note: N leaves → N × 4-byte `str` spill instructions,
+        // same density as flat tuple, struct, and tuple-struct parameters.
+        // FLS §6.1.2:37–45: All spills are runtime store instructions.
+        if let crate::ast::ParamKind::Tuple(pats) = &param.kind {
+            let leaves = collect_tuple_param_leaves(pats)?;
+            if reg_idx + leaves.len() > 8 {
+                return Err(LowerError::Unsupported(
+                    "tuple parameter exceeds ARM64 register window (>8 total registers)".into(),
+                ));
+            }
+            for leaf in &leaves {
                 let slot = ctx.alloc_slot()?;
-                if name != "_" {
-                    ctx.locals.insert(name, slot);
-                }
                 ctx.instrs.push(Instr::Store { src: reg_idx as u8, slot });
+                if let Some(span) = leaf {
+                    let name = span.text(source);
+                    if name != "_" {
+                        ctx.locals.insert(name, slot);
+                    }
+                }
                 reg_idx += 1;
             }
             continue;
@@ -2062,6 +2110,37 @@ impl<'src> LowerCtx<'src> {
                 let val = self.lower_expr(&field_init.1, &IrTy::I32)?;
                 let src = self.val_to_reg(val)?;
                 self.instrs.push(Instr::Store { src, slot: dst_slot });
+            }
+        }
+        Ok(())
+    }
+
+    /// Expand a (possibly nested) tuple literal into leaf argument registers.
+    ///
+    /// For `(1, (2, 3))` passed to `fn f((a, (b, c)): (i32, (i32, i32)))`,
+    /// the calling convention passes each scalar leaf as a separate register:
+    /// x0 = 1, x1 = 2, x2 = 3. This helper recurses into nested tuple elements
+    /// so that the correct number and order of registers are pushed to `arg_regs`.
+    ///
+    /// FLS §5.10.3, §6.10, §9.2: Nested tuple patterns in parameter position
+    /// flatten to consecutive registers. The tuple literal argument must match
+    /// the structure of the parameter pattern.
+    /// FLS §6.1.2:37–45: All evaluations emit runtime instructions.
+    ///
+    /// Cache-line note: N scalar leaves → N × 4-byte instructions.
+    fn push_tuple_lit_arg_regs(
+        &mut self,
+        elements: &[Expr],
+        arg_regs: &mut Vec<u8>,
+    ) -> Result<(), LowerError> {
+        for elem in elements {
+            if let ExprKind::Tuple(inner) = &elem.kind {
+                // Nested tuple: recurse into its elements.
+                self.push_tuple_lit_arg_regs(inner, arg_regs)?;
+            } else {
+                let val = self.lower_expr(elem, &IrTy::I32)?;
+                let reg = self.val_to_reg(val)?;
+                arg_regs.push(reg);
             }
         }
         Ok(())
@@ -6085,19 +6164,17 @@ impl<'src> LowerCtx<'src> {
                         self.push_struct_lit_arg_regs(arg, &struct_name, &mut arg_regs)?;
                     } else if let ExprKind::Tuple(elements) = &arg.kind {
                         // FLS §5.10.3, §6.10, §9.2: Tuple literal used directly as a
-                        // function argument — e.g., `sum_pair((3, 4))`.
+                        // function argument — e.g., `sum_pair((3, 4))` or
+                        // `sum3((1, (2, 3)))` (nested tuple).
                         //
-                        // Each element evaluates to one register, matching the tuple
-                        // parameter calling convention in `lower_fn`: element 0 → x{i},
-                        // element 1 → x{i+1}, …
+                        // Each scalar leaf evaluates to one register, matching the
+                        // tuple parameter calling convention in `lower_fn`. Nested
+                        // tuples are flattened recursively: `(1, (2, 3))` produces
+                        // three register arguments x0=1, x1=2, x2=3.
                         //
                         // FLS §6.1.2:37–45: All evaluations emit runtime instructions.
-                        // Cache-line note: N elements → N × 4-byte mov/ldr instructions.
-                        for elem in elements.iter() {
-                            let val = self.lower_expr(elem, &IrTy::I32)?;
-                            let reg = self.val_to_reg(val)?;
-                            arg_regs.push(reg);
-                        }
+                        // Cache-line note: N leaves → N × 4-byte mov/ldr instructions.
+                        self.push_tuple_lit_arg_regs(elements, &mut arg_regs)?;
                     } else if let ExprKind::Path(segs) = &arg.kind
                         && segs.len() == 1
                         && let Some(&base_slot) = self.locals.get(segs[0].text(self.source))
