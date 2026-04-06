@@ -867,6 +867,34 @@ impl<'src> Parser<'src> {
                 self.expect(TokenKind::CloseParen)?;
                 ParamKind::Tuple(names)
             } else if self.peek_kind() == TokenKind::Ident
+                && self.peek_nth(1) == TokenKind::OpenParen
+            {
+                // FLS §5.10.4, §9.2: Tuple struct pattern in parameter position
+                // `Pair(a, b): Pair`.
+                let type_span = self.current_span();
+                self.advance(); // consume struct type name
+                self.advance(); // consume `(`
+                let mut fields: Vec<Span> = Vec::new();
+                loop {
+                    if self.peek_kind() == TokenKind::CloseParen {
+                        break;
+                    }
+                    if matches!(self.peek_kind(), TokenKind::Underscore | TokenKind::Ident) {
+                        fields.push(self.current_span());
+                        self.advance();
+                    } else {
+                        return Err(self.error(format!(
+                            "expected identifier or `_` in tuple struct parameter pattern, found {:?}",
+                            self.peek_kind()
+                        )));
+                    }
+                    if !self.eat(TokenKind::Comma) {
+                        break;
+                    }
+                }
+                self.expect(TokenKind::CloseParen)?;
+                ParamKind::TupleStruct { type_span, fields }
+            } else if self.peek_kind() == TokenKind::Ident
                 && self.peek_nth(1) == TokenKind::OpenBrace
             {
                 // FLS §5.10.2, §9.2: Struct pattern in parameter position

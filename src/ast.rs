@@ -345,6 +345,18 @@ pub enum ParamKind {
         /// Field bindings in source order.
         fields: Vec<(Span, Option<Span>)>,
     },
+    /// Tuple struct destructuring `TupleStructName(a, b, ...): TyName`.
+    ///
+    /// FLS §5.10.4, §9.2: Tuple struct patterns are irrefutable when the
+    /// type is a tuple struct and may appear in parameter position.
+    ///
+    /// Each element is the span of the bound name or `_` (wildcard).
+    TupleStruct {
+        /// Span of the tuple struct type name (e.g. `Pair` in `Pair(a, b)`).
+        type_span: Span,
+        /// Positional field bindings in source order.
+        fields: Vec<Span>,
+    },
 }
 
 /// A function parameter.

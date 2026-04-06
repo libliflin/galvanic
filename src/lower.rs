@@ -1076,9 +1076,55 @@ fn lower_fn(
             )));
         }
 
+        // FLS §5.10.4, §9.2: Tuple struct pattern parameter `Pair(a, b): Pair`.
+        //
+        // The tuple struct value arrives in consecutive registers (one per field),
+        // matching the plain `p: Pair` calling convention. Spill each register to
+        // a slot and bind each named field directly.
+        //
+        // Cache-line note: N fields → N × 4-byte `str` spill instructions,
+        // same density as tuple and struct pattern parameters.
+        if let crate::ast::ParamKind::TupleStruct { type_span, fields } = &param.kind {
+            let type_name = type_span.text(source);
+            let n_fields = *tuple_struct_defs.get(type_name).ok_or_else(|| {
+                LowerError::Unsupported(format!(
+                    "tuple struct pattern parameter for unknown type `{type_name}`"
+                ))
+            })?;
+            if n_fields > 0 && reg_idx + n_fields > 8 {
+                return Err(LowerError::Unsupported(
+                    "tuple struct parameter exceeds ARM64 register window (>8 total registers)"
+                        .into(),
+                ));
+            }
+            let base_slot = ctx.alloc_slot()?;
+            for _ in 1..n_fields {
+                ctx.alloc_slot()?;
+            }
+            for fi in 0..n_fields {
+                ctx.instrs.push(Instr::Store {
+                    src: (reg_idx + fi) as u8,
+                    slot: base_slot + fi as u8,
+                });
+            }
+            // Bind each positional name to its slot (FLS §5.10.4).
+            for (fi, name_span) in fields.iter().enumerate() {
+                let name = name_span.text(source);
+                if name != "_" && fi < n_fields {
+                    ctx.locals.insert(name, base_slot + fi as u8);
+                }
+            }
+            // Track type for `.0`/`.1` field access and method dispatch.
+            ctx.local_tuple_struct_types.insert(base_slot, type_name.to_owned());
+            reg_idx += n_fields;
+            continue;
+        }
+
         let param_name = match &param.kind {
             crate::ast::ParamKind::Ident(s) => s.text(source),
-            crate::ast::ParamKind::Tuple(_) | crate::ast::ParamKind::Struct { .. } => {
+            crate::ast::ParamKind::Tuple(_)
+            | crate::ast::ParamKind::Struct { .. }
+            | crate::ast::ParamKind::TupleStruct { .. } => {
                 unreachable!() // handled above
             }
         };
