@@ -30,6 +30,10 @@ use std::collections::HashMap;
 use crate::ast::{BinOp, Block, Expr, ExprKind, ItemKind, SourceFile, StmtKind, TyKind};
 use crate::ir::{IrBinOp, Instr, IrFn, IrTy, IrValue, Module};
 
+// ── FLS citations added in this module ───────────────────────────────────────
+// FLS §6.12.1: Call expressions — `lower_expr` handles `ExprKind::Call`.
+// FLS §9: Functions with parameters — `lower_fn` spills x0..x{n-1} to stack.
+
 // ── Error type ────────────────────────────────────────────────────────────────
 
 /// Errors that can occur during lowering.
@@ -77,16 +81,12 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
 /// Lower a single function definition to an `IrFn`.
 ///
 /// FLS §9: Functions.
+/// FLS §6.12.1: Functions with parameters receive arguments in x0–x{n-1}
+/// per the ARM64 ABI. We spill each parameter to a stack slot so that
+/// path expressions can reference them via `Load` — reusing the same
+/// infrastructure as let-binding locals.
 fn lower_fn(fn_def: &crate::ast::FnDef, source: &str) -> Result<IrFn, LowerError> {
     let name = fn_def.name.text(source).to_owned();
-
-    // Functions with parameters require runtime stack frames / registers
-    // for parameter passing. Not yet implemented.
-    if !fn_def.params.is_empty() {
-        return Err(LowerError::Unsupported(
-            "functions with parameters (runtime parameter passing not yet implemented)".into(),
-        ));
-    }
 
     // FLS §9: "If no return type is specified, the return type is `()`."
     let ret_ty = match &fn_def.ret_ty {
@@ -104,11 +104,43 @@ fn lower_fn(fn_def: &crate::ast::FnDef, source: &str) -> Result<IrFn, LowerError
     };
 
     let mut ctx = LowerCtx::new(source);
+
+    // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
+    // to stack slots. Each parameter slot is allocated in parameter order
+    // so that subsequent path expressions emit `Load { slot }`.
+    //
+    // ARM64 ABI: the first 8 integer/pointer parameters arrive in x0–x7.
+    // Spilling them to the stack normalises parameter access to the same
+    // `Load` instruction used for let-binding locals, keeping codegen simple.
+    //
+    // Cache-line note: each spill is one `str` instruction (4 bytes); two
+    // spills per 8-byte stack pair keep the spill sequence cache-aligned.
+    for (i, param) in fn_def.params.iter().enumerate() {
+        if i >= 8 {
+            return Err(LowerError::Unsupported(
+                "functions with more than 8 parameters (exceeds ARM64 register window)".into(),
+            ));
+        }
+        let param_ty = lower_ty(&param.ty, source)?;
+        // Only i32 parameters are supported at this milestone.
+        if !matches!(param_ty, IrTy::I32) {
+            return Err(LowerError::Unsupported("parameter type other than i32".into()));
+        }
+        let slot = ctx.alloc_slot()?;
+        let param_name = param.name.text(source);
+        ctx.locals.insert(param_name, slot);
+        // Spill parameter register i (arm64 x{i}) to its stack slot.
+        // `src: i as u8` directly names the incoming register — this is
+        // safe because the body hasn't allocated any virtual registers yet.
+        ctx.instrs.push(Instr::Store { src: i as u8, slot });
+    }
+
     ctx.lower_block(body, &ret_ty)?;
 
     let body_instrs = ctx.instrs;
     let stack_slots = ctx.next_slot;
-    Ok(IrFn { name, ret_ty, body: body_instrs, stack_slots })
+    let saves_lr = ctx.has_calls;
+    Ok(IrFn { name, ret_ty, body: body_instrs, stack_slots, saves_lr })
 }
 
 // ── Type lowering ────────────────────────────────────────────────────────────
@@ -161,6 +193,14 @@ struct LowerCtx<'src> {
     /// introduced inside an if branch remain visible after it. Proper lexical
     /// scoping is deferred to a future milestone.
     locals: HashMap<&'src str, u8>,
+    /// Whether this function emits any `Call` instructions.
+    ///
+    /// Set to `true` when `Instr::Call` is pushed. Used to set `IrFn::saves_lr`
+    /// so codegen knows to save/restore x30 around calls.
+    ///
+    /// FLS §6.12.1: Call expressions make a function non-leaf; the link
+    /// register must be preserved so the function can return correctly.
+    has_calls: bool,
 }
 
 impl<'src> LowerCtx<'src> {
@@ -172,6 +212,7 @@ impl<'src> LowerCtx<'src> {
             next_slot: 0,
             next_label: 0,
             locals: HashMap::new(),
+            has_calls: false,
         }
     }
 
@@ -480,6 +521,59 @@ impl<'src> LowerCtx<'src> {
                         "if expression with non-i32 return type".into(),
                     )),
                 }
+            }
+
+            // FLS §6.12.1: Call expression — lower each argument, then emit
+            // `Instr::Call`. The callee must be a simple path (function name).
+            //
+            // ARM64 ABI: arguments go into x0–x{n-1}. If the argument's current
+            // virtual register happens to already be register i (the required
+            // ARM64 slot for argument i), no move is needed — this is tracked
+            // in the `args` field of `Instr::Call` and resolved in codegen.
+            //
+            // FLS §6.4:14: Arguments are evaluated left-to-right before the
+            // call. The sequential lowering loop preserves this order because
+            // `lower_expr` for each argument emits its instructions before
+            // moving on to the next.
+            //
+            // Limitation: only direct (named) calls are supported; function
+            // pointers and method calls are deferred to a future milestone.
+            ExprKind::Call { callee, args } => {
+                // Resolve the callee to a function name.
+                let fn_name = match &callee.kind {
+                    ExprKind::Path(segments) if segments.len() == 1 => {
+                        segments[0].text(self.source).to_owned()
+                    }
+                    _ => {
+                        return Err(LowerError::Unsupported(
+                            "call expression with non-path callee (function pointers not yet supported)".into(),
+                        ));
+                    }
+                };
+
+                if args.len() > 8 {
+                    return Err(LowerError::Unsupported(
+                        "call with more than 8 arguments (exceeds ARM64 register window)".into(),
+                    ));
+                }
+
+                // Lower each argument to a virtual register, left-to-right.
+                // We assume i32 arguments at this milestone — type inference
+                // is future work.
+                let mut arg_regs = Vec::with_capacity(args.len());
+                for arg in args {
+                    let val = self.lower_expr(arg, &IrTy::I32)?;
+                    let reg = self.val_to_reg(val)?;
+                    arg_regs.push(reg);
+                }
+
+                // Allocate the destination register for the return value.
+                let dst = self.alloc_reg()?;
+
+                self.has_calls = true;
+                self.instrs.push(Instr::Call { dst, name: fn_name, args: arg_regs });
+
+                Ok(IrValue::Reg(dst))
             }
 
             // Anything else: not yet supported as runtime codegen.

@@ -110,16 +110,36 @@ fn frame_size(stack_slots: u8) -> u32 {
 /// FLS §9: Functions. Each function is a labeled sequence of instructions
 /// ending with a `ret` (via `emit_instr`).
 ///
-/// If the function has local variables (`stack_slots > 0`) the prologue
-/// subtracts from `sp` to reserve space, and the epilogue (emitted as part
-/// of each `Ret` instruction) restores `sp` before returning.
+/// Stack layout (low address to high address, from the top of the frame):
+///   [optional lr save slot]   — 16 bytes, pre-indexed push; only if saves_lr
+///   [local variable slots]    — stack_slots * 8 bytes, rounded to 16; only if > 0
+///
+/// On entry to the function, sp points at the caller's frame boundary.
+/// The prologue saves lr first (if needed), then allocates locals.
+/// The epilogue restores locals first, then restores lr, then `ret`.
 ///
 /// Cache-line note: `sub sp, sp, #N` is one 4-byte instruction — the frame
 /// setup occupies one slot in the first cache line of the function body.
+/// The lr save/restore pair (`str`/`ldr`) each adds one 4-byte instruction.
 fn emit_fn(out: &mut String, func: &crate::ir::IrFn) -> Result<(), CodegenError> {
     writeln!(out, "    // fn {} — FLS §9", func.name)?;
     writeln!(out, "    .global {}", func.name)?;
     writeln!(out, "{}:", func.name)?;
+
+    // FLS §6.12.1: Non-leaf functions must save the link register (x30)
+    // before any `bl` instruction overwrites it. ARM64 pre-indexed store:
+    //   `str x30, [sp, #-16]!` → sp -= 16 first, then store x30 at [sp].
+    // This keeps sp 16-byte aligned (ARM64 ABI requirement).
+    //
+    // Cache-line note: the lr save is one 4-byte instruction; paired with
+    // the matching `ldr` restore in the epilogue, both are in the first
+    // and last cache line of the function respectively.
+    if func.saves_lr {
+        writeln!(
+            out,
+            "    str     x30, [sp, #-16]!      // FLS §6.12.1: save lr (non-leaf)"
+        )?;
+    }
 
     let fsize = frame_size(func.stack_slots);
 
@@ -134,7 +154,7 @@ fn emit_fn(out: &mut String, func: &crate::ir::IrFn) -> Result<(), CodegenError>
     }
 
     for instr in &func.body {
-        emit_instr(out, instr, fsize)?;
+        emit_instr(out, instr, fsize, func.saves_lr)?;
     }
 
     Ok(())
@@ -143,18 +163,30 @@ fn emit_fn(out: &mut String, func: &crate::ir::IrFn) -> Result<(), CodegenError>
 /// Emit one instruction.
 ///
 /// `frame_size` is passed so that `Ret` can restore `sp` before branching.
-fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32) -> Result<(), CodegenError> {
+/// `saves_lr` is passed so that `Ret` can restore `x30` before `ret`.
+fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool) -> Result<(), CodegenError> {
     match instr {
         // FLS §6.19: Return expression.
         // ARM64 ABI: return value in x0; `ret` branches to link register x30.
-        // If the function has a stack frame, restore sp before returning so
-        // the caller's stack is intact.
+        // Epilogue order (must mirror prologue in reverse):
+        //   1. restore sp for local variable frame (if any)
+        //   2. restore x30 from lr save slot (if non-leaf)
+        //   3. ret
         Instr::Ret(value) => {
             emit_load_x0(out, value)?;
             if frame_size > 0 {
                 writeln!(
                     out,
                     "    add     sp, sp, #{frame_size:<14} // FLS §8.1: restore stack frame"
+                )?;
+            }
+            if saves_lr {
+                // ARM64 post-indexed load: load x30 from [sp], then sp += 16.
+                // This undoes the prologue `str x30, [sp, #-16]!`.
+                // FLS §6.12.1: restore lr so `ret` branches to the caller.
+                writeln!(
+                    out,
+                    "    ldr     x30, [sp], #16         // FLS §6.12.1: restore lr"
                 )?;
             }
             writeln!(out, "    ret")?;
@@ -240,6 +272,44 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32) -> Result<(), Co
                 out,
                 "    cbz     x{reg}, .L{label:<21} // FLS §6.17: branch if false"
             )?;
+        }
+
+        // FLS §6.12.1: Call expression.
+        // ARM64 ABI: integer arguments 0–7 go in x0–x7; return value in x0.
+        //
+        // For each argument i, if `args[i] != i` we emit `mov x{i}, x{args[i]}`
+        // to place the value in the correct register. If `args[i] == i` the
+        // value is already in the right place (no move needed).
+        //
+        // After `bl {name}`, the return value is in x0. We move it to the
+        // destination register `dst` (unless dst == 0, already there).
+        //
+        // Cache-line note: at most `args.len()` move instructions before the
+        // `bl` plus one move after — fits in a few cache lines for typical
+        // short argument lists.
+        //
+        // Limitation: this does not handle the "parallel copy" problem where
+        // args form a cycle (e.g., args = [1, 0] would incorrectly overwrite).
+        // For the current milestone all arguments are freshly materialized
+        // immediates or loads, so arg[i] == i always holds in practice.
+        Instr::Call { dst, name, args } => {
+            // Move arguments to x0, x1, ... as required by the ARM64 ABI.
+            for (i, &src_reg) in args.iter().enumerate() {
+                if src_reg != i as u8 {
+                    writeln!(
+                        out,
+                        "    mov     x{i}, x{src_reg:<19} // FLS §6.12.1: arg {i}"
+                    )?;
+                }
+            }
+            writeln!(out, "    bl      {name:<24} // FLS §6.12.1: call {name}")?;
+            // Capture return value from x0 into the destination register.
+            if *dst != 0 {
+                writeln!(
+                    out,
+                    "    mov     x{dst}, x0              // FLS §6.12.1: return value → x{dst}"
+                )?;
+            }
         }
     }
     Ok(())
