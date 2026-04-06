@@ -22,8 +22,9 @@
 //! 8. Shift `<<` `>>`
 //! 9. Additive `+` `-`
 //! 10. Multiplicative `*` `/` `%`
-//! 11. Unary `-` `!` `*` `&` `&mut`
-//! 12. Primary: literals, paths, calls, `(expr)`, blocks, `if`, `return`
+//! 11. Type cast `as` (FLS §6.5.9)
+//! 12. Unary `-` `!` `*` `&` `&mut`
+//! 13. Primary: literals, paths, calls, `(expr)`, blocks, `if`, `return`
 //!
 //! FLS §6 NOTE: The FLS does not assign numeric precedence levels. Precedence
 //! is encoded in the grammar structure. This ordering follows the Rust
@@ -997,9 +998,40 @@ impl<'src> Parser<'src> {
         Ok(lhs)
     }
 
+    /// Type cast expressions `expr as Ty` — FLS §6.5.9. Left-associative.
+    ///
+    /// Precedence: lower than unary, higher than `*`, `/`, `%`.
+    /// `a * b as i32` → `a * (b as i32)` because `parse_multiplicative`
+    /// calls `parse_cast` for each operand.
+    ///
+    /// FLS §6.5.9: "A type cast expression converts a value of one type to
+    /// a value of another type." The `as` keyword is followed by a type path.
+    ///
+    /// Cache-line note: in the common case (no `as` token), this function
+    /// immediately returns the result of `parse_unary` with no heap allocation.
+    /// `#[inline]` ensures the wrapper is merged with the caller in release
+    /// builds, keeping the hot path (no `as`) as cheap as before this level
+    /// was added.
+    #[inline]
+    fn parse_cast(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_unary()?;
+
+        while self.peek_kind() == TokenKind::KwAs {
+            self.advance(); // consume `as`
+            let ty = self.parse_ty()?;
+            let span = expr.span.to(ty.span);
+            expr = Expr {
+                kind: ExprKind::Cast { expr: Box::new(expr), ty: Box::new(ty) },
+                span,
+            };
+        }
+
+        Ok(expr)
+    }
+
     /// Multiplicative operators `*` `/` `%` — FLS §6.5. Left-associative.
     fn parse_multiplicative(&mut self) -> Result<Expr, ParseError> {
-        let mut lhs = self.parse_unary()?;
+        let mut lhs = self.parse_cast()?;
 
         loop {
             let op = match self.peek_kind() {
@@ -1009,7 +1041,7 @@ impl<'src> Parser<'src> {
                 _ => break,
             };
             self.advance();
-            let rhs = self.parse_unary()?;
+            let rhs = self.parse_cast()?;
             let span = lhs.span.to(rhs.span);
             lhs = Expr {
                 kind: ExprKind::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) },
@@ -2843,5 +2875,74 @@ mod tests {
         // `for x items {}` — missing `in` keyword.
         let err = parse_err("fn f() { for x items {} }");
         assert!(err.message.contains("KwIn"), "{}", err.message);
+    }
+
+    // ── Type cast expressions (FLS §6.5.9) ───────────────────────────────────
+
+    #[test]
+    fn cast_literal_to_i32() {
+        // FLS §6.5.9: `5 as i32` — integer identity cast.
+        let src = "fn f() -> i32 { 5 as i32 }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!() };
+        let body = f.body.as_ref().unwrap();
+        let tail = body.tail.as_ref().expect("expected tail");
+        let ExprKind::Cast { ref ty, .. } = tail.kind else {
+            panic!("expected Cast, got {:?}", tail.kind);
+        };
+        let TyKind::Path(ref segs) = ty.kind else { panic!("expected Path type") };
+        assert_eq!(segs[0].text(src), "i32");
+    }
+
+    #[test]
+    fn cast_bool_to_i32() {
+        // FLS §6.5.9: `true as i32` — boolean to integer cast.
+        let src = "fn f() -> i32 { true as i32 }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!() };
+        let body = f.body.as_ref().unwrap();
+        let tail = body.tail.as_ref().expect("expected tail");
+        let ExprKind::Cast { ref expr, ref ty } = tail.kind else {
+            panic!("expected Cast, got {:?}", tail.kind);
+        };
+        assert!(matches!(expr.kind, ExprKind::LitBool(true)));
+        let TyKind::Path(ref segs) = ty.kind else { panic!() };
+        assert_eq!(segs[0].text(src), "i32");
+    }
+
+    #[test]
+    fn cast_left_associative() {
+        // FLS §6.5.9: `as` is left-associative. `x as i32 as i32` →
+        // `(x as i32) as i32`.
+        let src = "fn f(x: i32) -> i32 { x as i32 as i32 }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!() };
+        let body = f.body.as_ref().unwrap();
+        let tail = body.tail.as_ref().expect("expected tail");
+        // Outer cast: _ as i32
+        let ExprKind::Cast { ref expr, .. } = tail.kind else {
+            panic!("expected outer Cast, got {:?}", tail.kind);
+        };
+        // Inner cast: x as i32
+        assert!(matches!(expr.kind, ExprKind::Cast { .. }),
+            "expected inner Cast, got {:?}", expr.kind);
+    }
+
+    #[test]
+    fn cast_higher_precedence_than_multiply() {
+        // FLS §6.5.9: `a * b as i32` → `a * (b as i32)`.
+        // The cast binds tighter than multiplication.
+        let src = "fn f(a: i32, b: i32) -> i32 { a * b as i32 }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!() };
+        let body = f.body.as_ref().unwrap();
+        let tail = body.tail.as_ref().expect("expected tail");
+        // Top-level is Binary(Mul, a, Cast(b, i32))
+        let ExprKind::Binary { op: BinOp::Mul, ref lhs, ref rhs } = tail.kind else {
+            panic!("expected Mul, got {:?}", tail.kind);
+        };
+        assert!(matches!(lhs.kind, ExprKind::Path(_)), "lhs should be `a`");
+        assert!(matches!(rhs.kind, ExprKind::Cast { .. }),
+            "rhs should be `b as i32`, got {:?}", rhs.kind);
     }
 }

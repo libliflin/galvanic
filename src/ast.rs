@@ -496,6 +496,26 @@ pub enum ExprKind {
         rhs: Box<Expr>,
     },
 
+    /// A type cast expression. FLS §6.5.9.
+    ///
+    /// `expr as Ty` converts the value of `expr` to the target type `ty`.
+    ///
+    /// FLS §6.5.9: "A type cast expression is used to convert a value of one
+    /// type to a value of another type."
+    ///
+    /// FLS §6.5.9: The `as` operator has higher precedence than `*`, `/`, `%`
+    /// and lower precedence than unary operators. It is left-associative.
+    ///
+    /// At this milestone only numeric casts to `i32` are supported.
+    /// Casts between pointer types, `bool` → integer, and truncating/widening
+    /// integer casts will be added as the type system grows.
+    Cast {
+        /// The expression whose value is being cast.
+        expr: Box<Expr>,
+        /// The target type.
+        ty: Box<crate::ast::Ty>,
+    },
+
     /// A compound assignment expression. FLS §6.5.11.
     ///
     /// `target op= value` reads the current value of `target`, applies `op`,

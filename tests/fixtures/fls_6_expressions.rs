@@ -35,9 +35,17 @@ fn main() {
     let _r = 42 <= 42;
     let _s = 12 != 42;
 
-    // FLS §6.5.9 — Lazy boolean expressions
+    // FLS §6.5.8 — Lazy boolean expressions
     let _t = true || false;
     let _u = true && false;
+
+    // FLS §6.5.9 — Type cast expressions
+    // No explicit code example given in §6.5.9; derived from the semantic
+    // description: "A type cast expression converts a value of one type to
+    // a value of another type." (FLS §6.5.9)
+    let _w: i32 = 5 as i32;       // i32 → i32 identity cast
+    let _x: i32 = true as i32;    // bool → i32: true = 1
+    let _y: i32 = false as i32;   // bool → i32: false = 0
 
     // FLS §6.4 — Block expressions
     let _v = {

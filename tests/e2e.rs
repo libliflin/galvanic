@@ -1490,3 +1490,116 @@ fn runtime_not_emits_mvn_instruction() {
         "assembly must not constant-fold `!5` to #-6:\n{asm}"
     );
 }
+
+// ── Milestone 15: type cast expressions `as` ─────────────────────────────────
+//
+// FLS §6.5.9: Type cast expressions. The `as` operator converts a value of
+// one type to a value of another type. At this milestone, only casts to `i32`
+// are supported: `i32 as i32` (identity) and `bool as i32` (0/1 integer).
+//
+// The `as` operator has higher precedence than `*`, `/`, `%` and lower
+// precedence than unary operators. It is left-associative.
+//
+// FLS §6.1.2:37–45: The operand is lowered at runtime even if its value is
+// statically known — no constant folding of the cast expression.
+//
+// For `i32 as i32`: the cast is a no-op at the instruction level. The source
+// register is reused directly — no additional instruction is emitted.
+// For `bool as i32`: booleans are represented as 0/1 i32 values in the IR,
+// so the cast is also a no-op at the instruction level.
+//
+// FLS example (§6.5.9): No explicit example given for integer identity casts;
+// derived from the semantic description ("numeric casts").
+
+/// Milestone 15: `fn main() -> i32 { 7 as i32 }` → identity cast exits 7.
+///
+/// FLS §6.5.9: `i32 as i32` is an identity cast. No instruction is emitted
+/// for the cast itself — the source value is used directly.
+/// FLS §6.1.2:37–45: The operand `7` is still materialized via `mov` at runtime.
+#[test]
+fn milestone_15_identity_cast_literal() {
+    let Some(exit_code) = compile_and_run("fn main() -> i32 { 7 as i32 }\n") else {
+        return;
+    };
+    assert_eq!(exit_code, 7, "expected exit 7 from `7 as i32` (identity cast), got {exit_code}");
+}
+
+/// Milestone 15: cast in a let binding — `let x: i32 = 5 as i32; x` exits 5.
+///
+/// FLS §6.5.9: The result of `5 as i32` is `5`. Assigned to `x`, then returned.
+/// FLS §8.1: Let statement binding with explicit type annotation.
+#[test]
+fn milestone_15_cast_in_let() {
+    let src = "fn main() -> i32 { let x: i32 = 5 as i32; x }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 5, "expected exit 5 from `let x: i32 = 5 as i32; x`, got {exit_code}");
+}
+
+/// Milestone 15: cast applied to a variable — `fn f(n: i32) -> i32 { n as i32 }` returns n.
+///
+/// FLS §6.5.9: `n as i32` with `n: i32` is an identity cast. The runtime value
+/// is not statically known (it's a parameter), confirming the cast operates on
+/// dynamic values, not just literals.
+/// FLS §6.1.2:37–45: Cannot constant-fold a parameter value.
+#[test]
+fn milestone_15_cast_parameter() {
+    let src = "fn identity(n: i32) -> i32 { n as i32 }\nfn main() -> i32 { identity(42) }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 42, "expected exit 42 from `identity(42)` with `n as i32`, got {exit_code}");
+}
+
+/// Milestone 15: `true as i32` → exits 1; `false as i32` → exits 0.
+///
+/// FLS §6.5.9: Boolean-to-integer cast. `true` converts to 1, `false` to 0.
+/// FLS §2.4.7: Boolean literals — `false` = 0, `true` = 1.
+/// Both representations are identical in galvanic's IR, so this is a no-op cast.
+#[test]
+fn milestone_15_bool_as_i32_true() {
+    let Some(exit_code) = compile_and_run("fn main() -> i32 { true as i32 }\n") else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "expected exit 1 from `true as i32`, got {exit_code}");
+}
+
+/// Milestone 15: `false as i32` → exits 0.
+///
+/// FLS §6.5.9: Boolean-to-integer cast. `false` converts to 0.
+#[test]
+fn milestone_15_bool_as_i32_false() {
+    let Some(exit_code) = compile_and_run("fn main() -> i32 { false as i32 }\n") else {
+        return;
+    };
+    assert_eq!(exit_code, 0, "expected exit 0 from `false as i32`, got {exit_code}");
+}
+
+/// Milestone 15: cast in an arithmetic expression — `(3 as i32) + 4` exits 7.
+///
+/// FLS §6.5.9: `as` has higher precedence than `+`. `3 as i32 + 4` parses as
+/// `(3 as i32) + 4`. This verifies precedence is encoded correctly.
+#[test]
+fn milestone_15_cast_in_arithmetic() {
+    let Some(exit_code) = compile_and_run("fn main() -> i32 { 3 as i32 + 4 }\n") else {
+        return;
+    };
+    assert_eq!(exit_code, 7, "expected exit 7 from `3 as i32 + 4`, got {exit_code}");
+}
+
+/// Assembly inspection: `x as i32` with a variable emits no extra instructions.
+///
+/// FLS §6.5.9: An identity cast (i32 → i32) produces no additional machine
+/// code — the source register is reused directly.
+/// FLS §6.1.2:37–45: The parameter `x` still requires a runtime `ldr` to load
+/// from the stack, but no cast instruction is emitted.
+#[test]
+fn runtime_cast_identity_emits_no_cast_instruction() {
+    let asm = compile_to_asm("fn f(x: i32) -> i32 { x as i32 }\nfn main() -> i32 { f(5) }\n");
+    // No ARM64 cast instruction should appear — `sxtw`, `uxtw`, `sbfx` etc.
+    assert!(
+        !asm.contains("sxtw") && !asm.contains("uxtw") && !asm.contains("sbfx"),
+        "identity cast i32→i32 must not emit a cast instruction, got:\n{asm}"
+    );
+}
