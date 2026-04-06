@@ -10035,3 +10035,182 @@ fn main() -> i32 {\n\
         .any(|l| l.trim_start().starts_with("cbz") || l.trim_start().starts_with("b."));
     assert!(has_branch, "expected conditional branch in minmax:\n{}", in_minmax.join("\n"));
 }
+
+// ── Milestone 84: tuple return from match expression ──────────────────────────
+
+/// Milestone 84: match on zero returns (0, 0); wildcard arm returns (1, n).
+///
+/// FLS §6.18: Arms tested in source order; first match wins.
+/// FLS §6.10: Tuple elements stored to consecutive slots.
+#[test]
+fn milestone_84_tuple_match_basic_literal_arm() {
+    let src = "\
+fn classify(x: i32) -> (i32, i32) {\n\
+    match x {\n\
+        0 => (0, 0),\n\
+        _ => (1, x),\n\
+    }\n\
+}\n\
+fn main() -> i32 {\n\
+    let (flag, val) = classify(0);\n\
+    flag + val\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "classify(0)=(0,0), sum=0, got {exit_code}");
+}
+
+/// Milestone 84: match wildcard arm taken when literal arm does not match.
+///
+/// FLS §6.18: Wildcard pattern matches any value.
+#[test]
+fn milestone_84_tuple_match_wildcard_arm_taken() {
+    let src = "\
+fn classify(x: i32) -> (i32, i32) {\n\
+    match x {\n\
+        0 => (0, 0),\n\
+        _ => (1, x),\n\
+    }\n\
+}\n\
+fn main() -> i32 {\n\
+    let (flag, val) = classify(5);\n\
+    flag + val\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "classify(5)=(1,5), 1+5=6, got {exit_code}");
+}
+
+/// Milestone 84: match on parameter — scrutinee is a runtime value.
+///
+/// FLS §6.18: The scrutinee is evaluated at runtime; the pattern check
+/// emits a comparison instruction.
+#[test]
+fn milestone_84_tuple_match_on_parameter() {
+    let src = "\
+fn split(n: i32) -> (i32, i32) {\n\
+    match n {\n\
+        1 => (1, 0),\n\
+        2 => (1, 1),\n\
+        _ => (0, n),\n\
+    }\n\
+}\n\
+fn main() -> i32 {\n\
+    let (a, b) = split(2);\n\
+    a + b\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2, "split(2)=(1,1), 1+1=2, got {exit_code}");
+}
+
+/// Milestone 84: three literal arms — middle arm taken.
+///
+/// FLS §6.18: Arms are tested in order; the second arm fires when x==2.
+#[test]
+fn milestone_84_tuple_match_three_literal_arms_middle() {
+    let src = "\
+fn label(x: i32) -> (i32, i32) {\n\
+    match x {\n\
+        1 => (10, 1),\n\
+        2 => (20, 2),\n\
+        _ => (0, 0),\n\
+    }\n\
+}\n\
+fn main() -> i32 {\n\
+    let (a, b) = label(2);\n\
+    a - b\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 18, "label(2)=(20,2), 20-2=18, got {exit_code}");
+}
+
+/// Milestone 84: identifier pattern in default arm binds scrutinee.
+///
+/// FLS §5.1.4: An identifier pattern in the last arm binds the matched value.
+/// The body may use the bound name in the tuple expression.
+#[test]
+fn milestone_84_tuple_match_ident_default_binds_value() {
+    let src = "\
+fn wrap(x: i32) -> (i32, i32) {\n\
+    match x {\n\
+        0 => (0, 0),\n\
+        n => (1, n),\n\
+    }\n\
+}\n\
+fn main() -> i32 {\n\
+    let (a, b) = wrap(7);\n\
+    a + b\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 8, "wrap(7)=(1,7), 1+7=8, got {exit_code}");
+}
+
+/// Milestone 84: tuple result from match used in arithmetic.
+///
+/// FLS §6.5: Arithmetic on destructured tuple elements.
+#[test]
+fn milestone_84_tuple_match_result_in_arithmetic() {
+    let src = "\
+fn pair(x: i32) -> (i32, i32) {\n\
+    match x {\n\
+        0 => (3, 4),\n\
+        _ => (5, 12),\n\
+    }\n\
+}\n\
+fn main() -> i32 {\n\
+    let (a, b) = pair(0);\n\
+    a + b\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "pair(0)=(3,4), 3+4=7, got {exit_code}");
+}
+
+/// Milestone 84: tuple returned from match passed to another function.
+///
+/// FLS §9: Destructured tuple elements are ordinary locals passed as arguments.
+#[test]
+fn milestone_84_tuple_match_result_passed_to_fn() {
+    let src = "\
+fn add(a: i32, b: i32) -> i32 { a + b }\n\
+fn pair(flag: i32) -> (i32, i32) {\n\
+    match flag {\n\
+        0 => (10, 5),\n\
+        _ => (20, 3),\n\
+    }\n\
+}\n\
+fn main() -> i32 {\n\
+    let (a, b) = pair(0);\n\
+    add(a, b)\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 15, "pair(0)=(10,5), add(10,5)=15, got {exit_code}");
+}
+
+/// Milestone 84: match emits runtime comparison instruction (not compile-time eval).
+///
+/// FLS §6.1.2:37–45: Non-const code must emit runtime instructions.
+/// The match arm check must produce a `cmp`-style comparison, not constant-fold.
+#[test]
+fn runtime_tuple_match_emits_comparison_and_cbz() {
+    let src = "\
+fn classify(x: i32) -> (i32, i32) {\n\
+    match x {\n\
+        0 => (0, 0),\n\
+        _ => (1, x),\n\
+    }\n\
+}\n\
+fn main() -> i32 {\n\
+    let (a, b) = classify(0);\n\
+    a + b\n\
+}\n";
+    let asm = compile_to_asm(src);
+    // classify must contain a comparison (cmp or sub) and a conditional branch.
+    let in_classify: Vec<&str> = asm
+        .lines()
+        .skip_while(|l| !l.starts_with("classify:"))
+        .take_while(|l| !l.starts_with("main:"))
+        .collect();
+    let has_cmp = in_classify.iter().any(|l| {
+        let t = l.trim_start();
+        t.starts_with("cmp") || t.starts_with("sub") || t.starts_with("cbz")
+    });
+    assert!(has_cmp, "expected comparison/branch in classify:\n{}", in_classify.join("\n"));
+}

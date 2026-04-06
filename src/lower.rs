@@ -2855,6 +2855,156 @@ impl<'src> LowerCtx<'src> {
                 }
             }
 
+            // FLS §6.18, §6.10: Match expression producing a tuple value.
+            //
+            // Each arm body is lowered via `lower_tuple_expr_into`, storing N
+            // elements into base_slot..base_slot+n_elems-1. The pattern check
+            // follows the same strategy as scalar match: emit a comparison and
+            // `cbz` to the next arm label on mismatch.
+            //
+            // FLS §6.18: "A match expression is used to branch over the possible
+            // values of the scrutinee operand." Arms are tried in source order.
+            // FLS §6.10: All tuple elements are in declaration order and stored
+            // to consecutive stack slots.
+            // FLS §6.1.2:37–45: All comparisons and stores are runtime instructions.
+            //
+            // Cache-line note: each literal-pattern arm emits ~5 instructions
+            // (ldr + mov + cmp + cbz + stores = 20+ bytes). Two short arms fit
+            // in a 64-byte cache line.
+            ExprKind::Match { scrutinee, arms } => {
+                if arms.is_empty() {
+                    return Err(LowerError::Unsupported(
+                        "match expression with no arms".into(),
+                    ));
+                }
+
+                // FLS §6.18: The scrutinee is evaluated once before any arm is
+                // tried. We spill it to a stack slot so each arm's pattern check
+                // can reload it without re-evaluating the scrutinee.
+                let scrut_val = self.lower_expr(scrutinee, &IrTy::I32)?;
+                let scrut_reg = self.val_to_reg(scrut_val)?;
+                let scrut_slot = self.alloc_slot()?;
+                self.instrs.push(Instr::Store { src: scrut_reg, slot: scrut_slot });
+
+                // Split into checked arms (all but last) and the default arm.
+                // FLS §6.18: Arms are tested in source order; the last arm is
+                // emitted without a pattern check (unconditional fall-through).
+                let (checked_arms, default_arm) = arms.split_at(arms.len() - 1);
+                let exit_label = self.alloc_label();
+
+                for arm in checked_arms {
+                    let next_label = self.alloc_label();
+
+                    match &arm.pat {
+                        // FLS §5.1: Wildcard — always matches. Check guard only.
+                        Pat::Wildcard => {
+                            if let Some(guard) = &arm.guard {
+                                let gv = self.lower_expr(guard, &IrTy::Bool)?;
+                                let gr = self.val_to_reg(gv)?;
+                                self.instrs.push(Instr::CondBranch { reg: gr, label: next_label });
+                            }
+                            self.lower_tuple_expr_into(&arm.body, base_slot, n_elems)?;
+                            self.instrs.push(Instr::Branch(exit_label));
+                            self.instrs.push(Instr::Label(next_label));
+                            continue;
+                        }
+
+                        // FLS §5.1.4: Identifier pattern — always matches, binds name.
+                        // FLS §6.18: Binding is visible inside the arm body and guard.
+                        Pat::Ident(span) => {
+                            let name = span.text(self.source);
+                            let bind_slot = self.alloc_slot()?;
+                            let bind_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst: bind_reg, slot: scrut_slot });
+                            self.instrs.push(Instr::Store { src: bind_reg, slot: bind_slot });
+                            self.locals.insert(name, bind_slot);
+                            if let Some(guard) = &arm.guard {
+                                let gv = self.lower_expr(guard, &IrTy::Bool)?;
+                                let gr = self.val_to_reg(gv)?;
+                                self.instrs.push(Instr::CondBranch { reg: gr, label: next_label });
+                            }
+                            self.lower_tuple_expr_into(&arm.body, base_slot, n_elems)?;
+                            self.locals.remove(name);
+                            self.instrs.push(Instr::Branch(exit_label));
+                            self.instrs.push(Instr::Label(next_label));
+                            continue;
+                        }
+
+                        // FLS §5.4: Literal/path pattern — emit equality check.
+                        // LitInt, NegLitInt, LitBool, or two-segment path (enum variant).
+                        Pat::LitInt(n) => {
+                            let s_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                            let p_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::LoadImm(p_reg, *n as i32));
+                            let eq_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg });
+                            self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label });
+                        }
+
+                        Pat::NegLitInt(n) => {
+                            let s_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                            let p_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::LoadImm(p_reg, -(*n as i32)));
+                            let eq_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg });
+                            self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label });
+                        }
+
+                        Pat::LitBool(b) => {
+                            let s_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                            let p_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::LoadImm(p_reg, *b as i32));
+                            let eq_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg });
+                            self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label });
+                        }
+
+                        _ => {
+                            return Err(LowerError::Unsupported(
+                                "match arm pattern type not yet supported in tuple-returning match".into(),
+                            ));
+                        }
+                    }
+
+                    // Pattern matched: check guard (if any), then lower the arm body.
+                    if let Some(guard) = &arm.guard {
+                        let gv = self.lower_expr(guard, &IrTy::Bool)?;
+                        let gr = self.val_to_reg(gv)?;
+                        self.instrs.push(Instr::CondBranch { reg: gr, label: next_label });
+                    }
+                    self.lower_tuple_expr_into(&arm.body, base_slot, n_elems)?;
+                    self.instrs.push(Instr::Branch(exit_label));
+                    self.instrs.push(Instr::Label(next_label));
+                }
+
+                // Default (last) arm — no pattern check.
+                // FLS §6.18: The last arm is typically a wildcard or identifier
+                // pattern; it is executed unconditionally if all prior arms failed.
+                let default = &default_arm[0];
+                match &default.pat {
+                    Pat::Ident(span) => {
+                        let name = span.text(self.source);
+                        let bind_slot = self.alloc_slot()?;
+                        let bind_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: bind_reg, slot: scrut_slot });
+                        self.instrs.push(Instr::Store { src: bind_reg, slot: bind_slot });
+                        self.locals.insert(name, bind_slot);
+                        self.lower_tuple_expr_into(&default.body, base_slot, n_elems)?;
+                        self.locals.remove(name);
+                    }
+                    _ => {
+                        // Wildcard or literal (exhaustive last arm).
+                        self.lower_tuple_expr_into(&default.body, base_slot, n_elems)?;
+                    }
+                }
+
+                self.instrs.push(Instr::Label(exit_label));
+                Ok(())
+            }
+
             _ => Err(LowerError::Unsupported(
                 "tuple return: unsupported expression form".into(),
             )),
