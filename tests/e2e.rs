@@ -830,3 +830,20 @@ fn runtime_explicit_return_emits_ret() {
         "expected `ret` instruction for explicit return expression, got:\n{asm}"
     );
 }
+
+/// Assembly inspection: unary negation `-x` must emit a `neg` instruction.
+///
+/// FLS §6.5.4: Negation operator expressions. The unary `-` applied to an
+/// integer value must emit a runtime `neg` instruction, not fold the literal
+/// to a negative immediate.
+///
+/// FLS §6.1.2:37–45: Non-const code must emit runtime instructions.
+/// FLS §6.5.4: "The type of a negation expression is the type of the operand."
+#[test]
+fn runtime_neg_emits_neg_instruction() {
+    let asm = compile_to_asm("fn negate(x: i32) -> i32 { -x }\nfn main() -> i32 { negate(5) }\n");
+    assert!(
+        asm.contains("neg"),
+        "expected `neg` instruction for unary negation, got:\n{asm}"
+    );
+}

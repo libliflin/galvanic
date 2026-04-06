@@ -974,6 +974,26 @@ impl<'src> LowerCtx<'src> {
                 Ok(IrValue::Unit)
             }
 
+            // FLS §6.5.4: Unary negation `-operand` — arithmetic two's complement negation.
+            //
+            // Lowering:
+            //   1. Lower the operand to a register.
+            //   2. Emit `Instr::Neg { dst, src }` → `neg x{dst}, x{src}` on ARM64.
+            //
+            // FLS §6.1.2:37–45: Even `-5` in a non-const context emits a runtime `neg`
+            // instruction — no compile-time folding to a negative immediate.
+            //
+            // FLS §6.5.4: "The type of a negation expression is the type of the operand."
+            //
+            // Cache-line note: `neg` is 4 bytes (alias for `sub xD, xzr, xS`).
+            ExprKind::Unary { op: crate::ast::UnaryOp::Neg, operand } => {
+                let val = self.lower_expr(operand, &IrTy::I32)?;
+                let src = self.val_to_reg(val)?;
+                let dst = self.alloc_reg()?;
+                self.instrs.push(Instr::Neg { dst, src });
+                Ok(IrValue::Reg(dst))
+            }
+
             // Anything else: not yet supported as runtime codegen.
             _ => Err(LowerError::Unsupported(
                 "expression kind in non-const context (runtime codegen not yet implemented)".into(),

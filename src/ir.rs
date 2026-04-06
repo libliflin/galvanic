@@ -227,6 +227,25 @@ pub enum Instr {
         label: u32,
     },
 
+    /// Arithmetic negation: `dst = -src` (two's complement).
+    ///
+    /// `Neg { dst, src }` → `neg x{dst}, x{src}` on ARM64.
+    ///
+    /// FLS §6.5.4: Negation operator expressions. The unary `-` applied to
+    /// a numeric value produces its arithmetic negation. For `i32`, this is
+    /// two's complement negation: `neg xD, xS` ≡ `sub xD, xzr, xS`.
+    ///
+    /// FLS §6.1.2:37–45: Even `-literal` in a non-const context must emit a
+    /// runtime instruction, not fold to a negative immediate.
+    ///
+    /// Cache-line note: ARM64 `neg` is a 4-byte instruction (alias for sub xD, xzr, xS).
+    Neg {
+        /// Destination register (receives the negated value).
+        dst: u8,
+        /// Source register (holds the value to negate).
+        src: u8,
+    },
+
     /// Call a named function with arguments; result goes into a virtual register.
     ///
     /// `Call { dst, name, args }` emits (for each arg[i] ≠ i):
