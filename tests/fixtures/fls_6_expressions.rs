@@ -162,3 +162,28 @@ fn compound_assign_example() -> i32 {
     x >>= 1;   // x = 7  (FLS §6.5.11: >>=)
     x
 }
+
+// FLS §6.15.1 — For loop expression with integer range.
+// FLS §6.16 — Range expressions `start..end` and `start..=end`.
+//
+// No direct for-loop-with-range example in FLS §6.15.1; the section states
+// "A for loop expression iterates over the values produced by an IntoIterator."
+// This function is derived from the semantic description in §6.15.1 and §6.16.
+fn for_loop_sum_example() -> i32 {
+    let mut sum = 0;
+    for i in 0..5 {     // FLS §6.16: exclusive range 0, 1, 2, 3, 4
+        sum += i;        // FLS §6.5.11: compound add-assignment
+    }
+    sum                  // = 10
+}
+
+// FLS §6.16 — Inclusive range `start..=end`.
+// No direct FLS §6.16 example for inclusive ranges; derived from the spec's
+// definition: "A range expression `..=` represents an inclusive range."
+fn for_loop_inclusive_example() -> i32 {
+    let mut product = 1;
+    for i in 1..=4 {    // FLS §6.16: inclusive range 1, 2, 3, 4
+        product *= i;    // FLS §6.5.11: compound multiply-assignment
+    }
+    product              // = 24
+}

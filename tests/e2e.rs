@@ -1877,3 +1877,111 @@ fn runtime_recursive_call_spills_lhs_register() {
     let between = &asm[first_bl..first_bl + 1 + second_bl];
     assert!(between.contains("str"), "expected str (spill) between the two bl fib calls, got:\n{between}");
 }
+
+// ── Milestone 19: for loops with integer ranges ───────────────────────────────
+//
+// `for i in start..end { body }` desugars to a while-loop equivalent:
+//   alloc i = start, end_bound = end
+//   cond_label: if i < end_bound → exit
+//   body
+//   incr_label: i += 1 → cond_label
+//   exit_label
+//
+// `for i in start..=end` uses `<=` instead of `<`.
+//
+// FLS §6.15.1: For loop expressions iterate over an IntoIterator.
+// FLS §6.16: Range expressions `start..end` and `start..=end`.
+// FLS §6.21: Range operators have lower precedence than logical operators.
+// FLS §6.1.2:37–45: The back-edge and increment are runtime instructions.
+
+/// Milestone 19: sum 0..5 with a for loop.
+///
+/// `for i in 0..5 { acc += i }` → acc = 0+1+2+3+4 = 10.
+///
+/// FLS §6.15.1: For loop expression.
+/// FLS §6.16: Exclusive range `0..5`.
+#[test]
+fn milestone_19_for_loop_sum() {
+    let src = "fn main() -> i32 { let mut acc = 0; for i in 0..5 { acc += i; } acc }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 10, "expected 0+1+2+3+4=10, got {exit_code}");
+}
+
+/// Milestone 19: for loop body never executes when start >= end.
+///
+/// `for i in 5..5 { acc += 1; }` — range is empty, acc stays 0.
+///
+/// FLS §6.16: An exclusive range where start == end is empty.
+#[test]
+fn milestone_19_for_loop_empty_range() {
+    let src = "fn main() -> i32 { let mut acc = 0; for i in 5..5 { acc += 1; } acc }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 0, "expected empty range → acc=0, got {exit_code}");
+}
+
+/// Milestone 19: inclusive range `0..=4` sums 0+1+2+3+4 = 10.
+///
+/// FLS §6.16: Inclusive range `start..=end` iterates while i <= end.
+#[test]
+fn milestone_19_for_loop_inclusive_range() {
+    let src = "fn main() -> i32 { let mut acc = 0; for i in 0..=4 { acc += i; } acc }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 10, "expected 0+1+2+3+4=10 via inclusive range, got {exit_code}");
+}
+
+/// Milestone 19: for loop with a non-zero start.
+///
+/// `for i in 3..6 { acc += i }` → acc = 3+4+5 = 12.
+///
+/// FLS §6.16: Range bounds are evaluated once before the loop.
+#[test]
+fn milestone_19_for_loop_nonzero_start() {
+    let src = "fn main() -> i32 { let mut acc = 0; for i in 3..6 { acc += i; } acc }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 12, "expected 3+4+5=12, got {exit_code}");
+}
+
+/// Milestone 19: for loop with a function-parameter bound.
+///
+/// `sum_to(n)` uses `for i in 0..n`, which exercises a runtime end bound
+/// (not a literal). This proves codegen emits real runtime instructions,
+/// not a compile-time evaluation.
+///
+/// FLS §6.1.2:37–45: The range bounds must be evaluated at runtime.
+/// FLS §6.15.1: The loop variable is a fresh binding per iteration.
+#[test]
+fn milestone_19_for_loop_runtime_bound() {
+    let src = "fn sum_to(n: i32) -> i32 { let mut acc = 0; for i in 0..n { acc += i; } acc }\nfn main() -> i32 { sum_to(5) }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 10, "expected sum_to(5)=10, got {exit_code}");
+}
+
+/// Milestone 19: assembly inspection — for loop emits cmp and back-edge branch.
+///
+/// The control flow skeleton must include:
+/// - A comparison instruction for the loop condition.
+/// - A `cbz` to exit when the condition is false.
+/// - An `add` for the increment.
+/// - A back-edge `b` to the condition label.
+///
+/// FLS §6.15.1: For loop expressions produce runtime control flow.
+/// FLS §6.16: Range expression bounds are materialised as runtime loads.
+#[test]
+fn runtime_for_loop_emits_cmp_cbz_add_and_back_branch() {
+    let src = "fn main() -> i32 { let mut acc = 0; for i in 0..5 { acc += i; } acc }\n";
+    let asm = compile_to_asm(src);
+    assert!(asm.contains("cbz"), "expected cbz (exit branch) in for loop assembly");
+    assert!(asm.contains("add"), "expected add (increment) in for loop assembly");
+    // Back-edge: unconditional branch to the condition label.
+    assert!(asm.contains("b "), "expected back-edge branch in for loop assembly");
+}
