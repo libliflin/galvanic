@@ -156,11 +156,86 @@ classify_with_guard:
     add     sp, sp, #48             // FLS §8.1: restore stack frame
     ret
 
+    // fn check_exact — FLS §9
+    .global check_exact
+check_exact:
+    sub     sp, sp, #32             // FLS §8.1: frame for 3 slot(s)
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    ldr     x0, [sp, #0              ] // FLS §8.1: load slot 0
+    str     x0, [sp, #8              ] // FLS §8.1: store slot 1
+    ldr     x1, [sp, #8              ] // FLS §8.1: load slot 1
+    mov     x2, #42                  // FLS §2.4.4.1: load imm 42
+    cmp     x1, x2               // FLS §6.5.3: compare (signed)
+    cset    x3, eq                    // FLS §6.5.3: x3 = (x1 == x2)
+    cbz     x3, .L0                     // FLS §6.17: branch if false
+    mov     x4, #1                   // FLS §2.4.4.1: load imm 1
+    str     x4, [sp, #16             ] // FLS §8.1: store slot 2
+    b       .L1                        // FLS §6.17: branch to end
+.L0:                              // FLS §6.17: branch target
+    mov     x5, #0                   // FLS §2.4.4.1: load imm 0
+    str     x5, [sp, #16             ] // FLS §8.1: store slot 2
+.L1:                              // FLS §6.17: branch target
+    ldr     x6, [sp, #16             ] // FLS §8.1: load slot 2
+    mov     x0, x6              // FLS §6.19: return reg 6 → x0
+    add     sp, sp, #32             // FLS §8.1: restore stack frame
+    ret
+
+    // fn check_range — FLS §9
+    .global check_range
+check_range:
+    sub     sp, sp, #32             // FLS §8.1: frame for 3 slot(s)
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    ldr     x0, [sp, #0              ] // FLS §8.1: load slot 0
+    str     x0, [sp, #8              ] // FLS §8.1: store slot 1
+    ldr     x1, [sp, #8              ] // FLS §8.1: load slot 1
+    mov     x2, #1                   // FLS §2.4.4.1: load imm 1
+    cmp     x1, x2               // FLS §6.5.3: compare (signed)
+    cset    x3, ge                    // FLS §6.5.3: x3 = (x1 >= x2)
+    mov     x4, #10                  // FLS §2.4.4.1: load imm 10
+    cmp     x1, x4               // FLS §6.5.3: compare (signed)
+    cset    x5, le                    // FLS §6.5.3: x5 = (x1 <= x4)
+    and     x6, x3, x5          // FLS §6.5.6: bitwise and
+    cbz     x6, .L0                     // FLS §6.17: branch if false
+    mov     x7, #1                   // FLS §2.4.4.1: load imm 1
+    str     x7, [sp, #16             ] // FLS §8.1: store slot 2
+    b       .L1                        // FLS §6.17: branch to end
+.L0:                              // FLS §6.17: branch target
+    mov     x8, #0                   // FLS §2.4.4.1: load imm 0
+    str     x8, [sp, #16             ] // FLS §8.1: store slot 2
+.L1:                              // FLS §6.17: branch target
+    ldr     x9, [sp, #16             ] // FLS §8.1: load slot 2
+    mov     x0, x9              // FLS §6.19: return reg 9 → x0
+    add     sp, sp, #32             // FLS §8.1: restore stack frame
+    ret
+
+    // fn bind_and_use — FLS §9
+    .global bind_and_use
+bind_and_use:
+    sub     sp, sp, #32             // FLS §8.1: frame for 4 slot(s)
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    ldr     x0, [sp, #0              ] // FLS §8.1: load slot 0
+    str     x0, [sp, #8              ] // FLS §8.1: store slot 1
+    ldr     x1, [sp, #8              ] // FLS §8.1: load slot 1
+    str     x1, [sp, #16             ] // FLS §8.1: store slot 2
+    ldr     x2, [sp, #16             ] // FLS §8.1: load slot 2
+    mov     x3, #1                   // FLS §2.4.4.1: load imm 1
+    add     x4, x2, x3          // FLS §6.5.5: add
+    str     x4, [sp, #24             ] // FLS §8.1: store slot 3
+    b       .L1                        // FLS §6.17: branch to end
+.L0:                              // FLS §6.17: branch target
+    mov     x5, #0                   // FLS §2.4.4.1: load imm 0
+    str     x5, [sp, #24             ] // FLS §8.1: store slot 3
+.L1:                              // FLS §6.17: branch target
+    ldr     x6, [sp, #24             ] // FLS §8.1: load slot 3
+    mov     x0, x6              // FLS §6.19: return reg 6 → x0
+    add     sp, sp, #32             // FLS §8.1: restore stack frame
+    ret
+
     // fn main — FLS §9
     .global main
 main:
     str     x30, [sp, #-16]!      // FLS §6.12.1: save lr (non-leaf)
-    sub     sp, sp, #32             // FLS §8.1: frame for 4 slot(s)
+    sub     sp, sp, #64             // FLS §8.1: frame for 7 slot(s)
     mov     x0, #2                   // FLS §2.4.4.1: load imm 2
     bl      range_inclusive          // FLS §6.12.1: call range_inclusive
     mov     x1, x0              // FLS §6.12.1: return value → x1
@@ -181,15 +256,36 @@ main:
     bl      classify_with_guard      // FLS §6.12.1: call classify_with_guard
     mov     x8, x0              // FLS §6.12.1: return value → x8
     str     x8, [sp, #24             ] // FLS §8.1: store slot 3
-    ldr     x9, [sp, #0              ] // FLS §8.1: load slot 0
-    ldr     x10, [sp, #8              ] // FLS §8.1: load slot 1
-    add     x11, x9, x10          // FLS §6.5.5: add
-    ldr     x12, [sp, #16             ] // FLS §8.1: load slot 2
-    add     x13, x11, x12          // FLS §6.5.5: add
-    ldr     x14, [sp, #24             ] // FLS §8.1: load slot 3
-    add     x15, x13, x14          // FLS §6.5.5: add
-    mov     x0, x15              // FLS §6.19: return reg 15 → x0
-    add     sp, sp, #32             // FLS §8.1: restore stack frame
+    mov     x9, #42                  // FLS §2.4.4.1: load imm 42
+    mov     x0, x9                   // FLS §6.12.1: arg 0
+    bl      check_exact              // FLS §6.12.1: call check_exact
+    mov     x10, x0              // FLS §6.12.1: return value → x10
+    str     x10, [sp, #32             ] // FLS §8.1: store slot 4
+    mov     x11, #5                   // FLS §2.4.4.1: load imm 5
+    mov     x0, x11                  // FLS §6.12.1: arg 0
+    bl      check_range              // FLS §6.12.1: call check_range
+    mov     x12, x0              // FLS §6.12.1: return value → x12
+    str     x12, [sp, #40             ] // FLS §8.1: store slot 5
+    mov     x13, #3                   // FLS §2.4.4.1: load imm 3
+    mov     x0, x13                  // FLS §6.12.1: arg 0
+    bl      bind_and_use             // FLS §6.12.1: call bind_and_use
+    mov     x14, x0              // FLS §6.12.1: return value → x14
+    str     x14, [sp, #48             ] // FLS §8.1: store slot 6
+    ldr     x15, [sp, #0              ] // FLS §8.1: load slot 0
+    ldr     x16, [sp, #8              ] // FLS §8.1: load slot 1
+    add     x17, x15, x16          // FLS §6.5.5: add
+    ldr     x18, [sp, #16             ] // FLS §8.1: load slot 2
+    add     x19, x17, x18          // FLS §6.5.5: add
+    ldr     x20, [sp, #24             ] // FLS §8.1: load slot 3
+    add     x21, x19, x20          // FLS §6.5.5: add
+    ldr     x22, [sp, #32             ] // FLS §8.1: load slot 4
+    add     x23, x21, x22          // FLS §6.5.5: add
+    ldr     x24, [sp, #40             ] // FLS §8.1: load slot 5
+    add     x25, x23, x24          // FLS §6.5.5: add
+    ldr     x26, [sp, #48             ] // FLS §8.1: load slot 6
+    add     x27, x25, x26          // FLS §6.5.5: add
+    mov     x0, x27              // FLS §6.19: return reg 27 → x0
+    add     sp, sp, #64             // FLS §8.1: restore stack frame
     ldr     x30, [sp], #16         // FLS §6.12.1: restore lr
     ret
 
