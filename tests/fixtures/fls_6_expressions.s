@@ -182,8 +182,8 @@ count_to_ten:
     str     x6, [sp, #0              ] // FLS §8.1: store slot 0
     b       .L10                       // FLS §6.17: branch to end
 .L11:                              // FLS §6.17: branch target
-    ldr     x7, [sp, #0              ] // FLS §8.1: load slot 0
-    mov     x0, x7              // FLS §6.19: return reg 7 → x0
+    ldr     x1, [sp, #0              ] // FLS §8.1: load slot 0
+    mov     x0, x1              // FLS §6.19: return reg 1 → x0
     add     sp, sp, #16             // FLS §8.1: restore stack frame
     ret
 
@@ -209,8 +209,8 @@ find_first_over_threshold:
     str     x6, [sp, #0              ] // FLS §8.1: store slot 0
     b       .L12                       // FLS §6.17: branch to end
 .L13:                              // FLS §6.17: branch target
-    ldr     x7, [sp, #0              ] // FLS §8.1: load slot 0
-    mov     x0, x7              // FLS §6.19: return reg 7 → x0
+    ldr     x1, [sp, #0              ] // FLS §8.1: load slot 0
+    mov     x0, x1              // FLS §6.19: return reg 1 → x0
     add     sp, sp, #16             // FLS §8.1: restore stack frame
     ret
 
@@ -238,10 +238,10 @@ loop_returning_value:
 .L19:                              // FLS §6.17: branch target
     b       .L16                       // FLS §6.17: branch to end
 .L17:                              // FLS §6.17: branch target
-    ldr     x8, [sp, #16             ] // FLS §8.1: load slot 2
-    str     x8, [sp, #8              ] // FLS §8.1: store slot 1
-    ldr     x9, [sp, #8              ] // FLS §8.1: load slot 1
-    mov     x0, x9              // FLS §6.19: return reg 9 → x0
+    ldr     x1, [sp, #16             ] // FLS §8.1: load slot 2
+    str     x1, [sp, #8              ] // FLS §8.1: store slot 1
+    ldr     x2, [sp, #8              ] // FLS §8.1: load slot 1
+    mov     x0, x2              // FLS §6.19: return reg 2 → x0
     add     sp, sp, #32             // FLS §8.1: restore stack frame
     ret
 
@@ -278,8 +278,8 @@ sum_skipping_three:
     str     x13, [sp, #8              ] // FLS §8.1: store slot 1
     b       .L20                       // FLS §6.17: branch to end
 .L21:                              // FLS §6.17: branch target
-    ldr     x14, [sp, #8              ] // FLS §8.1: load slot 1
-    mov     x0, x14              // FLS §6.19: return reg 14 → x0
+    ldr     x2, [sp, #8              ] // FLS §8.1: load slot 1
+    mov     x0, x2              // FLS §6.19: return reg 2 → x0
     add     sp, sp, #16             // FLS §8.1: restore stack frame
     ret
 
@@ -434,8 +434,8 @@ for_loop_sum_example:
     str     x11, [sp, #8              ] // FLS §8.1: store slot 1
     b       .L26                       // FLS §6.17: branch to end
 .L28:                              // FLS §6.17: branch target
-    ldr     x12, [sp, #0              ] // FLS §8.1: load slot 0
-    mov     x0, x12              // FLS §6.19: return reg 12 → x0
+    ldr     x1, [sp, #0              ] // FLS §8.1: load slot 0
+    mov     x0, x1              // FLS §6.19: return reg 1 → x0
     add     sp, sp, #32             // FLS §8.1: restore stack frame
     ret
 
@@ -466,8 +466,8 @@ for_loop_inclusive_example:
     str     x11, [sp, #8              ] // FLS §8.1: store slot 1
     b       .L29                       // FLS §6.17: branch to end
 .L31:                              // FLS §6.17: branch target
-    ldr     x12, [sp, #0              ] // FLS §8.1: load slot 0
-    mov     x0, x12              // FLS §6.19: return reg 12 → x0
+    ldr     x1, [sp, #0              ] // FLS §8.1: load slot 0
+    mov     x0, x1              // FLS §6.19: return reg 1 → x0
     add     sp, sp, #32             // FLS §8.1: restore stack frame
     ret
 
