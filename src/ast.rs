@@ -891,6 +891,26 @@ pub enum Pat {
     /// Cache-line note: lowers identically to a LitInt pattern —
     /// ~3 instructions (mov + cmp + cbz = 12 bytes) per arm.
     Path(Vec<Span>),
+    /// Tuple struct/variant pattern: `Enum::Variant(p1, p2, ...)`.
+    ///
+    /// FLS §5.4: Struct patterns. A tuple variant pattern matches by
+    /// discriminant, then optionally binds positional fields to names.
+    ///
+    /// Example: `match x { Opt::Some(v) => v, Opt::None => 0 }` —
+    /// `Opt::Some(v)` is a tuple struct pattern; `v` is bound to the first
+    /// field of the matched variant.
+    ///
+    /// Field patterns: `Pat::Ident` (binding) and `Pat::Wildcard` (ignore)
+    /// are supported. Nested patterns are future work.
+    ///
+    /// Cache-line note: lowers to ~5 instructions (ldr discriminant + mov +
+    /// cmp + cbz + 1×ldr per field binding = 20+ bytes per arm).
+    TupleStruct {
+        /// The variant path (e.g., `["Opt", "Some"]`).
+        path: Vec<Span>,
+        /// Positional field patterns.
+        fields: Vec<Pat>,
+    },
 }
 
 // ── Operators ─────────────────────────────────────────────────────────────────
