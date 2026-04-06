@@ -708,10 +708,22 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::OpenBrace)?; // eat `{`
 
         let mut fields = Vec::new();
+        let mut base = None;
 
         while self.peek_kind() != TokenKind::CloseBrace
             && self.peek_kind() != TokenKind::Eof
         {
+            // FLS §6.11: Struct update syntax `..base_expr` — copies all fields
+            // not explicitly listed from `base_expr`. Must appear last, after
+            // any explicit field initialisers.
+            if self.peek_kind() == TokenKind::DotDot {
+                self.advance(); // consume `..`
+                let base_expr = self.parse_expr()?;
+                base = Some(Box::new(base_expr));
+                // `..base` is always the last item; no comma follows.
+                break;
+            }
+
             if self.peek_kind() != TokenKind::Ident {
                 return Err(self.error(format!(
                     "expected field name in struct literal, found {:?}",
@@ -741,7 +753,7 @@ impl<'src> Parser<'src> {
         let end = self.current_span();
         self.expect(TokenKind::CloseBrace)?;
         Ok(Expr {
-            kind: ExprKind::StructLit { name, fields },
+            kind: ExprKind::StructLit { name, fields, base },
             span: start.to(end),
         })
     }
@@ -1596,7 +1608,8 @@ impl<'src> Parser<'src> {
                 // 1. The path is a single identifier (multi-segment paths are
                 //    not yet supported as struct literal heads).
                 // 2. The next token is `{`.
-                // 3. The token after `{` is either `}` (empty struct) or
+                // 3. The token after `{` is either `}` (empty struct), `..`
+                //    (struct update syntax with no explicit fields), or
                 //    `Ident :` (named field — distinguishes from a block with
                 //    a plain expression statement like `{ foo }`).
                 // 4. `restrict_struct_lit` is false (not inside an
@@ -1605,6 +1618,8 @@ impl<'src> Parser<'src> {
                     && !self.restrict_struct_lit
                     && self.peek_kind() == TokenKind::OpenBrace
                     && (self.peek_nth(1) == TokenKind::CloseBrace
+                        // FLS §6.11: Struct update `Name { ..base }` with no explicit fields.
+                        || self.peek_nth(1) == TokenKind::DotDot
                         || (self.peek_nth(1) == TokenKind::Ident
                             && (self.peek_nth(2) == TokenKind::Colon
                                 // FLS §6.11: Shorthand field — `Name { field, … }`.
@@ -3541,6 +3556,38 @@ mod tests {
         let ExprKind::LitInt(_) = fields[1].1.kind else {
             panic!("expected LitInt for explicit field");
         };
+    }
+
+    #[test]
+    fn struct_lit_update_syntax_single_override() {
+        // FLS §6.11: struct update syntax `Point { x: 5, ..a }`.
+        let src = "fn f(a: Point) -> Point { Point { x: 5, ..a } }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn") };
+        let body = f.body.as_ref().unwrap();
+        let ExprKind::StructLit { ref fields, ref base, .. } = body.tail.as_ref().unwrap().kind else {
+            panic!("expected StructLit tail");
+        };
+        assert_eq!(fields.len(), 1, "expected 1 explicit field");
+        assert_eq!(fields[0].0.text(src), "x");
+        assert!(base.is_some(), "expected base expression from `..a`");
+        let ExprKind::Path(_) = base.as_ref().unwrap().kind else {
+            panic!("expected Path for base expression");
+        };
+    }
+
+    #[test]
+    fn struct_lit_update_syntax_no_explicit_fields() {
+        // FLS §6.11: struct update with no explicit fields — copies everything.
+        let src = "fn f(a: Point) -> Point { Point { ..a } }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn") };
+        let body = f.body.as_ref().unwrap();
+        let ExprKind::StructLit { ref fields, ref base, .. } = body.tail.as_ref().unwrap().kind else {
+            panic!("expected StructLit tail");
+        };
+        assert!(fields.is_empty(), "expected no explicit fields");
+        assert!(base.is_some(), "expected base expression from `..a`");
     }
 
     #[test]

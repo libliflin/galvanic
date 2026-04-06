@@ -440,3 +440,26 @@ fn tuple_struct_example() -> i32 {
     let p = Pair(3, 7);  // FLS §14.2: constructor call syntax
     p.0 + p.1            // FLS §6.10: positional field access (3 + 7 = 10)
 }
+
+// ── FLS §6.11 — Struct update syntax ─────────────────────────────────────────
+//
+// FLS §6.11: "A struct expression with a base struct may specify a subset of
+// the fields for the new value; all remaining fields have their values taken
+// from the base struct expression."
+//
+// Syntax: `Struct { field: val, ..base }` — the `..base` fills in all fields
+// not explicitly listed, copying them from `base` at runtime.
+//
+// Note: The FLS §6.11 section describes struct update syntax but does not
+// provide a self-contained runnable example. This function is derived from
+// the semantic description in §6.11.
+//
+// Cache-line note: copying a field from base emits one `ldr` + one `str`
+// (8 bytes), the same footprint as storing an explicitly initialised field.
+struct Origin { x: i32, y: i32 }
+
+fn struct_update_example() -> i32 {
+    let a = Origin { x: 1, y: 2 };    // FLS §6.11: full struct literal
+    let b = Origin { x: 5, ..a };     // FLS §6.11: update syntax — y copied from a
+    b.x + b.y                          // 5 + 2 = 7
+}

@@ -853,6 +853,25 @@ tuple_struct_example:
     add     sp, sp, #16             // FLS §8.1: restore stack frame
     ret
 
+    // fn struct_update_example — FLS §9
+    .global struct_update_example
+struct_update_example:
+    sub     sp, sp, #32             // FLS §8.1: frame for 4 slot(s)
+    mov     x0, #1                   // FLS §2.4.4.1: load imm 1
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    mov     x1, #2                   // FLS §2.4.4.1: load imm 2
+    str     x1, [sp, #8              ] // FLS §8.1: store slot 1
+    mov     x2, #5                   // FLS §2.4.4.1: load imm 5
+    str     x2, [sp, #16             ] // FLS §8.1: store slot 2
+    ldr     x3, [sp, #8              ] // FLS §8.1: load slot 1
+    str     x3, [sp, #24             ] // FLS §8.1: store slot 3
+    ldr     x4, [sp, #16             ] // FLS §8.1: load slot 2
+    ldr     x5, [sp, #24             ] // FLS §8.1: load slot 3
+    add     x6, x4, x5          // FLS §6.5.5: add
+    mov     x0, x6              // FLS §6.19: return reg 6 → x0
+    add     sp, sp, #32             // FLS §8.1: restore stack frame
+    ret
+
     // ELF entry point — FLS §18.1
     .global _start
 _start:
