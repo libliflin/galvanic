@@ -368,11 +368,20 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     }
 
     // Second pass: lower function items.
+    //
+    // FLS §6.17: Branch target labels must be unique within the assembly file.
+    // GAS local labels (`.L{n}`) are file-scoped, so if two functions both emit
+    // `.L0:` and `.L1:` the assembler will error or branch to the wrong target.
+    // We pass a monotonically increasing `label_base` to each `lower_fn` call
+    // so that every function's labels are globally unique.
     let mut fns = Vec::new();
+    let mut label_base: u32 = 0;
     for item in &src.items {
         match &item.kind {
             ItemKind::Fn(fn_def) => {
-                fns.push(lower_fn(fn_def, source, &struct_defs, &enum_defs, &method_self_kinds, &struct_return_fns, None)?);
+                let (ir_fn, next_label) = lower_fn(fn_def, source, &struct_defs, &enum_defs, &method_self_kinds, &struct_return_fns, None, label_base)?;
+                label_base = next_label;
+                fns.push(ir_fn);
             }
             ItemKind::Impl(impl_def) => {
                 // FLS §11: Inherent impl. Each method becomes a mangled top-level
@@ -392,7 +401,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         mangled_name: &mangled,
                         self_kind: method.self_param,
                     });
-                    fns.push(lower_fn(
+                    let (ir_fn, next_label) = lower_fn(
                         method,
                         source,
                         &struct_defs,
@@ -400,7 +409,10 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         &method_self_kinds,
                         &struct_return_fns,
                         mctx,
-                    )?);
+                        label_base,
+                    )?;
+                    label_base = next_label;
+                    fns.push(ir_fn);
                 }
             }
             ItemKind::Struct(_) | ItemKind::Enum(_) => {} // already processed above
@@ -441,6 +453,7 @@ struct MethodCtx<'a> {
 /// per the ARM64 ABI. We spill each parameter to a stack slot so that
 /// path expressions can reference them via `Load` — reusing the same
 /// infrastructure as let-binding locals.
+#[allow(clippy::too_many_arguments)]
 fn lower_fn(
     fn_def: &crate::ast::FnDef,
     source: &str,
@@ -449,7 +462,8 @@ fn lower_fn(
     method_self_kinds: &HashMap<String, SelfKind>,
     struct_return_fns: &HashMap<String, String>,
     method: Option<MethodCtx<'_>>,
-) -> Result<IrFn, LowerError> {
+    start_label: u32,
+) -> Result<(IrFn, u32), LowerError> {
     // For associated functions, impl_type = None and self_kind = None.
     let impl_type = method.as_ref().and_then(|m| m.impl_type);
     let override_name = method.as_ref().map(|m| m.mangled_name);
@@ -503,7 +517,7 @@ fn lower_fn(
         Some(block) => block,
     };
 
-    let mut ctx = LowerCtx::new(source, ret_ty, struct_defs, enum_defs, method_self_kinds, struct_return_fns);
+    let mut ctx = LowerCtx::new(source, ret_ty, struct_defs, enum_defs, method_self_kinds, struct_return_fns, start_label);
 
     // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
     // to stack slots. Each parameter slot is allocated in parameter order
@@ -772,7 +786,8 @@ fn lower_fn(
     let body_instrs = ctx.instrs;
     let stack_slots = ctx.next_slot;
     let saves_lr = ctx.has_calls;
-    Ok(IrFn { name, ret_ty, body: body_instrs, stack_slots, saves_lr })
+    let next_label = ctx.next_label;
+    Ok((IrFn { name, ret_ty, body: body_instrs, stack_slots, saves_lr }, next_label))
 }
 
 // ── Type lowering ────────────────────────────────────────────────────────────
@@ -960,13 +975,14 @@ impl<'src> LowerCtx<'src> {
         enum_defs: &'src EnumDefs,
         method_self_kinds: &'src HashMap<String, SelfKind>,
         struct_return_fns: &'src HashMap<String, String>,
+        start_label: u32,
     ) -> Self {
         LowerCtx {
             source,
             instrs: Vec::new(),
             next_reg: 0,
             next_slot: 0,
-            next_label: 0,
+            next_label: start_label,
             locals: HashMap::new(),
             has_calls: false,
             loop_stack: Vec::new(),
