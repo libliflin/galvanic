@@ -938,8 +938,20 @@ impl<'src> LowerCtx<'src> {
 
                             match &arm.pat {
                                 Pat::Wildcard => {
-                                    // Wildcard in non-last position — treat as unconditional.
-                                    // Lower body, store to phi, branch to exit.
+                                    // Wildcard in non-last position — pattern always matches.
+                                    // Check guard (if any) before executing the body.
+                                    //
+                                    // FLS §6.18: "A match arm guard is an additional condition
+                                    // that must hold for the arm to be selected."
+                                    // FLS §6.1.2:37–45: Guard check emits runtime instructions.
+                                    if let Some(guard) = &arm.guard {
+                                        let gv = self.lower_expr(guard, &IrTy::Bool)?;
+                                        let gr = self.val_to_reg(gv)?;
+                                        self.instrs.push(Instr::CondBranch {
+                                            reg: gr,
+                                            label: next_label,
+                                        });
+                                    }
                                     let body_val = self.lower_expr(&arm.body, ret_ty)?;
                                     let body_reg = self.val_to_reg(body_val)?;
                                     self.instrs.push(Instr::Store { src: body_reg, slot: phi_slot });
@@ -955,6 +967,11 @@ impl<'src> LowerCtx<'src> {
                                 // The binding is removed after the arm to avoid leaking into
                                 // subsequent arms (correct scoping per FLS §5.1.4).
                                 //
+                                // FLS §6.18: Guard (if present) is evaluated after the binding
+                                // is installed; the guard expression may reference the bound name.
+                                // If the guard fails, the arm is skipped (CondBranch to next_label)
+                                // and the binding is removed from `self.locals` before the label.
+                                //
                                 // FLS §6.1.2:37–45: The ldr/str pair emits at runtime.
                                 // Cache-line note: 2 instructions (ldr + str = 8 bytes).
                                 Pat::Ident(span) => {
@@ -964,11 +981,22 @@ impl<'src> LowerCtx<'src> {
                                     self.instrs.push(Instr::Load { dst: bind_reg, slot: scrut_slot });
                                     self.instrs.push(Instr::Store { src: bind_reg, slot: bind_slot });
                                     self.locals.insert(name, bind_slot);
+                                    // Guard check: binding is visible to the guard expression.
+                                    if let Some(guard) = &arm.guard {
+                                        let gv = self.lower_expr(guard, &IrTy::Bool)?;
+                                        let gr = self.val_to_reg(gv)?;
+                                        self.instrs.push(Instr::CondBranch {
+                                            reg: gr,
+                                            label: next_label,
+                                        });
+                                    }
                                     let body_val = self.lower_expr(&arm.body, ret_ty)?;
-                                    self.locals.remove(name);
                                     let body_reg = self.val_to_reg(body_val)?;
                                     self.instrs.push(Instr::Store { src: body_reg, slot: phi_slot });
                                     self.instrs.push(Instr::Branch(exit_label));
+                                    // Remove binding before the label so subsequent arms
+                                    // do not see a stale entry in `self.locals`.
+                                    self.locals.remove(name);
                                     self.instrs.push(Instr::Label(next_label));
                                     continue;
                                 }
@@ -1154,7 +1182,24 @@ impl<'src> LowerCtx<'src> {
                                 }
                             }
 
-                            // Arm body (reached when any pattern check matched).
+                            // Guard check (if any): emitted after the pattern check.
+                            // The pattern check already branched to next_label on failure;
+                            // if we reach here, the pattern matched. Now check the guard.
+                            //
+                            // FLS §6.18: "A match arm guard is an additional condition
+                            // that must hold for the arm to be selected."
+                            // FLS §6.1.2:37–45: Guard evaluation emits runtime instructions.
+                            // Cache-line note: guard check adds 1 CondBranch instruction (4 bytes).
+                            if let Some(guard) = &arm.guard {
+                                let gv = self.lower_expr(guard, &IrTy::Bool)?;
+                                let gr = self.val_to_reg(gv)?;
+                                self.instrs.push(Instr::CondBranch {
+                                    reg: gr,
+                                    label: next_label,
+                                });
+                            }
+
+                            // Arm body (reached when pattern matched AND guard passed).
                             let body_val = self.lower_expr(&arm.body, ret_ty)?;
                             let body_reg = self.val_to_reg(body_val)?;
                             self.instrs.push(Instr::Store { src: body_reg, slot: phi_slot });
@@ -1163,7 +1208,16 @@ impl<'src> LowerCtx<'src> {
                             self.instrs.push(Instr::Label(next_label));
                         }
 
-                        // Default arm — unconditional.
+                        // Default arm — unconditional (guard on last arm is not yet supported).
+                        // FLS §6.18 AMBIGUOUS: If the last arm has a guard that fails, the
+                        // match is non-exhaustive. Galvanic defers this check to a future
+                        // exhaustiveness pass.
+                        if default_arm[0].guard.is_some() {
+                            return Err(LowerError::Unsupported(
+                                "guard on last match arm (exhaustiveness deferred; use `_` without guard as last arm)".into(),
+                            ));
+                        }
+
                         // FLS §5.1.4: If the default arm has an identifier pattern,
                         // bind the scrutinee to the name before lowering the body.
                         let default_binding = match &default_arm[0].pat {
@@ -1197,12 +1251,22 @@ impl<'src> LowerCtx<'src> {
 
                             match &arm.pat {
                                 Pat::Wildcard => {
+                                    // FLS §6.18: Guard check before body execution.
+                                    if let Some(guard) = &arm.guard {
+                                        let gv = self.lower_expr(guard, &IrTy::Bool)?;
+                                        let gr = self.val_to_reg(gv)?;
+                                        self.instrs.push(Instr::CondBranch {
+                                            reg: gr,
+                                            label: next_label,
+                                        });
+                                    }
                                     self.lower_expr(&arm.body, &IrTy::Unit)?;
                                     self.instrs.push(Instr::Branch(exit_label));
                                     self.instrs.push(Instr::Label(next_label));
                                     continue;
                                 }
                                 // FLS §5.1.4: Identifier pattern — always matches, binds name.
+                                // FLS §6.18: Guard (if present) may reference the bound name.
                                 Pat::Ident(span) => {
                                     let name = span.text(self.source);
                                     let bind_slot = self.alloc_slot()?;
@@ -1210,6 +1274,14 @@ impl<'src> LowerCtx<'src> {
                                     self.instrs.push(Instr::Load { dst: bind_reg, slot: scrut_slot });
                                     self.instrs.push(Instr::Store { src: bind_reg, slot: bind_slot });
                                     self.locals.insert(name, bind_slot);
+                                    if let Some(guard) = &arm.guard {
+                                        let gv = self.lower_expr(guard, &IrTy::Bool)?;
+                                        let gr = self.val_to_reg(gv)?;
+                                        self.instrs.push(Instr::CondBranch {
+                                            reg: gr,
+                                            label: next_label,
+                                        });
+                                    }
                                     self.lower_expr(&arm.body, &IrTy::Unit)?;
                                     self.locals.remove(name);
                                     self.instrs.push(Instr::Branch(exit_label));
@@ -1366,12 +1438,29 @@ impl<'src> LowerCtx<'src> {
                                 }
                             }
 
+                            // Guard check for fall-through patterns (unit result).
+                            // FLS §6.18: Guard evaluated after pattern matches.
+                            if let Some(guard) = &arm.guard {
+                                let gv = self.lower_expr(guard, &IrTy::Bool)?;
+                                let gr = self.val_to_reg(gv)?;
+                                self.instrs.push(Instr::CondBranch {
+                                    reg: gr,
+                                    label: next_label,
+                                });
+                            }
+
                             self.lower_expr(&arm.body, &IrTy::Unit)?;
                             self.instrs.push(Instr::Branch(exit_label));
                             self.instrs.push(Instr::Label(next_label));
                         }
 
-                        // Default arm — unconditional.
+                        // Default arm — unconditional (guard on last arm not yet supported).
+                        if default_arm[0].guard.is_some() {
+                            return Err(LowerError::Unsupported(
+                                "guard on last match arm (exhaustiveness deferred)".into(),
+                            ));
+                        }
+
                         // FLS §5.1.4: If the default arm has an identifier pattern, bind.
                         let default_binding_unit = match &default_arm[0].pat {
                             Pat::Ident(span) => {

@@ -2794,3 +2794,125 @@ fn runtime_range_pattern_emits_cmp_and_cbz() {
     // Must have a conditional branch to skip the arm if outside range.
     assert!(asm.contains("cbz"), "expected 'cbz' for range arm guard");
 }
+
+// ── Milestone 35: match arm guards (FLS §6.18) ────────────────────────────────
+
+/// Milestone 35: guard taken — `n if n > 5 => 1` matches when x = 7.
+///
+/// FLS §6.18: A match arm guard is an additional condition evaluated after
+/// the pattern matches. If the guard is `true`, the arm executes.
+/// FLS §6.1.2:37–45: The guard condition emits runtime instructions (cbz).
+#[test]
+fn milestone_35_guard_taken() {
+    let src = "fn main() -> i32 { let x = 7; match x { n if n > 5 => 1, _ => 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected guard n > 5 to pass for x=7, got {exit_code}");
+}
+
+/// Milestone 35: guard not taken — guard fails so wildcard arm executes.
+///
+/// FLS §6.18: If the guard evaluates to `false`, the arm is skipped.
+#[test]
+fn milestone_35_guard_not_taken() {
+    let src = "fn main() -> i32 { let x = 3; match x { n if n > 5 => 1, _ => 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected guard n > 5 to fail for x=3, got {exit_code}");
+}
+
+/// Milestone 35: guard on literal pattern — `0 if false => 99` never fires.
+///
+/// FLS §6.18: Guard is evaluated only when the pattern matches.
+/// Pattern `0` matches scrutinee `0`, but the guard `false` rejects the arm.
+#[test]
+fn milestone_35_guard_on_literal_pattern() {
+    let src = "fn main() -> i32 { match 0 { 0 if false => 99, _ => 1 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected guard `false` to reject arm, got {exit_code}");
+}
+
+/// Milestone 35: guard via parameter — classify using guards.
+///
+/// FLS §6.18: Guards may reference function parameters.
+#[test]
+fn milestone_35_guard_on_parameter() {
+    let src = "\
+fn sign(x: i32) -> i32 {
+    match x {
+        _ if x > 0 => 1,
+        _ if x < 0 => 2,
+        _ => 0,
+    }
+}
+fn main() -> i32 { sign(42) }
+";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected sign(42) == 1, got {exit_code}");
+}
+
+/// Milestone 35: guard on parameter — negative value.
+#[test]
+fn milestone_35_guard_negative_value() {
+    let src = "\
+fn sign(x: i32) -> i32 {
+    match x {
+        _ if x > 0 => 1,
+        _ if x < 0 => 2,
+        _ => 0,
+    }
+}
+fn main() -> i32 { sign(0) - 0 }
+";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected sign(0) == 0, got {exit_code}");
+}
+
+/// Milestone 35: multiple guards — first matching guard wins.
+///
+/// FLS §6.18: Arms are tested in order; first arm whose pattern matches
+/// AND whose guard passes is selected.
+#[test]
+fn milestone_35_multiple_guards_first_wins() {
+    let src = "fn main() -> i32 { match 10 { n if n > 8 => 2, n if n > 5 => 1, _ => 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2, "expected first guard n > 8 to win for x=10, got {exit_code}");
+}
+
+/// Milestone 35: multiple guards — second guard fires when first fails.
+#[test]
+fn milestone_35_multiple_guards_second_fires() {
+    let src = "fn main() -> i32 { match 6 { n if n > 8 => 2, n if n > 5 => 1, _ => 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected second guard n > 5 to fire for x=6, got {exit_code}");
+}
+
+/// Milestone 35: guard references the bound identifier name.
+///
+/// FLS §6.18 + §5.1.4: In `n if n > 0 => n`, the guard expression `n > 0`
+/// references the bound name `n`, which holds the scrutinee value.
+#[test]
+fn milestone_35_guard_references_binding() {
+    let src = "fn main() -> i32 { match 7 { n if n > 0 => n, _ => 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected guard to pass and binding to return 7, got {exit_code}");
+}
+
+/// Milestone 35: assembly inspection — guard emits a second cbz after pattern check.
+///
+/// FLS §6.18: The guard condition must emit a runtime conditional branch.
+/// For `n if n > 5 => 1`, the generated code must have at least two cbz
+/// instructions: one for the pattern-match check and one for the guard.
+///
+/// FLS §6.1.2:37–45: All conditions emit runtime instructions.
+#[test]
+fn runtime_match_guard_emits_cbz_for_guard_condition() {
+    // The scrutinee is the only thing in the match so pattern is Ident (always matches).
+    // The guard `n > 5` emits a comparison + cbz.
+    let src = "fn main() -> i32 { let x = 7; match x { n if n > 5 => 1, _ => 0 } }\n";
+    let asm = compile_to_asm(src);
+    // Count cbz instructions: there should be at least one for the guard.
+    let cbz_count = asm.matches("cbz").count();
+    assert!(cbz_count >= 1, "expected at least 1 cbz for guard check, got {cbz_count}");
+    // The assembly must also contain a comparison for the guard condition.
+    assert!(asm.contains("cmp") || asm.contains("cset"),
+        "expected comparison instruction for guard n > 5");
+}

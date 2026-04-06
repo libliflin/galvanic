@@ -701,18 +701,28 @@ pub enum ExprKind {
 
 /// A single arm in a match expression.
 ///
-/// FLS §6.18: Each `MatchArm` consists of a pattern, an optional guard (not
-/// yet supported), and a body expression.
+/// FLS §6.18: Each `MatchArm` consists of a pattern, an optional guard
+/// (`if expr`), and a body expression.
 ///
-/// Cache-line note: `pat` is a small enum (fits in 2 words), `body` is a
-/// pointer. The struct fits comfortably in a single 64-byte cache line.
+/// FLS §6.18: "A match arm guard is an additional condition attached to
+/// a match arm. The match arm guard is only evaluated if the pattern
+/// matches. If the guard evaluates to `false`, the arm is not selected."
+///
+/// Cache-line note: `pat` is a small enum (fits in 2 words), `guard` and
+/// `body` are `Option<Box<Expr>>` / `Box<Expr>` pointers. The struct fits
+/// comfortably in a 64-byte cache line.
 #[derive(Debug)]
 pub struct MatchArm {
     /// The pattern to test.
     pub pat: Pat,
-    /// The body expression executed when the pattern matches.
+    /// Optional guard expression: `if <guard>`.
+    ///
+    /// FLS §6.18: Evaluated only when the pattern matches. If it evaluates
+    /// to `false`, the arm is skipped and the next arm is tried.
+    pub guard: Option<Box<Expr>>,
+    /// The body expression executed when the pattern matches and guard passes.
     pub body: Box<Expr>,
-    /// Source span covering the full arm (`pat => body`).
+    /// Source span covering the full arm (`pat [if guard] => body`).
     pub span: Span,
 }
 
