@@ -2541,6 +2541,128 @@ impl<'src> LowerCtx<'src> {
                     ));
                 }
 
+                // FLS §5.10.4 + §8.1: Tuple struct pattern in let position.
+                //
+                // `let Point(x, y) = expr;` — single-segment path followed by
+                // positional field patterns. Only `Pat::Ident` (binding) and
+                // `Pat::Wildcard` (discard) sub-patterns are supported.
+                //
+                // Supported initializer forms:
+                //   1. Variable path — `let Point(x, y) = p;` — slot aliasing,
+                //      zero runtime instructions.
+                //   2. Tuple struct constructor call — `let Point(x, y) = Point(3, 4);` —
+                //      evaluate each arg and store to fresh slots, then alias names.
+                //
+                // FLS §6.1.2:37–45: All stores are runtime instructions; no
+                // compile-time evaluation of non-const code.
+                // Cache-line note: constructor call costs N stores (4N bytes);
+                // variable rebind costs 0 instructions (slot alias only).
+                if let Pat::TupleStruct { path: pat_path, fields: pat_fields } = pat
+                    && pat_path.len() == 1
+                {
+                    let struct_name = pat_path[0].text(self.source);
+                    let n_fields = *self.tuple_struct_defs.get(struct_name).ok_or_else(|| {
+                        LowerError::Unsupported(format!(
+                            "unknown tuple struct type `{struct_name}` in let pattern"
+                        ))
+                    })?;
+                    if pat_fields.len() != n_fields {
+                        return Err(LowerError::Unsupported(format!(
+                            "tuple struct pattern has {} fields but `{struct_name}` has {n_fields}",
+                            pat_fields.len()
+                        )));
+                    }
+
+                    // Case 1: Init is a simple variable path — alias slots.
+                    if let Some(init_expr) = init.as_ref()
+                        && let ExprKind::Path(segs) = &init_expr.kind
+                        && segs.len() == 1
+                    {
+                        let src_name = segs[0].text(self.source);
+                        let src_slot =
+                            *self.locals.get(src_name).ok_or_else(|| {
+                                LowerError::Unsupported(format!(
+                                    "undefined variable `{src_name}` in tuple struct \
+                                     destructure"
+                                ))
+                            })?;
+                        for (i, sub_pat) in pat_fields.iter().enumerate() {
+                            match sub_pat {
+                                Pat::Ident(bind_span) => {
+                                    let bind_name = bind_span.text(self.source);
+                                    self.locals.insert(bind_name, src_slot + i as u8);
+                                }
+                                Pat::Wildcard => {}
+                                _ => {
+                                    return Err(LowerError::Unsupported(
+                                        "only ident/wildcard sub-patterns in tuple \
+                                         struct let-pattern"
+                                            .into(),
+                                    ));
+                                }
+                            }
+                        }
+                        return Ok(());
+                    }
+
+                    // Case 2: Init is a constructor call `Point(e0, e1, ...)` —
+                    // evaluate each argument and store to fresh consecutive slots.
+                    if let Some(init_expr) = init.as_ref()
+                        && let ExprKind::Call { callee, args } = &init_expr.kind
+                        && let ExprKind::Path(call_segs) = &callee.kind
+                        && call_segs.len() == 1
+                        && call_segs[0].text(self.source) == struct_name
+                    {
+                        if args.len() != n_fields {
+                            return Err(LowerError::Unsupported(format!(
+                                "constructor `{struct_name}` called with {} args but \
+                                 expects {n_fields}",
+                                args.len()
+                            )));
+                        }
+                        let base_slot = self.alloc_slot()?;
+                        for _ in 1..n_fields {
+                            self.alloc_slot()?;
+                        }
+                        self.local_tuple_lens.insert(base_slot, n_fields);
+                        self.local_tuple_struct_types
+                            .insert(base_slot, struct_name.to_owned());
+                        // Evaluate and store each argument left-to-right (FLS §6.4:14).
+                        for (i, arg_expr) in args.iter().enumerate() {
+                            let val = self.lower_expr(arg_expr, &IrTy::I32)?;
+                            let src = self.val_to_reg(val)?;
+                            self.instrs.push(Instr::Store {
+                                src,
+                                slot: base_slot + i as u8,
+                            });
+                        }
+                        // Bind each sub-pattern to its slot.
+                        for (i, sub_pat) in pat_fields.iter().enumerate() {
+                            match sub_pat {
+                                Pat::Ident(bind_span) => {
+                                    let bind_name = bind_span.text(self.source);
+                                    self.locals.insert(bind_name, base_slot + i as u8);
+                                }
+                                Pat::Wildcard => {}
+                                _ => {
+                                    return Err(LowerError::Unsupported(
+                                        "only ident/wildcard sub-patterns in tuple \
+                                         struct let-pattern"
+                                            .into(),
+                                    ));
+                                }
+                            }
+                        }
+                        return Ok(());
+                    }
+
+                    return Err(LowerError::Unsupported(
+                        "tuple struct let-pattern requires a tuple struct variable \
+                         or constructor call initializer"
+                            .into(),
+                    ));
+                }
+
                 // All other patterns: extract `var_name` for the scalar path.
                 //
                 // FLS §5.11: Wildcard pattern `_` — evaluate init for side
@@ -5657,6 +5779,34 @@ impl<'src> LowerCtx<'src> {
                             }
                         } else {
                             let val = self.lower_expr(arg, &IrTy::I32)?;
+                            let reg = self.val_to_reg(val)?;
+                            arg_regs.push(reg);
+                        }
+                    } else if let ExprKind::Call { callee: ctor_callee, args: ctor_args } = &arg.kind
+                        && let ExprKind::Path(ctor_segs) = &ctor_callee.kind
+                        && ctor_segs.len() == 1
+                        && let Some(&n_fields) = self.tuple_struct_defs.get(ctor_segs[0].text(self.source))
+                    {
+                        // FLS §14.2 + §6.12.1: Tuple struct constructor used directly as a
+                        // function argument — e.g., `sum(Point(5, 8))`.
+                        //
+                        // Inline-evaluate each positional argument and pass the results as
+                        // separate registers. This mirrors the tuple struct parameter calling
+                        // convention set up in `lower_fn` (field 0 → x{i}, field 1 → x{i+1},
+                        // …) without allocating a named slot or emitting a `bl` to a
+                        // (non-existent) constructor function.
+                        //
+                        // FLS §6.1.2:37–45: All evaluations emit runtime instructions.
+                        // Cache-line note: N field registers = N × 4-byte load/mov instructions.
+                        let ctor_name = ctor_segs[0].text(self.source);
+                        if ctor_args.len() != n_fields {
+                            return Err(LowerError::Unsupported(format!(
+                                "constructor `{ctor_name}` called with {} args but expects {n_fields}",
+                                ctor_args.len()
+                            )));
+                        }
+                        for ctor_arg in ctor_args {
+                            let val = self.lower_expr(ctor_arg, &IrTy::I32)?;
                             let reg = self.val_to_reg(val)?;
                             arg_regs.push(reg);
                         }

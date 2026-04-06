@@ -351,11 +351,28 @@ sum_pair:
     add     sp, sp, #32             // FLS §8.1: restore stack frame
     ret
 
+    // fn dist_sq — FLS §9
+    .global dist_sq
+dist_sq:
+    sub     sp, sp, #16             // FLS §8.1: frame for 2 slot(s)
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    str     x1, [sp, #8              ] // FLS §8.1: store slot 1
+    ldr     x0, [sp, #0              ] // FLS §8.1: load slot 0
+    ldr     x1, [sp, #0              ] // FLS §8.1: load slot 0
+    mul     x2, x0, x1          // FLS §6.5.5: mul
+    ldr     x3, [sp, #8              ] // FLS §8.1: load slot 1
+    ldr     x4, [sp, #8              ] // FLS §8.1: load slot 1
+    mul     x5, x3, x4          // FLS §6.5.5: mul
+    add     x6, x2, x5          // FLS §6.5.5: add
+    mov     x0, x6              // FLS §6.19: return reg 6 → x0
+    add     sp, sp, #16             // FLS §8.1: restore stack frame
+    ret
+
     // fn main — FLS §9
     .global main
 main:
     str     x30, [sp, #-16]!      // FLS §6.12.1: save lr (non-leaf)
-    sub     sp, sp, #160            // FLS §8.1: frame for 19 slot(s)
+    sub     sp, sp, #176            // FLS §8.1: frame for 22 slot(s)
     mov     x0, #2                   // FLS §2.4.4.1: load imm 2
     bl      range_inclusive          // FLS §6.12.1: call range_inclusive
     mov     x1, x0              // FLS §6.12.1: return value → x1
@@ -441,33 +458,44 @@ main:
     bl      magnitude_sq             // FLS §6.12.1: call magnitude_sq
     mov     x36, x0              // FLS §6.12.1: return value → x36
     str     x36, [sp, #144            ] // FLS §8.1: store slot 18
-    ldr     x37, [sp, #0              ] // FLS §8.1: load slot 0
-    ldr     x38, [sp, #8              ] // FLS §8.1: load slot 1
-    add     x39, x37, x38          // FLS §6.5.5: add
-    ldr     x40, [sp, #16             ] // FLS §8.1: load slot 2
-    add     x41, x39, x40          // FLS §6.5.5: add
-    ldr     x42, [sp, #24             ] // FLS §8.1: load slot 3
+    mov     x37, #1                   // FLS §2.4.4.1: load imm 1
+    str     x37, [sp, #152            ] // FLS §8.1: store slot 19
+    mov     x38, #0                   // FLS §2.4.4.1: load imm 0
+    str     x38, [sp, #160            ] // FLS §8.1: store slot 20
+    ldr     x39, [sp, #152            ] // FLS §8.1: load slot 19
+    mov     x0, x39                  // FLS §6.12.1: arg 0
+    bl      dist_sq                  // FLS §6.12.1: call dist_sq
+    mov     x40, x0              // FLS §6.12.1: return value → x40
+    str     x40, [sp, #168            ] // FLS §8.1: store slot 21
+    ldr     x41, [sp, #0              ] // FLS §8.1: load slot 0
+    ldr     x42, [sp, #8              ] // FLS §8.1: load slot 1
     add     x43, x41, x42          // FLS §6.5.5: add
-    ldr     x44, [sp, #32             ] // FLS §8.1: load slot 4
+    ldr     x44, [sp, #16             ] // FLS §8.1: load slot 2
     add     x45, x43, x44          // FLS §6.5.5: add
-    ldr     x46, [sp, #40             ] // FLS §8.1: load slot 5
+    ldr     x46, [sp, #24             ] // FLS §8.1: load slot 3
     add     x47, x45, x46          // FLS §6.5.5: add
-    ldr     x48, [sp, #48             ] // FLS §8.1: load slot 6
+    ldr     x48, [sp, #32             ] // FLS §8.1: load slot 4
     add     x49, x47, x48          // FLS §6.5.5: add
-    ldr     x50, [sp, #56             ] // FLS §8.1: load slot 7
+    ldr     x50, [sp, #40             ] // FLS §8.1: load slot 5
     add     x51, x49, x50          // FLS §6.5.5: add
-    ldr     x52, [sp, #80             ] // FLS §8.1: load slot 10
+    ldr     x52, [sp, #48             ] // FLS §8.1: load slot 6
     add     x53, x51, x52          // FLS §6.5.5: add
-    ldr     x54, [sp, #104            ] // FLS §8.1: load slot 13
+    ldr     x54, [sp, #56             ] // FLS §8.1: load slot 7
     add     x55, x53, x54          // FLS §6.5.5: add
-    ldr     x56, [sp, #112            ] // FLS §8.1: load slot 14
+    ldr     x56, [sp, #80             ] // FLS §8.1: load slot 10
     add     x57, x55, x56          // FLS §6.5.5: add
-    ldr     x58, [sp, #120            ] // FLS §8.1: load slot 15
+    ldr     x58, [sp, #104            ] // FLS §8.1: load slot 13
     add     x59, x57, x58          // FLS §6.5.5: add
-    ldr     x60, [sp, #144            ] // FLS §8.1: load slot 18
+    ldr     x60, [sp, #112            ] // FLS §8.1: load slot 14
     add     x61, x59, x60          // FLS §6.5.5: add
-    mov     x0, x61              // FLS §6.19: return reg 61 → x0
-    add     sp, sp, #160            // FLS §8.1: restore stack frame
+    ldr     x62, [sp, #120            ] // FLS §8.1: load slot 15
+    add     x63, x61, x62          // FLS §6.5.5: add
+    ldr     x64, [sp, #144            ] // FLS §8.1: load slot 18
+    add     x65, x63, x64          // FLS §6.5.5: add
+    ldr     x66, [sp, #168            ] // FLS §8.1: load slot 21
+    add     x67, x65, x66          // FLS §6.5.5: add
+    mov     x0, x67              // FLS §6.19: return reg 67 → x0
+    add     sp, sp, #176            // FLS §8.1: restore stack frame
     ldr     x30, [sp], #16         // FLS §6.12.1: restore lr
     ret
 

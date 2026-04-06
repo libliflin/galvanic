@@ -1095,10 +1095,14 @@ impl<'src> Parser<'src> {
                 self.advance();
                 Ok(Pat::Wildcard)
             }
-            // Identifier or struct pattern. FLS §5.2 (ident), FLS §5.10.2 (struct).
+            // Identifier, struct, or tuple struct pattern.
+            // FLS §5.2 (ident), FLS §5.10.2 (struct), FLS §5.10.4 (tuple struct).
             //
             // If the identifier is followed by `{`, it begins a struct pattern
-            // `StructName { field1, field2 }`. Otherwise it is a plain binding.
+            // `StructName { field1, field2 }`.
+            // If the identifier is followed by `(`, it begins a tuple struct pattern
+            // `StructName(p0, p1, ...)`.
+            // Otherwise it is a plain binding.
             TokenKind::Ident => {
                 let span = self.current_span();
                 self.advance();
@@ -1138,6 +1142,26 @@ impl<'src> Parser<'src> {
                     }
                     self.expect(TokenKind::CloseBrace)?;
                     Ok(Pat::StructVariant { path: vec![span], fields: pat_fields })
+                } else if self.peek_kind() == TokenKind::OpenParen {
+                    // Tuple struct pattern `StructName(p0, p1, ...)`. FLS §5.10.4.
+                    //
+                    // Parses the positional field patterns using the same recursive
+                    // `parse_let_pattern` call so nested tuple/struct patterns
+                    // would work in future. For now only Ident and Wildcard are
+                    // handled in lowering.
+                    self.advance(); // consume `(`
+                    let mut fields = Vec::new();
+                    while self.peek_kind() != TokenKind::CloseParen {
+                        fields.push(self.parse_let_pattern()?);
+                        if !self.eat(TokenKind::Comma) {
+                            break;
+                        }
+                        if self.peek_kind() == TokenKind::CloseParen {
+                            break; // trailing comma
+                        }
+                    }
+                    self.expect(TokenKind::CloseParen)?;
+                    Ok(Pat::TupleStruct { path: vec![span], fields })
                 } else {
                     Ok(Pat::Ident(span))
                 }
@@ -2729,6 +2753,47 @@ mod tests {
         };
         assert!(matches!(fields[0].1, Pat::Wildcard));
         assert!(matches!(fields[1].1, Pat::Ident(_)));
+    }
+
+    #[test]
+    fn let_tuple_struct_pattern_two_fields() {
+        // FLS §5.10.4 + §8.1: tuple struct pattern in let binding.
+        // `let Point(x, y) = p;` produces Pat::TupleStruct with a one-segment
+        // path and two Ident field patterns.
+        let src = "fn f(p: Point) { let Point(x, y) = p; }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        let StmtKind::Let { pat, .. } = &body.stmts[0].kind else {
+            panic!("expected let");
+        };
+        let Pat::TupleStruct { path, fields } = pat else {
+            panic!("expected Pat::TupleStruct, got {pat:?}");
+        };
+        assert_eq!(path.len(), 1, "single-segment path for tuple struct type");
+        assert_eq!(path[0].text(src), "Point");
+        assert_eq!(fields.len(), 2);
+        assert!(matches!(fields[0], Pat::Ident(_)));
+        assert!(matches!(fields[1], Pat::Ident(_)));
+    }
+
+    #[test]
+    fn let_tuple_struct_pattern_wildcard_field() {
+        // FLS §5.10.4 + §5.11: wildcard sub-pattern in tuple struct let-pattern.
+        // `let Point(_, y)` ignores the first field and binds y.
+        let src = "fn f(p: Point) { let Point(_, y) = p; }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        let StmtKind::Let { pat, .. } = &body.stmts[0].kind else {
+            panic!("expected let");
+        };
+        let Pat::TupleStruct { fields, .. } = pat else {
+            panic!("expected Pat::TupleStruct, got {pat:?}");
+        };
+        assert_eq!(fields.len(), 2);
+        assert!(matches!(fields[0], Pat::Wildcard));
+        assert!(matches!(fields[1], Pat::Ident(_)));
     }
 
     // ── Expressions ───────────────────────────────────────────────────────────

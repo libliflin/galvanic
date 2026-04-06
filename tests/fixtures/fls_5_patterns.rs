@@ -154,6 +154,22 @@ fn sum_pair(x: i32, y: i32) -> i32 {
     p + q
 }
 
+// FLS §5.10.4: Tuple struct pattern — `TupleStructName(p0, p1, ...)` in a
+// let statement. FLS §8.1: Let statements accept any irrefutable pattern,
+// including tuple struct patterns. FLS §5.10.4: "A tuple struct pattern is a
+// pattern that matches a tuple struct or enum variant."
+//
+// Note: The FLS does not provide a concrete code example for tuple struct
+// patterns in let position; this is derived from the semantic description in
+// §5.10.4 and the let statement grammar in §8.1.
+struct Coord(i32, i32);
+
+fn dist_sq(c: Coord) -> i32 {
+    // FLS §5.10.4: Destructure a tuple struct variable — binds `x` and `y`.
+    let Coord(x, y) = c;
+    x * x + y * y
+}
+
 fn main() -> i32 {
     // FLS §5.1.9: inclusive range — value 2 in [1,3] → 1.
     let a = range_inclusive(2);
@@ -183,6 +199,9 @@ fn main() -> i32 {
     // FLS §5.10.2: struct destructure — magnitude_sq(Vec2 { x:1, y:0 }) = 1.
     let v = Vec2 { x: 1, y: 0 };
     let n2 = magnitude_sq(v);
-    // a=1, b=2, c=1, d=1, e=1, f=1, g=4, h=2, i=3, j=0, k=2, m=3, n2=1 → sum=22
-    a + b + c + d + e + f + g + h + i + j + k + m + n2
+    // FLS §5.10.4: tuple struct destructure — dist_sq(Coord(1,0)) = 1.
+    let p = Coord(1, 0);
+    let n3 = dist_sq(p);
+    // a=1, b=2, c=1, d=1, e=1, f=1, g=4, h=2, i=3, j=0, k=2, m=3, n2=1, n3=1 → sum=23
+    a + b + c + d + e + f + g + h + i + j + k + m + n2 + n3
 }
