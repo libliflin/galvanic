@@ -45,6 +45,19 @@ fn range_negative(x: i32) -> i32 {
     }
 }
 
+// FLS §6.18: Match arm guard — `if <expr>` after the pattern.
+// FLS §6.18: "A match arm guard is an additional condition that must hold
+// for the arm to be selected."
+// Note: The FLS does not provide a concrete code example; this is derived
+// from the semantic description of MatchArmGuard.
+fn classify_with_guard(x: i32) -> i32 {
+    match x {
+        n if n > 0 => 1,
+        n if n < 0 => 2,
+        _ => 0,
+    }
+}
+
 fn main() -> i32 {
     // FLS §5.1.9: inclusive range — value 2 in [1,3] → 1.
     let a = range_inclusive(2);
@@ -52,6 +65,8 @@ fn main() -> i32 {
     let b = range_exclusive(5);
     // FLS §5.1.9: negative range — value -3 in [-5,-1] → 1.
     let c = range_negative(-3);
-    // a=1, b=2, c=1 → sum=4; exit 4 to signal correct execution.
-    a + b + c
+    // FLS §6.18: guard — positive value 5 → 1.
+    let d = classify_with_guard(5);
+    // a=1, b=2, c=1, d=1 → sum=5; exit 5 to signal correct execution.
+    a + b + c + d
 }

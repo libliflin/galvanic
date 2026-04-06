@@ -119,11 +119,48 @@ range_negative:
     add     sp, sp, #32             // FLS §8.1: restore stack frame
     ret
 
+    // fn classify_with_guard — FLS §9
+    .global classify_with_guard
+classify_with_guard:
+    sub     sp, sp, #48             // FLS §8.1: frame for 5 slot(s)
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    ldr     x0, [sp, #0              ] // FLS §8.1: load slot 0
+    str     x0, [sp, #8              ] // FLS §8.1: store slot 1
+    ldr     x1, [sp, #8              ] // FLS §8.1: load slot 1
+    str     x1, [sp, #24             ] // FLS §8.1: store slot 3
+    ldr     x2, [sp, #24             ] // FLS §8.1: load slot 3
+    mov     x3, #0                   // FLS §2.4.4.1: load imm 0
+    cmp     x2, x3               // FLS §6.5.3: compare (signed)
+    cset    x4, gt                    // FLS §6.5.3: x4 = (x2 > x3)
+    cbz     x4, .L1                     // FLS §6.17: branch if false
+    mov     x5, #1                   // FLS §2.4.4.1: load imm 1
+    str     x5, [sp, #16             ] // FLS §8.1: store slot 2
+    b       .L0                        // FLS §6.17: branch to end
+.L1:                              // FLS §6.17: branch target
+    ldr     x6, [sp, #8              ] // FLS §8.1: load slot 1
+    str     x6, [sp, #32             ] // FLS §8.1: store slot 4
+    ldr     x7, [sp, #32             ] // FLS §8.1: load slot 4
+    mov     x8, #0                   // FLS §2.4.4.1: load imm 0
+    cmp     x7, x8               // FLS §6.5.3: compare (signed)
+    cset    x9, lt                    // FLS §6.5.3: x9 = (x7 < x8)
+    cbz     x9, .L2                     // FLS §6.17: branch if false
+    mov     x10, #2                   // FLS §2.4.4.1: load imm 2
+    str     x10, [sp, #16             ] // FLS §8.1: store slot 2
+    b       .L0                        // FLS §6.17: branch to end
+.L2:                              // FLS §6.17: branch target
+    mov     x11, #0                   // FLS §2.4.4.1: load imm 0
+    str     x11, [sp, #16             ] // FLS §8.1: store slot 2
+.L0:                              // FLS §6.17: branch target
+    ldr     x12, [sp, #16             ] // FLS §8.1: load slot 2
+    mov     x0, x12              // FLS §6.19: return reg 12 → x0
+    add     sp, sp, #48             // FLS §8.1: restore stack frame
+    ret
+
     // fn main — FLS §9
     .global main
 main:
     str     x30, [sp, #-16]!      // FLS §6.12.1: save lr (non-leaf)
-    sub     sp, sp, #32             // FLS §8.1: frame for 3 slot(s)
+    sub     sp, sp, #32             // FLS §8.1: frame for 4 slot(s)
     mov     x0, #2                   // FLS §2.4.4.1: load imm 2
     bl      range_inclusive          // FLS §6.12.1: call range_inclusive
     mov     x1, x0              // FLS §6.12.1: return value → x1
@@ -139,12 +176,19 @@ main:
     bl      range_negative           // FLS §6.12.1: call range_negative
     mov     x6, x0              // FLS §6.12.1: return value → x6
     str     x6, [sp, #16             ] // FLS §8.1: store slot 2
-    ldr     x7, [sp, #0              ] // FLS §8.1: load slot 0
-    ldr     x8, [sp, #8              ] // FLS §8.1: load slot 1
-    add     x9, x7, x8          // FLS §6.5.5: add
-    ldr     x10, [sp, #16             ] // FLS §8.1: load slot 2
+    mov     x7, #5                   // FLS §2.4.4.1: load imm 5
+    mov     x0, x7                   // FLS §6.12.1: arg 0
+    bl      classify_with_guard      // FLS §6.12.1: call classify_with_guard
+    mov     x8, x0              // FLS §6.12.1: return value → x8
+    str     x8, [sp, #24             ] // FLS §8.1: store slot 3
+    ldr     x9, [sp, #0              ] // FLS §8.1: load slot 0
+    ldr     x10, [sp, #8              ] // FLS §8.1: load slot 1
     add     x11, x9, x10          // FLS §6.5.5: add
-    mov     x0, x11              // FLS §6.19: return reg 11 → x0
+    ldr     x12, [sp, #16             ] // FLS §8.1: load slot 2
+    add     x13, x11, x12          // FLS §6.5.5: add
+    ldr     x14, [sp, #24             ] // FLS §8.1: load slot 3
+    add     x15, x13, x14          // FLS §6.5.5: add
+    mov     x0, x15              // FLS §6.19: return reg 15 → x0
     add     sp, sp, #32             // FLS §8.1: restore stack frame
     ldr     x30, [sp], #16         // FLS §6.12.1: restore lr
     ret

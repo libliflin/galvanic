@@ -1449,12 +1449,15 @@ impl<'src> Parser<'src> {
     /// MatchExpression ::=
     ///     "match" Expression "{" MatchArm* "}"
     /// MatchArm ::=
-    ///     Pattern "=>" Expression ","?
+    ///     Pattern ("if" Expression)? "=>" Expression ","?
     /// ```
     ///
     /// FLS §6.18: "A match expression branches on a pattern." Arms are tested
     /// in source order; the first matching arm executes. All arms must have the
     /// same type.
+    ///
+    /// FLS §6.18: Match arm guards (`if expr`) are evaluated after the pattern
+    /// matches. If the guard evaluates to `false`, the arm is skipped.
     ///
     /// FLS §6.18 AMBIGUOUS: The spec requires exhaustiveness but does not
     /// specify the compile-time algorithm. This implementation defers
@@ -1474,6 +1477,17 @@ impl<'src> Parser<'src> {
         while self.peek_kind() != TokenKind::CloseBrace && self.peek_kind() != TokenKind::Eof {
             let arm_start = self.current_span();
             let pat = self.parse_pattern()?;
+
+            // Optional match arm guard: `if <expr>`.
+            // FLS §6.18: "A match arm guard is an additional condition that
+            // must hold for the arm to be selected. The guard is only
+            // evaluated when the pattern matches."
+            let guard = if self.eat(TokenKind::KwIf) {
+                Some(Box::new(self.parse_expr()?))
+            } else {
+                None
+            };
+
             self.expect(TokenKind::FatArrow)?;
 
             // The arm body is an expression. If it is a block expression the
@@ -1481,7 +1495,7 @@ impl<'src> Parser<'src> {
             // (rustc) but we accept it as optional to keep parsing lenient.
             let body = Box::new(self.parse_expr()?);
             let arm_end = body.span;
-            arms.push(MatchArm { pat, body, span: arm_start.to(arm_end) });
+            arms.push(MatchArm { pat, guard, body, span: arm_start.to(arm_end) });
 
             // Consume trailing comma if present.
             self.eat(TokenKind::Comma);
@@ -3382,5 +3396,42 @@ mod tests {
             matches!(arms[0].pat, Pat::RangeInclusive { lo: -5, hi: -1 }),
             "expected RangeInclusive{{lo:-5, hi:-1}}, got {:?}", arms[0].pat
         );
+    }
+
+    #[test]
+    fn match_arm_guard_simple() {
+        // FLS §6.18: Match arm guard `if expr` is parsed after the pattern.
+        // Example: `match x { n if n > 5 => 1, _ => 0 }` — first arm has a guard.
+        use crate::ast::{ExprKind, Pat};
+        let src = "fn f(x: i32) -> i32 { match x { n if x > 5 => 1, _ => 0 } }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!() };
+        let body = f.body.as_ref().unwrap();
+        let tail = body.tail.as_ref().expect("expected tail");
+        let ExprKind::Match { ref arms, .. } = tail.kind else {
+            panic!("expected Match");
+        };
+        assert_eq!(arms.len(), 2);
+        assert!(matches!(arms[0].pat, Pat::Ident(_)));
+        assert!(arms[0].guard.is_some(), "first arm should have a guard");
+        assert!(arms[1].guard.is_none(), "wildcard arm should have no guard");
+    }
+
+    #[test]
+    fn match_arm_no_guard() {
+        // FLS §6.18: Arms without a guard have `guard: None`.
+        use crate::ast::{ExprKind, Pat};
+        let src = "fn f(x: i32) -> i32 { match x { 0 => 1, _ => 0 } }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!() };
+        let body = f.body.as_ref().unwrap();
+        let tail = body.tail.as_ref().expect("expected tail");
+        let ExprKind::Match { ref arms, .. } = tail.kind else {
+            panic!("expected Match");
+        };
+        assert_eq!(arms.len(), 2);
+        assert!(arms[0].guard.is_none());
+        assert!(arms[1].guard.is_none());
+        assert!(matches!(arms[0].pat, Pat::LitInt(0)));
     }
 }
