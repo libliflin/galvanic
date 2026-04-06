@@ -375,6 +375,30 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         }
     }
 
+    // Build enum-returning free function registry: fn name → enum type name.
+    //
+    // FLS §9, §15: Free functions that return an enum type use a write-back
+    // calling convention: the callee stores discriminant + fields in
+    // x0..x{1+max_fields} via `RetFields`; the call site writes them to the
+    // destination enum variable's stack slots via `CallMut`.
+    //
+    // Cache-line note: populated once at compile time, not on any hot path.
+    let mut enum_return_fns: HashMap<String, String> = HashMap::new();
+    for item in &src.items {
+        if let ItemKind::Fn(fn_def) = &item.kind {
+            let fn_name = fn_def.name.text(source);
+            if let Some(ret_ty) = &fn_def.ret_ty
+                && let TyKind::Path(segs) = &ret_ty.kind
+                && segs.len() == 1
+            {
+                let ret_name = segs[0].text(source);
+                if enum_defs.contains_key(ret_name) {
+                    enum_return_fns.insert(fn_name.to_owned(), ret_name.to_owned());
+                }
+            }
+        }
+    }
+
     // Second pass: lower function items.
     //
     // FLS §6.17: Branch target labels must be unique within the assembly file.
@@ -387,7 +411,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     for item in &src.items {
         match &item.kind {
             ItemKind::Fn(fn_def) => {
-                let (ir_fn, next_label) = lower_fn(fn_def, source, &struct_defs, &enum_defs, &method_self_kinds, &struct_return_fns, None, label_base)?;
+                let (ir_fn, next_label) = lower_fn(fn_def, source, &struct_defs, &enum_defs, &method_self_kinds, &struct_return_fns, &enum_return_fns, None, label_base)?;
                 label_base = next_label;
                 fns.push(ir_fn);
             }
@@ -419,6 +443,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         &enum_defs,
                         &method_self_kinds,
                         &struct_return_fns,
+                        &enum_return_fns,
                         mctx,
                         label_base,
                     )?;
@@ -475,6 +500,7 @@ fn lower_fn(
     enum_defs: &EnumDefs,
     method_self_kinds: &HashMap<String, SelfKind>,
     struct_return_fns: &HashMap<String, String>,
+    enum_return_fns: &HashMap<String, String>,
     method: Option<MethodCtx<'_>>,
     start_label: u32,
 ) -> Result<(IrFn, u32), LowerError> {
@@ -487,28 +513,34 @@ fn lower_fn(
         .unwrap_or_else(|| fn_def.name.text(source).to_owned());
 
     // FLS §9: "If no return type is specified, the return type is `()`."
-    // For associated functions returning a struct type, `lower_ty` would fail
-    // (struct names are not primitive IR types). Detect struct return separately.
+    // For functions returning a struct or enum type, `lower_ty` would fail
+    // (struct/enum names are not primitive IR types). Detect them separately.
     //
     // FLS §10.1: Associated functions may return the impl type or any other type.
-    let (ret_ty, struct_ret_name) = match &fn_def.ret_ty {
-        None => (IrTy::Unit, None),
+    // FLS §9, §15: Free functions may return an enum type.
+    let (ret_ty, struct_ret_name, enum_ret_name) = match &fn_def.ret_ty {
+        None => (IrTy::Unit, None, None),
         Some(ty) => {
             match lower_ty(ty, source) {
-                Ok(t) => (t, None),
+                Ok(t) => (t, None, None),
                 Err(_) => {
-                    // Check if the return type is a known struct.
+                    // Check if the return type is a known struct or enum.
                     if let TyKind::Path(segs) = &ty.kind {
                         if segs.len() == 1 {
                             let ret_name = segs[0].text(source);
                             if struct_defs.contains_key(ret_name) {
-                                // Associated function returning a struct type.
+                                // Function returning a struct type.
                                 // Use Unit as a placeholder IrTy; the actual return
                                 // is handled via RetFields in the body lowering below.
-                                (IrTy::Unit, Some(ret_name.to_owned()))
+                                (IrTy::Unit, Some(ret_name.to_owned()), None)
+                            } else if enum_defs.contains_key(ret_name) {
+                                // FLS §9, §15: Free function returning an enum type.
+                                // Use Unit as a placeholder IrTy; the actual return
+                                // is handled via RetFields after `lower_enum_expr_into`.
+                                (IrTy::Unit, None, Some(ret_name.to_owned()))
                             } else {
                                 return Err(LowerError::Unsupported(format!(
-                                    "return type `{ret_name}` (not a known struct or primitive)"
+                                    "return type `{ret_name}` (not a known struct, enum, or primitive)"
                                 )));
                             }
                         } else {
@@ -531,7 +563,7 @@ fn lower_fn(
         Some(block) => block,
     };
 
-    let mut ctx = LowerCtx::new(source, ret_ty, struct_defs, enum_defs, method_self_kinds, struct_return_fns, start_label);
+    let mut ctx = LowerCtx::new(source, ret_ty, struct_defs, enum_defs, method_self_kinds, struct_return_fns, enum_return_fns, start_label);
 
     // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
     // to stack slots. Each parameter slot is allocated in parameter order
@@ -837,6 +869,51 @@ fn lower_fn(
         // Emit RetFields: loads fields from base_slot..base_slot+n_fields-1
         // into x0..x{N-1} before the epilogue.
         ctx.instrs.push(Instr::RetFields { base_slot, n_fields: n_fields as u8 });
+    } else if let Some(ref enum_name) = enum_ret_name {
+        // FLS §9, §15: Free function returning an enum type.
+        //
+        // The callee stores the enum (discriminant + fields) into consecutive
+        // stack slots allocated here, then returns them in x0..x{1+max_fields-1}
+        // via RetFields. The caller uses CallMut-style write-back to receive them.
+        //
+        // ARM64 ABI: up to 8 integer return registers (x0..x7). For the common
+        // case of 1-field enums (e.g. `Option<i32>-like`), two registers suffice.
+        //
+        // FLS §15 AMBIGUOUS: The spec does not define a calling convention for
+        // enum-returning functions. Galvanic extends the register-packing
+        // convention already used for struct returns and enum parameter passing:
+        // discriminant in x0, field[0] in x1, field[1] in x2, etc.
+        //
+        // Cache-line note: (1 + max_fields) × 4-byte ldr in RetFields sequence.
+        let max_fields = enum_defs
+            .get(enum_name.as_str())
+            .map(|v| v.values().map(|(_, names)| names.len()).max().unwrap_or(0))
+            .unwrap_or(0);
+        let n_ret = 1 + max_fields as u8;
+
+        // Lower all statements.
+        for stmt in &body.stmts {
+            ctx.lower_stmt(stmt)?;
+        }
+
+        // Lower the tail expression into return slots.
+        let tail = body.tail.as_deref().ok_or_else(|| {
+            LowerError::Unsupported(format!(
+                "function returning `{enum_name}` must have a tail expression"
+            ))
+        })?;
+
+        // Allocate consecutive slots for the enum return value:
+        // slot ret_base = discriminant, slot ret_base+1..ret_base+max_fields = fields.
+        let ret_base = ctx.alloc_slot()?;
+        for _ in 0..max_fields {
+            ctx.alloc_slot()?;
+        }
+
+        ctx.lower_enum_expr_into(tail, ret_base, max_fields)?;
+
+        // RetFields: load discriminant + fields into x0..x{n_ret-1} before epilogue.
+        ctx.instrs.push(Instr::RetFields { base_slot: ret_base, n_fields: n_ret });
     } else {
         ctx.lower_block(body, &ret_ty)?;
     }
@@ -1008,6 +1085,16 @@ struct LowerCtx<'src> {
     /// Cache-line note: read-only during lowering; not on any hot path.
     struct_return_fns: &'src HashMap<String, String>,
 
+    /// Enum-returning free function registry: fn name → enum type name.
+    ///
+    /// FLS §9, §15: Free functions that return an enum type use the same
+    /// write-back calling convention: discriminant + fields returned in
+    /// x0..x{1+max_fields-1} via RetFields; the call site writes them to
+    /// the destination enum variable's stack slots via CallMut.
+    ///
+    /// Cache-line note: read-only during lowering; not on any hot path.
+    enum_return_fns: &'src HashMap<String, String>,
+
     /// Maps a struct variable's base stack slot to its struct type name.
     ///
     /// FLS §6.13: Field access expressions need the struct type to compute
@@ -1048,6 +1135,7 @@ struct LowerCtx<'src> {
 }
 
 impl<'src> LowerCtx<'src> {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         source: &'src str,
         fn_ret_ty: IrTy,
@@ -1055,6 +1143,7 @@ impl<'src> LowerCtx<'src> {
         enum_defs: &'src EnumDefs,
         method_self_kinds: &'src HashMap<String, SelfKind>,
         struct_return_fns: &'src HashMap<String, String>,
+        enum_return_fns: &'src HashMap<String, String>,
         start_label: u32,
     ) -> Self {
         LowerCtx {
@@ -1071,6 +1160,7 @@ impl<'src> LowerCtx<'src> {
             enum_defs,
             method_self_kinds,
             struct_return_fns,
+            enum_return_fns,
             local_struct_types: HashMap::new(),
             local_enum_types: HashMap::new(),
             local_array_lens: HashMap::new(),
@@ -1185,6 +1275,158 @@ impl<'src> LowerCtx<'src> {
         Ok(())
     }
 
+    /// Lower an expression that returns an enum value into pre-allocated stack slots.
+    ///
+    /// Stores discriminant at `base_slot`, positional fields at `base_slot+1..`.
+    /// Used for functions returning enum types (FLS §9, §15).
+    ///
+    /// Handles:
+    /// - Tuple variant constructor `Enum::Variant(field, ...)` — stores discriminant + fields
+    /// - Unit variant path `Enum::Variant` — stores discriminant only
+    /// - Enum variable path `x` (where x is a local enum variable) — copies all slots
+    /// - If-else expression — handles each branch recursively
+    /// - Block expression — lowers stmts then handles tail
+    ///
+    /// FLS §6.1.2:37–45: All stores are runtime instructions.
+    /// FLS §15 AMBIGUOUS: The spec does not define a calling convention for
+    /// enum-returning functions. Galvanic uses discriminant in x0, fields in x1..xN.
+    fn lower_enum_expr_into(
+        &mut self,
+        expr: &Expr,
+        base_slot: u8,
+        max_fields: usize,
+    ) -> Result<(), LowerError> {
+        match &expr.kind {
+            // FLS §6.12.1 + §15: Tuple variant constructor `Enum::Variant(f0, f1, ...)`.
+            ExprKind::Call { callee, args }
+                if matches!(&callee.kind, ExprKind::Path(segs) if segs.len() == 2) =>
+            {
+                let segs = if let ExprKind::Path(segs) = &callee.kind {
+                    segs
+                } else {
+                    unreachable!()
+                };
+                let enum_name = segs[0].text(self.source);
+                let variant_name = segs[1].text(self.source);
+                if let Some((discriminant, _)) = self
+                    .enum_defs
+                    .get(enum_name)
+                    .and_then(|v| v.get(variant_name))
+                    .cloned()
+                {
+                    let disc_reg = self.alloc_reg()?;
+                    self.instrs.push(Instr::LoadImm(disc_reg, discriminant));
+                    self.instrs.push(Instr::Store { src: disc_reg, slot: base_slot });
+                    for (i, arg) in args.iter().enumerate() {
+                        let val = self.lower_expr(arg, &IrTy::I32)?;
+                        let src = self.val_to_reg(val)?;
+                        self.instrs.push(Instr::Store { src, slot: base_slot + 1 + i as u8 });
+                    }
+                    return Ok(());
+                }
+                Err(LowerError::Unsupported(
+                    "enum return: unknown variant constructor".into(),
+                ))
+            }
+
+            // FLS §6.3 + §15: Unit variant path `Enum::Variant`.
+            ExprKind::Path(segs) if segs.len() == 2 => {
+                let enum_name = segs[0].text(self.source);
+                let variant_name = segs[1].text(self.source);
+                if let Some((discriminant, field_names)) = self
+                    .enum_defs
+                    .get(enum_name)
+                    .and_then(|v| v.get(variant_name))
+                    .cloned()
+                    .filter(|(_, names)| names.is_empty())
+                {
+                    let _ = field_names;
+                    let disc_reg = self.alloc_reg()?;
+                    self.instrs.push(Instr::LoadImm(disc_reg, discriminant));
+                    self.instrs.push(Instr::Store { src: disc_reg, slot: base_slot });
+                    return Ok(());
+                }
+                Err(LowerError::Unsupported(
+                    "enum return: non-unit variant used as path (needs call syntax)".into(),
+                ))
+            }
+
+            // FLS §6.3 + §15: Enum variable path `x` (copy all slots).
+            ExprKind::Path(segs) if segs.len() == 1 => {
+                let var_name = segs[0].text(self.source);
+                let src_base = *self.locals.get(var_name).ok_or_else(|| {
+                    LowerError::Unsupported(format!("enum return: undefined variable `{var_name}`"))
+                })?;
+                if !self.local_enum_types.contains_key(&src_base) {
+                    return Err(LowerError::Unsupported(format!(
+                        "enum return: variable `{var_name}` is not an enum"
+                    )));
+                }
+                // Copy discriminant.
+                let disc_reg = self.alloc_reg()?;
+                self.instrs.push(Instr::Load { dst: disc_reg, slot: src_base });
+                self.instrs.push(Instr::Store { src: disc_reg, slot: base_slot });
+                // Copy fields.
+                for fi in 0..max_fields {
+                    let fr = self.alloc_reg()?;
+                    self.instrs.push(Instr::Load { dst: fr, slot: src_base + 1 + fi as u8 });
+                    self.instrs.push(Instr::Store { src: fr, slot: base_slot + 1 + fi as u8 });
+                }
+                Ok(())
+            }
+
+            // FLS §6.17: If-else expression — handle each branch recursively.
+            ExprKind::If { cond, then_block, else_expr } => {
+                let else_label = self.alloc_label();
+                let end_label = self.alloc_label();
+
+                let cond_val = self.lower_expr(cond, &IrTy::Bool)?;
+                let cond_reg = self.val_to_reg(cond_val)?;
+                self.instrs.push(Instr::CondBranch { reg: cond_reg, label: else_label });
+
+                // Then branch.
+                for stmt in &then_block.stmts {
+                    self.lower_stmt(stmt)?;
+                }
+                if let Some(tail) = then_block.tail.as_deref() {
+                    self.lower_enum_expr_into(tail, base_slot, max_fields)?;
+                }
+                self.instrs.push(Instr::Branch(end_label));
+
+                // Else branch.
+                self.instrs.push(Instr::Label(else_label));
+                match else_expr {
+                    Some(e) => self.lower_enum_expr_into(e, base_slot, max_fields)?,
+                    None => {
+                        return Err(LowerError::Unsupported(
+                            "enum-returning if expression must have an else branch".into(),
+                        ))
+                    }
+                }
+
+                self.instrs.push(Instr::Label(end_label));
+                Ok(())
+            }
+
+            // FLS §6.4: Block expression — lower stmts then handle tail.
+            ExprKind::Block(block) => {
+                for stmt in &block.stmts {
+                    self.lower_stmt(stmt)?;
+                }
+                match block.tail.as_deref() {
+                    Some(tail) => self.lower_enum_expr_into(tail, base_slot, max_fields),
+                    None => Err(LowerError::Unsupported(
+                        "enum-returning block must have a tail expression".into(),
+                    )),
+                }
+            }
+
+            _ => Err(LowerError::Unsupported(
+                "enum return: unsupported expression form".into(),
+            )),
+        }
+    }
+
     // ── Statement lowering ────────────────────────────────────────────────────
 
     /// Lower one statement to runtime IR instructions.
@@ -1265,6 +1507,53 @@ impl<'src> LowerCtx<'src> {
                             args: arg_regs,
                             write_back_slot: base_slot,
                             n_fields: n_fields as u8,
+                        });
+                        return Ok(());
+                    }
+                }
+
+                // FLS §9, §15: Enum-returning free function call as let-binding init.
+                //
+                // `let x = wrap(n)` where `wrap` is in `enum_return_fns`.
+                // The callee returns discriminant + fields in x0..x{1+max_fields-1}
+                // via RetFields. We allocate 1+max_fields consecutive slots for the
+                // variable and emit CallMut to write them after the bl.
+                //
+                // FLS §6.12.1: Call expressions. FLS §15: Enum values occupy
+                // 1+max_fields consecutive slots.
+                // Cache-line note: arg moves + bl + (1+max_fields) stores.
+                if let Some(init_expr) = init.as_ref()
+                    && let ExprKind::Call { callee, args } = &init_expr.kind
+                    && let ExprKind::Path(segs) = &callee.kind
+                    && segs.len() == 1
+                {
+                    let fn_name = segs[0].text(self.source);
+                    if let Some(enum_name) = self.enum_return_fns.get(fn_name).cloned() {
+                        let max_fields = self.enum_defs
+                            .get(enum_name.as_str())
+                            .map(|v| v.values().map(|(_, names)| names.len()).max().unwrap_or(0))
+                            .unwrap_or(0);
+                        let n_ret = 1 + max_fields as u8;
+                        // Allocate discriminant slot + field slots.
+                        let base_slot = self.alloc_slot()?;
+                        for _ in 0..max_fields {
+                            self.alloc_slot()?;
+                        }
+                        self.locals.insert(var_name, base_slot);
+                        self.local_enum_types.insert(base_slot, enum_name.clone());
+                        // Evaluate arguments.
+                        let mut arg_regs: Vec<u8> = Vec::new();
+                        for arg_expr in args.iter() {
+                            let val = self.lower_expr(arg_expr, &IrTy::I32)?;
+                            let reg = self.val_to_reg(val)?;
+                            arg_regs.push(reg);
+                        }
+                        self.has_calls = true;
+                        self.instrs.push(Instr::CallMut {
+                            name: fn_name.to_owned(),
+                            args: arg_regs,
+                            write_back_slot: base_slot,
+                            n_fields: n_ret,
                         });
                         return Ok(());
                     }
@@ -3853,6 +4142,40 @@ impl<'src> LowerCtx<'src> {
                         ));
                     }
                 };
+
+                // FLS §9, §15: If the LHS is an enum variable and the RHS is a call
+                // to an enum-returning free function, use CallMut-style write-back
+                // to populate the enum variable's discriminant + field slots.
+                if self.local_enum_types.contains_key(&slot)
+                    && let ExprKind::Call { callee, args } = &rhs.kind
+                    && let ExprKind::Path(segs) = &callee.kind
+                    && segs.len() == 1
+                {
+                    let fn_name = segs[0].text(self.source);
+                    if let Some(enum_name) = self.enum_return_fns.get(fn_name).cloned() {
+                        let max_fields = self.enum_defs
+                            .get(enum_name.as_str())
+                            .map(|v| v.values().map(|(_, names)| names.len()).max().unwrap_or(0))
+                            .unwrap_or(0);
+                        let n_ret = 1 + max_fields as u8;
+                        // Lower arguments.
+                        let mut arg_regs = Vec::with_capacity(args.len());
+                        for arg in args.iter() {
+                            let val = self.lower_expr(arg, &IrTy::I32)?;
+                            let reg = self.val_to_reg(val)?;
+                            arg_regs.push(reg);
+                        }
+                        self.has_calls = true;
+                        // CallMut: bl fn_name; str x0..[sp+slot*8..]
+                        self.instrs.push(Instr::CallMut {
+                            name: fn_name.to_owned(),
+                            args: arg_regs,
+                            write_back_slot: slot,
+                            n_fields: n_ret,
+                        });
+                        return Ok(IrValue::Unit);
+                    }
+                }
 
                 // Lower RHS as i32 — all current locals are i32.
                 // FLS §8.1 AMBIGUOUS: The spec does not describe how type
