@@ -321,7 +321,35 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                 }
                 enum_defs.insert(enum_name, variants);
             }
-            ItemKind::Fn(_) | ItemKind::Impl(_) | ItemKind::Trait(_) => {}
+            ItemKind::Fn(_) | ItemKind::Impl(_) | ItemKind::Trait(_) | ItemKind::Const(_) => {}
+        }
+    }
+
+    // Collect constant item values: maps const name → i32 value.
+    //
+    // FLS §7.1: Constant items are compile-time values substituted at every
+    // use site. The initializer must be a constant expression (FLS §6.1.2).
+    // At this milestone only integer literal initializers are supported.
+    //
+    // FLS §7.1:10: "Every use of a constant is replaced with its value
+    // (or a copy of it)." Galvanic implements this by emitting `LoadImm`
+    // when a path expression resolves to a known const name.
+    //
+    // Cache-line note: this HashMap is built once and shared read-only
+    // across all `lower_fn` calls — not on any hot runtime path.
+    let mut const_vals: HashMap<String, i32> = HashMap::new();
+    for item in &src.items {
+        if let ItemKind::Const(c) = &item.kind {
+            let name = c.name.text(source).to_owned();
+            // Only integer literal initializers supported at this milestone.
+            // FLS §6.1.2:37–45: The const initializer is evaluated at compile
+            // time. Non-literal initialisers (arithmetic, other consts) are
+            // future work.
+            if let ExprKind::LitInt(n) = &c.value.kind
+                && *n <= i32::MAX as u128
+            {
+                const_vals.insert(name, *n as i32);
+            }
         }
     }
 
@@ -441,7 +469,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     for item in &src.items {
         match &item.kind {
             ItemKind::Fn(fn_def) => {
-                let (ir_fn, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &enum_defs, &method_self_kinds, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, None, label_base)?;
+                let (ir_fn, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &enum_defs, &method_self_kinds, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &const_vals, None, label_base)?;
                 label_base = next_label;
                 fns.push(ir_fn);
             }
@@ -476,6 +504,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         &struct_return_fns,
                         &struct_return_free_fns,
                         &enum_return_fns,
+                        &const_vals,
                         mctx,
                         label_base,
                     )?;
@@ -487,6 +516,9 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
             // FLS §13: Trait definitions are parsed but produce no codegen.
             // Trait method implementations are emitted via `ItemKind::Impl`.
             ItemKind::Trait(_) => {}
+            // FLS §7.1: Const items are collected in the first pass above.
+            // They produce no runtime code of their own.
+            ItemKind::Const(_) => {}
         }
     }
 
@@ -535,6 +567,7 @@ fn lower_fn(
     struct_return_fns: &HashMap<String, String>,
     struct_return_free_fns: &HashMap<String, String>,
     enum_return_fns: &HashMap<String, String>,
+    const_vals: &HashMap<String, i32>,
     method: Option<MethodCtx<'_>>,
     start_label: u32,
 ) -> Result<(IrFn, u32), LowerError> {
@@ -597,7 +630,7 @@ fn lower_fn(
         Some(block) => block,
     };
 
-    let mut ctx = LowerCtx::new(source, ret_ty, struct_defs, tuple_struct_defs, enum_defs, method_self_kinds, struct_return_fns, struct_return_free_fns, enum_return_fns, start_label);
+    let mut ctx = LowerCtx::new(source, ret_ty, struct_defs, tuple_struct_defs, enum_defs, method_self_kinds, struct_return_fns, struct_return_free_fns, enum_return_fns, const_vals, start_label);
 
     // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
     // to stack slots. Each parameter slot is allocated in parameter order
@@ -1283,6 +1316,15 @@ struct LowerCtx<'src> {
     /// Cache-line note: populated once per let binding or method self-spill;
     /// read once per method call on a tuple struct receiver. Not on a hot path.
     local_tuple_struct_types: HashMap<u8, String>,
+
+    /// Compile-time constant values: maps const name → i32.
+    ///
+    /// FLS §7.1: Constant items. Every use of a constant is replaced with its
+    /// value. When a path expression `FOO` resolves to a known const name,
+    /// `LoadImm(value)` is emitted instead of `Load { slot }`.
+    ///
+    /// Cache-line note: read-only during lowering; not on any hot path.
+    const_vals: &'src HashMap<String, i32>,
 }
 
 impl<'src> LowerCtx<'src> {
@@ -1297,6 +1339,7 @@ impl<'src> LowerCtx<'src> {
         struct_return_fns: &'src HashMap<String, String>,
         struct_return_free_fns: &'src HashMap<String, String>,
         enum_return_fns: &'src HashMap<String, String>,
+        const_vals: &'src HashMap<String, i32>,
         start_label: u32,
     ) -> Self {
         LowerCtx {
@@ -1316,6 +1359,7 @@ impl<'src> LowerCtx<'src> {
             struct_return_fns,
             struct_return_free_fns,
             enum_return_fns,
+            const_vals,
             local_struct_types: HashMap::new(),
             local_enum_types: HashMap::new(),
             local_array_lens: HashMap::new(),
@@ -2264,13 +2308,24 @@ impl<'src> LowerCtx<'src> {
             // FLS §6.3: Path expression — a reference to a local variable or
             // an enum unit variant.
             //
-            // A single-segment path is a local variable reference. Emits a
-            // `Load` instruction to read the value from its stack slot at runtime.
+            // A single-segment path is either a const item reference or a
+            // local variable reference.
             //
+            // FLS §7.1:10: Every use of a constant is replaced with its value.
+            // For const items, emit `LoadImm` with the compile-time value.
+            //
+            // FLS §6.3: A local variable path emits `Load` at runtime.
             // FLS §6.1.2:37–45: The load is a runtime instruction — even if
             // the variable holds a statically-known value, we must load it.
             ExprKind::Path(segments) if segments.len() == 1 => {
                 let var_name = segments[0].text(self.source);
+                // Check const_vals first: FLS §7.1 substitution takes
+                // precedence over any local shadowing (rustc warns on shadow).
+                if let Some(&const_val) = self.const_vals.get(var_name) {
+                    let r = self.alloc_reg()?;
+                    self.instrs.push(Instr::LoadImm(r, const_val));
+                    return Ok(IrValue::Reg(r));
+                }
                 let slot = self.locals.get(var_name).copied().ok_or_else(|| {
                     LowerError::Unsupported(format!("undefined variable `{var_name}`"))
                 })?;

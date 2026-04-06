@@ -33,7 +33,7 @@
 use crate::ast::{
     BinOp, Block, EnumDef, EnumVariant, EnumVariantKind, Expr, ExprKind, FnDef, Item, ItemKind,
     NamedField, Param, SourceFile, Span, Stmt, StmtKind, StructDef, StructKind, Ty, TyKind,
-    TupleField, UnaryOp, Visibility, ImplDef, TraitDef,
+    TupleField, UnaryOp, Visibility, ImplDef, TraitDef, ConstDef,
 };
 use crate::lexer::{Token, TokenKind};
 
@@ -228,8 +228,13 @@ impl<'src> Parser<'src> {
                 let span = start.to(trait_def.span);
                 Ok(Item { kind: ItemKind::Trait(Box::new(trait_def)), span })
             }
+            TokenKind::KwConst => {
+                let const_def = self.parse_const_def(vis)?;
+                let span = start.to(const_def.span);
+                Ok(Item { kind: ItemKind::Const(Box::new(const_def)), span })
+            }
             kind => Err(self.error(format!(
-                "expected item (fn, struct, enum, impl, trait, …), found {kind:?}"
+                "expected item (fn, struct, enum, impl, trait, const, …), found {kind:?}"
             ))),
         }
     }
@@ -476,6 +481,31 @@ impl<'src> Parser<'src> {
         }
 
         None
+    }
+
+    /// Parse a constant item declaration.
+    ///
+    /// FLS §7.1: Constant items.
+    ///
+    /// Grammar:
+    /// ```text
+    /// ConstantDeclaration ::= "const" Identifier ":" Type "=" Expression ";"
+    /// ```
+    ///
+    /// FLS §7.1:10: Every use of a constant is replaced with its value.
+    /// FLS §6.1.2:37–45: The initializer is a const context — compile-time
+    /// evaluation is permitted and required.
+    fn parse_const_def(&mut self, _vis: Visibility) -> Result<ConstDef, ParseError> {
+        let start = self.current_span();
+        self.expect(TokenKind::KwConst)?;
+        let name = self.expect(TokenKind::Ident)?;
+        self.expect(TokenKind::Colon)?;
+        let ty = self.parse_ty()?;
+        self.expect(TokenKind::Eq)?;
+        let value = self.parse_expr()?;
+        let end = self.current_span();
+        self.expect(TokenKind::Semi)?;
+        Ok(ConstDef { name, ty, value, span: start.to(end) })
     }
 
     /// Parse a struct definition.

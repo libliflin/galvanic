@@ -52,3 +52,8 @@ fn fls_5_patterns() {
 fn fls_13_traits() {
     assert_galvanic_accepts("fls_13_traits.rs");
 }
+
+#[test]
+fn fls_7_1_consts() {
+    assert_galvanic_accepts("fls_7_1_consts.rs");
+}

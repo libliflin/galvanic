@@ -6700,3 +6700,134 @@ fn runtime_struct_update_emits_ldr_str_for_copied_field() {
         "expected `ldr` for copying y from base struct:\n{asm}"
     );
 }
+
+// ── Milestone 59: const items ────────────────────────────────────────────────
+//
+// FLS §7.1: Constant items. Every use of a constant is replaced with its value.
+// The initializer is a constant expression (integer literal at this milestone).
+
+/// Milestone 59: const item used as function return value.
+///
+/// FLS §7.1:10: The constant name is replaced with its integer literal value.
+/// FLS §2.4.4.1: Integer literal initializer.
+#[test]
+fn milestone_59_const_as_return_value() {
+    let src = r#"
+const ANSWER: i32 = 42;
+fn main() -> i32 { ANSWER }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+/// Milestone 59: const item used in arithmetic.
+///
+/// FLS §7.1: Constant substituted into a runtime arithmetic expression.
+/// FLS §6.5.5: Addition of the const value with a literal.
+#[test]
+fn milestone_59_const_in_arithmetic() {
+    let src = r#"
+const BASE: i32 = 10;
+fn main() -> i32 { BASE + 5 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 15, "expected exit 15, got {exit_code}");
+}
+
+/// Milestone 59: const item passed as function argument.
+///
+/// FLS §7.1: The constant value is substituted at the call site.
+/// FLS §6.12.1: The substituted value is passed as a runtime argument.
+#[test]
+fn milestone_59_const_as_fn_arg() {
+    let src = r#"
+const LIMIT: i32 = 7;
+fn double(n: i32) -> i32 { n * 2 }
+fn main() -> i32 { double(LIMIT) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 14, "expected exit 14, got {exit_code}");
+}
+
+/// Milestone 59: const item used as loop bound.
+///
+/// FLS §7.1: Constant substituted as the while-loop condition's RHS.
+/// FLS §6.15.3: While loop — condition evaluated at runtime on each iteration.
+#[test]
+fn milestone_59_const_as_loop_bound() {
+    let src = r#"
+const LIMIT: i32 = 5;
+fn main() -> i32 {
+    let mut i = 0;
+    while i < LIMIT { i += 1; }
+    i
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "expected exit 5, got {exit_code}");
+}
+
+/// Milestone 59: two const items used together.
+///
+/// FLS §7.1: Multiple constant items in the same program; each is
+/// substituted independently at its use site.
+#[test]
+fn milestone_59_two_consts() {
+    let src = r#"
+const X: i32 = 3;
+const Y: i32 = 4;
+fn main() -> i32 { X + Y }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected exit 7, got {exit_code}");
+}
+
+/// Milestone 59: const item used in if condition.
+///
+/// FLS §7.1: Constant substituted as one operand of a comparison.
+/// FLS §6.17: If expression evaluates condition at runtime.
+#[test]
+fn milestone_59_const_in_if_condition() {
+    let src = r#"
+const THRESHOLD: i32 = 10;
+fn check(n: i32) -> i32 { if n > THRESHOLD { 1 } else { 0 } }
+fn main() -> i32 { check(15) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected exit 1, got {exit_code}");
+}
+
+/// Milestone 59: const item with zero value.
+///
+/// FLS §7.1: Zero is a valid constant value.
+/// FLS §2.4.4.1: Integer literal 0.
+#[test]
+fn milestone_59_const_zero() {
+    let src = r#"
+const ZERO: i32 = 0;
+fn main() -> i32 { ZERO }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected exit 0, got {exit_code}");
+}
+
+/// Milestone 59: assembly inspection — const emits LoadImm, not Load+Store.
+///
+/// FLS §7.1:10: A constant use is substituted with its value. In galvanic
+/// this means `LoadImm` (a `mov` instruction), not a stack `Load`+`Store`.
+/// There must be no stack slot allocated for the constant itself.
+#[test]
+fn runtime_const_emits_load_imm_not_stack_load() {
+    let src = "const ANSWER: i32 = 42;\nfn main() -> i32 { ANSWER }\n";
+    let asm = compile_to_asm(src);
+    // The value 42 must appear as an immediate.
+    assert!(
+        asm.contains("42"),
+        "expected immediate value 42 in assembly:\n{asm}"
+    );
+    // There must be a `mov` instruction materializing the constant.
+    assert!(
+        asm.contains("mov"),
+        "expected `mov` for constant substitution:\n{asm}"
+    );
+}

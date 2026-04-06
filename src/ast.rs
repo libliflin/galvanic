@@ -97,8 +97,8 @@ pub struct Item {
 ///
 /// FLS §3: item kinds include functions, structs, enums, unions, traits,
 /// implementations, type aliases, constants, statics, use declarations,
-/// and extern blocks. `Fn`, `Struct`, `Enum`, `Impl`, and `Trait` are
-/// implemented here.
+/// and extern blocks. `Fn`, `Struct`, `Enum`, `Impl`, `Trait`, and `Const`
+/// are implemented here.
 #[derive(Debug)]
 pub enum ItemKind {
     /// A function definition. FLS §9.
@@ -118,6 +118,34 @@ pub enum ItemKind {
     /// Trait definitions are parsed but not yet used for type checking.
     /// They drive static dispatch via `impl Trait for Type`.
     Trait(Box<TraitDef>),
+    /// A constant item. FLS §7.1.
+    ///
+    /// `const NAME: Type = expr;` — names a compile-time constant value.
+    /// Every use of a constant is replaced with its value (FLS §7.1:10).
+    Const(Box<ConstDef>),
+}
+
+/// A constant item declaration.
+///
+/// FLS §7.1: Constant items.
+///
+/// Grammar (abridged):
+/// ```text
+/// ConstantDeclaration ::= "const" Identifier ":" Type "=" Expression ";"
+/// ```
+///
+/// Cache-line note: `ConstDef` is only allocated during parsing;
+/// it is not on any hot lowering path.
+#[derive(Debug)]
+pub struct ConstDef {
+    /// The name of the constant.
+    pub name: Span,
+    /// The declared type. Currently only `i32` is supported.
+    pub ty: Ty,
+    /// The initializer expression. Must be a constant expression (FLS §6.1.2).
+    pub value: Expr,
+    /// Span of the entire declaration including the trailing semicolon.
+    pub span: Span,
 }
 
 // ── Functions ─────────────────────────────────────────────────────────────────
