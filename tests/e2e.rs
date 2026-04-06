@@ -8842,3 +8842,112 @@ fn runtime_tuple_struct_destruct_variable_emits_no_extra_stores() {
         "constructor must emit ≥2 str instructions; got {store_count}:\n{asm}"
     );
 }
+
+// ── Milestone 75: nested tuple destructuring in let bindings ──────────────────
+//
+// `let (a, (b, c)) = (1, (2, 3));` — the inner tuple literal is recursively
+// destructured. FLS §5.10.3 applied recursively; all stores are runtime
+// instructions per FLS §6.1.2:37–45.
+
+/// Milestone 75: basic nested tuple — sum all three elements.
+///
+/// FLS §5.10.3: Tuple patterns may contain sub-patterns including other
+/// tuple patterns, applied recursively.
+#[test]
+fn milestone_75_nested_tuple_sum() {
+    let src = "fn main() -> i32 { let (a, (b, c)) = (1, (2, 4)); a + b + c }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 1 + 2 + 4 = 7, got {exit_code}");
+}
+
+/// Milestone 75: nested tuple with inner at left position.
+///
+/// FLS §5.10.3: The nested sub-pattern may appear at any position in the
+/// outer tuple pattern.
+#[test]
+fn milestone_75_nested_tuple_left_position() {
+    let src = "fn main() -> i32 { let ((a, b), c) = ((3, 2), 2); a + b + c }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 3 + 2 + 2 = 7, got {exit_code}");
+}
+
+/// Milestone 75: nested tuple wildcard in outer position.
+///
+/// FLS §5.10.3 + §5.1: A wildcard `_` at the outer level discards an element;
+/// the nested binding still proceeds for the remaining elements.
+#[test]
+fn milestone_75_nested_tuple_outer_wildcard() {
+    let src = "fn main() -> i32 { let (_, (b, c)) = (99, (3, 4)); b + c }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 3 + 4 = 7, got {exit_code}");
+}
+
+/// Milestone 75: nested tuple wildcard inside the inner pattern.
+///
+/// FLS §5.10.3 + §5.1: Wildcards may appear inside nested tuple sub-patterns.
+#[test]
+fn milestone_75_nested_tuple_inner_wildcard() {
+    let src = "fn main() -> i32 { let (a, (_, c)) = (3, (99, 4)); a + c }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 3 + 4 = 7, got {exit_code}");
+}
+
+/// Milestone 75: nested tuple used in arithmetic expression.
+///
+/// FLS §5.10.3: The bound variables are independent and usable in any expression.
+#[test]
+fn milestone_75_nested_tuple_arithmetic() {
+    let src = "fn main() -> i32 { let (a, (b, c)) = (10, (3, 4)); a - b - c }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "expected 10 - 3 - 4 = 3, got {exit_code}");
+}
+
+/// Milestone 75: nested tuple from function parameters.
+///
+/// FLS §5.10.3: Tuple patterns apply to any tuple value, including one
+/// constructed from function parameters.
+#[test]
+fn milestone_75_nested_tuple_from_params() {
+    let src = "fn f(x: i32, y: i32, z: i32) -> i32 { let (a, (b, c)) = (x, (y, z)); a + b + c }\nfn main() -> i32 { f(1, 2, 4) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 1 + 2 + 4 = 7, got {exit_code}");
+}
+
+/// Milestone 75: three-level nested tuple destructuring.
+///
+/// FLS §5.10.3: Nesting may be arbitrarily deep; each level recurses.
+#[test]
+fn milestone_75_three_level_nesting() {
+    let src = "fn main() -> i32 { let (a, (b, (c, d))) = (1, (1, (2, 3))); a + b + c + d }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 1 + 1 + 2 + 3 = 7, got {exit_code}");
+}
+
+/// Milestone 75: nested tuple in an inner block.
+///
+/// FLS §5.10.3 + §6.4: Tuple destructuring is valid in any block scope.
+#[test]
+fn milestone_75_nested_tuple_in_block() {
+    let src = "fn main() -> i32 { let r = { let (a, (b, c)) = (1, (2, 4)); a + b + c }; r }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 1 + 2 + 4 = 7, got {exit_code}");
+}
+
+/// Runtime inspection: nested tuple literal destructure emits stores for each leaf.
+///
+/// FLS §5.10.3 + §6.1.2:37–45: Each leaf element in `(1, (2, 4))` must be
+/// stored to its own stack slot at runtime. Three leaf bindings → at least
+/// three `str` instructions.
+///
+/// Cache-line note: 3 leaf elements → 3 stores (12 bytes) + setup fits in one
+/// 64-byte cache line alongside the function prologue.
+#[test]
+fn runtime_nested_tuple_destruct_emits_stores() {
+    let src = "fn main() -> i32 { let (a, (b, c)) = (1, (2, 4)); a + b + c }\n";
+    let asm = compile_to_asm(src);
+    let store_count = asm.lines().filter(|l| l.trim().starts_with("str")).count();
+    assert!(
+        store_count >= 3,
+        "nested tuple destructure must emit ≥3 str instructions, got {store_count}:\n{asm}"
+    );
+}
