@@ -595,6 +595,31 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         }
     }
 
+    // Build tuple-returning free function registry: fn name → number of tuple elements.
+    //
+    // FLS §6.10, §9: Free functions that return a tuple type use the same
+    // write-back calling convention as struct-returning functions: the callee
+    // stores each element in consecutive stack slots and returns them in
+    // x0..x{N-1} via `RetFields`; the call site writes them back to the
+    // destination tuple variable's consecutive stack slots via `CallMut`.
+    //
+    // FLS §6.10 AMBIGUOUS: The spec does not define a calling convention for
+    // tuple-returning functions. Galvanic uses the same register-packing
+    // convention as struct returns: element[0] in x0, element[1] in x1, etc.
+    //
+    // Cache-line note: populated once at compile time, not on any hot path.
+    let mut tuple_return_free_fns: HashMap<String, usize> = HashMap::new();
+    for item in &src.items {
+        if let ItemKind::Fn(fn_def) = &item.kind
+            && let Some(ret_ty) = &fn_def.ret_ty
+            && let TyKind::Tuple(elems) = &ret_ty.kind
+            && !elems.is_empty()
+        {
+            let fn_name = fn_def.name.text(source);
+            tuple_return_free_fns.insert(fn_name.to_owned(), elems.len());
+        }
+    }
+
     // Compute struct sizes and field offsets for nested struct support.
     //
     // FLS §6.11: Struct expressions with struct-type fields require knowing the
@@ -682,7 +707,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     for item in &src.items {
         match &item.kind {
             ItemKind::Fn(fn_def) => {
-                let (ir_fn, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &enum_defs, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &const_vals, &static_names, &struct_raw_field_types, &struct_field_offsets, &struct_sizes, None, label_base)?;
+                let (ir_fn, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &enum_defs, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &const_vals, &static_names, &struct_raw_field_types, &struct_field_offsets, &struct_sizes, None, label_base)?;
                 label_base = next_label;
                 fns.push(ir_fn);
             }
@@ -719,6 +744,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         &struct_return_free_fns,
                         &enum_return_fns,
                         &struct_return_methods,
+                        &tuple_return_free_fns,
                         &const_vals,
                         &static_names,
                         &struct_raw_field_types,
@@ -827,6 +853,7 @@ fn lower_fn(
     struct_return_free_fns: &HashMap<String, String>,
     enum_return_fns: &HashMap<String, String>,
     struct_return_methods: &HashMap<String, String>,
+    tuple_return_free_fns: &HashMap<String, usize>,
     const_vals: &HashMap<String, i32>,
     static_names: &std::collections::HashSet<String>,
     struct_field_types: &HashMap<String, Vec<Option<String>>>,
@@ -849,26 +876,36 @@ fn lower_fn(
     //
     // FLS §10.1: Associated functions may return the impl type or any other type.
     // FLS §9, §15: Free functions may return an enum type.
-    let (ret_ty, struct_ret_name, enum_ret_name) = match &fn_def.ret_ty {
-        None => (IrTy::Unit, None, None),
+    let (ret_ty, struct_ret_name, enum_ret_name, tuple_ret_n) = match &fn_def.ret_ty {
+        None => (IrTy::Unit, None, None, None),
         Some(ty) => {
             match lower_ty(ty, source) {
-                Ok(t) => (t, None, None),
+                Ok(t) => (t, None, None, None),
                 Err(_) => {
-                    // Check if the return type is a known struct or enum.
-                    if let TyKind::Path(segs) = &ty.kind {
+                    // FLS §6.10, §9: Tuple return type — elements returned in x0..x{N-1}.
+                    if let TyKind::Tuple(elems) = &ty.kind {
+                        if elems.is_empty() {
+                            // Empty tuple () is the unit type — already handled by lower_ty.
+                            (IrTy::Unit, None, None, None)
+                        } else {
+                            // Non-empty tuple: use Unit as placeholder IrTy; the actual
+                            // return is handled via RetFields in the body lowering below.
+                            (IrTy::Unit, None, None, Some(elems.len() as u8))
+                        }
+                    } else if let TyKind::Path(segs) = &ty.kind {
+                        // Check if the return type is a known struct or enum.
                         if segs.len() == 1 {
                             let ret_name = segs[0].text(source);
                             if struct_defs.contains_key(ret_name) {
                                 // Function returning a struct type.
                                 // Use Unit as a placeholder IrTy; the actual return
                                 // is handled via RetFields in the body lowering below.
-                                (IrTy::Unit, Some(ret_name.to_owned()), None)
+                                (IrTy::Unit, Some(ret_name.to_owned()), None, None)
                             } else if enum_defs.contains_key(ret_name) {
                                 // FLS §9, §15: Free function returning an enum type.
                                 // Use Unit as a placeholder IrTy; the actual return
                                 // is handled via RetFields after `lower_enum_expr_into`.
-                                (IrTy::Unit, None, Some(ret_name.to_owned()))
+                                (IrTy::Unit, None, Some(ret_name.to_owned()), None)
                             } else {
                                 return Err(LowerError::Unsupported(format!(
                                     "return type `{ret_name}` (not a known struct, enum, or primitive)"
@@ -894,7 +931,7 @@ fn lower_fn(
         Some(block) => block,
     };
 
-    let mut ctx = LowerCtx::new(source, ret_ty, struct_defs, tuple_struct_defs, enum_defs, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, const_vals, static_names, struct_field_types, struct_field_offsets, struct_sizes, start_label);
+    let mut ctx = LowerCtx::new(source, ret_ty, struct_defs, tuple_struct_defs, enum_defs, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, const_vals, static_names, struct_field_types, struct_field_offsets, struct_sizes, start_label);
 
     // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
     // to stack slots. Each parameter slot is allocated in parameter order
@@ -1522,6 +1559,55 @@ fn lower_fn(
 
         // RetFields: load discriminant + fields into x0..x{n_ret-1} before epilogue.
         ctx.instrs.push(Instr::RetFields { base_slot: ret_base, n_fields: n_ret });
+    } else if let Some(n_elems) = tuple_ret_n {
+        // FLS §6.10, §9: Function returning a tuple type.
+        //
+        // The callee stores each element in consecutive stack slots and returns
+        // them in x0..x{N-1} via RetFields. The caller (in a `let` tuple pattern
+        // binding) uses CallMut to write x0..x{N-1} into the destination slots.
+        //
+        // FLS §6.10 AMBIGUOUS: The spec does not define a tuple return calling
+        // convention. Galvanic extends the struct-return convention: element[i]
+        // returns in x{i}, matching the register-packing convention for struct
+        // and enum returns.
+        //
+        // ARM64 ABI: up to 8 result registers (x0..x7). At this milestone only
+        // tuples with ≤8 scalar elements are supported.
+        //
+        // Cache-line note: N element stores + RetFields N loads = 2N instructions.
+        // For a 2-element tuple this is 8 bytes — fits in two ARM64 instruction slots.
+
+        // Lower all statements.
+        for stmt in &body.stmts {
+            ctx.lower_stmt(stmt)?;
+        }
+
+        // The tail expression produces a tuple value via lower_tuple_expr_into.
+        // FLS §6.10: A tuple expression `(e0, e1, ...)` evaluates each element
+        // left-to-right and produces a tuple value.
+        // FLS §6.17: If/else expressions may also produce tuple values when both
+        // branches yield the same tuple type.
+        let tail = body.tail.as_deref().ok_or_else(|| {
+            LowerError::Unsupported(
+                "function returning a tuple must end with a tuple expression".into(),
+            )
+        })?;
+
+        // Allocate N consecutive stack slots for the tuple elements.
+        // FLS §6.10: Tuple elements are in declaration order.
+        // Cache-line note: N consecutive 8-byte slots = N×8 bytes on the stack.
+        // For a 2-element tuple: 16 bytes, same as a 2-field struct.
+        let base_slot = ctx.alloc_slot()?;
+        for _ in 1..n_elems {
+            ctx.alloc_slot()?;
+        }
+
+        // Delegate to lower_tuple_expr_into, which handles tuple literals,
+        // if/else, and block expressions (FLS §6.10, §6.17, §6.4).
+        ctx.lower_tuple_expr_into(tail, base_slot, n_elems)?;
+
+        // RetFields: load elements from base_slot..base_slot+N-1 into x0..x{N-1}.
+        ctx.instrs.push(Instr::RetFields { base_slot, n_fields: n_elems });
     } else {
         ctx.lower_block(body, &ret_ty)?;
     }
@@ -1767,6 +1853,16 @@ struct LowerCtx<'src> {
     /// Cache-line note: read-only during lowering; not on any hot path.
     enum_return_fns: &'src HashMap<String, String>,
 
+    /// Tuple-returning free function registry: fn name → number of elements.
+    ///
+    /// FLS §6.10, §9: Free functions that return a tuple type use the
+    /// write-back calling convention: elements returned in x0..x{N-1} via
+    /// RetFields; the call site writes them to consecutive stack slots via
+    /// CallMut and binds each to the tuple pattern variables.
+    ///
+    /// Cache-line note: read-only during lowering; not on any hot path.
+    tuple_return_free_fns: &'src HashMap<String, usize>,
+
     /// Maps a struct variable's base stack slot to its struct type name.
     ///
     /// FLS §6.13: Field access expressions need the struct type to compute
@@ -1888,6 +1984,7 @@ impl<'src> LowerCtx<'src> {
         struct_return_free_fns: &'src HashMap<String, String>,
         enum_return_fns: &'src HashMap<String, String>,
         struct_return_methods: &'src HashMap<String, String>,
+        tuple_return_free_fns: &'src HashMap<String, usize>,
         const_vals: &'src HashMap<String, i32>,
         static_names: &'src std::collections::HashSet<String>,
         struct_field_types: &'src HashMap<String, Vec<Option<String>>>,
@@ -1914,6 +2011,7 @@ impl<'src> LowerCtx<'src> {
             struct_return_free_fns,
             enum_return_fns,
             struct_return_methods,
+            tuple_return_free_fns,
             const_vals,
             static_names,
             struct_field_types,
@@ -2666,6 +2764,103 @@ impl<'src> LowerCtx<'src> {
         }
     }
 
+    /// Lower an expression that must produce a tuple value into consecutive
+    /// stack slots `base_slot..base_slot+n_elems`.
+    ///
+    /// FLS §6.10: Tuple expressions evaluate each element left-to-right.
+    /// FLS §6.17: If/else expressions where both branches produce tuples.
+    /// FLS §6.4: Block expressions whose tail produces a tuple.
+    ///
+    /// This follows the same "expr-into-slots" pattern as `lower_enum_expr_into`
+    /// but for tuple types. The slots are pre-allocated by the caller; this
+    /// function only emits Store instructions to fill them.
+    fn lower_tuple_expr_into(
+        &mut self,
+        expr: &Expr,
+        base_slot: u8,
+        n_elems: u8,
+    ) -> Result<(), LowerError> {
+        match &expr.kind {
+            // FLS §6.10: Tuple literal `(e0, e1, ...)`.
+            ExprKind::Tuple(elems) => {
+                if elems.len() != n_elems as usize {
+                    return Err(LowerError::Unsupported(format!(
+                        "declared {} return elements but tuple literal has {}",
+                        n_elems,
+                        elems.len()
+                    )));
+                }
+                // FLS §6:3: Tuple elements are evaluated left-to-right.
+                // FLS §6.1.2:37–45: All stores are runtime instructions.
+                for (i, elem) in elems.iter().enumerate() {
+                    let val = self.lower_expr(elem, &IrTy::I32)?;
+                    let src = self.val_to_reg(val)?;
+                    self.instrs.push(Instr::Store { src, slot: base_slot + i as u8 });
+                }
+                Ok(())
+            }
+
+            // FLS §6.17: If-else expression — each branch stores its tuple
+            // elements into the shared return slots.
+            //
+            // FLS §6.17: Both branches must produce a value of the same type.
+            // Galvanic enforces this structurally: both branches must lower
+            // successfully via lower_tuple_expr_into with the same n_elems.
+            ExprKind::If { cond, then_block, else_expr } => {
+                let else_label = self.alloc_label();
+                let end_label = self.alloc_label();
+
+                let cond_val = self.lower_expr(cond, &IrTy::Bool)?;
+                let cond_reg = self.val_to_reg(cond_val)?;
+                self.instrs.push(Instr::CondBranch { reg: cond_reg, label: else_label });
+
+                // Then branch: lower stmts, then store tuple result.
+                for stmt in &then_block.stmts {
+                    self.lower_stmt(stmt)?;
+                }
+                if let Some(tail) = then_block.tail.as_deref() {
+                    self.lower_tuple_expr_into(tail, base_slot, n_elems)?;
+                } else {
+                    return Err(LowerError::Unsupported(
+                        "tuple-returning if expression: then branch must have a tail".into(),
+                    ));
+                }
+                self.instrs.push(Instr::Branch(end_label));
+
+                // Else branch: store tuple result.
+                self.instrs.push(Instr::Label(else_label));
+                match else_expr {
+                    Some(e) => self.lower_tuple_expr_into(e, base_slot, n_elems)?,
+                    None => {
+                        return Err(LowerError::Unsupported(
+                            "tuple-returning if expression must have an else branch".into(),
+                        ))
+                    }
+                }
+
+                self.instrs.push(Instr::Label(end_label));
+                Ok(())
+            }
+
+            // FLS §6.4: Block expression — lower stmts then handle tail.
+            ExprKind::Block(block) => {
+                for stmt in &block.stmts {
+                    self.lower_stmt(stmt)?;
+                }
+                match block.tail.as_deref() {
+                    Some(tail) => self.lower_tuple_expr_into(tail, base_slot, n_elems),
+                    None => Err(LowerError::Unsupported(
+                        "tuple-returning block must have a tail expression".into(),
+                    )),
+                }
+            }
+
+            _ => Err(LowerError::Unsupported(
+                "tuple return: unsupported expression form".into(),
+            )),
+        }
+    }
+
     // ── Statement lowering ────────────────────────────────────────────────────
 
     /// Lower one statement to runtime IR instructions.
@@ -2774,8 +2969,79 @@ impl<'src> LowerCtx<'src> {
                         return Ok(());
                     }
 
+                    // Case 3: init is a call to a tuple-returning free function.
+                    //
+                    // `let (a, b) = pair(x)` where `pair` is in
+                    // `tuple_return_free_fns`. The callee returns element values in
+                    // x0..x{N-1} via RetFields. We allocate N consecutive slots and
+                    // emit CallMut to write x0..x{N-1} into those slots after the bl,
+                    // then bind each pattern element to its slot.
+                    //
+                    // FLS §6.10, §9: Tuple-returning function calling convention.
+                    // FLS §5.10.3: Tuple pattern destructuring.
+                    // FLS §6.1.2:37–45: All spills are runtime store instructions.
+                    // Cache-line note: N arg moves + bl + N stores = (2N+1) instructions.
+                    if let Some(init_expr) = init.as_ref()
+                        && let ExprKind::Call { callee, args } = &init_expr.kind
+                        && let ExprKind::Path(segs) = &callee.kind
+                        && segs.len() == 1
+                    {
+                        let fn_name = segs[0].text(self.source).to_owned();
+                        if let Some(&n_elems) = self.tuple_return_free_fns.get(&fn_name) {
+                            if n_elems != pats.len() {
+                                return Err(LowerError::Unsupported(format!(
+                                    "tuple pattern has {} elements but `{fn_name}` returns {n_elems}",
+                                    pats.len()
+                                )));
+                            }
+                            // Evaluate arguments and collect their virtual registers.
+                            let mut arg_regs: Vec<u8> = Vec::new();
+                            for arg_expr in args.iter() {
+                                let val = self.lower_expr(arg_expr, &IrTy::I32)?;
+                                let reg = self.val_to_reg(val)?;
+                                arg_regs.push(reg);
+                            }
+                            // Allocate N consecutive slots for the returned tuple.
+                            let base_slot = self.alloc_slot()?;
+                            for _ in 1..n_elems {
+                                self.alloc_slot()?;
+                            }
+                            self.has_calls = true;
+                            // CallMut: call fn, then store x0..x{N-1} to
+                            // base_slot..base_slot+N-1.
+                            self.instrs.push(Instr::CallMut {
+                                name: fn_name,
+                                args: arg_regs,
+                                write_back_slot: base_slot,
+                                n_fields: n_elems as u8,
+                            });
+                            // Register the base slot as a tuple for field access (.0, .1).
+                            self.local_tuple_lens.insert(base_slot, n_elems);
+                            // Bind each pattern element to its slot.
+                            for (i, sub_pat) in pats.iter().enumerate() {
+                                match sub_pat {
+                                    Pat::Ident(span) => {
+                                        let name = span.text(self.source);
+                                        self.locals.insert(name, base_slot + i as u8);
+                                    }
+                                    Pat::Wildcard => {}
+                                    _ => {
+                                        return Err(LowerError::Unsupported(
+                                            "only ident and wildcard patterns supported in \
+                                             tuple-returning call destructure"
+                                                .into(),
+                                        ));
+                                    }
+                                }
+                            }
+                            return Ok(());
+                        }
+                    }
+
                     return Err(LowerError::Unsupported(
-                        "tuple destructuring requires a tuple literal or simple variable initializer".into(),
+                        "tuple destructuring requires a tuple literal, simple variable, \
+                         or tuple-returning function call as initializer"
+                            .into(),
                     ));
                 }
 

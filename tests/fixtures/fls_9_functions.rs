@@ -110,3 +110,17 @@ impl Rect {
         Rect { w: self.w * factor, h: self.h * factor }
     }
 }
+
+// FLS §6.10, §9: Function returning a tuple type.
+//
+// The FLS does not provide a direct code example for tuple-returning functions
+// in §9. This example is derived from the semantic description in §6.10
+// (Tuple Expressions) combined with §9 (Functions):
+// "A function may return any type, including a tuple type."
+//
+// FLS §6.10 AMBIGUOUS: The spec does not define a calling convention for
+// tuple-returning functions. Galvanic extends the struct-return convention:
+// element[0] returns in x0, element[1] returns in x1, etc.
+fn minmax(a: i32, b: i32) -> (i32, i32) {
+    if a < b { (a, b) } else { (b, a) }
+}
