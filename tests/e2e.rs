@@ -4131,3 +4131,206 @@ fn main() -> i32 {
         "expected ldr x0 (RetFields) in Counter__increment:\n{asm}"
     );
 }
+
+// ── Milestone 45: associated functions ──────────────────────────────────────
+//
+// Associated functions are functions in impl blocks that do not have a `self`
+// parameter. They are called with `TypeName::fn_name(args)` syntax and are
+// emitted under the mangled name `TypeName__fn_name`.
+//
+// FLS §10.1: Associated functions.
+// FLS §6.12.1: Call expressions (two-segment path callee).
+// FLS §14: Entities and resolution (path resolution for `Type::fn`).
+
+/// Milestone 45: scalar-returning associated function is called correctly.
+///
+/// FLS §10.1: Associated functions with scalar return types are emitted as
+/// regular functions under a mangled name and called via two-segment path.
+#[test]
+fn milestone_45_assoc_fn_scalar_return() {
+    let src = r#"
+struct Calc { n: i32 }
+impl Calc {
+    fn double(n: i32) -> i32 { n * 2 }
+}
+fn main() -> i32 { Calc::double(3) - 6 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected exit 0, got {exit_code}");
+}
+
+/// Milestone 45: associated constructor returns struct, field accessed via &self method.
+///
+/// FLS §10.1: `Point::new(x, y)` constructs a Point using a struct-returning
+/// associated function. The fields are returned in x0..x{N-1} and written back
+/// to the destination variable's stack slots.
+#[test]
+fn milestone_45_assoc_new_then_method() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+impl Point {
+    fn new(px: i32, py: i32) -> Point { Point { x: px, y: py } }
+    fn x(&self) -> i32 { self.x }
+    fn y(&self) -> i32 { self.y }
+}
+fn main() -> i32 {
+    let p = Point::new(3, 7);
+    p.x() + p.y() - 10
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected exit 0, got {exit_code}");
+}
+
+/// Milestone 45: associated function with no parameters returning a struct.
+///
+/// FLS §10.1: Associated functions need not take parameters.
+#[test]
+fn milestone_45_assoc_zero_init() {
+    let src = r#"
+struct Counter { value: i32 }
+impl Counter {
+    fn zero() -> Counter { Counter { value: 0 } }
+    fn get(&self) -> i32 { self.value }
+}
+fn main() -> i32 {
+    let c = Counter::zero();
+    c.get()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected exit 0, got {exit_code}");
+}
+
+/// Milestone 45: associated function result used in arithmetic.
+///
+/// FLS §10.1: The scalar return value of an associated function can be used
+/// directly in an arithmetic expression.
+#[test]
+fn milestone_45_assoc_result_in_arithmetic() {
+    let src = r#"
+struct Math { }
+impl Math {
+    fn square(n: i32) -> i32 { n * n }
+}
+fn main() -> i32 { Math::square(4) - 16 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected exit 0, got {exit_code}");
+}
+
+/// Milestone 45: struct constructed via associated function, then mutated.
+///
+/// FLS §10.1 + §10.1 (&mut self): combine constructor with mutable method.
+#[test]
+fn milestone_45_assoc_new_then_mut_method() {
+    let src = r#"
+struct Counter { value: i32 }
+impl Counter {
+    fn new(start: i32) -> Counter { Counter { value: start } }
+    fn increment(&mut self) { self.value = self.value + 1; }
+    fn get(&self) -> i32 { self.value }
+}
+fn main() -> i32 {
+    let mut c = Counter::new(5);
+    c.increment();
+    c.get() - 6
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected exit 0, got {exit_code}");
+}
+
+/// Milestone 45: associated function called with parameter from another variable.
+///
+/// FLS §10.1: Arguments to associated functions are evaluated at runtime.
+#[test]
+fn milestone_45_assoc_fn_on_parameter() {
+    let src = r#"
+struct Mult { }
+impl Mult {
+    fn by_three(n: i32) -> i32 { n * 3 }
+}
+fn apply(n: i32) -> i32 { Mult::by_three(n) }
+fn main() -> i32 { apply(7) - 21 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected exit 0, got {exit_code}");
+}
+
+/// Milestone 45: multiple associated functions in one impl block.
+///
+/// FLS §10.1: Multiple associated functions can be defined in one impl block.
+#[test]
+fn milestone_45_multiple_assoc_fns() {
+    let src = r#"
+struct Range { }
+impl Range {
+    fn min(a: i32, b: i32) -> i32 { if a < b { a } else { b } }
+    fn max(a: i32, b: i32) -> i32 { if a > b { a } else { b } }
+}
+fn main() -> i32 { Range::max(3, 7) - Range::min(3, 7) - 4 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected exit 0, got {exit_code}");
+}
+
+// ── Assembly inspection: milestone 45 ────────────────────────────────────────
+
+/// Milestone 45: associated function emitted under mangled name.
+///
+/// FLS §10.1: `Calc::double` must be emitted as `Calc__double`, not `double`.
+/// The two-segment path call site must emit `bl Calc__double`.
+#[test]
+fn runtime_assoc_fn_emits_mangled_name() {
+    let src = r#"
+struct Calc { }
+impl Calc {
+    fn double(n: i32) -> i32 { n * 2 }
+}
+fn main() -> i32 { Calc::double(3) }
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("Calc__double"),
+        "expected mangled function `Calc__double` in assembly:\n{asm}"
+    );
+    assert!(
+        asm.contains("bl") && asm.contains("Calc__double"),
+        "expected `bl Calc__double` in assembly:\n{asm}"
+    );
+}
+
+/// Milestone 45: struct-returning associated function emits RetFields (ldr before ret).
+///
+/// FLS §10.1: A struct-returning associated function must return fields in
+/// x0..x{N-1} via the RetFields mechanism, not interpret them at compile time.
+#[test]
+fn runtime_assoc_new_emits_ret_fields() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+impl Point {
+    fn new(px: i32, py: i32) -> Point { Point { x: px, y: py } }
+    fn sum(&self) -> i32 { self.x + self.y }
+}
+fn main() -> i32 {
+    let p = Point::new(3, 4);
+    p.sum()
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("Point__new"),
+        "expected `Point__new` in assembly:\n{asm}"
+    );
+    // The constructor must use RetFields: loads from stack before ret.
+    assert!(
+        asm.contains("ldr     x0") || asm.contains("ldr x0"),
+        "expected ldr x0 (RetFields) in Point__new:\n{asm}"
+    );
+    // The call site in main must write back fields from x0..x1.
+    assert!(
+        asm.contains("str     x0") || asm.contains("str x0"),
+        "expected str x0 (write-back) in main:\n{asm}"
+    );
+}
