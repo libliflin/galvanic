@@ -898,6 +898,18 @@ pub enum ExprKind {
     /// A 8-element array fills exactly one 64-byte cache line on the stack.
     Array(Vec<Expr>),
 
+    /// A tuple expression. FLS §6.10.
+    ///
+    /// `(expr0, expr1, ...)` — always two or more elements (one-element tuples
+    /// require a trailing comma; zero elements is the unit expression `()`).
+    ///
+    /// FLS §6.10: A tuple expression evaluates each operand left-to-right
+    /// and produces a tuple value. Field access is via `.0`, `.1`, etc.
+    ///
+    /// Cache-line note: N fields occupy N consecutive 8-byte stack slots,
+    /// identical layout to N-field struct or N-element array.
+    Tuple(Vec<Expr>),
+
     /// An indexing expression. FLS §6.9.
     ///
     /// `base[index]`

@@ -4918,3 +4918,183 @@ fn main() -> i32 {
         "expected `bl Square__area` call in assembly:\n{asm}"
     );
 }
+
+// ── Milestone 49: tuple expressions (FLS §6.10) ───────────────────────────────
+//
+// A tuple `(a, b)` is a heterogeneous sequence of values. Galvanic stores
+// each element in a consecutive stack slot (same layout as struct fields or
+// arrays). Field access `.0`, `.1` loads from `base_slot + index`.
+//
+// FLS §6.10: Tuple expressions and §6.10 field access.
+// Cache-line note: N-element tuple fills N consecutive 8-byte slots.
+
+/// Milestone 49: access first field of a two-element tuple.
+///
+/// FLS §6.10: `t.0` loads the first element.
+#[test]
+fn milestone_49_tuple_first_field() {
+    let src = r#"
+fn main() -> i32 {
+    let t = (1, 2);
+    t.0
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected exit 1, got {exit_code}");
+}
+
+/// Milestone 49: access second field of a two-element tuple.
+///
+/// FLS §6.10: `t.1` loads the second element.
+#[test]
+fn milestone_49_tuple_second_field() {
+    let src = r#"
+fn main() -> i32 {
+    let t = (3, 7);
+    t.1
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected exit 7, got {exit_code}");
+}
+
+/// Milestone 49: sum of tuple fields.
+///
+/// FLS §6.10: Both fields are loaded and used in arithmetic.
+#[test]
+fn milestone_49_tuple_field_sum() {
+    let src = r#"
+fn main() -> i32 {
+    let t = (10, 32);
+    t.0 + t.1
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+/// Milestone 49: three-element tuple, access middle field.
+///
+/// FLS §6.10: `.1` on a 3-tuple accesses the second slot.
+#[test]
+fn milestone_49_tuple_three_elements_middle() {
+    let src = r#"
+fn main() -> i32 {
+    let t = (5, 99, 7);
+    t.1
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 99, "expected exit 99, got {exit_code}");
+}
+
+/// Milestone 49: tuple fields from expressions (not just literals).
+///
+/// FLS §6.10: Elements are evaluated left-to-right at runtime.
+#[test]
+fn milestone_49_tuple_expr_elements() {
+    let src = r#"
+fn main() -> i32 {
+    let x = 3;
+    let y = 4;
+    let t = (x * x, y * y);
+    t.0 + t.1
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 25, "expected exit 25, got {exit_code}");
+}
+
+/// Milestone 49: tuple field passed to a function.
+///
+/// FLS §6.10: Tuple fields can be used anywhere an i32 can.
+#[test]
+fn milestone_49_tuple_field_to_fn() {
+    let src = r#"
+fn double(n: i32) -> i32 { n + n }
+fn main() -> i32 {
+    let t = (21, 0);
+    double(t.0)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+/// Milestone 49: tuple with function result as element.
+///
+/// FLS §6.10: Elements are arbitrary expressions.
+#[test]
+fn milestone_49_tuple_fn_result_element() {
+    let src = r#"
+fn five() -> i32 { 5 }
+fn main() -> i32 {
+    let t = (five(), 10);
+    t.0 + t.1
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 15, "expected exit 15, got {exit_code}");
+}
+
+/// Milestone 49: tuple field in a conditional.
+///
+/// FLS §6.10 + §6.17: Tuple fields can be used as if-conditions.
+#[test]
+fn milestone_49_tuple_field_in_if() {
+    let src = r#"
+fn main() -> i32 {
+    let t = (1, 0);
+    if t.0 == 1 { 42 } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+/// Milestone 49: tuple with parameter.
+///
+/// FLS §6.10: Tuple elements can come from function parameters.
+#[test]
+fn milestone_49_tuple_from_param() {
+    let src = r#"
+fn swap_sum(a: i32, b: i32) -> i32 {
+    let t = (b, a);
+    t.0 + t.1
+}
+fn main() -> i32 {
+    swap_sum(10, 32)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+// ── Assembly inspection: milestone 49 ────────────────────────────────────────
+
+/// Milestone 49: tuple init emits stores and field access emits a load.
+///
+/// FLS §6.10: `let t = (a, b)` stores two values to consecutive slots.
+/// `t.0` loads from the base slot; `t.1` loads from base+1.
+#[test]
+fn runtime_tuple_emits_stores_and_load() {
+    let src = r#"
+fn main() -> i32 {
+    let t = (1, 2);
+    t.0 + t.1
+}
+"#;
+    let asm = compile_to_asm(src);
+    // Should emit at least two stores (for elements 0 and 1).
+    let store_count = asm.lines().filter(|l| l.trim().starts_with("str")).count();
+    assert!(
+        store_count >= 2,
+        "expected at least 2 store instructions for tuple init:\n{asm}"
+    );
+    // Should emit at least two loads (for t.0 and t.1).
+    let load_count = asm.lines().filter(|l| l.trim().starts_with("ldr")).count();
+    assert!(
+        load_count >= 2,
+        "expected at least 2 load instructions for field access:\n{asm}"
+    );
+}

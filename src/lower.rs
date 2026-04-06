@@ -143,6 +143,7 @@ fn expr_contains_call(expr: &Expr) -> bool {
         }
         ExprKind::FieldAccess { receiver, .. } => expr_contains_call(receiver),
         ExprKind::Array(elems) => elems.iter().any(expr_contains_call),
+        ExprKind::Tuple(elems) => elems.iter().any(expr_contains_call),
         ExprKind::Index { base, index } => expr_contains_call(base) || expr_contains_call(index),
         // Leaves: literals, paths, unit — none contain calls.
         _ => false,
@@ -219,6 +220,7 @@ fn expr_contains_break_with_value(expr: &Expr) -> bool {
         }
         ExprKind::FieldAccess { receiver, .. } => expr_contains_break_with_value(receiver),
         ExprKind::Array(elems) => elems.iter().any(expr_contains_break_with_value),
+        ExprKind::Tuple(elems) => elems.iter().any(expr_contains_break_with_value),
         ExprKind::Index { base, index } => {
             expr_contains_break_with_value(base) || expr_contains_break_with_value(index)
         }
@@ -988,6 +990,17 @@ struct LowerCtx<'src> {
     /// Cache-line note: populated once per array let binding; read once per
     /// index expression. Not on a hot path.
     local_array_lens: HashMap<u8, usize>,
+
+    /// Maps a tuple variable's base stack slot to its field count.
+    ///
+    /// FLS §6.10: Tuple values occupy N consecutive 8-byte stack slots where
+    /// N is the number of elements. When `let t = (a, b)` is lowered, `t`'s
+    /// base slot is registered here with count 2. Field access `.0`, `.1`
+    /// is lowered to `base_slot + index`.
+    ///
+    /// Cache-line note: same layout as struct fields or array elements —
+    /// N consecutive slots per tuple.
+    local_tuple_lens: HashMap<u8, usize>,
 }
 
 impl<'src> LowerCtx<'src> {
@@ -1017,6 +1030,7 @@ impl<'src> LowerCtx<'src> {
             local_struct_types: HashMap::new(),
             local_enum_types: HashMap::new(),
             local_array_lens: HashMap::new(),
+            local_tuple_lens: HashMap::new(),
         }
     }
 
@@ -1450,6 +1464,36 @@ impl<'src> LowerCtx<'src> {
                     self.local_array_lens.insert(base_slot, n);
                     // Evaluate and store each element.
                     // FLS §6.8: Elements are evaluated left-to-right.
+                    for (i, elem_expr) in elems.iter().enumerate() {
+                        let val = self.lower_expr(elem_expr, &IrTy::I32)?;
+                        let src = self.val_to_reg(val)?;
+                        self.instrs.push(Instr::Store { src, slot: base_slot + i as u8 });
+                    }
+                    return Ok(());
+                }
+
+                // FLS §6.10: Tuple literal `let t = (e0, e1, ...)`.
+                //
+                // A tuple of N elements is laid out as N consecutive 8-byte
+                // stack slots, identical to a struct or array. The variable
+                // name maps to the base slot (slot of element 0). Elements
+                // are evaluated and stored left-to-right (FLS §6.4:14).
+                //
+                // `local_tuple_lens` records the field count so that `.0`,
+                // `.1` field accesses can compute `base_slot + index`.
+                //
+                // Cache-line note: same layout as arrays — N stores per init.
+                if let Some(init_expr) = init.as_ref()
+                    && let ExprKind::Tuple(elems) = &init_expr.kind
+                {
+                    let n = elems.len();
+                    let base_slot = self.alloc_slot()?;
+                    for _ in 1..n {
+                        self.alloc_slot()?;
+                    }
+                    self.locals.insert(var_name, base_slot);
+                    self.local_tuple_lens.insert(base_slot, n);
+                    // FLS §6.10: Elements evaluated left-to-right.
                     for (i, elem_expr) in elems.iter().enumerate() {
                         let val = self.lower_expr(elem_expr, &IrTy::I32)?;
                         let src = self.val_to_reg(val)?;
@@ -4691,22 +4735,15 @@ impl<'src> LowerCtx<'src> {
             // access on a temporary (non-place) expression is well-formed.
             // Galvanic restricts to named local variables for this milestone.
             ExprKind::FieldAccess { receiver, field } => {
-                // Resolve receiver to its base slot and struct type name.
-                let (base_slot, struct_type_name) = match &receiver.kind {
+                // Resolve receiver to its base slot.
+                let base_slot = match &receiver.kind {
                     ExprKind::Path(segs) if segs.len() == 1 => {
                         let var_name = segs[0].text(self.source);
-                        let base_slot = *self.locals.get(var_name).ok_or_else(|| {
+                        *self.locals.get(var_name).ok_or_else(|| {
                             LowerError::Unsupported(format!(
                                 "undefined variable `{var_name}` in field access"
                             ))
-                        })?;
-                        let type_name =
-                            self.local_struct_types.get(&base_slot).ok_or_else(|| {
-                                LowerError::Unsupported(format!(
-                                    "variable `{var_name}` is not a struct"
-                                ))
-                            })?;
-                        (base_slot, type_name.clone())
+                        })?
                     }
                     _ => {
                         return Err(LowerError::Unsupported(
@@ -4715,8 +4752,37 @@ impl<'src> LowerCtx<'src> {
                     }
                 };
 
-                // Look up the field index in the struct definition.
                 let field_name = field.text(self.source);
+
+                // FLS §6.10: Tuple field access `.0`, `.1`, etc.
+                // The field token is a decimal integer literal; parse it as
+                // the index into the tuple's consecutive stack slots.
+                if self.local_tuple_lens.contains_key(&base_slot) {
+                    let idx: usize = field_name.parse().map_err(|_| {
+                        LowerError::Unsupported(format!(
+                            "invalid tuple field index `{field_name}`"
+                        ))
+                    })?;
+                    let n = self.local_tuple_lens[&base_slot];
+                    if idx >= n {
+                        return Err(LowerError::Unsupported(format!(
+                            "tuple index {idx} out of range for {n}-element tuple"
+                        )));
+                    }
+                    let slot = base_slot + idx as u8;
+                    let reg = self.alloc_reg()?;
+                    self.instrs.push(Instr::Load { dst: reg, slot });
+                    return Ok(IrValue::Reg(reg));
+                }
+
+                // FLS §6.13: Struct field access by name.
+                let struct_type_name = self.local_struct_types.get(&base_slot).ok_or_else(|| {
+                    LowerError::Unsupported(format!(
+                        "variable at slot {base_slot} is not a struct or tuple"
+                    ))
+                })?.clone();
+
+                // Look up the field index in the struct definition.
                 let field_names = self.struct_defs.get(&struct_type_name).ok_or_else(|| {
                     LowerError::Unsupported(format!("unknown struct type `{struct_type_name}`"))
                 })?;
@@ -4914,6 +4980,15 @@ impl<'src> LowerCtx<'src> {
                 self.instrs.push(Instr::LoadIndexed { dst, base_slot, index_reg });
                 Ok(IrValue::Reg(dst))
             }
+
+            // FLS §6.10: Tuple expression as a value (not as a let initializer).
+            // This path is reached when a tuple literal appears as a tail expression
+            // or in a context where it's used as a value directly (rare; most tuple
+            // usage goes through the `let` path above). Not yet supported — tuples
+            // must be bound to a named variable first.
+            ExprKind::Tuple(_) => Err(LowerError::Unsupported(
+                "tuple expression must be bound to a `let` variable at this milestone".into(),
+            )),
 
             // Anything else: not yet supported as runtime codegen.
             _ => Err(LowerError::Unsupported(

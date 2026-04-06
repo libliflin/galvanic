@@ -1448,11 +1448,18 @@ impl<'src> Parser<'src> {
                 TokenKind::Dot => {
                     self.advance(); // eat `.`
 
-                    if self.peek_kind() != TokenKind::Ident {
-                        return Err(self.error("expected field or method name after `.`"));
-                    }
-                    let member_span = self.current_span();
-                    self.advance(); // eat identifier
+                    // FLS §6.13: field access by name (`receiver.field`).
+                    // FLS §6.10: tuple field access by index (`receiver.0`).
+                    // Both produce an `ExprKind::FieldAccess` node; the field
+                    // span text is the identifier or integer literal.
+                    let member_span = match self.peek_kind() {
+                        TokenKind::Ident | TokenKind::LitInteger => {
+                            let span = self.current_span();
+                            self.advance();
+                            span
+                        }
+                        _ => return Err(self.error("expected field or method name after `.`")),
+                    };
 
                     if self.peek_kind() == TokenKind::OpenParen {
                         // Method call: `receiver.method(args)`
@@ -1639,7 +1646,7 @@ impl<'src> Parser<'src> {
                 })
             }
 
-            // Grouped expression or unit `()` — FLS §6.3.2, §6.3.3
+            // Grouped expression, unit `()`, or tuple — FLS §6.7, §6.3.3, §6.10
             TokenKind::OpenParen => {
                 self.advance(); // eat `(`
 
@@ -1648,10 +1655,32 @@ impl<'src> Parser<'src> {
                     return Ok(Expr { kind: ExprKind::Unit, span: start });
                 }
 
-                // Grouped (parenthesised) expression — FLS §6.3.2
-                let inner = self.parse_expr()?;
-                self.expect(TokenKind::CloseParen)?;
-                Ok(inner)
+                // Parse first element. Then check for `,` to decide
+                // whether this is a grouped expression or a tuple.
+                let first = self.parse_expr()?;
+
+                if self.eat(TokenKind::Comma) {
+                    // Tuple expression — FLS §6.10.
+                    // Elements are evaluated left-to-right; at least two
+                    // elements (a trailing comma after a single element would
+                    // produce a 1-tuple, which we also accept here).
+                    let mut elems = vec![first];
+                    while self.peek_kind() != TokenKind::CloseParen
+                        && self.peek_kind() != TokenKind::Eof
+                    {
+                        elems.push(self.parse_expr()?);
+                        if !self.eat(TokenKind::Comma) {
+                            break;
+                        }
+                    }
+                    let end = self.current_span();
+                    self.expect(TokenKind::CloseParen)?;
+                    Ok(Expr { kind: ExprKind::Tuple(elems), span: start.to(end) })
+                } else {
+                    // Grouped (parenthesised) expression — FLS §6.7
+                    self.expect(TokenKind::CloseParen)?;
+                    Ok(first)
+                }
             }
 
             // Block expression — FLS §6.10
@@ -4319,5 +4348,47 @@ impl Area for Square { fn area(&self) -> i32 { self.side * self.side } }
         };
         assert!(matches!(lhs.kind, ExprKind::Index { .. }));
         assert!(matches!(rhs.kind, ExprKind::Index { .. }));
+    }
+
+    #[test]
+    fn tuple_two_elements() {
+        // FLS §6.10: `(1, 2)` is a tuple expression with two elements.
+        let src = "fn f() -> i32 { let t = (1, 2); t.0 }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!() };
+        let body = f.body.as_ref().unwrap();
+        let StmtKind::Let { init: Some(ref init), .. } = body.stmts[0].kind else {
+            panic!("expected let binding");
+        };
+        let ExprKind::Tuple(ref elems) = init.kind else {
+            panic!("expected Tuple, got {:?}", init.kind);
+        };
+        assert_eq!(elems.len(), 2);
+        assert!(matches!(elems[0].kind, ExprKind::LitInt(1)));
+        assert!(matches!(elems[1].kind, ExprKind::LitInt(2)));
+    }
+
+    #[test]
+    fn tuple_field_access_integer_index() {
+        // FLS §6.10: `t.0` accesses the first tuple field via a FieldAccess node
+        // whose `field` span contains the integer literal `0`.
+        let src = "fn f() -> i32 { let t = (10, 20); t.0 + t.1 }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!() };
+        let body = f.body.as_ref().unwrap();
+        let tail = body.tail.as_ref().expect("expected tail expression");
+        let ExprKind::Binary { op: BinOp::Add, ref lhs, ref rhs } = tail.kind else {
+            panic!("expected Add, got {:?}", tail.kind);
+        };
+        // t.0 — field is "0"
+        let ExprKind::FieldAccess { ref field, .. } = lhs.kind else {
+            panic!("expected FieldAccess, got {:?}", lhs.kind);
+        };
+        assert_eq!(field.text(src), "0");
+        // t.1 — field is "1"
+        let ExprKind::FieldAccess { field: ref field1, .. } = rhs.kind else {
+            panic!("expected FieldAccess, got {:?}", rhs.kind);
+        };
+        assert_eq!(field1.text(src), "1");
     }
 }
