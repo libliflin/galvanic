@@ -2288,6 +2288,21 @@ impl<'src> LowerCtx<'src> {
                     } else {
                         None
                     };
+                // FLS §5.3: If the scrutinee is a plain struct variable, record its
+                // base slot for struct pattern field access. Fields are at base_slot +
+                // field_idx (no discriminant offset, unlike enum variants).
+                let struct_base_slot: Option<u8> =
+                    if let ExprKind::Path(segs) = &scrutinee.kind
+                        && segs.len() == 1
+                    {
+                        let var_name = segs[0].text(self.source);
+                        self.locals
+                            .get(var_name)
+                            .copied()
+                            .filter(|s| self.local_struct_types.contains_key(s))
+                    } else {
+                        None
+                    };
                 // Infer scrutinee type from the pattern (bool literal → Bool, else I32).
                 let scrut_ty = match pat {
                     Pat::LitBool(_) => IrTy::Bool,
@@ -2565,82 +2580,121 @@ impl<'src> LowerCtx<'src> {
                             }
                         }
                     }
-                    // FLS §5.3 + §15.3: StructVariant pattern in if-let.
+                    // FLS §5.3 + §15.3: Named-field struct or variant pattern in if-let.
                     //
-                    // `if let Enum::Variant { field, .. } = x { then } else { else }`
-                    // Strategy: compare discriminant at scrut_slot against the variant's
-                    // discriminant; branch to else_label on mismatch; then install named
-                    // field bindings by declaration order using enum_base_slot + 1 + idx.
+                    // One-segment path (`Point { x, y }`): plain struct pattern — irrefutable,
+                    // no discriminant check, fields at struct_base_slot + field_idx.
+                    // Two-segment path (`Enum::Variant { field, … }`): enum variant — compare
+                    // discriminant, branch to else_label on mismatch, bind fields at
+                    // enum_base_slot + 1 + field_idx.
                     //
+                    // FLS §5.3: "A struct pattern matches a struct or enum struct variant
+                    // by its field patterns."
                     // FLS §6.1.2:37–45: All instructions are runtime.
-                    // Cache-line note: ~5 + 2×N instructions per variant arm.
+                    // Cache-line note: 2×N instructions (plain struct); ~5 + 2×N (enum variant).
                     Pat::StructVariant { path: segs, fields: pat_fields } => {
-                        if segs.len() != 2 {
-                            return Err(LowerError::Unsupported(
-                                "struct variant pattern path must have two segments".into(),
-                            ));
-                        }
-                        let enum_name = segs[0].text(self.source);
-                        let variant_name = segs[1].text(self.source);
-                        let (discriminant, field_names) = self
-                            .enum_defs
-                            .get(enum_name)
-                            .and_then(|v| v.get(variant_name))
-                            .cloned()
-                            .ok_or_else(|| {
-                                LowerError::Unsupported(format!(
-                                    "unknown enum variant `{enum_name}::{variant_name}`"
-                                ))
+                        if segs.len() == 1 {
+                            // FLS §5.3: Plain struct pattern — always matches (irrefutable).
+                            let struct_name = segs[0].text(self.source);
+                            let base = struct_base_slot.ok_or_else(|| {
+                                LowerError::Unsupported(
+                                    "plain struct pattern in if-let requires struct variable scrutinee".into(),
+                                )
                             })?;
-                        let base = enum_base_slot.ok_or_else(|| {
-                            LowerError::Unsupported(
-                                "StructVariant pattern in if-let requires enum variable scrutinee"
-                                    .into(),
-                            )
-                        })?;
-                        // Discriminant check — branch to else on mismatch.
-                        let s_reg = self.alloc_reg()?;
-                        self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
-                        let p_reg = self.alloc_reg()?;
-                        self.instrs.push(Instr::LoadImm(p_reg, discriminant));
-                        let cmp_reg = self.alloc_reg()?;
-                        self.instrs.push(Instr::BinOp {
-                            op: IrBinOp::Eq,
-                            dst: cmp_reg,
-                            lhs: s_reg,
-                            rhs: p_reg,
-                        });
-                        self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: else_label });
-                        // Install named field bindings by declaration order.
-                        for (fname_span, fp) in pat_fields.iter() {
-                            let fname = fname_span.text(self.source);
-                            let field_idx = field_names
-                                .iter()
-                                .position(|n| n == fname)
-                                .ok_or_else(|| {
-                                    LowerError::Unsupported(format!(
-                                        "enum variant `{enum_name}::{variant_name}` has no field `{fname}`"
-                                    ))
-                                })?;
-                            match fp {
-                                Pat::Ident(bind_span) => {
-                                    let bind_name = bind_span.text(self.source);
-                                    let fslot = base + 1 + field_idx as u8;
-                                    let bslot = self.alloc_slot()?;
-                                    let breg = self.alloc_reg()?;
-                                    self.instrs.push(Instr::Load { dst: breg, slot: fslot });
-                                    self.instrs.push(Instr::Store { src: breg, slot: bslot });
-                                    self.locals.insert(bind_name, bslot);
-                                    bound_names.push(bind_name);
-                                }
-                                Pat::Wildcard => {} // ignore field
-                                _ => {
-                                    return Err(LowerError::Unsupported(
-                                        "only ident/wildcard sub-patterns in StructVariant if-let fields"
-                                            .into(),
-                                    ));
+                            let field_names = self.struct_defs
+                                .get(struct_name)
+                                .cloned()
+                                .ok_or_else(|| LowerError::Unsupported(format!(
+                                    "unknown struct `{struct_name}`"
+                                )))?;
+                            // No CondBranch — plain struct patterns are irrefutable.
+                            for (fname_span, fp) in pat_fields.iter() {
+                                let fname = fname_span.text(self.source);
+                                let field_idx = field_names.iter().position(|n| n == fname)
+                                    .ok_or_else(|| LowerError::Unsupported(format!(
+                                        "struct `{struct_name}` has no field `{fname}`"
+                                    )))?;
+                                match fp {
+                                    Pat::Ident(bind_span) => {
+                                        let bind_name = bind_span.text(self.source);
+                                        let fslot = base + field_idx as u8;
+                                        let bslot = self.alloc_slot()?;
+                                        let breg = self.alloc_reg()?;
+                                        self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                        self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                        self.locals.insert(bind_name, bslot);
+                                        bound_names.push(bind_name);
+                                    }
+                                    Pat::Wildcard => {}
+                                    _ => return Err(LowerError::Unsupported(
+                                        "only ident/wildcard sub-patterns in struct if-let patterns".into(),
+                                    )),
                                 }
                             }
+                        } else if segs.len() == 2 {
+                            let enum_name = segs[0].text(self.source);
+                            let variant_name = segs[1].text(self.source);
+                            let (discriminant, field_names) = self
+                                .enum_defs
+                                .get(enum_name)
+                                .and_then(|v| v.get(variant_name))
+                                .cloned()
+                                .ok_or_else(|| {
+                                    LowerError::Unsupported(format!(
+                                        "unknown enum variant `{enum_name}::{variant_name}`"
+                                    ))
+                                })?;
+                            let base = enum_base_slot.ok_or_else(|| {
+                                LowerError::Unsupported(
+                                    "StructVariant pattern in if-let requires enum variable scrutinee"
+                                        .into(),
+                                )
+                            })?;
+                            // Discriminant check — branch to else on mismatch.
+                            let s_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                            let p_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::LoadImm(p_reg, discriminant));
+                            let cmp_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::BinOp {
+                                op: IrBinOp::Eq,
+                                dst: cmp_reg,
+                                lhs: s_reg,
+                                rhs: p_reg,
+                            });
+                            self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: else_label });
+                            // Install named field bindings by declaration order.
+                            for (fname_span, fp) in pat_fields.iter() {
+                                let fname = fname_span.text(self.source);
+                                let field_idx = field_names
+                                    .iter()
+                                    .position(|n| n == fname)
+                                    .ok_or_else(|| {
+                                        LowerError::Unsupported(format!(
+                                            "enum variant `{enum_name}::{variant_name}` has no field `{fname}`"
+                                        ))
+                                    })?;
+                                match fp {
+                                    Pat::Ident(bind_span) => {
+                                        let bind_name = bind_span.text(self.source);
+                                        let fslot = base + 1 + field_idx as u8;
+                                        let bslot = self.alloc_slot()?;
+                                        let breg = self.alloc_reg()?;
+                                        self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                        self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                        self.locals.insert(bind_name, bslot);
+                                        bound_names.push(bind_name);
+                                    }
+                                    Pat::Wildcard => {}
+                                    _ => return Err(LowerError::Unsupported(
+                                        "only ident/wildcard sub-patterns in StructVariant if-let fields".into(),
+                                    )),
+                                }
+                            }
+                        } else {
+                            return Err(LowerError::Unsupported(
+                                "struct/variant if-let pattern path must have 1 or 2 segments".into(),
+                            ));
                         }
                     }
                 }
@@ -2781,6 +2835,21 @@ impl<'src> LowerCtx<'src> {
                             .get(var_name)
                             .copied()
                             .filter(|s| self.local_enum_types.contains_key(s))
+                    } else {
+                        None
+                    };
+                // FLS §5.3: If the scrutinee is a plain struct variable, record its
+                // base slot for struct pattern field access. Fields are at base_slot +
+                // field_idx (no discriminant offset, unlike enum variants).
+                let struct_base_slot: Option<u8> =
+                    if let ExprKind::Path(segs) = &scrutinee.kind
+                        && segs.len() == 1
+                    {
+                        let var_name = segs[0].text(self.source);
+                        self.locals
+                            .get(var_name)
+                            .copied()
+                            .filter(|s| self.local_struct_types.contains_key(s))
                     } else {
                         None
                     };
@@ -3122,71 +3191,115 @@ impl<'src> LowerCtx<'src> {
                                     self.instrs.push(Instr::Label(next_label));
                                     continue;
                                 }
-                                // FLS §5.3 + §15.3: Named-field enum variant pattern (value-returning match).
+                                // FLS §5.3 + §15.3: Named-field struct or enum variant pattern
+                                // (value-returning match).
                                 //
-                                // `Enum::Variant { field, … }` matches by discriminant then binds
-                                // named fields. Fields are mapped to slots by declaration order
-                                // (`EnumVariantInfo.1`), not by source order in the pattern.
+                                // One-segment path (`Point { x, y }`): plain struct pattern —
+                                // irrefutable, no discriminant check, fields at base_slot + idx.
+                                // Two-segment path (`Enum::Variant { field, … }`): enum variant —
+                                // check discriminant, then bind fields at enum_base_slot + 1 + idx.
                                 //
+                                // FLS §5.3: "A struct pattern matches a struct or enum struct variant
+                                // by its field patterns."
                                 // FLS §6.1.2:37–45: All instructions are runtime.
-                                // Cache-line note: ~5 + 2×N instructions per arm.
+                                // Cache-line note: ~5 + 2×N instructions per arm (enum variant);
+                                // 2×N instructions per arm (plain struct, no discriminant check).
                                 Pat::StructVariant { path: segs, fields: pat_fields } => {
-                                    if segs.len() != 2 {
-                                        return Err(LowerError::Unsupported(
-                                            "struct variant pattern path must have two segments".into(),
-                                        ));
-                                    }
-                                    let enum_name = segs[0].text(self.source);
-                                    let variant_name = segs[1].text(self.source);
-                                    let (discriminant, field_names) = self.enum_defs
-                                        .get(enum_name)
-                                        .and_then(|v| v.get(variant_name))
-                                        .cloned()
-                                        .ok_or_else(|| LowerError::Unsupported(format!(
-                                            "unknown enum variant `{enum_name}::{variant_name}`"
-                                        )))?;
-                                    let base = enum_base_slot.ok_or_else(|| {
-                                        LowerError::Unsupported(
-                                            "StructVariant pattern requires enum variable scrutinee".into(),
-                                        )
-                                    })?;
-                                    // Discriminant check.
-                                    let s_reg = self.alloc_reg()?;
-                                    self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
-                                    let p_reg = self.alloc_reg()?;
-                                    self.instrs.push(Instr::LoadImm(p_reg, discriminant));
-                                    let cmp_reg = self.alloc_reg()?;
-                                    self.instrs.push(Instr::BinOp {
-                                        op: IrBinOp::Eq,
-                                        dst: cmp_reg,
-                                        lhs: s_reg,
-                                        rhs: p_reg,
-                                    });
-                                    self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
-                                    // Install named field bindings by declaration order.
                                     let mut bound_sv: Vec<&str> = Vec::new();
-                                    for (fname_span, fp) in pat_fields.iter() {
-                                        let fname = fname_span.text(self.source);
-                                        let field_idx = field_names.iter().position(|n| n == fname)
+                                    if segs.len() == 1 {
+                                        // FLS §5.3: Plain struct pattern — always matches.
+                                        let struct_name = segs[0].text(self.source);
+                                        let base = struct_base_slot.ok_or_else(|| {
+                                            LowerError::Unsupported(
+                                                "plain struct pattern requires struct variable scrutinee".into(),
+                                            )
+                                        })?;
+                                        let field_names = self.struct_defs
+                                            .get(struct_name)
+                                            .cloned()
                                             .ok_or_else(|| LowerError::Unsupported(format!(
-                                                "enum variant `{enum_name}::{variant_name}` has no field `{fname}`"
+                                                "unknown struct `{struct_name}`"
                                             )))?;
-                                        match fp {
-                                            Pat::Ident(bind_span) => {
-                                                let bind_name = bind_span.text(self.source);
-                                                let fslot = base + 1 + field_idx as u8;
-                                                let bslot = self.alloc_slot()?;
-                                                let breg = self.alloc_reg()?;
-                                                self.instrs.push(Instr::Load { dst: breg, slot: fslot });
-                                                self.instrs.push(Instr::Store { src: breg, slot: bslot });
-                                                self.locals.insert(bind_name, bslot);
-                                                bound_sv.push(bind_name);
+                                        // No CondBranch — plain struct patterns are irrefutable.
+                                        for (fname_span, fp) in pat_fields.iter() {
+                                            let fname = fname_span.text(self.source);
+                                            let field_idx = field_names.iter().position(|n| n == fname)
+                                                .ok_or_else(|| LowerError::Unsupported(format!(
+                                                    "struct `{struct_name}` has no field `{fname}`"
+                                                )))?;
+                                            match fp {
+                                                Pat::Ident(bind_span) => {
+                                                    let bind_name = bind_span.text(self.source);
+                                                    let fslot = base + field_idx as u8;
+                                                    let bslot = self.alloc_slot()?;
+                                                    let breg = self.alloc_reg()?;
+                                                    self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                                    self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                                    self.locals.insert(bind_name, bslot);
+                                                    bound_sv.push(bind_name);
+                                                }
+                                                Pat::Wildcard => {}
+                                                _ => return Err(LowerError::Unsupported(
+                                                    "only ident/wildcard sub-patterns in struct patterns".into(),
+                                                )),
                                             }
-                                            Pat::Wildcard => {} // ignore field
-                                            _ => return Err(LowerError::Unsupported(
-                                                "only ident/wildcard sub-patterns in StructVariant fields".into(),
-                                            )),
                                         }
+                                    } else if segs.len() == 2 {
+                                        let enum_name = segs[0].text(self.source);
+                                        let variant_name = segs[1].text(self.source);
+                                        let (discriminant, field_names) = self.enum_defs
+                                            .get(enum_name)
+                                            .and_then(|v| v.get(variant_name))
+                                            .cloned()
+                                            .ok_or_else(|| LowerError::Unsupported(format!(
+                                                "unknown enum variant `{enum_name}::{variant_name}`"
+                                            )))?;
+                                        let base = enum_base_slot.ok_or_else(|| {
+                                            LowerError::Unsupported(
+                                                "StructVariant pattern requires enum variable scrutinee".into(),
+                                            )
+                                        })?;
+                                        // Discriminant check.
+                                        let s_reg = self.alloc_reg()?;
+                                        self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                                        let p_reg = self.alloc_reg()?;
+                                        self.instrs.push(Instr::LoadImm(p_reg, discriminant));
+                                        let cmp_reg = self.alloc_reg()?;
+                                        self.instrs.push(Instr::BinOp {
+                                            op: IrBinOp::Eq,
+                                            dst: cmp_reg,
+                                            lhs: s_reg,
+                                            rhs: p_reg,
+                                        });
+                                        self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
+                                        // Install named field bindings by declaration order.
+                                        for (fname_span, fp) in pat_fields.iter() {
+                                            let fname = fname_span.text(self.source);
+                                            let field_idx = field_names.iter().position(|n| n == fname)
+                                                .ok_or_else(|| LowerError::Unsupported(format!(
+                                                    "enum variant `{enum_name}::{variant_name}` has no field `{fname}`"
+                                                )))?;
+                                            match fp {
+                                                Pat::Ident(bind_span) => {
+                                                    let bind_name = bind_span.text(self.source);
+                                                    let fslot = base + 1 + field_idx as u8;
+                                                    let bslot = self.alloc_slot()?;
+                                                    let breg = self.alloc_reg()?;
+                                                    self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                                    self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                                    self.locals.insert(bind_name, bslot);
+                                                    bound_sv.push(bind_name);
+                                                }
+                                                Pat::Wildcard => {}
+                                                _ => return Err(LowerError::Unsupported(
+                                                    "only ident/wildcard sub-patterns in StructVariant fields".into(),
+                                                )),
+                                            }
+                                        }
+                                    } else {
+                                        return Err(LowerError::Unsupported(
+                                            "struct/variant pattern path must have 1 or 2 segments".into(),
+                                        ));
                                     }
                                     if let Some(guard) = &arm.guard {
                                         let gv = self.lower_expr(guard, &IrTy::Bool)?;
@@ -3300,31 +3413,62 @@ impl<'src> LowerCtx<'src> {
                                 }
                                 names
                             }
-                            // FLS §5.3 + §15.3: Named-field variant default arm.
-                            Pat::StructVariant { path: segs, fields: pat_fields } if segs.len() == 2 => {
-                                let enum_name = segs[0].text(self.source);
-                                let variant_name = segs[1].text(self.source);
-                                let field_names = self.enum_defs
-                                    .get(enum_name)
-                                    .and_then(|v| v.get(variant_name))
-                                    .map(|(_, names)| names.clone())
-                                    .unwrap_or_default();
-                                let base = enum_base_slot.ok_or_else(|| LowerError::Unsupported(
-                                    "StructVariant default arm requires enum variable scrutinee".into(),
-                                ))?;
+                            // FLS §5.3 + §15.3: Named-field struct or variant default arm
+                            // (value-returning match).
+                            // One-segment: plain struct pattern (irrefutable, fields at base + idx).
+                            // Two-segment: enum variant pattern (fields at enum_base + 1 + idx).
+                            Pat::StructVariant { path: segs, fields: pat_fields } => {
                                 let mut names: Vec<&str> = Vec::new();
-                                for (fname_span, fp) in pat_fields.iter() {
-                                    let fname = fname_span.text(self.source);
-                                    if let Pat::Ident(bind_span) = fp {
-                                        let bind_name = bind_span.text(self.source);
-                                        if let Some(idx) = field_names.iter().position(|n| n == fname) {
-                                            let fslot = base + 1 + idx as u8;
-                                            let bslot = self.alloc_slot()?;
-                                            let breg = self.alloc_reg()?;
-                                            self.instrs.push(Instr::Load { dst: breg, slot: fslot });
-                                            self.instrs.push(Instr::Store { src: breg, slot: bslot });
-                                            self.locals.insert(bind_name, bslot);
-                                            names.push(bind_name);
+                                if segs.len() == 1 {
+                                    let struct_name = segs[0].text(self.source);
+                                    let base = struct_base_slot.ok_or_else(|| LowerError::Unsupported(
+                                        "plain struct default-arm pattern requires struct variable scrutinee".into(),
+                                    ))?;
+                                    let field_names = self.struct_defs
+                                        .get(struct_name)
+                                        .cloned()
+                                        .ok_or_else(|| LowerError::Unsupported(format!(
+                                            "unknown struct `{struct_name}`"
+                                        )))?;
+                                    for (fname_span, fp) in pat_fields.iter() {
+                                        let fname = fname_span.text(self.source);
+                                        if let Pat::Ident(bind_span) = fp {
+                                            let bind_name = bind_span.text(self.source);
+                                            if let Some(idx) = field_names.iter().position(|n| n == fname) {
+                                                let fslot = base + idx as u8;
+                                                let bslot = self.alloc_slot()?;
+                                                let breg = self.alloc_reg()?;
+                                                self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                                self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                                self.locals.insert(bind_name, bslot);
+                                                names.push(bind_name);
+                                            }
+                                        }
+                                    }
+                                } else if segs.len() == 2 {
+                                    let enum_name = segs[0].text(self.source);
+                                    let variant_name = segs[1].text(self.source);
+                                    let field_names = self.enum_defs
+                                        .get(enum_name)
+                                        .and_then(|v| v.get(variant_name))
+                                        .map(|(_, names)| names.clone())
+                                        .unwrap_or_default();
+                                    let base = enum_base_slot.ok_or_else(|| LowerError::Unsupported(
+                                        "StructVariant default arm requires enum variable scrutinee".into(),
+                                    ))?;
+                                    for (fname_span, fp) in pat_fields.iter() {
+                                        let fname = fname_span.text(self.source);
+                                        if let Pat::Ident(bind_span) = fp {
+                                            let bind_name = bind_span.text(self.source);
+                                            if let Some(idx) = field_names.iter().position(|n| n == fname) {
+                                                let fslot = base + 1 + idx as u8;
+                                                let bslot = self.alloc_slot()?;
+                                                let breg = self.alloc_reg()?;
+                                                self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                                self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                                self.locals.insert(bind_name, bslot);
+                                                names.push(bind_name);
+                                            }
                                         }
                                     }
                                 }
@@ -3600,60 +3744,97 @@ impl<'src> LowerCtx<'src> {
                                     self.instrs.push(Instr::Label(next_label));
                                     continue;
                                 }
-                                // FLS §5.3 + §15.3: Named-field variant pattern (unit-return match).
+                                // FLS §5.3 + §15.3: Named-field struct or variant pattern
+                                // (unit-return match). Same 1/2-segment dispatch as I32 branch.
                                 Pat::StructVariant { path: segs, fields: pat_fields } => {
-                                    if segs.len() != 2 {
-                                        return Err(LowerError::Unsupported(
-                                            "struct variant pattern path must have two segments".into(),
-                                        ));
-                                    }
-                                    let enum_name = segs[0].text(self.source);
-                                    let variant_name = segs[1].text(self.source);
-                                    let (discriminant, field_names) = self.enum_defs
-                                        .get(enum_name)
-                                        .and_then(|v| v.get(variant_name))
-                                        .cloned()
-                                        .ok_or_else(|| LowerError::Unsupported(format!(
-                                            "unknown enum variant `{enum_name}::{variant_name}`"
-                                        )))?;
-                                    let base = enum_base_slot.ok_or_else(|| LowerError::Unsupported(
-                                        "StructVariant pattern requires enum variable scrutinee".into(),
-                                    ))?;
-                                    let s_reg = self.alloc_reg()?;
-                                    self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
-                                    let p_reg = self.alloc_reg()?;
-                                    self.instrs.push(Instr::LoadImm(p_reg, discriminant));
-                                    let cmp_reg = self.alloc_reg()?;
-                                    self.instrs.push(Instr::BinOp {
-                                        op: IrBinOp::Eq,
-                                        dst: cmp_reg,
-                                        lhs: s_reg,
-                                        rhs: p_reg,
-                                    });
-                                    self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
                                     let mut bound_sv: Vec<&str> = Vec::new();
-                                    for (fname_span, fp) in pat_fields.iter() {
-                                        let fname = fname_span.text(self.source);
-                                        let field_idx = field_names.iter().position(|n| n == fname)
+                                    if segs.len() == 1 {
+                                        // FLS §5.3: Plain struct pattern — irrefutable.
+                                        let struct_name = segs[0].text(self.source);
+                                        let base = struct_base_slot.ok_or_else(|| LowerError::Unsupported(
+                                            "plain struct pattern requires struct variable scrutinee".into(),
+                                        ))?;
+                                        let field_names = self.struct_defs
+                                            .get(struct_name)
+                                            .cloned()
                                             .ok_or_else(|| LowerError::Unsupported(format!(
-                                                "enum variant `{enum_name}::{variant_name}` has no field `{fname}`"
+                                                "unknown struct `{struct_name}`"
                                             )))?;
-                                        match fp {
-                                            Pat::Ident(bind_span) => {
-                                                let bind_name = bind_span.text(self.source);
-                                                let fslot = base + 1 + field_idx as u8;
-                                                let bslot = self.alloc_slot()?;
-                                                let breg = self.alloc_reg()?;
-                                                self.instrs.push(Instr::Load { dst: breg, slot: fslot });
-                                                self.instrs.push(Instr::Store { src: breg, slot: bslot });
-                                                self.locals.insert(bind_name, bslot);
-                                                bound_sv.push(bind_name);
+                                        for (fname_span, fp) in pat_fields.iter() {
+                                            let fname = fname_span.text(self.source);
+                                            let field_idx = field_names.iter().position(|n| n == fname)
+                                                .ok_or_else(|| LowerError::Unsupported(format!(
+                                                    "struct `{struct_name}` has no field `{fname}`"
+                                                )))?;
+                                            match fp {
+                                                Pat::Ident(bind_span) => {
+                                                    let bind_name = bind_span.text(self.source);
+                                                    let fslot = base + field_idx as u8;
+                                                    let bslot = self.alloc_slot()?;
+                                                    let breg = self.alloc_reg()?;
+                                                    self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                                    self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                                    self.locals.insert(bind_name, bslot);
+                                                    bound_sv.push(bind_name);
+                                                }
+                                                Pat::Wildcard => {}
+                                                _ => return Err(LowerError::Unsupported(
+                                                    "only ident/wildcard sub-patterns in struct patterns".into(),
+                                                )),
                                             }
-                                            Pat::Wildcard => {}
-                                            _ => return Err(LowerError::Unsupported(
-                                                "only ident/wildcard sub-patterns in StructVariant fields".into(),
-                                            )),
                                         }
+                                    } else if segs.len() == 2 {
+                                        let enum_name = segs[0].text(self.source);
+                                        let variant_name = segs[1].text(self.source);
+                                        let (discriminant, field_names) = self.enum_defs
+                                            .get(enum_name)
+                                            .and_then(|v| v.get(variant_name))
+                                            .cloned()
+                                            .ok_or_else(|| LowerError::Unsupported(format!(
+                                                "unknown enum variant `{enum_name}::{variant_name}`"
+                                            )))?;
+                                        let base = enum_base_slot.ok_or_else(|| LowerError::Unsupported(
+                                            "StructVariant pattern requires enum variable scrutinee".into(),
+                                        ))?;
+                                        let s_reg = self.alloc_reg()?;
+                                        self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                                        let p_reg = self.alloc_reg()?;
+                                        self.instrs.push(Instr::LoadImm(p_reg, discriminant));
+                                        let cmp_reg = self.alloc_reg()?;
+                                        self.instrs.push(Instr::BinOp {
+                                            op: IrBinOp::Eq,
+                                            dst: cmp_reg,
+                                            lhs: s_reg,
+                                            rhs: p_reg,
+                                        });
+                                        self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
+                                        for (fname_span, fp) in pat_fields.iter() {
+                                            let fname = fname_span.text(self.source);
+                                            let field_idx = field_names.iter().position(|n| n == fname)
+                                                .ok_or_else(|| LowerError::Unsupported(format!(
+                                                    "enum variant `{enum_name}::{variant_name}` has no field `{fname}`"
+                                                )))?;
+                                            match fp {
+                                                Pat::Ident(bind_span) => {
+                                                    let bind_name = bind_span.text(self.source);
+                                                    let fslot = base + 1 + field_idx as u8;
+                                                    let bslot = self.alloc_slot()?;
+                                                    let breg = self.alloc_reg()?;
+                                                    self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                                    self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                                    self.locals.insert(bind_name, bslot);
+                                                    bound_sv.push(bind_name);
+                                                }
+                                                Pat::Wildcard => {}
+                                                _ => return Err(LowerError::Unsupported(
+                                                    "only ident/wildcard sub-patterns in StructVariant fields".into(),
+                                                )),
+                                            }
+                                        }
+                                    } else {
+                                        return Err(LowerError::Unsupported(
+                                            "struct/variant pattern path must have 1 or 2 segments".into(),
+                                        ));
                                     }
                                     if let Some(guard) = &arm.guard {
                                         let gv = self.lower_expr(guard, &IrTy::Bool)?;
@@ -3746,31 +3927,60 @@ impl<'src> LowerCtx<'src> {
                                 }
                                 names
                             }
-                            // FLS §5.3 + §15.3: Named-field variant default arm (unit-return match).
-                            Pat::StructVariant { path: segs, fields: pat_fields } if segs.len() == 2 => {
-                                let enum_name = segs[0].text(self.source);
-                                let variant_name = segs[1].text(self.source);
-                                let field_names = self.enum_defs
-                                    .get(enum_name)
-                                    .and_then(|v| v.get(variant_name))
-                                    .map(|(_, names)| names.clone())
-                                    .unwrap_or_default();
-                                let base = enum_base_slot.ok_or_else(|| LowerError::Unsupported(
-                                    "StructVariant default arm requires enum variable scrutinee".into(),
-                                ))?;
+                            // FLS §5.3 + §15.3: Named-field struct or variant default arm
+                            // (unit-return match). 1-segment: plain struct; 2-segment: enum variant.
+                            Pat::StructVariant { path: segs, fields: pat_fields } => {
                                 let mut names: Vec<&str> = Vec::new();
-                                for (fname_span, fp) in pat_fields.iter() {
-                                    let fname = fname_span.text(self.source);
-                                    if let Pat::Ident(bind_span) = fp {
-                                        let bind_name = bind_span.text(self.source);
-                                        if let Some(idx) = field_names.iter().position(|n| n == fname) {
-                                            let fslot = base + 1 + idx as u8;
-                                            let bslot = self.alloc_slot()?;
-                                            let breg = self.alloc_reg()?;
-                                            self.instrs.push(Instr::Load { dst: breg, slot: fslot });
-                                            self.instrs.push(Instr::Store { src: breg, slot: bslot });
-                                            self.locals.insert(bind_name, bslot);
-                                            names.push(bind_name);
+                                if segs.len() == 1 {
+                                    let struct_name = segs[0].text(self.source);
+                                    let base = struct_base_slot.ok_or_else(|| LowerError::Unsupported(
+                                        "plain struct default-arm pattern requires struct variable scrutinee".into(),
+                                    ))?;
+                                    let field_names = self.struct_defs
+                                        .get(struct_name)
+                                        .cloned()
+                                        .ok_or_else(|| LowerError::Unsupported(format!(
+                                            "unknown struct `{struct_name}`"
+                                        )))?;
+                                    for (fname_span, fp) in pat_fields.iter() {
+                                        let fname = fname_span.text(self.source);
+                                        if let Pat::Ident(bind_span) = fp {
+                                            let bind_name = bind_span.text(self.source);
+                                            if let Some(idx) = field_names.iter().position(|n| n == fname) {
+                                                let fslot = base + idx as u8;
+                                                let bslot = self.alloc_slot()?;
+                                                let breg = self.alloc_reg()?;
+                                                self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                                self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                                self.locals.insert(bind_name, bslot);
+                                                names.push(bind_name);
+                                            }
+                                        }
+                                    }
+                                } else if segs.len() == 2 {
+                                    let enum_name = segs[0].text(self.source);
+                                    let variant_name = segs[1].text(self.source);
+                                    let field_names = self.enum_defs
+                                        .get(enum_name)
+                                        .and_then(|v| v.get(variant_name))
+                                        .map(|(_, names)| names.clone())
+                                        .unwrap_or_default();
+                                    let base = enum_base_slot.ok_or_else(|| LowerError::Unsupported(
+                                        "StructVariant default arm requires enum variable scrutinee".into(),
+                                    ))?;
+                                    for (fname_span, fp) in pat_fields.iter() {
+                                        let fname = fname_span.text(self.source);
+                                        if let Pat::Ident(bind_span) = fp {
+                                            let bind_name = bind_span.text(self.source);
+                                            if let Some(idx) = field_names.iter().position(|n| n == fname) {
+                                                let fslot = base + 1 + idx as u8;
+                                                let bslot = self.alloc_slot()?;
+                                                let breg = self.alloc_reg()?;
+                                                self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                                self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                                self.locals.insert(bind_name, bslot);
+                                                names.push(bind_name);
+                                            }
                                         }
                                     }
                                 }
@@ -4549,6 +4759,19 @@ impl<'src> LowerCtx<'src> {
                     } else {
                         None
                     };
+                // FLS §5.3: Plain struct variable scrutinee for struct pattern.
+                let struct_base_slot: Option<u8> =
+                    if let ExprKind::Path(segs) = &scrutinee.kind
+                        && segs.len() == 1
+                    {
+                        let var_name = segs[0].text(self.source);
+                        self.locals
+                            .get(var_name)
+                            .copied()
+                            .filter(|s| self.local_struct_types.contains_key(s))
+                    } else {
+                        None
+                    };
 
                 // Save register watermark — same rationale as While above.
                 let reg_mark = self.next_reg;
@@ -4831,83 +5054,112 @@ impl<'src> LowerCtx<'src> {
                             }
                         }
                     }
-                    // FLS §5.3 + §15.3: StructVariant pattern in while-let.
-                    //
-                    // `while let Enum::Variant { field, .. } = x { body }`
-                    // Strategy: compare discriminant at scrut_slot against the variant's
-                    // discriminant; branch to exit_label on mismatch; then install named
-                    // field bindings by declaration order.
-                    //
-                    // FLS §6.15.4: mismatch terminates the loop.
-                    // FLS §6.1.2:37–45: All instructions are runtime.
-                    // Cache-line note: ~5 + 2×N instructions per iteration header.
+                    // FLS §5.3 + §15.3: Named-field struct or variant pattern in while-let.
+                    // 1-segment: plain struct (irrefutable — loop runs forever unless broken).
+                    // 2-segment: enum variant (terminates loop on discriminant mismatch).
                     Pat::StructVariant { path: segs, fields: pat_fields } => {
-                        if segs.len() != 2 {
-                            return Err(LowerError::Unsupported(
-                                "struct variant pattern path must have two segments".into(),
-                            ));
-                        }
-                        let enum_name = segs[0].text(self.source);
-                        let variant_name = segs[1].text(self.source);
-                        let (discriminant, field_names) = self
-                            .enum_defs
-                            .get(enum_name)
-                            .and_then(|v| v.get(variant_name))
-                            .cloned()
-                            .ok_or_else(|| {
-                                LowerError::Unsupported(format!(
-                                    "unknown enum variant `{enum_name}::{variant_name}`"
-                                ))
+                        if segs.len() == 1 {
+                            // FLS §5.3: Plain struct pattern — always matches.
+                            let struct_name = segs[0].text(self.source);
+                            let base = struct_base_slot.ok_or_else(|| {
+                                LowerError::Unsupported(
+                                    "plain struct pattern in while-let requires struct variable scrutinee".into(),
+                                )
                             })?;
-                        let base = enum_base_slot.ok_or_else(|| {
-                            LowerError::Unsupported(
-                                "StructVariant pattern in while-let requires enum variable scrutinee"
-                                    .into(),
-                            )
-                        })?;
-                        // Discriminant check — branch to exit on mismatch.
-                        let s_reg = self.alloc_reg()?;
-                        self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
-                        let p_reg = self.alloc_reg()?;
-                        self.instrs.push(Instr::LoadImm(p_reg, discriminant));
-                        let cmp_reg = self.alloc_reg()?;
-                        self.instrs.push(Instr::BinOp {
-                            op: IrBinOp::Eq,
-                            dst: cmp_reg,
-                            lhs: s_reg,
-                            rhs: p_reg,
-                        });
-                        self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: exit_label });
-                        // Install named field bindings by declaration order.
-                        for (fname_span, fp) in pat_fields.iter() {
-                            let fname = fname_span.text(self.source);
-                            let field_idx = field_names
-                                .iter()
-                                .position(|n| n == fname)
-                                .ok_or_else(|| {
-                                    LowerError::Unsupported(format!(
-                                        "enum variant `{enum_name}::{variant_name}` has no field `{fname}`"
-                                    ))
-                                })?;
-                            match fp {
-                                Pat::Ident(bind_span) => {
-                                    let bind_name = bind_span.text(self.source);
-                                    let fslot = base + 1 + field_idx as u8;
-                                    let bslot = self.alloc_slot()?;
-                                    let breg = self.alloc_reg()?;
-                                    self.instrs.push(Instr::Load { dst: breg, slot: fslot });
-                                    self.instrs.push(Instr::Store { src: breg, slot: bslot });
-                                    self.locals.insert(bind_name, bslot);
-                                    bound_names.push(bind_name);
-                                }
-                                Pat::Wildcard => {} // ignore field
-                                _ => {
-                                    return Err(LowerError::Unsupported(
-                                        "only ident/wildcard sub-patterns in StructVariant while-let fields"
-                                            .into(),
-                                    ));
+                            let field_names = self.struct_defs
+                                .get(struct_name)
+                                .cloned()
+                                .ok_or_else(|| LowerError::Unsupported(format!(
+                                    "unknown struct `{struct_name}`"
+                                )))?;
+                            // No CondBranch — plain struct patterns are irrefutable.
+                            for (fname_span, fp) in pat_fields.iter() {
+                                let fname = fname_span.text(self.source);
+                                let field_idx = field_names.iter().position(|n| n == fname)
+                                    .ok_or_else(|| LowerError::Unsupported(format!(
+                                        "struct `{struct_name}` has no field `{fname}`"
+                                    )))?;
+                                match fp {
+                                    Pat::Ident(bind_span) => {
+                                        let bind_name = bind_span.text(self.source);
+                                        let fslot = base + field_idx as u8;
+                                        let bslot = self.alloc_slot()?;
+                                        let breg = self.alloc_reg()?;
+                                        self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                        self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                        self.locals.insert(bind_name, bslot);
+                                        bound_names.push(bind_name);
+                                    }
+                                    Pat::Wildcard => {}
+                                    _ => return Err(LowerError::Unsupported(
+                                        "only ident/wildcard sub-patterns in struct while-let patterns".into(),
+                                    )),
                                 }
                             }
+                        } else if segs.len() == 2 {
+                            let enum_name = segs[0].text(self.source);
+                            let variant_name = segs[1].text(self.source);
+                            let (discriminant, field_names) = self
+                                .enum_defs
+                                .get(enum_name)
+                                .and_then(|v| v.get(variant_name))
+                                .cloned()
+                                .ok_or_else(|| {
+                                    LowerError::Unsupported(format!(
+                                        "unknown enum variant `{enum_name}::{variant_name}`"
+                                    ))
+                                })?;
+                            let base = enum_base_slot.ok_or_else(|| {
+                                LowerError::Unsupported(
+                                    "StructVariant pattern in while-let requires enum variable scrutinee"
+                                        .into(),
+                                )
+                            })?;
+                            // Discriminant check — branch to exit on mismatch.
+                            let s_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                            let p_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::LoadImm(p_reg, discriminant));
+                            let cmp_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::BinOp {
+                                op: IrBinOp::Eq,
+                                dst: cmp_reg,
+                                lhs: s_reg,
+                                rhs: p_reg,
+                            });
+                            self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: exit_label });
+                            // Install named field bindings by declaration order.
+                            for (fname_span, fp) in pat_fields.iter() {
+                                let fname = fname_span.text(self.source);
+                                let field_idx = field_names
+                                    .iter()
+                                    .position(|n| n == fname)
+                                    .ok_or_else(|| {
+                                        LowerError::Unsupported(format!(
+                                            "enum variant `{enum_name}::{variant_name}` has no field `{fname}`"
+                                        ))
+                                    })?;
+                                match fp {
+                                    Pat::Ident(bind_span) => {
+                                        let bind_name = bind_span.text(self.source);
+                                        let fslot = base + 1 + field_idx as u8;
+                                        let bslot = self.alloc_slot()?;
+                                        let breg = self.alloc_reg()?;
+                                        self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                        self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                        self.locals.insert(bind_name, bslot);
+                                        bound_names.push(bind_name);
+                                    }
+                                    Pat::Wildcard => {}
+                                    _ => return Err(LowerError::Unsupported(
+                                        "only ident/wildcard sub-patterns in StructVariant while-let fields".into(),
+                                    )),
+                                }
+                            }
+                        } else {
+                            return Err(LowerError::Unsupported(
+                                "struct/variant while-let pattern path must have 1 or 2 segments".into(),
+                            ));
                         }
                     }
                 }

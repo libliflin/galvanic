@@ -2083,6 +2083,34 @@ impl<'src> Parser<'src> {
                         return Ok(Pat::StructVariant { path: segments, fields: pat_fields });
                     }
                     Ok(Pat::Path(segments))
+                } else if self.peek_kind() == TokenKind::OpenBrace
+                    && (self.peek_nth(1) == TokenKind::CloseBrace
+                        || self.peek_nth(1) == TokenKind::Ident)
+                {
+                    // FLS §5.3: Single-segment struct pattern — `StructName { field, … }`.
+                    // A plain struct type name (no `::`) followed by `{` with field bindings.
+                    // Shorthand `{ field }` binds field to an ident pattern of the same name.
+                    //
+                    // FLS §5.3: "A struct pattern matches a struct or enum struct variant
+                    // by its field patterns." For named struct types the path has one segment.
+                    self.advance(); // consume `{`
+                    let mut pat_fields: Vec<(crate::ast::Span, Pat)> = Vec::new();
+                    while self.peek_kind() != TokenKind::CloseBrace {
+                        let field_name = self.expect(TokenKind::Ident)?;
+                        let field_pat = if self.peek_kind() == TokenKind::Colon {
+                            self.advance(); // consume `:`
+                            self.parse_single_pattern()?
+                        } else {
+                            // Shorthand — `{ field }` binds as `{ field: field }`.
+                            Pat::Ident(field_name)
+                        };
+                        pat_fields.push((field_name, field_pat));
+                        if !self.eat(TokenKind::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(TokenKind::CloseBrace)?;
+                    Ok(Pat::StructVariant { path: vec![first_span], fields: pat_fields })
                 } else {
                     Ok(Pat::Ident(first_span))
                 }
@@ -4167,6 +4195,58 @@ mod tests {
                 assert!(matches!(&fields[1], Pat::Ident(_)));
             }
             other => panic!("expected TupleStruct pattern, got {other:?}"),
+        }
+    }
+
+    // ── Struct pattern tests ──────────────────────────────────────────────────
+
+    /// FLS §5.3: Single-segment struct pattern `Point { x, y }` in match arm.
+    ///
+    /// `match p { Point { x, y } => x + y }` — shorthand field binding.
+    /// Parses as `Pat::StructVariant { path: ["Point"], fields: [("x", Ident), ("y", Ident)] }`.
+    #[test]
+    fn struct_pattern_single_segment_two_fields() {
+        let src = "fn f(n: i32) -> i32 { let p = Point { x: 1, y: 2 }; match p { Point { x, y } => x + y } }";
+        let tokens = crate::lexer::tokenize(src).unwrap();
+        let sf = parse(&tokens, src).unwrap();
+        let ItemKind::Fn(f) = &sf.items[0].kind else { panic!() };
+        let body = f.body.as_ref().expect("no body");
+        let Some(tail) = body.tail.as_ref() else { panic!() };
+        let ExprKind::Match { arms, .. } = &tail.kind else { panic!("expected match") };
+        match &arms[0].pat {
+            Pat::StructVariant { path, fields } => {
+                assert_eq!(path.len(), 1);
+                assert_eq!(path[0].text(src), "Point");
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].0.text(src), "x");
+                assert_eq!(fields[1].0.text(src), "y");
+                assert!(matches!(&fields[0].1, Pat::Ident(_)));
+                assert!(matches!(&fields[1].1, Pat::Ident(_)));
+            }
+            other => panic!("expected StructVariant pattern, got {other:?}"),
+        }
+    }
+
+    /// FLS §5.3: Single-segment struct pattern with wildcard field.
+    ///
+    /// `Point { x, y: _ }` — first field bound, second discarded.
+    #[test]
+    fn struct_pattern_single_segment_wildcard_field() {
+        let src = "fn f(n: i32) -> i32 { let p = Point { x: 1, y: 2 }; match p { Point { x, y: _ } => x } }";
+        let tokens = crate::lexer::tokenize(src).unwrap();
+        let sf = parse(&tokens, src).unwrap();
+        let ItemKind::Fn(f) = &sf.items[0].kind else { panic!() };
+        let body = f.body.as_ref().expect("no body");
+        let Some(tail) = body.tail.as_ref() else { panic!() };
+        let ExprKind::Match { arms, .. } = &tail.kind else { panic!("expected match") };
+        match &arms[0].pat {
+            Pat::StructVariant { path, fields } => {
+                assert_eq!(path.len(), 1);
+                assert_eq!(path[0].text(src), "Point");
+                assert_eq!(fields.len(), 2);
+                assert!(matches!(&fields[1].1, Pat::Wildcard));
+            }
+            other => panic!("expected StructVariant pattern, got {other:?}"),
         }
     }
 
