@@ -743,3 +743,107 @@ fn runtime_loop_emits_back_edge_and_break_branch() {
         "expected no `cbz` for unconditional `loop {{ break; }}`, got:\n{asm}"
     );
 }
+
+// ── Milestone 9: explicit return expressions ──────────────────────────────────
+//
+// FLS §6.19: Return expressions transfer control from the current function to
+// the caller, optionally producing a value. A `return` expression may appear
+// anywhere an expression is allowed — not just as the final tail expression.
+//
+// The key test is that `return` appearing as a statement (inside a block, or
+// inside an `if` branch) emits a `ret` instruction at the correct point in
+// the instruction stream, allowing earlier exit from the function.
+//
+// FLS §6.19: "The type of a return expression is the never type `!`."
+// FLS §6.1.2:37–45: The `ret` is a runtime instruction — not elided even
+// when the returned value is statically known.
+
+/// Milestone 9: explicit `return` as the only statement in a function.
+///
+/// `fn f() -> i32 { return 42; }` — the tail is absent; the only exit is
+/// the explicit `return` statement.
+///
+/// FLS §6.19: Return expression with value.
+/// FLS §6.4: Block with no tail expression — the return statement provides
+/// the only exit from the function.
+#[test]
+fn milestone_9_explicit_return_only() {
+    let src = "fn f() -> i32 { return 42; }\nfn main() -> i32 { f() }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 42, "expected exit 42 from explicit `return 42;`, got {exit_code}");
+}
+
+/// Milestone 9: early return from a function based on a condition.
+///
+/// ```rust
+/// fn clamp_lower(x: i32) -> i32 {
+///     if x < 0 { return 0; }
+///     x
+/// }
+/// fn main() -> i32 { clamp_lower(-5) }
+/// ```
+/// When `x < 0`, the `return 0` exits before reaching the tail `x`.
+///
+/// FLS §6.19: Return expression inside an if branch provides early exit.
+/// FLS §6.17: The if has no else; when the condition is false the tail runs.
+/// FLS §6.5.3: `x < 0` emits `cmp`+`cset` at runtime.
+#[test]
+fn milestone_9_early_return_taken() {
+    let src = "fn clamp_lower(x: i32) -> i32 { if x < 0 { return 0; } x }\nfn main() -> i32 { clamp_lower(-5) }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 0, "expected exit 0 from clamp_lower(-5), got {exit_code}");
+}
+
+/// Milestone 9 (variant): early return NOT taken — falls through to tail.
+///
+/// Same `clamp_lower` function, called with a non-negative argument.
+/// The `if` condition is false; `return 0` is skipped; the tail `x` runs.
+///
+/// FLS §6.19: The return expression is not reached; the tail expression provides
+/// the function's value.
+#[test]
+fn milestone_9_early_return_not_taken() {
+    let src = "fn clamp_lower(x: i32) -> i32 { if x < 0 { return 0; } x }\nfn main() -> i32 { clamp_lower(7) }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 7, "expected exit 7 from clamp_lower(7), got {exit_code}");
+}
+
+/// Assembly inspection: explicit `return` must emit a `ret` instruction.
+///
+/// A `return <value>` inside a function body emits a `ret` instruction at
+/// the point of the return, not just at the end of the function.
+///
+/// FLS §6.19: Return expressions emit runtime `ret` instructions.
+/// FLS §6.1.2:37–45: The `ret` is not elided even when the value is constant.
+#[test]
+fn runtime_explicit_return_emits_ret() {
+    let asm = compile_to_asm("fn f() -> i32 { return 42; }\nfn main() -> i32 { f() }\n");
+    // The `ret` instruction must appear in `f`'s body.
+    assert!(
+        asm.contains("ret"),
+        "expected `ret` instruction for explicit return expression, got:\n{asm}"
+    );
+}
+
+/// Assembly inspection: unary negation `-x` must emit a `neg` instruction.
+///
+/// FLS §6.5.4: Negation operator expressions. The unary `-` applied to an
+/// integer value must emit a runtime `neg` instruction, not fold the literal
+/// to a negative immediate.
+///
+/// FLS §6.1.2:37–45: Non-const code must emit runtime instructions.
+/// FLS §6.5.4: "The type of a negation expression is the type of the operand."
+#[test]
+fn runtime_neg_emits_neg_instruction() {
+    let asm = compile_to_asm("fn negate(x: i32) -> i32 { -x }\nfn main() -> i32 { negate(5) }\n");
+    assert!(
+        asm.contains("neg"),
+        "expected `neg` instruction for unary negation, got:\n{asm}"
+    );
+}

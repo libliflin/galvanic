@@ -270,6 +270,19 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool) 
             }
         }
 
+        // FLS §6.5.4: Arithmetic negation — two's complement negation.
+        // ARM64: `neg x{dst}, x{src}` is an alias for `sub x{dst}, xzr, x{src}`.
+        // The GNU assembler accepts `neg` directly; it encodes as a 4-byte instruction.
+        //
+        // FLS §6.1.2:37–45: Runtime instruction — no constant folding.
+        // Cache-line note: one 4-byte instruction, same footprint as any other UnOp.
+        Instr::Neg { dst, src } => {
+            writeln!(
+                out,
+                "    neg     x{dst}, x{src}               // FLS §6.5.4: negate x{src}"
+            )?;
+        }
+
         // FLS §8.1: Store a virtual register to a stack slot.
         // ARM64: `str x{src}, [sp, #{offset}]` — offset = slot * 8.
         // Cache-line note: 8-byte slots keep stores naturally aligned;

@@ -108,7 +108,7 @@ fn lower_fn(fn_def: &crate::ast::FnDef, source: &str) -> Result<IrFn, LowerError
         Some(block) => block,
     };
 
-    let mut ctx = LowerCtx::new(source);
+    let mut ctx = LowerCtx::new(source, ret_ty);
 
     // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
     // to stack slots. Each parameter slot is allocated in parameter order
@@ -238,20 +238,30 @@ struct LowerCtx<'src> {
     /// FLS §6.15.7: "A continue expression without a label continues the
     /// innermost enclosing loop expression."
     loop_stack: Vec<LoopCtx>,
+
+    /// The return type of the current function.
+    ///
+    /// Stored so that `return` expressions (FLS §6.19) can lower the returned
+    /// value using the correct type, regardless of the expression context type
+    /// (`ret_ty`) passed to `lower_expr` at the point of the `return`.
+    ///
+    /// For example, `return 42` appearing inside a unit-typed `if` body still
+    /// needs to lower `42` as `IrTy::I32` if the enclosing function returns i32.
+    fn_ret_ty: IrTy,
 }
 
 impl<'src> LowerCtx<'src> {
-    fn new(source: &'src str) -> Self {
+    fn new(source: &'src str, fn_ret_ty: IrTy) -> Self {
         LowerCtx {
             source,
             instrs: Vec::new(),
             next_reg: 0,
             next_slot: 0,
-
             next_label: 0,
             locals: HashMap::new(),
             has_calls: false,
             loop_stack: Vec::new(),
+            fn_ret_ty,
         }
     }
 
@@ -923,6 +933,65 @@ impl<'src> LowerCtx<'src> {
 
                 // FLS §6.15.7: continue has type `!` (never). Approximated as Unit.
                 Ok(IrValue::Unit)
+            }
+
+            // FLS §6.19: Return expression — transfer control to the caller.
+            //
+            // A `return` expression exits the current function immediately,
+            // yielding the given value (or unit if none) to the caller.
+            //
+            // Lowering strategy:
+            //   1. If a value is present, lower it using the function's return
+            //      type (`fn_ret_ty`), not the current expression context type.
+            //      The function return type is stored in `LowerCtx::fn_ret_ty`
+            //      precisely for this purpose.
+            //   2. Emit `Instr::Ret` with the value.
+            //   3. Return `IrValue::Unit` to the caller of `lower_expr` — any
+            //      code after a `return` in the same block is unreachable but
+            //      the surrounding block still lowers it. Dead instructions
+            //      after `ret` are ignored by the assembler.
+            //
+            // FLS §6.19: "The type of a return expression is the never type `!`."
+            // We approximate `!` as Unit since the never type is not yet in the IR.
+            //
+            // FLS §6.1.2:37–45: The `ret` is a runtime instruction — no constant
+            // folding of the returned value.
+            //
+            // Cache-line note: a `return <literal>` emits one `LoadImm` (4 bytes)
+            // + one `ret` (4 bytes) = two instructions, one half a cache line.
+            ExprKind::Return(opt_val) => {
+                let fn_ret_ty = self.fn_ret_ty;
+                let ret_val = match opt_val {
+                    Some(val) => {
+                        let v = self.lower_expr(val, &fn_ret_ty)?;
+                        let r = self.val_to_reg(v)?;
+                        IrValue::Reg(r)
+                    }
+                    None => IrValue::Unit,
+                };
+                self.instrs.push(Instr::Ret(ret_val));
+                // FLS §6.19: return has type `!` (never). Approximated as Unit.
+                Ok(IrValue::Unit)
+            }
+
+            // FLS §6.5.4: Unary negation `-operand` — arithmetic two's complement negation.
+            //
+            // Lowering:
+            //   1. Lower the operand to a register.
+            //   2. Emit `Instr::Neg { dst, src }` → `neg x{dst}, x{src}` on ARM64.
+            //
+            // FLS §6.1.2:37–45: Even `-5` in a non-const context emits a runtime `neg`
+            // instruction — no compile-time folding to a negative immediate.
+            //
+            // FLS §6.5.4: "The type of a negation expression is the type of the operand."
+            //
+            // Cache-line note: `neg` is 4 bytes (alias for `sub xD, xzr, xS`).
+            ExprKind::Unary { op: crate::ast::UnaryOp::Neg, operand } => {
+                let val = self.lower_expr(operand, &IrTy::I32)?;
+                let src = self.val_to_reg(val)?;
+                let dst = self.alloc_reg()?;
+                self.instrs.push(Instr::Neg { dst, src });
+                Ok(IrValue::Reg(dst))
             }
 
             // Anything else: not yet supported as runtime codegen.
