@@ -135,8 +135,9 @@ fn expr_contains_call(expr: &Expr) -> bool {
             expr_contains_call(scrutinee)
                 || arms.iter().any(|a| expr_contains_call(&a.body))
         }
-        ExprKind::StructLit { fields, .. } => {
+        ExprKind::StructLit { fields, base, .. } => {
             fields.iter().any(|(_, v)| expr_contains_call(v))
+                || base.as_ref().is_some_and(|b| expr_contains_call(b))
         }
         ExprKind::EnumVariantLit { fields, .. } => {
             fields.iter().any(|(_, v)| expr_contains_call(v))
@@ -212,8 +213,9 @@ fn expr_contains_break_with_value(expr: &Expr) -> bool {
             expr_contains_break_with_value(scrutinee)
                 || arms.iter().any(|a| expr_contains_break_with_value(&a.body))
         }
-        ExprKind::StructLit { fields, .. } => {
+        ExprKind::StructLit { fields, base, .. } => {
             fields.iter().any(|(_, v)| expr_contains_break_with_value(v))
+                || base.as_ref().is_some_and(|b| expr_contains_break_with_value(b))
         }
         ExprKind::EnumVariantLit { fields, .. } => {
             fields.iter().any(|(_, v)| expr_contains_break_with_value(v))
@@ -945,7 +947,7 @@ fn lower_fn(
                 "associated function returning `{struct_name}` must end with a struct literal"
             ))
         })?;
-        let ExprKind::StructLit { name: sn, fields: lit_fields } = &tail.kind else {
+        let ExprKind::StructLit { name: sn, fields: lit_fields, .. } = &tail.kind else {
             return Err(LowerError::Unsupported(format!(
                 "associated function returning `{struct_name}`: tail must be a struct literal"
             )));
@@ -1819,6 +1821,7 @@ impl<'src> LowerCtx<'src> {
                     && let ExprKind::StructLit {
                         name: struct_name_span,
                         fields: init_fields,
+                        base: init_base,
                     } = &init_expr.kind
                 {
                         let struct_name = struct_name_span.text(self.source);
@@ -1844,22 +1847,60 @@ impl<'src> LowerCtx<'src> {
                         self.local_struct_types
                             .insert(base_slot, struct_name.to_owned());
 
+                        // FLS §6.11: Struct update syntax `Struct { field: val, ..other }`.
+                        // Resolve the base struct's first slot so we can copy unspecified
+                        // fields from it. The base must be a simple variable path.
+                        //
+                        // FLS §6.11: "A struct expression with a base struct specifies one
+                        // or more fields for the new value and copies all remaining fields
+                        // from the base struct expression."
+                        let base_struct_slot: Option<u8> = if let Some(base_expr) = init_base {
+                            if let ExprKind::Path(segs) = &base_expr.kind
+                                && segs.len() == 1
+                            {
+                                let base_var = segs[0].text(self.source);
+                                Some(*self.locals.get(base_var).ok_or_else(|| {
+                                    LowerError::Unsupported(format!(
+                                        "unknown variable `{base_var}` in struct update syntax"
+                                    ))
+                                })?)
+                            } else {
+                                return Err(LowerError::Unsupported(
+                                    "struct update base must be a simple variable path".into(),
+                                ));
+                            }
+                        } else {
+                            None
+                        };
+
                         // Store each field in declaration order.
                         // FLS §6.11: Field initializers are evaluated in source
                         // order but stored in declaration order for layout stability.
+                        // FLS §6.11: Fields not explicitly listed are copied from base.
                         for (field_idx, field_name) in field_names.iter().enumerate() {
-                            let slot = base_slot + field_idx as u8;
-                            let field_init = init_fields
+                            let dst_slot = base_slot + field_idx as u8;
+
+                            if let Some(field_init) = init_fields
                                 .iter()
                                 .find(|(f, _)| f.text(self.source) == field_name.as_str())
-                                .ok_or_else(|| {
-                                    LowerError::Unsupported(format!(
-                                        "missing field `{field_name}` in `{struct_name}` literal"
-                                    ))
-                                })?;
-                            let val = self.lower_expr(&field_init.1, &IrTy::I32)?;
-                            let src = self.val_to_reg(val)?;
-                            self.instrs.push(Instr::Store { src, slot });
+                            {
+                                // Explicitly provided field — evaluate and store.
+                                let val = self.lower_expr(&field_init.1, &IrTy::I32)?;
+                                let src = self.val_to_reg(val)?;
+                                self.instrs.push(Instr::Store { src, slot: dst_slot });
+                            } else if let Some(base_first_slot) = base_struct_slot {
+                                // FLS §6.11: Copy unspecified field from the base struct.
+                                // Load from `base_first_slot + field_idx`, store to `dst_slot`.
+                                // Cache-line note: load+store = two 4-byte instructions = 8 bytes.
+                                let src_slot = base_first_slot + field_idx as u8;
+                                let tmp = self.alloc_reg()?;
+                                self.instrs.push(Instr::Load { dst: tmp, slot: src_slot });
+                                self.instrs.push(Instr::Store { src: tmp, slot: dst_slot });
+                            } else {
+                                return Err(LowerError::Unsupported(format!(
+                                    "missing field `{field_name}` in `{struct_name}` literal"
+                                )));
+                            }
                         }
                         return Ok(());
                 }
@@ -4451,6 +4492,7 @@ impl<'src> LowerCtx<'src> {
                     } else if let ExprKind::StructLit {
                         name: struct_name_span,
                         fields: lit_fields,
+                        ..
                     } = &arg.kind
                     {
                         // FLS §6.11 + §11: Struct literal used directly as a function

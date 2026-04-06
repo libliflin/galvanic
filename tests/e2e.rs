@@ -6541,3 +6541,162 @@ fn runtime_shorthand_field_emits_same_as_explicit() {
         "expected `ldr` instructions for RetFields:\n{asm}"
     );
 }
+
+// ── Milestone 58: struct update syntax ───────────────────────────────────────
+
+/// Milestone 58: basic struct update — one field overridden, one copied.
+///
+/// FLS §6.11: `Point { x: 5, ..a }` constructs a new `Point` with `x = 5`
+/// and `y` copied from `a`. The `..a` syntax fills in all fields not listed.
+#[test]
+fn milestone_58_struct_update_basic() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn main() -> i32 {
+    let a = Point { x: 1, y: 2 };
+    let b = Point { x: 5, ..a };
+    b.x + b.y
+}
+"#;
+    // b.x = 5 (explicit), b.y = 2 (copied from a). 5 + 2 = 7.
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected exit 7, got {exit_code}");
+}
+
+/// Milestone 58: second field overridden, first copied.
+///
+/// FLS §6.11: any subset of fields may be specified; the rest come from base.
+#[test]
+fn milestone_58_struct_update_second_field() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn main() -> i32 {
+    let a = Point { x: 3, y: 9 };
+    let b = Point { y: 4, ..a };
+    b.x + b.y
+}
+"#;
+    // b.x = 3 (from a), b.y = 4 (explicit). 3 + 4 = 7.
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected exit 7, got {exit_code}");
+}
+
+/// Milestone 58: all fields from base (none explicitly listed).
+///
+/// FLS §6.11: `Struct { ..base }` with no explicit fields copies all fields.
+#[test]
+fn milestone_58_struct_update_all_from_base() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn main() -> i32 {
+    let a = Point { x: 10, y: 20 };
+    let b = Point { ..a };
+    b.x + b.y
+}
+"#;
+    // b = copy of a. 10 + 20 = 30.
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 30, "expected exit 30, got {exit_code}");
+}
+
+/// Milestone 58: struct update with three fields.
+///
+/// FLS §6.11: update syntax works for structs with any number of fields.
+#[test]
+fn milestone_58_struct_update_three_fields() {
+    let src = r#"
+struct Triple { a: i32, b: i32, c: i32 }
+fn main() -> i32 {
+    let base = Triple { a: 1, b: 2, c: 3 };
+    let t = Triple { b: 20, ..base };
+    t.a + t.b + t.c
+}
+"#;
+    // t.a = 1 (from base), t.b = 20 (explicit), t.c = 3 (from base). 1+20+3 = 24.
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 24, "expected exit 24, got {exit_code}");
+}
+
+/// Milestone 58: struct update with parameter-derived base.
+///
+/// FLS §6.11: the base expression may be a function parameter.
+#[test]
+fn milestone_58_struct_update_from_param() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn shift_x(p: Point, dx: i32) -> i32 {
+    let q = Point { x: p.x + dx, ..p };
+    q.x + q.y
+}
+fn main() -> i32 {
+    let p = Point { x: 5, y: 3 };
+    shift_x(p, 2)
+}
+"#;
+    // q.x = 5 + 2 = 7, q.y = 3 (from p). 7 + 3 = 10.
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "expected exit 10, got {exit_code}");
+}
+
+/// Milestone 58: chained updates — update from a previously updated struct.
+///
+/// FLS §6.11: the base may itself have been constructed with struct update syntax.
+#[test]
+fn milestone_58_struct_update_chained() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn main() -> i32 {
+    let a = Point { x: 1, y: 1 };
+    let b = Point { x: 5, ..a };
+    let c = Point { y: 7, ..b };
+    c.x + c.y
+}
+"#;
+    // c.x = 5 (from b which overrode a.x), c.y = 7 (explicit). 5 + 7 = 12.
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 12, "expected exit 12, got {exit_code}");
+}
+
+/// Milestone 58: struct update result used in arithmetic.
+///
+/// FLS §6.11: the result of struct update is a value expression; its fields
+/// are readable immediately.
+#[test]
+fn milestone_58_struct_update_in_arithmetic() {
+    let src = r#"
+struct Rect { w: i32, h: i32 }
+fn main() -> i32 {
+    let r = Rect { w: 3, h: 4 };
+    let wide = Rect { w: 10, ..r };
+    wide.w * wide.h
+}
+"#;
+    // wide.w = 10, wide.h = 4 (from r). 10 * 4 = 40. Return 40 % 256 = 40.
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 40, "expected exit 40, got {exit_code}");
+}
+
+// ── Assembly inspection: milestone 58 ────────────────────────────────────────
+
+/// Milestone 58: struct update emits ldr+str pair for copied fields.
+///
+/// FLS §6.11: copying a field from the base must emit a runtime `ldr` from
+/// the base's slot followed by a `str` to the new struct's slot.
+/// FLS §6.1.2:37–45: All copies are runtime instructions — no compile-time folding.
+#[test]
+fn runtime_struct_update_emits_ldr_str_for_copied_field() {
+    // The `y` field is copied from `a`; this must emit `ldr` + `str`.
+    let src = "struct Point { x: i32, y: i32 }\nfn main() -> i32 { let a = Point { x: 1, y: 2 }; let b = Point { x: 5, ..a }; b.y }\n";
+    let asm = compile_to_asm(src);
+    // `str` for explicit x field + `str` for copied y field.
+    let str_count = asm.matches("str").count();
+    assert!(
+        str_count >= 2,
+        "expected at least 2 `str` instructions for both fields:\n{asm}"
+    );
+    // `ldr` must appear for the copied field.
+    assert!(
+        asm.contains("ldr"),
+        "expected `ldr` for copying y from base struct:\n{asm}"
+    );
+}

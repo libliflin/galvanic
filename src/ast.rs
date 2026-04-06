@@ -637,22 +637,25 @@ pub enum ExprKind {
 
     /// A struct literal expression. FLS §6.11.
     ///
-    /// Example: `Point { x: 1, y: 2 }`
+    /// Example: `Point { x: 1, y: 2 }` or `Point { x: 5, ..other }`
     ///
     /// FLS §6.11: A struct expression constructs an instance of a struct type.
     /// Each field must be initialised exactly once. The order of field initialisers
     /// in the source need not match the declaration order; galvanic normalises to
     /// declaration order during lowering.
     ///
-    /// FLS §6.11 AMBIGUOUS: The spec does not specify whether shorthand field
-    /// initialisation (`Point { x, y }`) is part of the struct expression or a
-    /// separate syntactic form. Galvanic only supports the explicit `field: expr`
-    /// form at this milestone.
+    /// FLS §6.11: The struct update syntax `Struct { field: val, ..base }` copies
+    /// all fields not explicitly listed from the `base` expression.
     StructLit {
         /// The struct type name (single identifier).
         name: Span,
         /// The field initialisers in source order: (field_name, value).
         fields: Vec<(Span, Box<Expr>)>,
+        /// Optional base expression for struct update syntax `..base`.
+        ///
+        /// FLS §6.11: When present, fields not listed in `fields` are copied
+        /// from the base struct. The base must have the same struct type.
+        base: Option<Box<Expr>>,
     },
 
     /// A named-field enum variant construction expression. FLS §6.11 + §15.
