@@ -647,6 +647,23 @@ struct_expr_example:
     add     sp, sp, #16             // FLS §8.1: restore stack frame
     ret
 
+    // fn struct_expr_shorthand_example — FLS §9
+    .global struct_expr_shorthand_example
+struct_expr_shorthand_example:
+    sub     sp, sp, #32             // FLS §8.1: frame for 4 slot(s)
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    str     x1, [sp, #8              ] // FLS §8.1: store slot 1
+    ldr     x0, [sp, #0              ] // FLS §8.1: load slot 0
+    str     x0, [sp, #16             ] // FLS §8.1: store slot 2
+    ldr     x1, [sp, #8              ] // FLS §8.1: load slot 1
+    str     x1, [sp, #24             ] // FLS §8.1: store slot 3
+    ldr     x2, [sp, #16             ] // FLS §8.1: load slot 2
+    ldr     x3, [sp, #24             ] // FLS §8.1: load slot 3
+    add     x4, x2, x3          // FLS §6.5.5: add
+    mov     x0, x4              // FLS §6.19: return reg 4 → x0
+    add     sp, sp, #32             // FLS §8.1: restore stack frame
+    ret
+
     // fn field_access_example — FLS §9
     .global field_access_example
 field_access_example:
