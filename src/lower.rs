@@ -664,6 +664,43 @@ fn lower_fn(
             ctx.locals.insert("self", base_slot);
             ctx.local_enum_types.insert(base_slot, type_name.to_owned());
             reg_idx += regs_needed;
+        } else if let Some(&n_fields) = tuple_struct_defs.get(type_name) {
+            // FLS §14.2, §10.1: Tuple struct self parameter.
+            //
+            // A tuple struct with N fields is passed as N consecutive registers
+            // (one per field), identical to anonymous tuple and named struct
+            // calling conventions. Spill to N consecutive stack slots; register
+            // in `local_tuple_lens` for `.0`/`.1` field access and in
+            // `local_tuple_struct_types` for method call dispatch.
+            //
+            // FLS §6.1.2:37–45: All spills are runtime store instructions.
+            // Cache-line note: N × 4-byte `str` per self spill.
+            if n_fields > 0 {
+                if reg_idx + n_fields > 8 {
+                    return Err(LowerError::Unsupported(
+                        "tuple struct self fields exceed ARM64 register window".into(),
+                    ));
+                }
+                let base_slot = ctx.alloc_slot()?;
+                for _ in 1..n_fields {
+                    ctx.alloc_slot()?;
+                }
+                for fi in 0..n_fields {
+                    ctx.instrs.push(Instr::Store {
+                        src: (reg_idx + fi) as u8,
+                        slot: base_slot + fi as u8,
+                    });
+                }
+                ctx.locals.insert("self", base_slot);
+                ctx.local_tuple_lens.insert(base_slot, n_fields);
+                ctx.local_tuple_struct_types.insert(base_slot, type_name.to_owned());
+                reg_idx += n_fields;
+            } else {
+                // Zero-field tuple struct: allocate a dummy slot for `self`.
+                let base_slot = ctx.alloc_slot()?;
+                ctx.locals.insert("self", base_slot);
+                ctx.local_tuple_struct_types.insert(base_slot, type_name.to_owned());
+            }
         } else {
             return Err(LowerError::Unsupported(format!(
                 "impl for unknown type `{type_name}`"
@@ -747,6 +784,46 @@ fn lower_fn(
                 reg_idx += regs_needed;
                 continue;
             }
+
+            // FLS §14.2, §10.1: Tuple struct parameter — `fn f(w: Wrap)`.
+            //
+            // A tuple struct with N fields is passed as N consecutive registers,
+            // identical to the tuple struct self-parameter calling convention.
+            // Spill to N consecutive stack slots; register in `local_tuple_lens`
+            // for `.0`/`.1` field access and `local_tuple_struct_types` for
+            // method call dispatch (so `w.val()` resolves to `Wrap::val`).
+            //
+            // FLS §6.1.2:37–45: All spills are runtime store instructions.
+            // Cache-line note: N × 4-byte `str` per parameter spill.
+            if let Some(&n_fields) = tuple_struct_defs.get(type_name) {
+                if n_fields > 0 {
+                    if reg_idx + n_fields > 8 {
+                        return Err(LowerError::Unsupported(
+                            "tuple struct parameter exceeds ARM64 register window (>8 total registers)".into(),
+                        ));
+                    }
+                    let base_slot = ctx.alloc_slot()?;
+                    for _ in 1..n_fields {
+                        ctx.alloc_slot()?;
+                    }
+                    ctx.locals.insert(param_name, base_slot);
+                    ctx.local_tuple_lens.insert(base_slot, n_fields);
+                    ctx.local_tuple_struct_types.insert(base_slot, type_name.to_owned());
+                    for fi in 0..n_fields {
+                        ctx.instrs.push(Instr::Store {
+                            src: (reg_idx + fi) as u8,
+                            slot: base_slot + fi as u8,
+                        });
+                    }
+                    reg_idx += n_fields;
+                } else {
+                    // Zero-field tuple struct: allocate a dummy slot.
+                    let base_slot = ctx.alloc_slot()?;
+                    ctx.locals.insert(param_name, base_slot);
+                    ctx.local_tuple_struct_types.insert(base_slot, type_name.to_owned());
+                }
+                continue;
+            }
         }
 
         // FLS §9: i32 and bool parameters — one register each.
@@ -794,7 +871,14 @@ fn lower_fn(
                 "&mut self methods on enum types not yet supported".into(),
             ));
         }
-        let n_fields = struct_defs.get(type_name).map(|f| f.len() as u8).unwrap_or(0);
+        let n_fields = if let Some(f) = struct_defs.get(type_name) {
+            f.len() as u8
+        } else if let Some(&n) = tuple_struct_defs.get(type_name) {
+            // FLS §14.2, §10.1: &mut self on tuple struct — N consecutive slots.
+            n as u8
+        } else {
+            0
+        };
         // Run the body (statements + tail), discarding the unit tail value.
         // Fields in the method's local slots will have been updated by body code.
         ctx.lower_block_to_value(body, &ret_ty)?;
@@ -1148,6 +1232,17 @@ struct LowerCtx<'src> {
     /// Cache-line note: same layout as struct fields or array elements —
     /// N consecutive slots per tuple.
     local_tuple_lens: HashMap<u8, usize>,
+
+    /// Maps a tuple struct variable's base stack slot to its type name.
+    ///
+    /// FLS §14.2: Tuple struct types. When `let p = Point(a, b)` or `self`
+    /// in an `impl Point` method is lowered, the base slot is registered here
+    /// with type `"Point"`. This lets method call dispatch compute the mangled
+    /// name `Point__method_name` for tuple struct receivers.
+    ///
+    /// Cache-line note: populated once per let binding or method self-spill;
+    /// read once per method call on a tuple struct receiver. Not on a hot path.
+    local_tuple_struct_types: HashMap<u8, String>,
 }
 
 impl<'src> LowerCtx<'src> {
@@ -1183,6 +1278,7 @@ impl<'src> LowerCtx<'src> {
             local_enum_types: HashMap::new(),
             local_array_lens: HashMap::new(),
             local_tuple_lens: HashMap::new(),
+            local_tuple_struct_types: HashMap::new(),
         }
     }
 
@@ -1914,6 +2010,9 @@ impl<'src> LowerCtx<'src> {
                         }
                         self.locals.insert(var_name, base_slot);
                         self.local_tuple_lens.insert(base_slot, n);
+                        // FLS §14.2: Record the tuple struct type so method call dispatch
+                        // can compute the mangled name `TypeName__method_name`.
+                        self.local_tuple_struct_types.insert(base_slot, ctor_name.to_owned());
                         // FLS §6.4:14 / §6.10: Arguments evaluated left-to-right.
                         for (i, arg_expr) in args.iter().enumerate() {
                             let val = self.lower_expr(arg_expr, &IrTy::I32)?;
@@ -5976,13 +6075,15 @@ impl<'src> LowerCtx<'src> {
                                 ))
                             })?;
                         // Check both struct and enum type registries.
+                        // FLS §10.1, §11, §14.2: Check struct, enum, and tuple struct registries.
                         let type_name = self
                             .local_struct_types
                             .get(&base_slot)
                             .or_else(|| self.local_enum_types.get(&base_slot))
+                            .or_else(|| self.local_tuple_struct_types.get(&base_slot))
                             .ok_or_else(|| {
                                 LowerError::Unsupported(format!(
-                                    "variable `{var_name}` is not a struct or enum; \
+                                    "variable `{var_name}` is not a struct, enum, or tuple struct; \
                                      method calls on primitive types are not yet supported"
                                 ))
                             })?
@@ -6037,6 +6138,19 @@ impl<'src> LowerCtx<'src> {
                     // Load field registers.
                     for fi in 0..max_fields {
                         let slot = recv_base_slot + 1 + fi as u8;
+                        let reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: reg, slot });
+                        arg_regs.push(reg);
+                    }
+                } else if let Some(&n_fields) = self.tuple_struct_defs.get(recv_type_name.as_str()) {
+                    // FLS §14.2, §10.1: Tuple struct receiver — load N fields from
+                    // consecutive slots. Same register convention as named struct.
+                    //
+                    // FLS §6.1.2:37–45: All loads are runtime instructions.
+                    // Cache-line note: N × 4-byte `ldr` instructions per method call.
+                    n_self_regs = n_fields;
+                    for fi in 0..n_fields {
+                        let slot = recv_base_slot + fi as u8;
                         let reg = self.alloc_reg()?;
                         self.instrs.push(Instr::Load { dst: reg, slot });
                         arg_regs.push(reg);
