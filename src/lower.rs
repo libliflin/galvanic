@@ -1746,9 +1746,13 @@ fn parse_char_value(text: &str) -> Result<u32, LowerError> {
 /// counted by its UTF-8 byte length.
 fn parse_str_byte_len(text: &str) -> Result<usize, LowerError> {
     // FLS §2.4.2: Byte string literals begin with `b"` or `br"`.
+    // FLS §2.4.2.2: Raw byte string literals begin with `br"` or `br#"`.
     // Strip the leading `b` so the rest of the function handles `"..."` / `r"..."`.
     let text = text.strip_prefix('b').unwrap_or(text);
 
+    // FLS §2.4.6.2: Raw string literals begin with `r"` or `r#"`.
+    // Key property: raw strings contain NO escape sequences — backslash is
+    // a literal character.  `r"hello\n"` is 7 bytes, not 6.
     // Strip raw-string prefix if present: `r"..."` or `r##"..."##`.
     // Count the number of `#` characters (0–255).
     if let Some(rest) = text.strip_prefix('r') {
@@ -1758,7 +1762,7 @@ fn parse_str_byte_len(text: &str) -> Result<usize, LowerError> {
         let inner = rest.get(inner_start..inner_end).ok_or_else(|| {
             LowerError::Unsupported(format!("malformed raw string literal: {text}"))
         })?;
-        // Raw string: no escape sequences.  Count UTF-8 bytes directly.
+        // FLS §2.4.6.2: Raw string — no escape processing.  Count UTF-8 bytes directly.
         return Ok(inner.len());
     }
 
@@ -5285,6 +5289,12 @@ impl<'src> LowerCtx<'src> {
             //
             // FLS §2.4.6: "A string literal is a sequence of Unicode characters …
             // its type is `&str`."
+            // FLS §2.4.6.2: Raw string literals (r"..." / r#"..."#) contain no
+            // escape sequences — backslash is a literal byte.  `r"hello\n"` is
+            // 7 bytes; `"hello\n"` is 6 bytes.
+            // FLS §2.4.2: Byte string literals (b"...") have type `&[u8]`.
+            // FLS §2.4.2.2: Raw byte string literals (br"..." / br#"..."#) follow
+            // the same no-escape rule as raw string literals.
             // FLS §6.1.2:37–45: Even a literal emits a runtime `mov` — no
             // constant folding across this boundary.
             //

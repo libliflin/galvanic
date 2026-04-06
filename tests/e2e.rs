@@ -11942,3 +11942,221 @@ fn main() -> i32 {
         "expected immediate 5 (len of b\"hello\") in assembly:\n{asm}"
     );
 }
+
+// ── Milestone 95: Raw string literals compile to runtime ARM64 (FLS §2.4.6.2, §2.4.2.2) ──
+
+/// Milestone 95: Raw string literal `.len()` directly on the literal.
+///
+/// FLS §2.4.6.2: A raw string literal `r"..."` has type `&str` and contains
+/// no escape sequences. `r"hello"` is 5 bytes — same as `"hello"`.
+#[test]
+fn milestone_95_raw_str_len_literal_direct() {
+    let src = r#"
+fn main() -> i32 {
+    r"hello".len() as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "r\"hello\".len()=5, got {exit_code}");
+}
+
+/// Milestone 95: Raw string literal bound to a `let` variable, then `.len()`.
+///
+/// FLS §2.4.6.2: Raw string literals have type `&str`.
+/// FLS §8.1: Let bindings bring the variable into scope after the initializer.
+#[test]
+fn milestone_95_raw_str_len_let_binding() {
+    let src = r#"
+fn main() -> i32 {
+    let s = r"hello";
+    s.len() as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "r\"hello\".len()=5, got {exit_code}");
+}
+
+/// Milestone 95: Empty raw string literal has length zero.
+///
+/// FLS §2.4.6.2: `r""` is a valid raw string literal containing zero characters.
+#[test]
+fn milestone_95_raw_str_len_empty() {
+    let src = r#"
+fn main() -> i32 {
+    r"".len() as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "r\"\".len()=0, got {exit_code}");
+}
+
+/// Milestone 95: Raw string backslash-n is two bytes, not one.
+///
+/// FLS §2.4.6.2: Raw strings do NOT process escape sequences.
+/// `r"hello\n"` contains literal backslash and 'n' — 7 bytes total.
+/// This distinguishes raw strings from regular strings: `"hello\n"` is 6 bytes.
+#[test]
+fn milestone_95_raw_str_backslash_counts_as_two_bytes() {
+    // The inner source contains r"hello\n" — backslash-n is TWO bytes in a raw string.
+    let src = "fn main() -> i32 {\n    r\"hello\\n\".len() as i32\n}";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "r\"hello\\n\" has 7 bytes (no escape), got {exit_code}");
+}
+
+/// Milestone 95: Raw string with six characters.
+///
+/// FLS §2.4.6.2: `r"galvanic"` is 8 bytes.
+#[test]
+fn milestone_95_raw_str_len_six_chars() {
+    let src = r#"
+fn main() -> i32 {
+    r"galvan".len() as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "r\"galvan\".len()=6, got {exit_code}");
+}
+
+/// Milestone 95: Raw string length used in arithmetic.
+///
+/// FLS §2.4.6.2: `r"abc"` is 3 bytes.
+/// FLS §6.5.1: Addition of two i32 values.
+#[test]
+fn milestone_95_raw_str_len_in_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    r"abc".len() as i32 + 1
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 4, "r\"abc\".len()+1=4, got {exit_code}");
+}
+
+/// Milestone 95: Two raw string bindings, lengths summed.
+///
+/// FLS §2.4.6.2: `r"ab"` is 2 bytes; `r"cd"` is 2 bytes; sum is 4.
+#[test]
+fn milestone_95_raw_str_len_two_bindings_summed() {
+    let src = r#"
+fn main() -> i32 {
+    let a = r"ab";
+    let b = r"cd";
+    a.len() as i32 + b.len() as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 4, "r\"ab\".len()+r\"cd\".len()=4, got {exit_code}");
+}
+
+/// Milestone 95: Raw byte string literal `.len()` directly on the literal.
+///
+/// FLS §2.4.2.2: A raw byte string literal `br"..."` has type `&[u8]` and
+/// contains no escape sequences. `br"hello"` is 5 bytes.
+#[test]
+fn milestone_95_raw_byte_str_len_literal_direct() {
+    let src = r#"
+fn main() -> i32 {
+    br"hello".len() as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "br\"hello\".len()=5, got {exit_code}");
+}
+
+/// Milestone 95: Raw byte string backslash-n is two bytes, not one.
+///
+/// FLS §2.4.2.2: Raw byte strings do NOT process escape sequences.
+/// `br"hello\n"` contains literal backslash and 'n' — 7 bytes total.
+#[test]
+fn milestone_95_raw_byte_str_backslash_counts_as_two_bytes() {
+    // The inner source contains br"hello\n" — backslash-n is TWO bytes.
+    let src = "fn main() -> i32 {\n    br\"hello\\n\".len() as i32\n}";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "br\"hello\\n\" has 7 bytes (no escape), got {exit_code}");
+}
+
+/// Milestone 95: Raw byte string bound to a let binding.
+///
+/// FLS §2.4.2.2: Raw byte string literals have type `&[u8]`.
+/// FLS §8.1: Let bindings bring the variable into scope after the initializer.
+#[test]
+fn milestone_95_raw_byte_str_len_let_binding() {
+    let src = r#"
+fn main() -> i32 {
+    let s = br"hello";
+    s.len() as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "br\"hello\".len()=5, got {exit_code}");
+}
+
+/// Assembly check: raw string literal `.len()` emits a `mov` with the byte count.
+///
+/// FLS §2.4.6.2: Raw strings have no escape processing.  The length is
+/// materialised as a runtime `mov` (FLS §6.1.2:37–45).
+/// Cache-line note: one `mov` = 4 bytes (half a cache slot).
+#[test]
+fn runtime_raw_str_literal_len_emits_mov() {
+    let src = r#"
+fn main() -> i32 {
+    r"hello".len() as i32
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("#5"),
+        "expected immediate 5 (len of r\"hello\") in assembly:\n{asm}"
+    );
+}
+
+/// Assembly check: raw string with backslash emits correct (unescaped) byte count.
+///
+/// FLS §2.4.6.2: `r"hello\n"` is 7 bytes (backslash + n are separate characters).
+/// The assembly must contain `#7`, NOT `#6`.
+#[test]
+fn runtime_raw_str_backslash_emits_unescaped_len() {
+    // Source: fn main() -> i32 { r"hello\n".len() as i32 }
+    // The inner r"hello\n" has 7 chars: h,e,l,l,o,\,n
+    let src = "fn main() -> i32 {\n    r\"hello\\n\".len() as i32\n}";
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("#7"),
+        "expected immediate 7 (raw: backslash+n = 2 chars) in assembly:\n{asm}"
+    );
+    assert!(
+        !asm.contains("#6"),
+        "must NOT emit #6 (that would be escaped len) in assembly:\n{asm}"
+    );
+}
+
+/// Assembly check: raw byte string literal `.len()` emits a `mov` with byte count.
+///
+/// FLS §2.4.2.2: Raw byte strings have no escape processing.
+/// The length is materialised as a runtime `mov` (FLS §6.1.2:37–45).
+#[test]
+fn runtime_raw_byte_str_literal_len_emits_mov() {
+    let src = r#"
+fn main() -> i32 {
+    br"hello".len() as i32
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("#5"),
+        "expected immediate 5 (len of br\"hello\") in assembly:\n{asm}"
+    );
+}
+
+/// Assembly check: raw byte string with backslash emits correct (unescaped) count.
+///
+/// FLS §2.4.2.2: `br"hello\n"` is 7 bytes (backslash + n are separate chars).
+#[test]
+fn runtime_raw_byte_str_backslash_emits_unescaped_len() {
+    let src = "fn main() -> i32 {\n    br\"hello\\n\".len() as i32\n}";
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("#7"),
+        "expected immediate 7 (raw: backslash+n = 2 bytes) in assembly:\n{asm}"
+    );
+}
