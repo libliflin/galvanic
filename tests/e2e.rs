@@ -10669,3 +10669,258 @@ fn main() -> i32 { make(1).x }
         in_main.join("\n")
     );
 }
+
+// ── Milestone 87: enum-returning function with match body ─────────────────────
+//
+// A free function whose body is a match expression returns different enum
+// variants depending on the scrutinee. FLS §6.18 (match expressions) + §15
+// (enum values as discriminant + fields in consecutive slots).
+//
+// This extends the set of programs galvanic can compile end-to-end: functions
+// that select an enum variant via match are now fully supported.
+
+/// Milestone 87: enum-returning match — literal arm taken (first arm).
+///
+/// FLS §6.18: First arm matches `0`, discriminant 0 returned.
+/// FLS §15: Unit variants are discriminant-only (no field slots used).
+#[test]
+fn milestone_87_enum_match_return_first_arm_taken() {
+    let src = r#"
+enum Dir { North, South, East }
+fn pick(n: i32) -> Dir {
+    match n {
+        0 => Dir::North,
+        1 => Dir::South,
+        _ => Dir::East,
+    }
+}
+fn main() -> i32 {
+    let d = pick(0);
+    match d {
+        Dir::North => 10,
+        Dir::South => 20,
+        Dir::East => 30,
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "pick(0)=North→10, got {exit_code}");
+}
+
+/// Milestone 87: enum-returning match — second literal arm taken.
+///
+/// FLS §6.18: Arms tested in order; second matches `1`.
+#[test]
+fn milestone_87_enum_match_return_second_arm_taken() {
+    let src = r#"
+enum Dir { North, South, East }
+fn pick(n: i32) -> Dir {
+    match n {
+        0 => Dir::North,
+        1 => Dir::South,
+        _ => Dir::East,
+    }
+}
+fn main() -> i32 {
+    let d = pick(1);
+    match d {
+        Dir::North => 10,
+        Dir::South => 20,
+        Dir::East => 30,
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 20, "pick(1)=South→20, got {exit_code}");
+}
+
+/// Milestone 87: enum-returning match — wildcard (default) arm taken.
+///
+/// FLS §6.18: Wildcard arm taken when no earlier arm matched.
+#[test]
+fn milestone_87_enum_match_return_wildcard_arm_taken() {
+    let src = r#"
+enum Dir { North, South, East }
+fn pick(n: i32) -> Dir {
+    match n {
+        0 => Dir::North,
+        1 => Dir::South,
+        _ => Dir::East,
+    }
+}
+fn main() -> i32 {
+    let d = pick(5);
+    match d {
+        Dir::North => 10,
+        Dir::South => 20,
+        Dir::East => 30,
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 30, "pick(5)=East→30, got {exit_code}");
+}
+
+/// Milestone 87: enum-returning match — result passed to another function.
+///
+/// FLS §6.12.1: Caller passes enum discriminant register to callee.
+#[test]
+fn milestone_87_enum_match_return_passed_to_fn() {
+    let src = r#"
+enum Rank { Low, Mid, High }
+fn rank(n: i32) -> Rank {
+    match n {
+        0 => Rank::Low,
+        1 => Rank::Mid,
+        _ => Rank::High,
+    }
+}
+fn score(r: Rank) -> i32 {
+    match r {
+        Rank::Low => 1,
+        Rank::Mid => 5,
+        Rank::High => 10,
+    }
+}
+fn main() -> i32 { score(rank(2)) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "rank(2)=High, score(High)=10, got {exit_code}");
+}
+
+/// Milestone 87: enum-returning match — result used in if-let.
+///
+/// FLS §6.17: if-let on the returned enum value.
+#[test]
+fn milestone_87_enum_match_return_in_if_let() {
+    let src = r#"
+enum Maybe { Nothing, Just(i32) }
+fn wrap(n: i32) -> Maybe {
+    match n {
+        0 => Maybe::Nothing,
+        _ => Maybe::Just(n),
+    }
+}
+fn main() -> i32 {
+    let m = wrap(7);
+    if let Maybe::Just(v) = m { v } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "wrap(7)=Just(7), if-let extracts 7, got {exit_code}");
+}
+
+/// Milestone 87: enum-returning match — on function parameter.
+///
+/// FLS §9.2: Function parameter used as match scrutinee inside factory function.
+#[test]
+fn milestone_87_enum_match_return_on_parameter() {
+    let src = r#"
+enum Color { Red, Green, Blue }
+fn from_code(n: i32) -> Color {
+    match n {
+        1 => Color::Red,
+        2 => Color::Green,
+        _ => Color::Blue,
+    }
+}
+fn main() -> i32 {
+    let c = from_code(2);
+    match c {
+        Color::Red => 0,
+        Color::Green => 1,
+        Color::Blue => 2,
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "from_code(2)=Green→1, got {exit_code}");
+}
+
+/// Milestone 87: enum-returning match — result used in arithmetic.
+///
+/// FLS §6.5.5: Score values from two calls added together.
+#[test]
+fn milestone_87_enum_match_return_result_in_arithmetic() {
+    let src = r#"
+enum Tier { Bronze, Silver, Gold }
+fn tier(n: i32) -> Tier {
+    match n {
+        1 => Tier::Bronze,
+        2 => Tier::Silver,
+        _ => Tier::Gold,
+    }
+}
+fn points(t: Tier) -> i32 {
+    match t {
+        Tier::Bronze => 10,
+        Tier::Silver => 25,
+        Tier::Gold => 50,
+    }
+}
+fn main() -> i32 { points(tier(2)) + points(tier(3)) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 75, "Silver(25)+Gold(50)=75, got {exit_code}");
+}
+
+/// Milestone 87: enum-returning match — with tuple variant fields.
+///
+/// FLS §6.18, §15: Match arms can return tuple variants carrying field data.
+#[test]
+fn milestone_87_enum_match_return_tuple_variant() {
+    let src = r#"
+enum Maybe { Nothing, Just(i32) }
+fn wrap(n: i32) -> Maybe {
+    match n {
+        0 => Maybe::Nothing,
+        _ => Maybe::Just(n * 2),
+    }
+}
+fn main() -> i32 {
+    let m = wrap(5);
+    match m {
+        Maybe::Nothing => 0,
+        Maybe::Just(v) => v,
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "wrap(5)=Just(10), match extracts 10, got {exit_code}");
+}
+
+/// Assembly check: enum-returning match emits cmp+cbz for pattern dispatch.
+///
+/// FLS §6.18: Pattern comparison followed by conditional branch.
+/// FLS §6.1.2:37–45: All instructions are runtime (no compile-time folding).
+#[test]
+fn runtime_enum_match_return_emits_cmp_and_cbz() {
+    let src = r#"
+enum Dir { North, South }
+fn pick(n: i32) -> Dir {
+    match n {
+        0 => Dir::North,
+        _ => Dir::South,
+    }
+}
+fn main() -> i32 {
+    let d = pick(0);
+    match d { Dir::North => 1, Dir::South => 2 }
+}
+"#;
+    let asm = compile_to_asm(src);
+    // The `pick` function must contain a comparison (cmp) and conditional
+    // branch (cbz) to implement the match expression at runtime.
+    let in_pick: Vec<&str> = asm
+        .lines()
+        .skip_while(|l| !l.starts_with("pick:"))
+        .take_while(|l| !l.starts_with("main:"))
+        .collect();
+    let has_cbz = in_pick.iter().any(|l| l.trim_start().starts_with("cbz"));
+    let has_cmp = in_pick.iter().any(|l| l.trim_start().starts_with("cmp"));
+    assert!(
+        has_cbz && has_cmp,
+        "expected cmp+cbz in pick (enum-returning match):\n{}",
+        in_pick.join("\n")
+    );
+}
