@@ -2030,6 +2030,34 @@ struct LowerCtx<'src> {
     /// Cache-line note: a function pointer occupies one stack slot — same as i32.
     local_fn_ptr_slots: std::collections::HashSet<u8>,
 
+    /// Captured outer-scope slots for each closure fn-pointer slot.
+    ///
+    /// FLS §6.22: Capturing closures capture free variables from the enclosing
+    /// scope by value. Galvanic compiles each captured variable as a hidden
+    /// leading parameter of the closure's hidden function. At every call site
+    /// the captured values are loaded from their outer-scope slots and prepended
+    /// to the explicit argument list before `CallIndirect` is emitted.
+    ///
+    /// Maps `fn_ptr_slot → vec![outer_slot_0, outer_slot_1, ...]` in the order
+    /// the captures appear in the closure body (first-seen, deduplicated).
+    ///
+    /// Cache-line note: read/write during closure lowering only; not on the hot
+    /// arithmetic path. Map entry is 24 bytes per captured variable.
+    local_capture_args: HashMap<u8, Vec<u8>>,
+
+    /// Side-channel from `lower_expr(Closure)` to the surrounding `lower_stmt(Let)`.
+    ///
+    /// FLS §6.22, §8.1: When a capturing closure is lowered, this field records
+    /// the outer-scope slots it captures (in parameter order). The let-binding
+    /// handler drains this after storing the closure address to register the
+    /// captures for the new fn-pointer slot.
+    ///
+    /// `None` when the most recently lowered closure had no captures (or when
+    /// no closure has been lowered yet).
+    ///
+    /// Cache-line note: `Option<Vec<u8>>` = 24 bytes (None = 0 heap allocation).
+    last_closure_captures: Option<Vec<u8>>,
+
     /// Names of all free functions declared in the current source file.
     ///
     /// FLS §4.9: Used to detect when a single-segment path expression refers to a
@@ -2124,6 +2152,159 @@ struct LowerCtx<'src> {
     pending_closures: Vec<IrFn>,
 }
 
+/// Collect all free variables in `expr` that are present in `outer_locals`
+/// but are not bound by the closure's own parameter list (`closure_params`).
+///
+/// FLS §6.22: A closure captures variables from the enclosing scope by value
+/// when they appear as free identifiers in the closure body. This function
+/// implements capture analysis: it walks the expression AST and for each
+/// single-segment path that resolves to an outer local, records the variable
+/// name and its stack slot.
+///
+/// Results are accumulated into `captured` as `(name, outer_slot)` pairs in
+/// first-seen order (later duplicate references to the same variable are
+/// skipped). The caller uses this ordered list to generate the hidden leading
+/// parameters of the closure's compiled function.
+///
+/// FLS §6.22: "A closure expression captures variables from the surrounding
+/// environment." The spec does not mandate a particular capture strategy;
+/// galvanic uses capture-by-copy (each captured variable is passed as an
+/// extra leading argument on every call, matching the ARM64 integer register
+/// ABI). This is equivalent to `move` closure semantics for scalar types.
+///
+/// Cache-line note: called once per closure during lowering; not on any
+/// performance-critical path.
+fn find_captures<'src>(
+    expr: &Expr,
+    outer_locals: &HashMap<&'src str, u8>,
+    closure_params: &std::collections::HashSet<&str>,
+    source: &'src str,
+    captured: &mut Vec<(&'src str, u8)>,
+) {
+    use crate::ast::{Block, Pat, StmtKind};
+
+    /// Walk a block, tracking inner let-bound names to avoid spurious captures.
+    fn find_in_block<'src>(
+        block: &Block,
+        outer_locals: &HashMap<&'src str, u8>,
+        closure_params: &std::collections::HashSet<&str>,
+        source: &'src str,
+        captured: &mut Vec<(&'src str, u8)>,
+    ) {
+        // Clone the exclusion set so inner let-bound names don't escape.
+        let mut inner_params = closure_params.clone();
+        for stmt in &block.stmts {
+            match &stmt.kind {
+                StmtKind::Let { pat, init, .. } => {
+                    // Evaluate the RHS before the binding comes into scope.
+                    if let Some(init_expr) = init {
+                        find_captures(init_expr, outer_locals, &inner_params, source, captured);
+                    }
+                    // Bring the bound name into scope (may shadow an outer local).
+                    if let Pat::Ident(span) = pat {
+                        let n = span.text(source);
+                        inner_params.insert(n);
+                    }
+                }
+                StmtKind::Expr(e) => {
+                    find_captures(e, outer_locals, &inner_params, source, captured);
+                }
+                StmtKind::Empty => {}
+            }
+        }
+        if let Some(tail) = &block.tail {
+            find_captures(tail, outer_locals, &inner_params, source, captured);
+        }
+    }
+
+    match &expr.kind {
+        // FLS §6.3, §6.22: A single-segment path that names an outer local is
+        // a free variable → capture it.
+        ExprKind::Path(segs) if segs.len() == 1 => {
+            let name = segs[0].text(source);
+            if !closure_params.contains(name)
+                && let Some(&slot) = outer_locals.get(name)
+            {
+                // Deduplicate: only record first occurrence.
+                if !captured.iter().any(|(n, _)| *n == name) {
+                    captured.push((name, slot));
+                }
+            }
+        }
+
+        // FLS §6.4: Block expressions — recurse into stmts and tail.
+        ExprKind::Block(block) => {
+            find_in_block(block, outer_locals, closure_params, source, captured);
+        }
+
+        // Recurse into all compound expression forms.
+        ExprKind::Unary { operand, .. } => {
+            find_captures(operand, outer_locals, closure_params, source, captured);
+        }
+        ExprKind::Binary { lhs, rhs, .. }
+        | ExprKind::CompoundAssign { target: lhs, value: rhs, .. } => {
+            find_captures(lhs, outer_locals, closure_params, source, captured);
+            find_captures(rhs, outer_locals, closure_params, source, captured);
+        }
+        ExprKind::Cast { expr: inner, .. } => {
+            find_captures(inner, outer_locals, closure_params, source, captured);
+        }
+        ExprKind::Call { callee, args } => {
+            find_captures(callee, outer_locals, closure_params, source, captured);
+            for a in args {
+                find_captures(a, outer_locals, closure_params, source, captured);
+            }
+        }
+        ExprKind::MethodCall { receiver, args, .. } => {
+            find_captures(receiver, outer_locals, closure_params, source, captured);
+            for a in args {
+                find_captures(a, outer_locals, closure_params, source, captured);
+            }
+        }
+        ExprKind::FieldAccess { receiver, .. } => {
+            find_captures(receiver, outer_locals, closure_params, source, captured);
+        }
+        ExprKind::Index { base, index } => {
+            find_captures(base, outer_locals, closure_params, source, captured);
+            find_captures(index, outer_locals, closure_params, source, captured);
+        }
+        ExprKind::If { cond, then_block, else_expr } => {
+            find_captures(cond, outer_locals, closure_params, source, captured);
+            find_in_block(then_block, outer_locals, closure_params, source, captured);
+            if let Some(e) = else_expr {
+                find_captures(e, outer_locals, closure_params, source, captured);
+            }
+        }
+        ExprKind::Return(Some(v)) | ExprKind::Break(Some(v)) => {
+            find_captures(v, outer_locals, closure_params, source, captured);
+        }
+        ExprKind::Tuple(elems) | ExprKind::Array(elems) => {
+            for e in elems {
+                find_captures(e, outer_locals, closure_params, source, captured);
+            }
+        }
+        ExprKind::While { cond, body } => {
+            find_captures(cond, outer_locals, closure_params, source, captured);
+            find_in_block(body, outer_locals, closure_params, source, captured);
+        }
+        ExprKind::Loop(body) => {
+            find_in_block(body, outer_locals, closure_params, source, captured);
+        }
+        ExprKind::Match { scrutinee, arms } => {
+            find_captures(scrutinee, outer_locals, closure_params, source, captured);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    find_captures(guard, outer_locals, closure_params, source, captured);
+                }
+                find_captures(&arm.body, outer_locals, closure_params, source, captured);
+            }
+        }
+        // Literals, unit, path (multi-segment), LitFloat, LitStr, LitChar,
+        // LitBool, LitInt, Continue, Return(None), Break(None): no sub-expressions.
+        _ => {}
+    }
+}
+
 impl<'src> LowerCtx<'src> {
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -2183,6 +2364,8 @@ impl<'src> LowerCtx<'src> {
             local_tuple_lens: HashMap::new(),
             local_tuple_struct_types: HashMap::new(),
             local_fn_ptr_slots: std::collections::HashSet::new(),
+            local_capture_args: HashMap::new(),
+            last_closure_captures: None,
         }
     }
 
@@ -4833,6 +5016,17 @@ impl<'src> LowerCtx<'src> {
                     {
                         self.local_fn_ptr_slots.insert(slot);
                     }
+                    // FLS §6.14, §6.22: Closure expressions stored in a let binding —
+                    // mark the slot as a function pointer so `f(args)` emits
+                    // `CallIndirect` (blr) rather than a direct `bl f`.
+                    // If the closure captured outer variables, also register the
+                    // capture-slot list so the call site passes them as leading args.
+                    if matches!(init_expr.kind, ExprKind::Closure { .. }) {
+                        self.local_fn_ptr_slots.insert(slot);
+                        if let Some(cap_slots) = self.last_closure_captures.take() {
+                            self.local_capture_args.insert(slot, cap_slots);
+                        }
+                    }
                 }
                 // Bring the new binding into scope only after the initializer
                 // has been fully evaluated. FLS §8.1: uninitialized let
@@ -7098,21 +7292,40 @@ impl<'src> LowerCtx<'src> {
                     if let Some(&ptr_slot) = self.locals.get(var_name)
                         && self.local_fn_ptr_slots.contains(&ptr_slot)
                     {
-                        // Lower arguments left-to-right.
-                        if args.len() > 7 {
-                            return Err(LowerError::Unsupported(
-                                "indirect call with more than 7 arguments".into(),
-                            ));
+                        // FLS §6.22: Load captured outer-scope variables and
+                        // prepend them as hidden leading arguments before the
+                        // explicit arguments. The hidden closure function receives
+                        // captures in x0..x{k-1} and explicit args in x{k}..
+                        let cap_slots: Vec<u8> = self.local_capture_args
+                            .get(&ptr_slot)
+                            .cloned()
+                            .unwrap_or_default();
+                        let n_caps = cap_slots.len();
+                        let total_args = n_caps + args.len();
+                        if total_args > 8 {
+                            return Err(LowerError::Unsupported(format!(
+                                "indirect call with {total_args} arguments (captures + explicit) \
+                                 exceeds 8-register ARM64 window"
+                            )));
                         }
-                        let mut arg_regs = Vec::with_capacity(args.len());
+                        // Load captured values first (they must stay stable while
+                        // explicit args are evaluated, so load them before the
+                        // explicit argument expressions).
+                        let mut all_regs = Vec::with_capacity(total_args);
+                        for cap_slot in cap_slots {
+                            let r = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst: r, slot: cap_slot });
+                            all_regs.push(r);
+                        }
+                        // Lower explicit arguments left-to-right (FLS §6.4:14).
                         for arg in args {
                             let v = self.lower_expr(arg, ret_ty)?;
                             let r = self.val_to_reg(v)?;
-                            arg_regs.push(r);
+                            all_regs.push(r);
                         }
                         let dst = self.alloc_reg()?;
                         self.has_calls = true;
-                        self.instrs.push(Instr::CallIndirect { dst, ptr_slot, args: arg_regs });
+                        self.instrs.push(Instr::CallIndirect { dst, ptr_slot, args: all_regs });
                         return Ok(IrValue::Reg(dst));
                     }
                 }
@@ -9494,18 +9707,34 @@ impl<'src> LowerCtx<'src> {
                 "tuple expression must be bound to a `let` variable at this milestone".into(),
             )),
 
-            // FLS §6.14: Non-capturing closure expression.
+            // FLS §6.14: Closure expression (non-capturing and capturing).
             //
-            // A closure `|x: i32, y: i32| -> i32 { x + y }` compiles to:
+            // A closure `|x: i32| -> i32 { x + captured }` compiles to:
             //   1. A hidden top-level function `__closure_{fn_name}_{counter}`.
             //   2. `LoadFnAddr { dst, name }` — the closure's address as a fn pointer.
             //
-            // FLS §6.14: Non-capturing closures coerce to `fn` pointer types (FLS §4.9).
+            // FLS §6.22: If the closure body references free variables from the
+            // enclosing scope (variables not in its own parameter list), those
+            // variables are captured. Galvanic implements capture-by-copy: each
+            // captured variable becomes an extra *leading* parameter of the hidden
+            // function. At every call site the caller loads the captured variables
+            // from its own stack slots and passes them as leading arguments before
+            // the explicit arguments.
+            //
+            // Example: `let n = 3; let f = |x: i32| x + n; f(7)` compiles to:
+            //   hidden fn `__closure_main_0(n: i32, x: i32) -> i32 { x + n }`
+            //   call: `x0 = load n; x1 = load 7; blr f`
+            //
+            // FLS §6.14: Non-capturing closures coerce to `fn` pointer types.
+            // FLS §6.22: Capturing closures in galvanic also use fn pointer ABI
+            //   with hidden leading params — this matches move-closure semantics
+            //   for scalar types (FLS §6.22 AMBIGUOUS: the spec does not mandate
+            //   a particular capture ABI; galvanic chooses leading-parameter capture).
             // FLS §6.1.2:37–45: The function body emits runtime instructions.
-            // FLS §6.14 AMBIGUOUS: The spec does not specify a compilation strategy
-            // for non-capturing closures; galvanic treats them as named functions.
             //
             // Cache-line note: the closure address fits in one 8-byte register.
+            // Each captured variable adds one extra argument register per call —
+            // same cost as an explicit parameter.
             ExprKind::Closure { params, ret_ty, body } => {
                 // Generate a unique name for the closure function.
                 let closure_name =
@@ -9519,6 +9748,20 @@ impl<'src> LowerCtx<'src> {
                     Some(ty) => lower_ty(ty, self.source)?,
                     None => IrTy::I32,
                 };
+
+                // ── Capture analysis (FLS §6.22) ─────────────────────────────
+                // Collect the closure's own parameter names so we don't treat
+                // them as captures.
+                let mut closure_param_names = std::collections::HashSet::new();
+                for p in params {
+                    if let crate::ast::Pat::Ident(span) = &p.pat {
+                        let n = span.text(self.source);
+                        closure_param_names.insert(n);
+                    }
+                }
+                // Walk the body to find free variables referencing outer locals.
+                let mut captures: Vec<(&str, u8)> = Vec::new();
+                find_captures(body, &self.locals, &closure_param_names, self.source, &mut captures);
 
                 // Build a new LowerCtx for the closure body.
                 // Labels continue from where the enclosing function left off so
@@ -9548,15 +9791,33 @@ impl<'src> LowerCtx<'src> {
                     closure_start_label,
                 );
 
-                // Spill scalar parameters into stack slots and bind names.
-                // FLS §6.14: Closure parameters follow the ARM64 calling convention;
-                // the first N params arrive in x0..x{N-1}.
-                // FLS §9: Same spill strategy as free functions.
+                // ── Spill captured variables (FLS §6.22) ─────────────────────
+                // Each captured variable arrives as a leading argument register
+                // (x0, x1, ...) and is spilled to a stack slot, then bound in
+                // the closure's local scope under the same name.
+                //
+                // FLS §6.22: Captures precede explicit parameters in the ABI so
+                // the caller can pass them without knowing the explicit-param arity.
                 // FLS §6.1.2:37–45: All spills are runtime store instructions.
-                let _n_params = params.len();
-                for (i, param) in params.iter().enumerate() {
+                let n_captures = captures.len();
+                for (i, (cap_name, _outer_slot)) in captures.iter().enumerate() {
                     let slot = closure_ctx.alloc_slot()?;
                     closure_ctx.instrs.push(Instr::Store { src: i as u8, slot });
+                    closure_ctx.locals.insert(cap_name, slot);
+                }
+
+                // ── Spill explicit parameters (FLS §6.14, §9) ────────────────
+                // Explicit parameters arrive after the captured variables, so
+                // parameter i occupies register x{n_captures + i}.
+                //
+                // FLS §6.14: Closure parameters follow the ARM64 calling convention;
+                // the first N params arrive in x0..x{N-1} after captures.
+                // FLS §9: Same spill strategy as free functions.
+                // FLS §6.1.2:37–45: All spills are runtime store instructions.
+                for (i, param) in params.iter().enumerate() {
+                    let reg = (n_captures + i) as u8;
+                    let slot = closure_ctx.alloc_slot()?;
+                    closure_ctx.instrs.push(Instr::Store { src: reg, slot });
                     match &param.pat {
                         crate::ast::Pat::Ident(name_span) => {
                             let name = name_span.text(self.source);
@@ -9605,6 +9866,15 @@ impl<'src> LowerCtx<'src> {
                 self.pending_closures.push(closure_fn);
                 self.pending_closures.extend(closure_ctx.pending_closures);
 
+                // Record the captured outer-scope slots so the let-binding handler
+                // can register them for the call site.
+                // FLS §6.22: The enclosing `lower_stmt(Let)` drains `last_closure_captures`
+                // after allocating a stack slot for the closure variable.
+                if !captures.is_empty() {
+                    let outer_slots: Vec<u8> = captures.iter().map(|(_, s)| *s).collect();
+                    self.last_closure_captures = Some(outer_slots);
+                }
+
                 // Materialise the closure's address as a function pointer value.
                 // FLS §4.9: `LoadFnAddr` emits ADRP + ADD to load the label address.
                 // FLS §6.14: The closure expression evaluates to this address.
@@ -9612,8 +9882,6 @@ impl<'src> LowerCtx<'src> {
                 // Cache-line note: ADRP + ADD = 8 bytes; same cost as a static load.
                 let dst = self.alloc_reg()?;
                 self.instrs.push(Instr::LoadFnAddr { dst, name: closure_name });
-                // Mark the destination slot as holding a fn pointer (if stored).
-                // The caller may later do `let f = |x| ...` → Store → slot registered.
                 Ok(IrValue::Reg(dst))
             }
 

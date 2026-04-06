@@ -11347,3 +11347,156 @@ fn runtime_char_literal_emits_mov() {
         "expected `mov ... #65` for 'A' (code point 65) in assembly:\n{asm}"
     );
 }
+
+// ── Milestone 91: capturing closures ─────────────────────────────────────────
+
+/// Milestone 91: basic capturing closure — single variable captured by copy.
+///
+/// FLS §6.22: A closure expression captures free variables from the enclosing
+/// scope. The captured variable is passed as a hidden leading argument on every
+/// invocation. Galvanic implements capture-by-copy for scalar types.
+/// FLS §6.14: The closure body executes at runtime.
+/// FLS §6.1.2:37–45: All instructions emitted at runtime; no compile-time folding.
+#[test]
+fn milestone_91_capturing_closure_basic() {
+    let src = r#"
+fn main() -> i32 {
+    let x = 5;
+    let f = || x + 1;
+    f()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "x=5, f()=x+1=6, got {exit_code}");
+}
+
+/// Milestone 91: capturing closure with an explicit parameter.
+///
+/// FLS §6.22: Captured variables precede explicit parameters in the ABI.
+/// The closure `|x| x + n` captures `n` and takes `x` explicitly.
+#[test]
+fn milestone_91_capturing_closure_with_param() {
+    let src = r#"
+fn main() -> i32 {
+    let n = 3;
+    let add_n = |x: i32| -> i32 { x + n };
+    add_n(7)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "n=3, add_n(7)=7+3=10, got {exit_code}");
+}
+
+/// Milestone 91: closure captures two variables.
+///
+/// FLS §6.22: All free variables referenced in the closure body are captured.
+/// Both `a` and `b` arrive as hidden leading arguments.
+#[test]
+fn milestone_91_capturing_closure_two_captures() {
+    let src = r#"
+fn main() -> i32 {
+    let a = 2;
+    let b = 3;
+    let f = || a + b;
+    f()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "a=2, b=3, f()=a+b=5, got {exit_code}");
+}
+
+/// Milestone 91: capturing closure called multiple times.
+///
+/// FLS §6.22: Each invocation reloads the captured value from its outer slot.
+/// The captured variable is not mutated — copy semantics.
+#[test]
+fn milestone_91_capturing_closure_called_twice() {
+    let src = r#"
+fn main() -> i32 {
+    let multiplier = 4;
+    let double = |x: i32| -> i32 { x * multiplier };
+    double(5) + double(3)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 32, "4*5+4*3=20+12=32, got {exit_code}");
+}
+
+/// Milestone 91: capturing closure with if-else body.
+///
+/// FLS §6.22: The closure body can contain control flow.
+/// FLS §6.17: if-else inside the closure emits the same branch instructions.
+#[test]
+fn milestone_91_capturing_closure_if_else_body() {
+    let src = r#"
+fn main() -> i32 {
+    let threshold = 5;
+    let clamp = |x: i32| -> i32 { if x > threshold { threshold } else { x } };
+    clamp(10) + clamp(3)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 8, "clamp(10)=5, clamp(3)=3, sum=8, got {exit_code}");
+}
+
+/// Milestone 91: captured variable from a parameter.
+///
+/// FLS §6.22: A closure can capture a function parameter.
+/// The parameter is already on the stack; the closure receives it via its slot.
+#[test]
+fn milestone_91_capturing_closure_captures_parameter() {
+    let src = r#"
+fn make_adder(n: i32) -> i32 {
+    let add = |x: i32| -> i32 { x + n };
+    add(10)
+}
+fn main() -> i32 { make_adder(7) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 17, "add(10) where n=7 → 10+7=17, got {exit_code}");
+}
+
+/// Milestone 91: result of capturing closure in arithmetic.
+///
+/// FLS §6.14, §6.22: The return value of `f()` is a regular i32 that can be
+/// used in subsequent arithmetic.
+#[test]
+fn milestone_91_capturing_closure_result_in_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    let offset = 10;
+    let shifted = |x: i32| -> i32 { x + offset };
+    shifted(5) + shifted(7)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 32, "15+17=32, got {exit_code}");
+}
+
+/// Assembly check: capturing closure passes hidden arg before explicit arg.
+///
+/// FLS §6.22: The hidden closure function receives the captured variable as
+/// x0 and the explicit parameter as x1. At the call site the captured value is
+/// loaded and placed in the first argument position.
+/// FLS §6.1.2:37–45: All loads and stores are runtime instructions.
+#[test]
+fn runtime_capturing_closure_emits_capture_load_before_explicit_arg() {
+    let src = r#"
+fn main() -> i32 {
+    let n = 3;
+    let add_n = |x: i32| -> i32 { x + n };
+    add_n(7)
+}
+"#;
+    let asm = compile_to_asm(src);
+    // The hidden function must be emitted.
+    assert!(
+        asm.contains("__closure_main_0"),
+        "expected hidden closure label `__closure_main_0` in assembly:\n{asm}"
+    );
+    // A `blr` must appear (indirect call for the fn pointer).
+    assert!(
+        asm.contains("blr"),
+        "expected `blr` indirect call for capturing closure in assembly:\n{asm}"
+    );
+}

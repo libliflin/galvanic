@@ -664,3 +664,30 @@ fn closure_example() -> i32 {
     // Use the closures via apply (fn pointer call).
     apply_closure(increment, 5) + apply_closure(add, apply_closure(increment, 0), forty_two())
 }
+
+// ── FLS §6.22: Capturing closures ─────────────────────────────────────────
+
+// FLS §6.22: "A closure expression captures variables from the surrounding
+// environment." The spec does not mandate a specific capture strategy.
+// Galvanic implements capture-by-copy: captured variables are passed as
+// hidden leading arguments on every call to the closure's hidden function.
+//
+// FLS §6.22: "A closure that does not capture variables coerces to a function
+// pointer type." Capturing closures do not perform this coercion — they have
+// a unique, unnamed type.
+//
+// FLS §6.22 AMBIGUOUS: The spec does not enumerate a concrete capture ABI.
+// Galvanic chooses leading-parameter capture, equivalent to `move` closure
+// semantics for Copy types (FLS §15.3).
+//
+// Note: the FLS does not provide a standalone code example for §6.22;
+// the example below is derived from the semantic description in that section.
+
+fn capturing_closure_example() -> i32 {
+    // FLS §6.22: Closure captures `offset` from the enclosing scope.
+    let offset = 10;
+    let shifted = |x: i32| -> i32 { x + offset };
+
+    // FLS §6.22: Each call passes `offset` as a hidden leading argument.
+    shifted(5) + shifted(7)   // 15 + 17 = 32
+}
