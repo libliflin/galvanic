@@ -9750,3 +9750,187 @@ fn main() -> i32 { sum(Outer { inner: Inner { a: 1, b: 2 }, c: 3 }) }\n";
         in_sum.len()
     );
 }
+
+// ── Milestone 82: Functions returning tuples ──────────────────────────────────
+//
+// FLS §6.10: Tuple expressions. FLS §9: Functions.
+// A function whose return type is `(T0, T1, ...)` returns element values in
+// x0..x{N-1} via `RetFields` and the caller receives them via `CallMut`.
+// The call site in a `let` tuple pattern binding is the primary consumer.
+//
+// FLS §6.10 AMBIGUOUS: The spec does not define a calling convention for
+// tuple-returning functions. Galvanic uses the same register-packing convention
+// as struct returns: element[0] in x0, element[1] in x1, etc.
+
+/// Milestone 82: simplest tuple-returning function — return a pair of scalars.
+///
+/// FLS §6.10, §9: `fn pair() -> (i32, i32) { (3, 4) }` returns two values
+/// in x0, x1. The caller destructures them with `let (a, b) = pair()`.
+#[test]
+fn milestone_82_tuple_return_basic() {
+    let src = "\
+fn pair() -> (i32, i32) { (3, 4) }\n\
+fn main() -> i32 {\n\
+    let (a, b) = pair();\n\
+    a + b\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "3+4=7, got {exit_code}");
+}
+
+/// Milestone 82: first element of the returned tuple.
+///
+/// FLS §6.10: Tuple elements are in left-to-right declaration order.
+/// Element 0 arrives in x0; destructuring `(a, _)` binds only x0.
+#[test]
+fn milestone_82_tuple_return_first_element() {
+    let src = "\
+fn pair() -> (i32, i32) { (10, 20) }\n\
+fn main() -> i32 {\n\
+    let (a, _b) = pair();\n\
+    a\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "expected 10, got {exit_code}");
+}
+
+/// Milestone 82: second element of the returned tuple.
+///
+/// FLS §6.10: Element 1 arrives in x1; destructuring `(_, b)` binds only x1.
+#[test]
+fn milestone_82_tuple_return_second_element() {
+    let src = "\
+fn pair() -> (i32, i32) { (10, 20) }\n\
+fn main() -> i32 {\n\
+    let (_a, b) = pair();\n\
+    b\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 20, "expected 20, got {exit_code}");
+}
+
+/// Milestone 82: function returning a tuple derived from its parameters.
+///
+/// FLS §9: Parameters are available throughout the function body.
+/// Returning `(b, a)` swaps the inputs; the call site confirms the swap.
+#[test]
+fn milestone_82_tuple_return_from_params() {
+    let src = "\
+fn swap(a: i32, b: i32) -> (i32, i32) { (b, a) }\n\
+fn main() -> i32 {\n\
+    let (x, y) = swap(5, 3);\n\
+    x + y\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 8, "swap(5,3)=(3,5), 3+5=8; got {exit_code}");
+}
+
+/// Milestone 82: tuple return used in arithmetic.
+///
+/// FLS §6.5: Arithmetic expressions. The destructured elements are normal
+/// locals and can participate in any expression.
+#[test]
+fn milestone_82_tuple_return_in_arithmetic() {
+    let src = "\
+fn minmax(a: i32, b: i32) -> (i32, i32) {\n\
+    if a < b { (a, b) } else { (b, a) }\n\
+}\n\
+fn main() -> i32 {\n\
+    let (lo, hi) = minmax(7, 3);\n\
+    hi - lo\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 4, "max(7,3)-min(7,3)=7-3=4, got {exit_code}");
+}
+
+/// Milestone 82: tuple return with zero as first element.
+///
+/// FLS §6.10: Zero is a valid tuple element.
+#[test]
+fn milestone_82_tuple_return_zero_first() {
+    let src = "\
+fn encode(v: i32) -> (i32, i32) { (0, v) }\n\
+fn main() -> i32 {\n\
+    let (flag, val) = encode(42);\n\
+    flag + val\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "0+42=42, got {exit_code}");
+}
+
+/// Milestone 82: call a tuple-returning function twice and sum all elements.
+///
+/// FLS §9: Each call evaluates independently. Two separate `let` bindings
+/// from two calls are four independent locals.
+#[test]
+fn milestone_82_two_tuple_return_calls() {
+    let src = "\
+fn pair(x: i32) -> (i32, i32) { (x, x + 1) }\n\
+fn main() -> i32 {\n\
+    let (a, b) = pair(10);\n\
+    let (c, d) = pair(20);\n\
+    a + b + c + d\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 62, "10+11+20+21=62, got {exit_code}");
+}
+
+/// Milestone 82: result passed to another function as argument.
+///
+/// FLS §9: Function call arguments are evaluated at the call site.
+/// Destructured tuple elements are ordinary locals and may be passed as args.
+#[test]
+fn milestone_82_tuple_result_passed_to_fn() {
+    let src = "\
+fn add(a: i32, b: i32) -> i32 { a + b }\n\
+fn pair() -> (i32, i32) { (15, 25) }\n\
+fn main() -> i32 {\n\
+    let (x, y) = pair();\n\
+    add(x, y)\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 40, "15+25=40, got {exit_code}");
+}
+
+/// Runtime inspection: tuple-returning function emits RetFields then CallMut.
+///
+/// FLS §6.10, §9, §6.1.2:37–45: The callee must emit `str` instructions to
+/// store elements before `RetFields` loads them into x0..x1. The caller must
+/// emit `CallMut`-style `str` instructions to write x0..x1 to stack slots.
+///
+/// Cache-line note: 2 str + 2 ldr (RetFields) in callee + 2 str (CallMut) in
+/// caller = 6 instructions × 4 bytes = 24 bytes.
+#[test]
+fn runtime_tuple_return_emits_ret_fields_and_callmut() {
+    let src = "\
+fn pair() -> (i32, i32) { (1, 2) }\n\
+fn main() -> i32 {\n\
+    let (a, b) = pair();\n\
+    a + b\n\
+}\n";
+    let asm = compile_to_asm(src);
+    // The callee `pair` must have RetFields: two ldr instructions loading from
+    // stack slots into x0 and x1, followed by the epilogue and ret.
+    let in_pair: Vec<&str> = asm
+        .lines()
+        .skip_while(|l| !l.starts_with("pair:"))
+        .take_while(|l| !l.starts_with("main:"))
+        .filter(|l| l.trim_start().starts_with("ldr") || l.trim_start().starts_with("str"))
+        .collect();
+    assert!(
+        in_pair.len() >= 2,
+        "expected ≥2 ldr/str in pair (RetFields), got {}:\n{asm}",
+        in_pair.len()
+    );
+    // The caller `main` must write x0 and x1 to stack slots after the bl call.
+    let in_main: Vec<&str> = asm
+        .lines()
+        .skip_while(|l| !l.starts_with("main:"))
+        .filter(|l| l.trim_start().starts_with("str") && !l.contains("lr"))
+        .collect();
+    assert!(
+        in_main.len() >= 2,
+        "expected ≥2 str (CallMut write-back) in main, got {}:\n{asm}",
+        in_main.len()
+    );
+}
