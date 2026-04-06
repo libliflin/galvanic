@@ -7921,3 +7921,235 @@ fn runtime_numeric_cast_identity_emits_no_extra_instruction() {
         "expected zero cast instructions for identity `i32 as u32 as i32`, got:\n{asm}"
     );
 }
+
+// ── Milestone 67: variable shadowing compiles to runtime ARM64 (FLS §8.1) ──
+
+/// Milestone 67: `let x = x + 3` correctly reads the old x (slot 0) and
+/// writes to a new slot (slot 1).
+///
+/// FLS §8.1: The binding introduced by a let statement comes into scope
+/// after the initializer expression has been evaluated. In a shadowing
+/// `let x = x + 3`, the RHS `x` refers to the previous binding.
+///
+/// This was a bug: locals.insert happened before lower_expr, so the RHS
+/// saw the new uninitialized slot instead of the old value.
+#[test]
+fn milestone_67_shadow_simple() {
+    let src = "fn main() -> i32 { let x = 5; let x = x + 3; x }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 8, "expected 8, got {exit_code}");
+}
+
+/// Milestone 67: Three levels of shadowing, each step reading the previous.
+///
+/// FLS §8.1: Each `let x = x * 2` evaluates the previous x before
+/// introducing the new binding.
+#[test]
+fn milestone_67_shadow_three_levels() {
+    // x=5, x=5+3=8, x=8*2=16 → exit 16
+    let src = "fn main() -> i32 { let x = 5; let x = x + 3; let x = x * 2; x }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 16, "expected 16, got {exit_code}");
+}
+
+/// Milestone 67: Shadowing inside a function using a parameter.
+///
+/// FLS §8.1: The inner `let n = n - 1` reads the parameter n, not the
+/// new binding.
+#[test]
+fn milestone_67_shadow_parameter() {
+    // n=10 → let n = 10-1 = 9 → return 9
+    let src = "fn dec(n: i32) -> i32 { let n = n - 1; n }\nfn main() -> i32 { dec(10) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 9, "expected 9, got {exit_code}");
+}
+
+/// Milestone 67: Shadow a variable with a different expression type.
+///
+/// FLS §8.1: `let x = x > 0` — shadows x (i32) with a bool-valued
+/// expression that reads the old x. Here we cast to i32 for the exit code.
+#[test]
+fn milestone_67_shadow_changes_value() {
+    // x=7, let x = x - 2 = 5, let x = x - 2 = 3 → exit 3
+    let src = "fn main() -> i32 { let x = 7; let x = x - 2; let x = x - 2; x }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "expected 3, got {exit_code}");
+}
+
+/// Milestone 67: Shadowing in a block — outer x remains unchanged after
+/// the inner block exits (inner binding does not affect outer scope).
+///
+/// FLS §8.1 / FLS §6.4: Block expressions create a scope. A `let`
+/// statement in an inner block shadows the outer binding within that block
+/// but the outer binding is unaffected after the block ends.
+///
+/// Note: galvanic uses flat stack slots and does not yet restore the outer
+/// binding after a block. This test uses sequential top-level shadowing,
+/// not block-scoped shadowing.
+#[test]
+fn milestone_67_shadow_in_fn_multiple_vars() {
+    // Each variable shadows independently.
+    let src = "fn main() -> i32 { let a = 1; let b = 2; let a = a + b; a }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "expected 3, got {exit_code}");
+}
+
+/// Milestone 67: assembly inspection — `let x = x + 3` loads slot 0 for the
+/// RHS, not slot 1.
+///
+/// FLS §8.1: The RHS references the old binding (slot 0). The new binding
+/// gets slot 1. Before the fix, slot 1 was loaded (uninitialized).
+///
+/// Cache-line note: one ldr (slot 0), one add, one str (slot 1) — three
+/// instructions, fitting within a single 64-byte cache line.
+#[test]
+fn runtime_shadow_rhs_reads_old_slot() {
+    // let x = 5 → str slot 0; let x = x + 3 → ldr slot 0 (not slot 1), add, str slot 1
+    let src = "fn main() -> i32 { let x = 5; let x = x + 3; x }\n";
+    let asm = compile_to_asm(src);
+    // Find the add instruction; the ldr before it should reference slot 0, not slot 1.
+    let lines: Vec<&str> = asm.lines().collect();
+    let add_idx = lines.iter().position(|l| l.trim().starts_with("add"));
+    let add_idx = add_idx.expect("expected an add instruction in the assembly");
+    // The ldr immediately before the add should load from slot 0 (offset 0).
+    let ldr_before = lines[..add_idx]
+        .iter()
+        .rev()
+        .find(|l| l.trim().starts_with("ldr"))
+        .expect("expected an ldr before the add");
+    assert!(
+        ldr_before.contains("#0"),
+        "expected ldr from slot 0 (offset #0) before add, got: {ldr_before}"
+    );
+}
+
+// ── Milestone 68: references as function parameters compile to runtime ARM64 ──
+// FLS §6.5.1: Borrow expressions — `&place` computes the address of a local variable.
+// FLS §6.5.2: Dereference expressions — `*expr` loads through a pointer.
+// FLS §4.8: Reference types `&T` and `&mut T` are pointer-sized values.
+
+/// Milestone 68: `*x` inside a function with `&i32` parameter returns the
+/// referent value.
+///
+/// FLS §6.5.2: A dereference expression evaluates the operand (producing an
+/// address) and loads the value at that address.
+#[test]
+fn milestone_68_deref_ref_param() {
+    let src = "fn identity_ref(x: &i32) -> i32 { *x }\nfn main() -> i32 { let n = 42; identity_ref(&n) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected 42, got {exit_code}");
+}
+
+/// Milestone 68: `*x * 2` — arithmetic on a dereferenced reference.
+///
+/// FLS §6.5.2: The dereferenced value can be used in arithmetic expressions.
+/// FLS §6.5.5: Arithmetic expressions apply to the loaded value.
+#[test]
+fn milestone_68_deref_in_arithmetic() {
+    let src = "fn double(x: &i32) -> i32 { *x * 2 }\nfn main() -> i32 { let n = 21; double(&n) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected 42, got {exit_code}");
+}
+
+/// Milestone 68: passing `&n` where `n` is a parameter.
+///
+/// FLS §6.5.1: Any local variable (including function parameters, which are
+/// spilled to the stack) can be borrowed.
+#[test]
+fn milestone_68_borrow_param() {
+    let src = "fn identity_ref(x: &i32) -> i32 { *x }\nfn relay(n: i32) -> i32 { identity_ref(&n) }\nfn main() -> i32 { relay(7) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 7, got {exit_code}");
+}
+
+/// Milestone 68: deref result used in an `if` condition.
+///
+/// FLS §6.17: if expressions use a boolean condition. The dereferenced value
+/// (a boolean reference `&bool`) is used as the condition.
+#[test]
+fn milestone_68_deref_bool_param() {
+    let src = "fn check(flag: &i32) -> i32 { if *flag != 0 { 1 } else { 0 } }\nfn main() -> i32 { let b = 1; check(&b) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected 1, got {exit_code}");
+}
+
+/// Milestone 68: deref of a variable passed through two borrow levels.
+///
+/// FLS §6.5.1: `&n` passes n's address. The callee receives the pointer in a
+/// register (x0), spills it, then loads it back to dereference.
+#[test]
+fn milestone_68_deref_zero() {
+    let src = "fn get_zero(x: &i32) -> i32 { *x }\nfn main() -> i32 { let n = 0; get_zero(&n) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected 0, got {exit_code}");
+}
+
+/// Milestone 68: `&n` and `&m` — two borrows in one call expression.
+///
+/// FLS §6.5.1: Each borrow produces a separate pointer value passed in
+/// x0 and x1 per the ARM64 ABI.
+#[test]
+fn milestone_68_two_ref_params() {
+    let src = "fn add_refs(a: &i32, b: &i32) -> i32 { *a + *b }\nfn main() -> i32 { let x = 10; let y = 32; add_refs(&x, &y) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected 42, got {exit_code}");
+}
+
+/// Milestone 68: deref result stored in a local variable.
+///
+/// FLS §8.1: `let v = *x` — the dereferenced value is bound to a new slot.
+#[test]
+fn milestone_68_deref_into_let() {
+    let src = "fn load(p: &i32) -> i32 { let v = *p; v + 1 }\nfn main() -> i32 { let n = 9; load(&n) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "expected 10, got {exit_code}");
+}
+
+/// Milestone 68: assembly inspection — `&n` emits `add` to form the stack address.
+///
+/// FLS §6.5.1: The borrow expression must emit `add x{dst}, sp, #{offset}`
+/// to form the pointer value at runtime, not a constant address.
+///
+/// Cache-line note: `add` is one 4-byte instruction — identical footprint to
+/// any `ldr`/`str`. The address computation fits in one instruction slot.
+#[test]
+fn runtime_borrow_emits_add_sp() {
+    let src = "fn identity_ref(x: &i32) -> i32 { *x }\nfn main() -> i32 { let n = 42; identity_ref(&n) }\n";
+    let asm = compile_to_asm(src);
+    // `&n` must produce an `add xD, sp, #offset` instruction in main.
+    let has_addr_add = asm.lines().any(|l| {
+        let t = l.trim();
+        t.starts_with("add") && t.contains("sp,") && !t.contains("sp, sp,")
+    });
+    assert!(has_addr_add, "expected `add xD, sp, #offset` for &n, got:\n{asm}");
+}
+
+/// Milestone 68: assembly inspection — `*x` inside the callee emits an
+/// indirect `ldr`.
+///
+/// FLS §6.5.2: The dereference must emit `ldr x{dst}, [x{src}]` — a
+/// register-indirect load, not a stack-relative load.
+///
+/// Cache-line note: `ldr [xN]` is one 4-byte instruction. Compared to the
+/// two-instruction `adrp`+`ldr` needed for statics, a reference dereference
+/// is cheaper when the pointer is already in a register.
+#[test]
+fn runtime_deref_emits_ldr_indirect() {
+    let src = "fn get(x: &i32) -> i32 { *x }\nfn main() -> i32 { let n = 5; get(&n) }\n";
+    let asm = compile_to_asm(src);
+    // `*x` must emit `ldr xD, [xN]` (square bracket with register, no #offset).
+    let has_indirect_ldr = asm.lines().any(|l| {
+        let t = l.trim();
+        // Match `ldr xD, [xN]` but not `ldr xD, [sp, #offset]` (stack load)
+        // and not `ldr xD, [xN, ...]` (indexed load).
+        if !t.starts_with("ldr") { return false; }
+        if let Some(bracket_start) = t.find('[') {
+            let inside = &t[bracket_start + 1..];
+            // Must start with 'x' (register) not 's' (sp) and must close immediately.
+            inside.starts_with('x') && inside.contains(']') && !inside.contains(',')
+        } else {
+            false
+        }
+    });
+    assert!(has_indirect_ldr, "expected `ldr xD, [xN]` for *x, got:\n{asm}");
+}

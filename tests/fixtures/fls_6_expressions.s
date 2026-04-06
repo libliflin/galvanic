@@ -899,6 +899,38 @@ chained_field_access_example:
     add     sp, sp, #32             // FLS §8.1: restore stack frame
     ret
 
+    // fn shadow_example — FLS §9
+    .global shadow_example
+shadow_example:
+    sub     sp, sp, #32             // FLS §8.1: frame for 3 slot(s)
+    mov     x0, #5                   // FLS §2.4.4.1: load imm 5
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    ldr     x1, [sp, #0              ] // FLS §8.1: load slot 0
+    mov     x2, #3                   // FLS §2.4.4.1: load imm 3
+    add     x3, x1, x2          // FLS §6.5.5: add
+    str     x3, [sp, #8              ] // FLS §8.1: store slot 1
+    ldr     x4, [sp, #8              ] // FLS §8.1: load slot 1
+    mov     x5, #2                   // FLS §2.4.4.1: load imm 2
+    mul     x6, x4, x5          // FLS §6.5.5: mul
+    str     x6, [sp, #16             ] // FLS §8.1: store slot 2
+    ldr     x7, [sp, #16             ] // FLS §8.1: load slot 2
+    mov     x0, x7              // FLS §6.19: return reg 7 → x0
+    add     sp, sp, #32             // FLS §8.1: restore stack frame
+    ret
+
+    // fn deref_ref_example — FLS §9
+    .global deref_ref_example
+deref_ref_example:
+    sub     sp, sp, #16             // FLS §8.1: frame for 2 slot(s)
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    add     x0, sp, #0                   // FLS §6.5.1: address of stack slot 0
+    str     x0, [sp, #8              ] // FLS §8.1: store slot 1
+    ldr     x1, [sp, #8              ] // FLS §8.1: load slot 1
+    ldr     x2, [x1]           // FLS §6.5.2: deref pointer in x1
+    mov     x0, x2              // FLS §6.19: return reg 2 → x0
+    add     sp, sp, #16             // FLS §8.1: restore stack frame
+    ret
+
     // ELF entry point — FLS §18.1
     .global _start
 _start:

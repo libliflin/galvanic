@@ -747,6 +747,34 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool) 
                 )?;
             }
         }
+        // FLS §6.5.1: Borrow expression `&place`.
+        //
+        // Computes the address of a stack slot and places it in `dst`.
+        // ARM64: `add x{dst}, sp, #{slot * 8}` — adds the byte offset to sp.
+        //
+        // Cache-line note: one 4-byte instruction. The resulting pointer value
+        // occupies one 8-byte register slot — same footprint as any i32 value.
+        Instr::AddrOf { dst, slot } => {
+            let offset = *slot as u32 * 8;
+            writeln!(
+                out,
+                "    add     x{dst}, sp, #{offset:<19} // FLS §6.5.1: address of stack slot {slot}"
+            )?;
+        }
+
+        // FLS §6.5.2: Dereference expression `*expr`.
+        //
+        // Loads the value at the memory address held in register `src`.
+        // ARM64: `ldr x{dst}, [x{src}]` — register-indirect load.
+        //
+        // Cache-line note: one 4-byte instruction. The load targets the cache
+        // line containing the referent value (8-byte aligned on the stack).
+        Instr::LoadPtr { dst, src } => {
+            writeln!(
+                out,
+                "    ldr     x{dst}, [x{src}]           // FLS §6.5.2: deref pointer in x{src}"
+            )?;
+        }
     }
     Ok(())
 }
