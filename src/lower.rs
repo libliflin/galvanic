@@ -309,7 +309,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                 }
                 enum_defs.insert(enum_name, variants);
             }
-            ItemKind::Fn(_) | ItemKind::Impl(_) => {}
+            ItemKind::Fn(_) | ItemKind::Impl(_) | ItemKind::Trait(_) => {}
         }
     }
 
@@ -335,37 +335,93 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         }
     }
 
+    // Build struct-returning associated function registry: mangled name → struct type name.
+    //
+    // FLS §10.1: Associated functions (no self parameter) that return a struct type
+    // use a special write-back calling convention: the callee stores field values in
+    // x0..x{N-1} via `RetFields`; the call site writes them to consecutive stack slots
+    // via `CallMut`. This registry lets the call site identify such functions.
+    //
+    // Cache-line note: populated once at compile time, not on any hot path.
+    let mut struct_return_fns: HashMap<String, String> = HashMap::new();
+    for item in &src.items {
+        if let ItemKind::Impl(impl_def) = &item.kind {
+            let type_name = impl_def.ty.text(source);
+            for method in &impl_def.methods {
+                if method.self_param.is_some() {
+                    continue; // Only associated functions (no self).
+                }
+                let method_name = method.name.text(source);
+                let mangled = format!("{type_name}__{method_name}");
+                if let Some(ret_ty) = &method.ret_ty
+                    && let TyKind::Path(segs) = &ret_ty.kind
+                    && segs.len() == 1
+                {
+                    let ret_name = segs[0].text(source);
+                    if struct_defs.contains_key(ret_name) {
+                        // FLS §10.1: Associated function returning a struct type.
+                        struct_return_fns.insert(mangled, ret_name.to_owned());
+                    }
+                }
+            }
+        }
+    }
+
     // Second pass: lower function items.
+    //
+    // FLS §6.17: Branch target labels must be unique within the assembly file.
+    // GAS local labels (`.L{n}`) are file-scoped, so if two functions both emit
+    // `.L0:` and `.L1:` the assembler will error or branch to the wrong target.
+    // We pass a monotonically increasing `label_base` to each `lower_fn` call
+    // so that every function's labels are globally unique.
     let mut fns = Vec::new();
+    let mut label_base: u32 = 0;
     for item in &src.items {
         match &item.kind {
             ItemKind::Fn(fn_def) => {
-                fns.push(lower_fn(fn_def, source, &struct_defs, &enum_defs, &method_self_kinds, None)?);
+                let (ir_fn, next_label) = lower_fn(fn_def, source, &struct_defs, &enum_defs, &method_self_kinds, &struct_return_fns, None, label_base)?;
+                label_base = next_label;
+                fns.push(ir_fn);
             }
             ItemKind::Impl(impl_def) => {
-                // FLS §11: Inherent impl. Each method becomes a mangled top-level
-                // function: `TypeName__method_name`. The impl type's fields are
-                // passed as implicit leading parameters for `self`/`&self` methods.
+                // FLS §11: Inherent impl and trait impl. Each method becomes a
+                // mangled top-level function: `TypeName__method_name`.
+                // For trait impls (`impl Trait for Type`), the struct type is
+                // `impl_def.ty` and mangling is identical to inherent impls.
+                // FLS §13: Trait method implementations lower identically to
+                // inherent methods — static dispatch uses the same mangling.
                 let type_name = impl_def.ty.text(source);
                 for method in &impl_def.methods {
                     let method_name = method.name.text(source);
                     let mangled = format!("{type_name}__{method_name}");
-                    let mctx = method.self_param.map(|kind| MethodCtx {
-                        impl_type: type_name,
+                    // Always create MethodCtx so associated functions (no self_param)
+                    // get the mangled name. impl_type and self_kind are None for
+                    // associated functions.
+                    //
+                    // FLS §10.1: Associated functions do not have a self parameter.
+                    let mctx = Some(MethodCtx {
+                        impl_type: method.self_param.map(|_| type_name),
                         mangled_name: &mangled,
-                        self_kind: kind,
+                        self_kind: method.self_param,
                     });
-                    fns.push(lower_fn(
+                    let (ir_fn, next_label) = lower_fn(
                         method,
                         source,
                         &struct_defs,
                         &enum_defs,
                         &method_self_kinds,
+                        &struct_return_fns,
                         mctx,
-                    )?);
+                        label_base,
+                    )?;
+                    label_base = next_label;
+                    fns.push(ir_fn);
                 }
             }
             ItemKind::Struct(_) | ItemKind::Enum(_) => {} // already processed above
+            // FLS §13: Trait definitions are parsed but produce no codegen.
+            // Trait method implementations are emitted via `ItemKind::Impl`.
+            ItemKind::Trait(_) => {}
         }
     }
 
@@ -378,13 +434,17 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
 ///
 /// Bundles the parameters that distinguish a method from a free function.
 /// FLS §10.1: Methods have a `self` parameter and a mangled name.
+/// Associated functions (no `self`) also get a `MethodCtx` for the mangled
+/// name; their `impl_type` and `self_kind` are both `None`.
 struct MethodCtx<'a> {
     /// Struct type name this method belongs to (for self-field spilling).
-    impl_type: &'a str,
+    /// `None` for associated functions (no `self` parameter).
+    impl_type: Option<&'a str>,
     /// Mangled function name (`TypeName__method_name`).
     mangled_name: &'a str,
     /// How `self` is received (value, shared ref, mutable ref).
-    self_kind: SelfKind,
+    /// `None` for associated functions (no `self` parameter).
+    self_kind: Option<SelfKind>,
 }
 
 /// Lower a single function (or method) definition to an `IrFn`.
@@ -399,25 +459,59 @@ struct MethodCtx<'a> {
 /// per the ARM64 ABI. We spill each parameter to a stack slot so that
 /// path expressions can reference them via `Load` — reusing the same
 /// infrastructure as let-binding locals.
+#[allow(clippy::too_many_arguments)]
 fn lower_fn(
     fn_def: &crate::ast::FnDef,
     source: &str,
     struct_defs: &HashMap<String, Vec<String>>,
     enum_defs: &EnumDefs,
     method_self_kinds: &HashMap<String, SelfKind>,
+    struct_return_fns: &HashMap<String, String>,
     method: Option<MethodCtx<'_>>,
-) -> Result<IrFn, LowerError> {
-    let impl_type = method.as_ref().map(|m| m.impl_type);
+    start_label: u32,
+) -> Result<(IrFn, u32), LowerError> {
+    // For associated functions, impl_type = None and self_kind = None.
+    let impl_type = method.as_ref().and_then(|m| m.impl_type);
     let override_name = method.as_ref().map(|m| m.mangled_name);
-    let self_kind = method.as_ref().map(|m| m.self_kind);
+    let self_kind = method.as_ref().and_then(|m| m.self_kind);
     let name = override_name
         .map(|s| s.to_owned())
         .unwrap_or_else(|| fn_def.name.text(source).to_owned());
 
     // FLS §9: "If no return type is specified, the return type is `()`."
-    let ret_ty = match &fn_def.ret_ty {
-        None => IrTy::Unit,
-        Some(ty) => lower_ty(ty, source)?,
+    // For associated functions returning a struct type, `lower_ty` would fail
+    // (struct names are not primitive IR types). Detect struct return separately.
+    //
+    // FLS §10.1: Associated functions may return the impl type or any other type.
+    let (ret_ty, struct_ret_name) = match &fn_def.ret_ty {
+        None => (IrTy::Unit, None),
+        Some(ty) => {
+            match lower_ty(ty, source) {
+                Ok(t) => (t, None),
+                Err(_) => {
+                    // Check if the return type is a known struct.
+                    if let TyKind::Path(segs) = &ty.kind {
+                        if segs.len() == 1 {
+                            let ret_name = segs[0].text(source);
+                            if struct_defs.contains_key(ret_name) {
+                                // Associated function returning a struct type.
+                                // Use Unit as a placeholder IrTy; the actual return
+                                // is handled via RetFields in the body lowering below.
+                                (IrTy::Unit, Some(ret_name.to_owned()))
+                            } else {
+                                return Err(LowerError::Unsupported(format!(
+                                    "return type `{ret_name}` (not a known struct or primitive)"
+                                )));
+                            }
+                        } else {
+                            return Err(LowerError::Unsupported("multi-segment return type".into()));
+                        }
+                    } else {
+                        return Err(LowerError::Unsupported("complex return type".into()));
+                    }
+                }
+            }
+        }
     };
 
     let body = match &fn_def.body {
@@ -429,7 +523,7 @@ fn lower_fn(
         Some(block) => block,
     };
 
-    let mut ctx = LowerCtx::new(source, ret_ty, struct_defs, enum_defs, method_self_kinds);
+    let mut ctx = LowerCtx::new(source, ret_ty, struct_defs, enum_defs, method_self_kinds, struct_return_fns, start_label);
 
     // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
     // to stack slots. Each parameter slot is allocated in parameter order
@@ -619,6 +713,78 @@ fn lower_fn(
         // Emit RetFields: loads each field from slot 0..n_fields-1 into x0..x{N-1}
         // then performs the normal epilogue.
         ctx.instrs.push(Instr::RetFields { base_slot: 0, n_fields });
+    } else if let Some(ref struct_name) = struct_ret_name {
+        // FLS §10.1: Associated function returning a struct type.
+        // The tail expression must be a struct literal. Lower all statements,
+        // then store the struct literal fields to consecutive slots, then emit
+        // RetFields to return them in x0..x{N-1}.
+        //
+        // ARM64 ABI: multiple return values packed into x0..x{N-1} (small structs).
+        // The call site uses CallMut-style write-back to store them into the
+        // destination variable's slots.
+        //
+        // FLS §10.1 AMBIGUOUS: The spec does not define the calling convention for
+        // returning struct types from associated functions. Galvanic uses the same
+        // register-packing convention as &mut self (fields in x0..x{N-1}).
+        //
+        // Cache-line note: N field stores (4 bytes each) + RetFields ldr sequence
+        // (N loads) = 2N instructions before the epilogue.
+        let field_names = struct_defs.get(struct_name.as_str())
+            .ok_or_else(|| LowerError::Unsupported(format!("unknown struct `{struct_name}`")))?
+            .clone();
+        let n_fields = field_names.len();
+
+        // Lower all statements.
+        for stmt in &body.stmts {
+            ctx.lower_stmt(stmt)?;
+        }
+
+        // The tail expression must be a struct literal.
+        let tail = body.tail.as_deref().ok_or_else(|| {
+            LowerError::Unsupported(format!(
+                "associated function returning `{struct_name}` must end with a struct literal"
+            ))
+        })?;
+        let ExprKind::StructLit { name: sn, fields: lit_fields } = &tail.kind else {
+            return Err(LowerError::Unsupported(format!(
+                "associated function returning `{struct_name}`: tail must be a struct literal"
+            )));
+        };
+
+        let actual_struct_name = sn.text(source);
+        if actual_struct_name != struct_name.as_str() {
+            return Err(LowerError::Unsupported(format!(
+                "associated function declared to return `{struct_name}` but tail is `{actual_struct_name}`"
+            )));
+        }
+
+        // Allocate consecutive slots for the return struct fields.
+        let base_slot = ctx.alloc_slot()?;
+        for _ in 1..n_fields {
+            ctx.alloc_slot()?;
+        }
+
+        // Store each field in declaration order.
+        // FLS §6.11: Field initializers evaluated in source order, stored in
+        // declaration order for layout stability.
+        for (field_idx, field_name) in field_names.iter().enumerate() {
+            let slot = base_slot + field_idx as u8;
+            let field_init = lit_fields
+                .iter()
+                .find(|(f, _)| f.text(source) == field_name.as_str())
+                .ok_or_else(|| {
+                    LowerError::Unsupported(format!(
+                        "missing field `{field_name}` in `{struct_name}` literal"
+                    ))
+                })?;
+            let val = ctx.lower_expr(&field_init.1, &IrTy::I32)?;
+            let src = ctx.val_to_reg(val)?;
+            ctx.instrs.push(Instr::Store { src, slot });
+        }
+
+        // Emit RetFields: loads fields from base_slot..base_slot+n_fields-1
+        // into x0..x{N-1} before the epilogue.
+        ctx.instrs.push(Instr::RetFields { base_slot, n_fields: n_fields as u8 });
     } else {
         ctx.lower_block(body, &ret_ty)?;
     }
@@ -626,7 +792,8 @@ fn lower_fn(
     let body_instrs = ctx.instrs;
     let stack_slots = ctx.next_slot;
     let saves_lr = ctx.has_calls;
-    Ok(IrFn { name, ret_ty, body: body_instrs, stack_slots, saves_lr })
+    let next_label = ctx.next_label;
+    Ok((IrFn { name, ret_ty, body: body_instrs, stack_slots, saves_lr }, next_label))
 }
 
 // ── Type lowering ────────────────────────────────────────────────────────────
@@ -779,6 +946,16 @@ struct LowerCtx<'src> {
     /// Cache-line note: read-only during lowering; not on any hot path.
     method_self_kinds: &'src HashMap<String, SelfKind>,
 
+    /// Struct-returning associated function registry: mangled name → struct type name.
+    ///
+    /// FLS §10.1: Associated functions that return a struct type use a
+    /// write-back calling convention (fields returned in x0..x{N-1}).
+    /// At the call site, this registry identifies such functions so the
+    /// caller can emit `CallMut`-style write-back into the destination slots.
+    ///
+    /// Cache-line note: read-only during lowering; not on any hot path.
+    struct_return_fns: &'src HashMap<String, String>,
+
     /// Maps a struct variable's base stack slot to its struct type name.
     ///
     /// FLS §6.13: Field access expressions need the struct type to compute
@@ -803,13 +980,15 @@ impl<'src> LowerCtx<'src> {
         struct_defs: &'src HashMap<String, Vec<String>>,
         enum_defs: &'src EnumDefs,
         method_self_kinds: &'src HashMap<String, SelfKind>,
+        struct_return_fns: &'src HashMap<String, String>,
+        start_label: u32,
     ) -> Self {
         LowerCtx {
             source,
             instrs: Vec::new(),
             next_reg: 0,
             next_slot: 0,
-            next_label: 0,
+            next_label: start_label,
             locals: HashMap::new(),
             has_calls: false,
             loop_stack: Vec::new(),
@@ -817,6 +996,7 @@ impl<'src> LowerCtx<'src> {
             struct_defs,
             enum_defs,
             method_self_kinds,
+            struct_return_fns,
             local_struct_types: HashMap::new(),
             local_enum_types: HashMap::new(),
         }
@@ -955,6 +1135,64 @@ impl<'src> LowerCtx<'src> {
             // the initializer (when present) is evaluated at runtime.
             StmtKind::Let { name, ty: _, init } => {
                 let var_name = name.text(self.source);
+
+                // FLS §10.1: Struct-returning associated function call as let-binding init.
+                //
+                // `let p = Point::new(x, y)` where `Point__new` is in `struct_return_fns`.
+                // The callee returns field values in x0..x{N-1} via RetFields.
+                // We allocate N consecutive slots for the variable and emit CallMut
+                // to write x0..x{N-1} into those slots after the bl.
+                //
+                // This is the same write-back mechanism used by &mut self methods,
+                // reused here for constructor-style associated functions.
+                //
+                // FLS §6.12.1: Call expressions. FLS §10.1: Associated functions.
+                // Cache-line note: arg moves + bl + N stores per construction.
+                if let Some(init_expr) = init.as_ref()
+                    && let ExprKind::Call { callee, args } = &init_expr.kind
+                    && let ExprKind::Path(segs) = &callee.kind
+                    && segs.len() == 2
+                {
+                    let type_name = segs[0].text(self.source);
+                    let fn_name_seg = segs[1].text(self.source);
+                    let mangled = format!("{type_name}__{fn_name_seg}");
+                    if let Some(struct_name) = self.struct_return_fns.get(&mangled).cloned() {
+                        let field_names = self.struct_defs
+                            .get(&struct_name)
+                            .ok_or_else(|| {
+                                LowerError::Unsupported(format!("unknown struct `{struct_name}`"))
+                            })?
+                            .clone();
+                        let n_fields = field_names.len();
+
+                        // Allocate N consecutive slots for the new struct variable.
+                        let base_slot = self.alloc_slot()?;
+                        for _ in 1..n_fields {
+                            self.alloc_slot()?;
+                        }
+                        self.locals.insert(var_name, base_slot);
+                        self.local_struct_types.insert(base_slot, struct_name.clone());
+
+                        // Evaluate arguments and collect their virtual registers.
+                        let mut arg_regs: Vec<u8> = Vec::new();
+                        for arg_expr in args.iter() {
+                            let val = self.lower_expr(arg_expr, &IrTy::I32)?;
+                            let reg = self.val_to_reg(val)?;
+                            arg_regs.push(reg);
+                        }
+
+                        self.has_calls = true;
+                        // Emit CallMut: args → bl → store x0..x{N-1} to base_slot..
+                        // The callee's RetFields has already put field values in x0..x{N-1}.
+                        self.instrs.push(Instr::CallMut {
+                            name: mangled,
+                            args: arg_regs,
+                            write_back_slot: base_slot,
+                            n_fields: n_fields as u8,
+                        });
+                        return Ok(());
+                    }
+                }
 
                 // FLS §6.11: Struct literal initializer — allocate one slot per
                 // field (consecutive) and store each field value.
@@ -2958,16 +3196,25 @@ impl<'src> LowerCtx<'src> {
                         segments[0].text(self.source).to_owned()
                     }
                     ExprKind::Path(segments) if segments.len() == 2 => {
-                        let en = segments[0].text(self.source);
-                        let vn = segments[1].text(self.source);
-                        if self.enum_defs.get(en).and_then(|v| v.get(vn)).is_some() {
+                        let tn = segments[0].text(self.source);
+                        let fn_seg = segments[1].text(self.source);
+                        // Check for enum variant constructor first.
+                        if self.enum_defs.get(tn).and_then(|v| v.get(fn_seg)).is_some() {
                             return Err(LowerError::Unsupported(format!(
-                                "enum variant `{en}::{vn}(...)` as expression; use in `let` binding"
+                                "enum variant `{tn}::{fn_seg}(...)` as expression; use in `let` binding"
                             )));
                         }
-                        return Err(LowerError::Unsupported(
-                            "two-segment path call on non-enum (function pointers not yet supported)".into(),
-                        ));
+                        let mangled = format!("{tn}__{fn_seg}");
+                        // Struct-returning associated functions cannot be used as scalar
+                        // expressions — the caller needs a destination slot.
+                        if self.struct_return_fns.contains_key(&mangled) {
+                            return Err(LowerError::Unsupported(format!(
+                                "`{tn}::{fn_seg}` returns a struct; use it in a `let` binding"
+                            )));
+                        }
+                        // FLS §10.1: Scalar-returning associated function call.
+                        // Resolve to the mangled name `TypeName__fn_name`.
+                        mangled
                     }
                     _ => {
                         return Err(LowerError::Unsupported(

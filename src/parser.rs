@@ -33,7 +33,7 @@
 use crate::ast::{
     BinOp, Block, EnumDef, EnumVariant, EnumVariantKind, Expr, ExprKind, FnDef, Item, ItemKind,
     NamedField, Param, SourceFile, Span, Stmt, StmtKind, StructDef, StructKind, Ty, TyKind,
-    TupleField, UnaryOp, Visibility, ImplDef,
+    TupleField, UnaryOp, Visibility, ImplDef, TraitDef,
 };
 use crate::lexer::{Token, TokenKind};
 
@@ -223,8 +223,13 @@ impl<'src> Parser<'src> {
                 let span = start.to(impl_def.span);
                 Ok(Item { kind: ItemKind::Impl(Box::new(impl_def)), span })
             }
+            TokenKind::KwTrait => {
+                let trait_def = self.parse_trait_def(vis)?;
+                let span = start.to(trait_def.span);
+                Ok(Item { kind: ItemKind::Trait(Box::new(trait_def)), span })
+            }
             kind => Err(self.error(format!(
-                "expected item (fn, struct, enum, impl, …), found {kind:?}"
+                "expected item (fn, struct, enum, impl, trait, …), found {kind:?}"
             ))),
         }
     }
@@ -289,9 +294,17 @@ impl<'src> Parser<'src> {
             None
         };
 
-        // Function body (required for non-extern/non-trait functions).
-        // FLS §9: the body must be a block expression.
-        let body = Some(self.parse_block()?);
+        // Function body: required for non-trait functions, optional for trait
+        // method signatures (which end with `;` instead of a block).
+        //
+        // FLS §9: The body is a block expression for normal functions.
+        // FLS §13: Trait method signatures omit the body; they end with `;`.
+        let body = if self.peek_kind() == TokenKind::Semi {
+            self.advance(); // eat `;`
+            None
+        } else {
+            Some(self.parse_block()?)
+        };
 
         Ok(FnDef { vis, name, self_param, params, ret_ty, body })
     }
@@ -312,15 +325,36 @@ impl<'src> Parser<'src> {
         let start = self.current_span();
         self.expect(TokenKind::KwImpl)?;
 
-        // The impl target must be a simple identifier.
+        // After `impl`, we expect an identifier. It is either:
+        //   (a) `impl TypeName {`            — inherent impl: trait_name = None
+        //   (b) `impl TraitName for TypeName {` — trait impl: trait_name = Some(…)
+        //
+        // FLS §11.1: Trait implementations have the form `impl Trait for Type`.
+        // FLS §11.2: Inherent implementations have the form `impl Type`.
         if self.peek_kind() != TokenKind::Ident {
             return Err(self.error(format!(
                 "expected type name after `impl`, found {:?}",
                 self.peek_kind()
             )));
         }
-        let ty = self.current_span();
+        let first_ident = self.current_span();
         self.advance();
+
+        // Disambiguate: if the next token is `for`, `first_ident` is the trait name.
+        let (trait_name, ty) = if self.peek_kind() == TokenKind::KwFor {
+            self.advance(); // eat `for`
+            if self.peek_kind() != TokenKind::Ident {
+                return Err(self.error(format!(
+                    "expected type name after `for`, found {:?}",
+                    self.peek_kind()
+                )));
+            }
+            let struct_ty = self.current_span();
+            self.advance();
+            (Some(first_ident), struct_ty)
+        } else {
+            (None, first_ident)
+        };
 
         self.expect(TokenKind::OpenBrace)?;
 
@@ -341,7 +375,63 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::CloseBrace)?;
         let span = start.to(end);
 
-        Ok(ImplDef { ty, methods, span })
+        Ok(ImplDef { ty, trait_name, methods, span })
+    }
+
+    /// Parse a trait definition.
+    ///
+    /// FLS §13: Traits.
+    ///
+    /// Grammar (simplified):
+    /// ```text
+    /// TraitDeclaration ::=
+    ///     Visibility? "trait" Identifier "{" TraitItem* "}"
+    /// TraitItem ::=
+    ///     Visibility? "fn" Identifier "(" TraitFunctionParams? ")" FunctionReturnType? ";"
+    /// ```
+    ///
+    /// Method signatures inside a trait body have no body — they end with `;`.
+    /// The `FnDef::body` field is `None` for trait method signatures.
+    ///
+    /// FLS §13 AMBIGUOUS: The FLS allows default method bodies in traits
+    /// (`fn foo(&self) -> i32 { 0 }`). This implementation only supports
+    /// signatures without a body (the common case for galvanic's milestone).
+    fn parse_trait_def(&mut self, _vis: Visibility) -> Result<TraitDef, ParseError> {
+        let start = self.current_span();
+        self.expect(TokenKind::KwTrait)?;
+
+        if self.peek_kind() != TokenKind::Ident {
+            return Err(self.error(format!(
+                "expected trait name after `trait`, found {:?}",
+                self.peek_kind()
+            )));
+        }
+        let name = self.current_span();
+        self.advance();
+
+        self.expect(TokenKind::OpenBrace)?;
+
+        let mut methods = Vec::new();
+        while self.peek_kind() != TokenKind::CloseBrace && self.peek_kind() != TokenKind::Eof {
+            let vis = self.parse_visibility();
+            if self.peek_kind() != TokenKind::KwFn {
+                return Err(self.error(format!(
+                    "expected `fn` inside trait body, found {:?}",
+                    self.peek_kind()
+                )));
+            }
+            // Parse the function signature. If the next token after the
+            // signature is `;`, consume it (body-less method signature).
+            // If it is `{`, parse the full body (default method — future work).
+            let method = self.parse_fn_def(vis)?;
+            methods.push(Box::new(method));
+        }
+
+        let end = self.current_span();
+        self.expect(TokenKind::CloseBrace)?;
+        let span = start.to(end);
+
+        Ok(TraitDef { name, methods, span })
     }
 
     /// Consume a `self`, `&self`, or `&mut self` parameter if present.
@@ -3990,5 +4080,98 @@ mod tests {
             }
             other => panic!("expected TupleStruct pattern, got {other:?}"),
         }
+    }
+
+    // ── Trait definition tests ────────────────────────────────────────────────
+
+    /// FLS §13: Simple trait definition with one method signature (no body).
+    ///
+    /// `trait Foo { fn bar(&self) -> i32; }` — one bodyless method signature.
+    #[test]
+    fn trait_definition_simple() {
+        use crate::ast::ItemKind;
+        let src = "trait Foo { fn bar(&self) -> i32; }";
+        let tokens = crate::lexer::tokenize(src).unwrap();
+        let sf = parse(&tokens, src).unwrap();
+        assert_eq!(sf.items.len(), 1);
+        let ItemKind::Trait(t) = &sf.items[0].kind else {
+            panic!("expected Trait item")
+        };
+        assert_eq!(t.name.text(src), "Foo");
+        assert_eq!(t.methods.len(), 1);
+        assert_eq!(t.methods[0].name.text(src), "bar");
+        assert!(t.methods[0].body.is_none(), "trait method should have no body");
+    }
+
+    /// FLS §13: Trait with multiple method signatures.
+    ///
+    /// `trait Shape { fn area(&self) -> i32; fn perimeter(&self) -> i32; }`
+    #[test]
+    fn trait_multiple_methods() {
+        use crate::ast::ItemKind;
+        let src = "trait Shape { fn area(&self) -> i32; fn perimeter(&self) -> i32; }";
+        let tokens = crate::lexer::tokenize(src).unwrap();
+        let sf = parse(&tokens, src).unwrap();
+        let ItemKind::Trait(t) = &sf.items[0].kind else {
+            panic!("expected Trait item")
+        };
+        assert_eq!(t.methods.len(), 2);
+        assert_eq!(t.methods[0].name.text(src), "area");
+        assert_eq!(t.methods[1].name.text(src), "perimeter");
+    }
+
+    /// FLS §11.1: `impl Trait for Type` — trait implementation parsed correctly.
+    ///
+    /// The `ImplDef.ty` must be the struct type (`Foo`), and `ImplDef.trait_name`
+    /// must be the trait name (`Bar`).
+    #[test]
+    fn impl_trait_for_type() {
+        use crate::ast::ItemKind;
+        let src = "impl Bar for Foo { fn method(&self) -> i32 { 1 } }";
+        let tokens = crate::lexer::tokenize(src).unwrap();
+        let sf = parse(&tokens, src).unwrap();
+        let ItemKind::Impl(imp) = &sf.items[0].kind else {
+            panic!("expected Impl item")
+        };
+        assert_eq!(imp.ty.text(src), "Foo", "ty should be the struct");
+        assert!(imp.trait_name.is_some(), "trait_name should be Some");
+        assert_eq!(imp.trait_name.unwrap().text(src), "Bar");
+        assert_eq!(imp.methods.len(), 1);
+        assert!(imp.methods[0].body.is_some(), "impl method must have a body");
+    }
+
+    /// FLS §11.2: Inherent impl still parses correctly (no regression).
+    ///
+    /// `impl Foo { fn method(&self) -> i32 { 1 } }` — `trait_name` is `None`.
+    #[test]
+    fn impl_inherent_has_no_trait_name() {
+        use crate::ast::ItemKind;
+        let src = "impl Foo { fn method(&self) -> i32 { 1 } }";
+        let tokens = crate::lexer::tokenize(src).unwrap();
+        let sf = parse(&tokens, src).unwrap();
+        let ItemKind::Impl(imp) = &sf.items[0].kind else {
+            panic!("expected Impl item")
+        };
+        assert_eq!(imp.ty.text(src), "Foo");
+        assert!(imp.trait_name.is_none(), "inherent impl has no trait name");
+    }
+
+    /// FLS §13 + §11.1: Trait definition followed by impl trait for type.
+    ///
+    /// Both items are parsed; the file has 3 items total: trait, struct, impl.
+    #[test]
+    fn trait_definition_and_impl() {
+        use crate::ast::ItemKind;
+        let src = r#"
+trait Area { fn area(&self) -> i32; }
+struct Square { side: i32 }
+impl Area for Square { fn area(&self) -> i32 { self.side * self.side } }
+"#;
+        let tokens = crate::lexer::tokenize(src).unwrap();
+        let sf = parse(&tokens, src).unwrap();
+        assert_eq!(sf.items.len(), 3);
+        assert!(matches!(sf.items[0].kind, ItemKind::Trait(_)));
+        assert!(matches!(sf.items[1].kind, ItemKind::Struct(_)));
+        assert!(matches!(sf.items[2].kind, ItemKind::Impl(_)));
     }
 }
