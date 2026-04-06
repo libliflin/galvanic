@@ -3004,3 +3004,78 @@ fn runtime_if_let_emits_comparison_and_cbz() {
     );
     assert!(asm.contains("cbz"), "expected cbz for if-let conditional branch");
 }
+
+// ── Milestone 37: while-let loops ────────────────────────────────────────────
+//
+// FLS §6.15.4: "A while let loop expression is syntactic sugar for a loop
+// expression containing a match expression that breaks on mismatch."
+// The loop type is `()`. `break` exits; `continue` re-evaluates the scrutinee.
+
+/// Milestone 37: while-let literal pattern — loop while scrutinee matches.
+///
+/// FLS §6.15.4: pattern is checked before each iteration; exits when no match.
+#[test]
+fn milestone_37_while_let_literal_exits_on_mismatch() {
+    // Counter starts at 1; loop runs while x == 1; after body x becomes 2.
+    let src = "fn main() -> i32 { let mut x = 1; let mut r = 0; while let 1 = x { r = 5; x = 2; } r }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "expected loop body to run once setting r=5, got {exit_code}");
+}
+
+/// Milestone 37: while-let literal pattern — body never runs when mismatch immediately.
+///
+/// FLS §6.15.4: condition is checked before the first iteration.
+#[test]
+fn milestone_37_while_let_no_match_initially() {
+    let src = "fn main() -> i32 { let x = 2; let mut r = 0; while let 1 = x { r = 99; } r }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected loop body to never run, got {exit_code}");
+}
+
+/// Milestone 37: while-let identifier pattern — binds scrutinee each iteration.
+///
+/// FLS §5.1.4 + §6.15.4: identifier pattern always matches; binding is fresh
+/// each iteration.
+#[test]
+fn milestone_37_while_let_ident_counts() {
+    // Counts from 0 to 4 (5 iterations) using while-let with ident pattern.
+    // The ident pattern always matches so the loop runs until the break.
+    let src = "fn main() -> i32 { let mut i = 0; while let v = i { if v >= 5 { break; } i = i + 1; } i }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "expected i=5 after loop, got {exit_code}");
+}
+
+/// Milestone 37: while-let with range pattern — loop while value in range.
+///
+/// FLS §5.1.9 + §6.15.4: range patterns are valid in while-let position.
+#[test]
+fn milestone_37_while_let_range_counts() {
+    // Loop while x is in 1..=3; body increments x.
+    let src = "fn main() -> i32 { let mut x = 1; let mut count = 0; while let 1..=3 = x { count = count + 1; x = x + 1; } count }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "expected 3 iterations (x=1,2,3), got {exit_code}");
+}
+
+/// Milestone 37: while-let on a function parameter-derived value.
+///
+/// FLS §6.15.4: The scrutinee can be any expression.
+#[test]
+fn milestone_37_while_let_on_parameter() {
+    // sum_down: while n matches 1..=100, add n to acc then decrement n.
+    let src = "fn sum_down(mut n: i32) -> i32 { let mut acc = 0; while let 1..=100 = n { acc = acc + n; n = n - 1; } acc }\nfn main() -> i32 { sum_down(5) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 15, "expected sum 1+2+3+4+5=15, got {exit_code}");
+}
+
+/// Milestone 37: assembly inspection — while-let emits back-edge branch and cbz.
+///
+/// FLS §6.15.4: Must emit runtime loop structure, not constant-fold.
+/// FLS §6.1.2:37–45: Back-edge is a runtime branch instruction.
+#[test]
+fn runtime_while_let_emits_back_edge_and_cbz() {
+    let src = "fn main() -> i32 { let mut x = 0; while let 0 = x { x = 1; } x }\n";
+    let asm = compile_to_asm(src);
+    assert!(asm.contains("cbz"), "expected cbz for while-let pattern check");
+    // Back-edge: unconditional branch back to loop header (`b` followed by label).
+    assert!(asm.contains("b ") && asm.contains(".L"), "expected back-edge branch for while-let loop");
+}

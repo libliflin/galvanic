@@ -99,6 +99,9 @@ fn expr_contains_call(expr: &Expr) -> bool {
         ExprKind::While { cond, body } => {
             expr_contains_call(cond) || block_contains_call(body)
         }
+        ExprKind::WhileLet { scrutinee, body, .. } => {
+            expr_contains_call(scrutinee) || block_contains_call(body)
+        }
         ExprKind::Loop(body) => block_contains_call(body),
         ExprKind::Break(opt_val) => opt_val.as_ref().is_some_and(|e| expr_contains_call(e)),
         ExprKind::Return(opt_val) => opt_val.as_ref().is_some_and(|e| expr_contains_call(e)),
@@ -181,7 +184,7 @@ fn expr_contains_break_with_value(expr: &Expr) -> bool {
                 || arms.iter().any(|a| expr_contains_break_with_value(&a.body))
         }
         // Do NOT recurse into nested loops — their `break` belongs to them.
-        ExprKind::Loop(_) | ExprKind::While { .. } | ExprKind::For { .. } => false,
+        ExprKind::Loop(_) | ExprKind::While { .. } | ExprKind::WhileLet { .. } | ExprKind::For { .. } => false,
         _ => false,
     }
 }
@@ -2051,6 +2054,256 @@ impl<'src> LowerCtx<'src> {
                 self.loop_stack.pop();
 
                 // FLS §6.15.3: "The type of a while expression is the unit type ()."
+                Ok(IrValue::Unit)
+            }
+
+            // FLS §6.15.4: While-let loop expression.
+            //
+            // `while let Pattern = scrutinee { body }`
+            //
+            // FLS §6.15.4: "A while let loop expression is syntactic sugar for
+            // a loop expression containing a match expression that breaks on
+            // mismatch." Lowered directly to a header + pattern-check + body
+            // structure for clarity and efficiency.
+            //
+            // Lowering strategy:
+            //   1. Emit header_label (back-edge target for both continue and
+            //      each new iteration).
+            //   2. Lower scrutinee → spill to scrut_slot (re-evaluated each
+            //      iteration, consistent with FLS §6.1.2:37–45).
+            //   3. Pattern check: emit comparison and CondBranch to exit_label
+            //      on no-match (same logic as IfLet pattern check).
+            //   4. Install identifier binding (if any) before the body.
+            //   5. Lower the body as unit.
+            //   6. Remove binding (if any).
+            //   7. Branch to header_label.
+            //   8. Emit exit_label.
+            //   9. Return Unit — FLS §6.15.4 says the loop type is `()`.
+            //
+            // `break` in body → exit_label (no break-with-value).
+            // `continue` in body → header_label (re-evaluates scrutinee).
+            //
+            // FLS §6.15.6: while-let does not support break-with-value.
+            // FLS §6.1.2:37–45: All checks emit runtime instructions.
+            // Cache-line note: loop header costs ~2 instr (str scrut + pattern
+            // cmp) plus body; back-edge is 1 branch (4 bytes).
+            ExprKind::WhileLet { pat, scrutinee, body } => {
+                let header_label = self.alloc_label();
+                let exit_label = self.alloc_label();
+
+                // Push loop context — while-let has no break-with-value.
+                // FLS §6.15.4, §6.15.6.
+                self.loop_stack.push(LoopCtx {
+                    header_label,
+                    exit_label,
+                    break_slot: None,
+                    break_ret_ty: IrTy::Unit,
+                });
+
+                self.instrs.push(Instr::Label(header_label));
+
+                // Infer scrutinee type from the pattern.
+                let scrut_ty = match pat {
+                    Pat::LitBool(_) => IrTy::Bool,
+                    Pat::Or(alts) if alts.iter().any(|p| matches!(p, Pat::LitBool(_))) => {
+                        IrTy::Bool
+                    }
+                    _ => IrTy::I32,
+                };
+                let scrut_val = self.lower_expr(scrutinee, &scrut_ty)?;
+                let scrut_reg = self.val_to_reg(scrut_val)?;
+                let scrut_slot = self.alloc_slot()?;
+                self.instrs.push(Instr::Store { src: scrut_reg, slot: scrut_slot });
+
+                // Pattern check — branch to exit_label on mismatch.
+                // Uses the same per-pattern logic as IfLet.
+                // FLS §6.15.4: mismatch breaks out of the loop.
+                match pat {
+                    Pat::Wildcard | Pat::Ident(_) => {
+                        // Always matches — no conditional branch.
+                    }
+                    Pat::LitInt(n) => {
+                        let s_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                        let p_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(p_reg, *n as i32));
+                        let eq_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::BinOp {
+                            op: IrBinOp::Eq,
+                            dst: eq_reg,
+                            lhs: s_reg,
+                            rhs: p_reg,
+                        });
+                        self.instrs.push(Instr::CondBranch { reg: eq_reg, label: exit_label });
+                    }
+                    Pat::NegLitInt(n) => {
+                        let s_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                        let p_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(p_reg, -(*n as i32)));
+                        let eq_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::BinOp {
+                            op: IrBinOp::Eq,
+                            dst: eq_reg,
+                            lhs: s_reg,
+                            rhs: p_reg,
+                        });
+                        self.instrs.push(Instr::CondBranch { reg: eq_reg, label: exit_label });
+                    }
+                    Pat::LitBool(b) => {
+                        let s_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                        let p_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(p_reg, *b as i32));
+                        let eq_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::BinOp {
+                            op: IrBinOp::Eq,
+                            dst: eq_reg,
+                            lhs: s_reg,
+                            rhs: p_reg,
+                        });
+                        self.instrs.push(Instr::CondBranch { reg: eq_reg, label: exit_label });
+                    }
+                    Pat::RangeInclusive { lo, hi } => {
+                        let s_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                        let lo_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(lo_reg, *lo as i32));
+                        let cmp1 = self.alloc_reg()?;
+                        self.instrs.push(Instr::BinOp {
+                            op: IrBinOp::Ge,
+                            dst: cmp1,
+                            lhs: s_reg,
+                            rhs: lo_reg,
+                        });
+                        let hi_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
+                        let cmp2 = self.alloc_reg()?;
+                        self.instrs.push(Instr::BinOp {
+                            op: IrBinOp::Le,
+                            dst: cmp2,
+                            lhs: s_reg,
+                            rhs: hi_reg,
+                        });
+                        let matched = self.alloc_reg()?;
+                        self.instrs.push(Instr::BinOp {
+                            op: IrBinOp::BitAnd,
+                            dst: matched,
+                            lhs: cmp1,
+                            rhs: cmp2,
+                        });
+                        self.instrs.push(Instr::CondBranch { reg: matched, label: exit_label });
+                    }
+                    Pat::RangeExclusive { lo, hi } => {
+                        let s_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                        let lo_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(lo_reg, *lo as i32));
+                        let cmp1 = self.alloc_reg()?;
+                        self.instrs.push(Instr::BinOp {
+                            op: IrBinOp::Ge,
+                            dst: cmp1,
+                            lhs: s_reg,
+                            rhs: lo_reg,
+                        });
+                        let hi_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
+                        let cmp2 = self.alloc_reg()?;
+                        self.instrs.push(Instr::BinOp {
+                            op: IrBinOp::Lt,
+                            dst: cmp2,
+                            lhs: s_reg,
+                            rhs: hi_reg,
+                        });
+                        let matched = self.alloc_reg()?;
+                        self.instrs.push(Instr::BinOp {
+                            op: IrBinOp::BitAnd,
+                            dst: matched,
+                            lhs: cmp1,
+                            rhs: cmp2,
+                        });
+                        self.instrs.push(Instr::CondBranch { reg: matched, label: exit_label });
+                    }
+                    Pat::Or(alts) => {
+                        let matched_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(matched_reg, 0));
+                        for alt in alts {
+                            match alt {
+                                Pat::Wildcard => {
+                                    self.instrs.push(Instr::LoadImm(matched_reg, 1));
+                                    break;
+                                }
+                                Pat::Or(_) | Pat::Ident(_) => {
+                                    return Err(LowerError::Unsupported(
+                                        "nested OR or identifier inside while-let OR pattern".into(),
+                                    ));
+                                }
+                                _ => {
+                                    let alt_imm = match alt {
+                                        Pat::LitInt(n) => *n as i32,
+                                        Pat::NegLitInt(n) => -(*n as i32),
+                                        Pat::LitBool(b) => *b as i32,
+                                        _ => unreachable!(),
+                                    };
+                                    let si_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::Load {
+                                        dst: si_reg,
+                                        slot: scrut_slot,
+                                    });
+                                    let alt_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::LoadImm(alt_reg, alt_imm));
+                                    let eq_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::BinOp {
+                                        op: IrBinOp::Eq,
+                                        dst: eq_reg,
+                                        lhs: si_reg,
+                                        rhs: alt_reg,
+                                    });
+                                    self.instrs.push(Instr::BinOp {
+                                        op: IrBinOp::BitOr,
+                                        dst: matched_reg,
+                                        lhs: matched_reg,
+                                        rhs: eq_reg,
+                                    });
+                                }
+                            }
+                        }
+                        self.instrs.push(Instr::CondBranch {
+                            reg: matched_reg,
+                            label: exit_label,
+                        });
+                    }
+                }
+
+                // Install identifier binding (if any) — in scope for body only.
+                // FLS §5.1.4: identifier pattern binds the scrutinee.
+                let binding_name: Option<&str> = if let Pat::Ident(span) = pat {
+                    let name = span.text(self.source);
+                    let bind_slot = self.alloc_slot()?;
+                    let bind_reg = self.alloc_reg()?;
+                    self.instrs.push(Instr::Load { dst: bind_reg, slot: scrut_slot });
+                    self.instrs.push(Instr::Store { src: bind_reg, slot: bind_slot });
+                    self.locals.insert(name, bind_slot);
+                    Some(name)
+                } else {
+                    None
+                };
+
+                // Execute body.
+                self.lower_block_to_value(body, &IrTy::Unit)?;
+
+                // Remove binding before back-edge.
+                if let Some(name) = binding_name {
+                    self.locals.remove(name);
+                }
+
+                // Back-edge: re-evaluate scrutinee and re-check pattern.
+                self.instrs.push(Instr::Branch(header_label));
+
+                self.instrs.push(Instr::Label(exit_label));
+                self.loop_stack.pop();
+
+                // FLS §6.15.4: "The type of a while let loop expression is the unit type ()."
                 Ok(IrValue::Unit)
             }
 

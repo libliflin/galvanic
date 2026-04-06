@@ -619,6 +619,25 @@ pub enum ExprKind {
         body: Box<Block>,
     },
 
+    /// A while-let loop expression. FLS §6.15.4.
+    ///
+    /// `while let Pattern = Expr { body }`
+    ///
+    /// FLS §6.15.4: "A while let loop expression is syntactic sugar for a loop
+    /// expression containing a match expression that breaks on mismatch."
+    /// The loop evaluates to `()`.
+    ///
+    /// Cache-line note: lowered to a loop header + pattern-match check + body,
+    /// same instruction count as a `while` loop plus a pattern comparison.
+    WhileLet {
+        /// The pattern to test each iteration.
+        pat: Pat,
+        /// The value being matched on each iteration.
+        scrutinee: Box<Expr>,
+        /// The loop body, executed when the pattern matches.
+        body: Box<Block>,
+    },
+
     /// A for loop expression. FLS §6.8.3.
     ///
     /// `for pat in iter { body }`

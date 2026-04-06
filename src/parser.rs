@@ -682,6 +682,7 @@ impl<'src> Parser<'src> {
                 | ExprKind::IfLet { .. }
                 | ExprKind::Loop(_)
                 | ExprKind::While { .. }
+                | ExprKind::WhileLet { .. }
                 | ExprKind::For { .. }
                 | ExprKind::Match { .. }
         );
@@ -1708,6 +1709,18 @@ impl<'src> Parser<'src> {
     fn parse_while_expr(&mut self) -> Result<Expr, ParseError> {
         let start = self.current_span();
         self.expect(TokenKind::KwWhile)?;
+
+        // FLS §6.15.4: while-let expression — `while let Pattern = Expr { body }`
+        if self.eat(TokenKind::KwLet) {
+            let pat = self.parse_pattern()?;
+            self.expect(TokenKind::Eq)?;
+            let scrutinee = Box::new(self.parse_expr()?);
+            let body = Box::new(self.parse_block()?);
+            let span = start.to(body.span);
+            return Ok(Expr { kind: ExprKind::WhileLet { pat, scrutinee, body }, span });
+        }
+
+        // FLS §6.15.3: regular while expression.
         let cond = Box::new(self.parse_expr()?);
         let body = Box::new(self.parse_block()?);
         let span = start.to(body.span);
@@ -3147,6 +3160,50 @@ mod tests {
             panic!("expected expr stmt");
         };
         assert!(matches!(while_expr.kind, ExprKind::While { .. }));
+    }
+
+    #[test]
+    fn while_let_literal_pattern() {
+        // FLS §6.15.4: `while let Pat = expr { body }` — loops while pattern matches.
+        let src = "fn f() { while let 1 = x {} }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        let tail = body.tail.as_ref().expect("expected while-let as tail");
+        assert!(
+            matches!(tail.kind, ExprKind::WhileLet { pat: Pat::LitInt(1), .. }),
+            "expected WhileLet with LitInt(1) pattern, got {:?}",
+            tail.kind
+        );
+    }
+
+    #[test]
+    fn while_let_ident_pattern() {
+        // FLS §6.15.4 + §5.1.4: `while let v = expr { body }` — identifier pattern.
+        let src = "fn f() { while let v = next() {} }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        let tail = body.tail.as_ref().expect("expected while-let as tail");
+        assert!(
+            matches!(tail.kind, ExprKind::WhileLet { pat: Pat::Ident(_), .. }),
+            "expected WhileLet with Ident pattern"
+        );
+    }
+
+    #[test]
+    fn while_let_as_stmt() {
+        // FLS §6.15.4: while-let (expression-with-block) in statement position
+        // does not require a trailing semicolon.
+        let src = "fn f() { while let 0 = x {} let y = 1; }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        assert_eq!(body.stmts.len(), 2);
+        let StmtKind::Expr(ref wl_expr) = body.stmts[0].kind else {
+            panic!("expected expr stmt");
+        };
+        assert!(matches!(wl_expr.kind, ExprKind::WhileLet { .. }));
     }
 
     #[test]
