@@ -5782,6 +5782,34 @@ impl<'src> LowerCtx<'src> {
                             let reg = self.val_to_reg(val)?;
                             arg_regs.push(reg);
                         }
+                    } else if let ExprKind::Call { callee: ctor_callee, args: ctor_args } = &arg.kind
+                        && let ExprKind::Path(ctor_segs) = &ctor_callee.kind
+                        && ctor_segs.len() == 1
+                        && let Some(&n_fields) = self.tuple_struct_defs.get(ctor_segs[0].text(self.source))
+                    {
+                        // FLS §14.2 + §6.12.1: Tuple struct constructor used directly as a
+                        // function argument — e.g., `sum(Point(5, 8))`.
+                        //
+                        // Inline-evaluate each positional argument and pass the results as
+                        // separate registers. This mirrors the tuple struct parameter calling
+                        // convention set up in `lower_fn` (field 0 → x{i}, field 1 → x{i+1},
+                        // …) without allocating a named slot or emitting a `bl` to a
+                        // (non-existent) constructor function.
+                        //
+                        // FLS §6.1.2:37–45: All evaluations emit runtime instructions.
+                        // Cache-line note: N field registers = N × 4-byte load/mov instructions.
+                        let ctor_name = ctor_segs[0].text(self.source);
+                        if ctor_args.len() != n_fields {
+                            return Err(LowerError::Unsupported(format!(
+                                "constructor `{ctor_name}` called with {} args but expects {n_fields}",
+                                ctor_args.len()
+                            )));
+                        }
+                        for ctor_arg in ctor_args {
+                            let val = self.lower_expr(ctor_arg, &IrTy::I32)?;
+                            let reg = self.val_to_reg(val)?;
+                            arg_regs.push(reg);
+                        }
                     } else if let ExprKind::StructLit {
                         name: struct_name_span,
                         fields: lit_fields,
