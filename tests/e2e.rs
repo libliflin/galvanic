@@ -3079,3 +3079,112 @@ fn runtime_while_let_emits_back_edge_and_cbz() {
     // Back-edge: unconditional branch back to loop header (`b` followed by label).
     assert!(asm.contains("b ") && asm.contains(".L"), "expected back-edge branch for while-let loop");
 }
+
+// ── Milestone 38: struct construction + field access (FLS §6.11, §6.13) ────────
+
+/// Milestone 38: simplest struct — two i32 fields, access by name.
+///
+/// FLS §6.11: Struct expression constructs the struct on the stack.
+/// FLS §6.13: Field access loads from the correct stack slot.
+#[test]
+fn milestone_38_struct_field_access() {
+    let src = "struct Point { x: i32, y: i32 }\nfn main() -> i32 { let p = Point { x: 3, y: 4 }; p.x + p.y }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected p.x + p.y = 3 + 4 = 7, got {exit_code}");
+}
+
+/// Milestone 38: first field only.
+///
+/// FLS §6.13: The first field is at `base_slot + 0`.
+#[test]
+fn milestone_38_struct_first_field() {
+    let src = "struct Pair { a: i32, b: i32 }\nfn main() -> i32 { let p = Pair { a: 42, b: 1 }; p.a }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected p.a = 42, got {exit_code}");
+}
+
+/// Milestone 38: second field only.
+///
+/// FLS §6.13: The second field is at `base_slot + 1`.
+#[test]
+fn milestone_38_struct_second_field() {
+    let src = "struct Pair { a: i32, b: i32 }\nfn main() -> i32 { let p = Pair { a: 1, b: 99 }; p.b }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 99, "expected p.b = 99, got {exit_code}");
+}
+
+/// Milestone 38: struct field used in arithmetic.
+///
+/// FLS §6.13: Field access produces an i32 value usable as an operand.
+#[test]
+fn milestone_38_struct_field_in_arithmetic() {
+    let src = "struct Rect { w: i32, h: i32 }\nfn main() -> i32 { let r = Rect { w: 6, h: 7 }; r.w * r.h }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected w * h = 6 * 7 = 42, got {exit_code}");
+}
+
+/// Milestone 38: struct fields accessed after let bindings (mixed stack).
+///
+/// FLS §8.1 + §6.13: Struct slots must not alias other locals on the stack.
+#[test]
+fn milestone_38_struct_with_other_locals() {
+    let src = "struct Point { x: i32, y: i32 }\nfn main() -> i32 { let offset = 10; let p = Point { x: 3, y: 4 }; p.x + p.y + offset }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 17, "expected 3 + 4 + 10 = 17, got {exit_code}");
+}
+
+/// Milestone 38: struct passed to a function that accepts its fields.
+///
+/// FLS §9 + §6.13: Field access works when the struct is defined in a called context.
+#[test]
+fn milestone_38_struct_field_passed_to_fn() {
+    let src = "struct Point { x: i32, y: i32 }\nfn sum(a: i32, b: i32) -> i32 { a + b }\nfn main() -> i32 { let p = Point { x: 10, y: 20 }; sum(p.x, p.y) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 30, "expected sum(10, 20) = 30, got {exit_code}");
+}
+
+/// Milestone 38: struct initializer fields in non-declaration order.
+///
+/// FLS §6.11: Field initializers may appear in any order in the source.
+/// Galvanic normalises to declaration order for storage.
+#[test]
+fn milestone_38_struct_fields_out_of_order() {
+    let src = "struct Point { x: i32, y: i32 }\nfn main() -> i32 { let p = Point { y: 9, x: 5 }; p.x - p.y }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 252, "expected 5 - 9 = -4 (wraps to 252 as u8 exit code), got {exit_code}");
+}
+
+/// Milestone 38: three-field struct.
+///
+/// FLS §6.11: Structs with more than two fields allocate additional slots.
+#[test]
+fn milestone_38_three_field_struct() {
+    let src = "struct Triple { a: i32, b: i32, c: i32 }\nfn main() -> i32 { let t = Triple { a: 1, b: 2, c: 3 }; t.a + t.b + t.c }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "expected 1 + 2 + 3 = 6, got {exit_code}");
+}
+
+/// Milestone 38: assembly inspection — struct literal emits str instructions.
+///
+/// FLS §6.11: Must emit runtime store instructions, not fold at compile time.
+/// FLS §6.1.2:37–45: Struct construction emits runtime stores.
+#[test]
+fn runtime_struct_lit_emits_stores() {
+    let src = "struct Point { x: i32, y: i32 }\nfn main() -> i32 { let p = Point { x: 3, y: 4 }; p.x + p.y }\n";
+    let asm = compile_to_asm(src);
+    // Two str instructions for the two fields.
+    let store_count = asm.lines().filter(|l| l.trim().starts_with("str")).count();
+    assert!(store_count >= 2, "expected ≥2 str instructions for struct fields, got {store_count}");
+}
+
+/// Milestone 38: assembly inspection — field access emits ldr instructions.
+///
+/// FLS §6.13: Field access must emit runtime load instructions.
+#[test]
+fn runtime_field_access_emits_ldr() {
+    let src = "struct Point { x: i32, y: i32 }\nfn main() -> i32 { let p = Point { x: 3, y: 4 }; p.x + p.y }\n";
+    let asm = compile_to_asm(src);
+    // Two ldr instructions for p.x and p.y (plus possibly the add operands).
+    let load_count = asm.lines().filter(|l| l.trim().starts_with("ldr")).count();
+    assert!(load_count >= 2, "expected ≥2 ldr instructions for field accesses, got {load_count}");
+}

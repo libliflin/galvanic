@@ -291,3 +291,30 @@ fn match_ident_pattern(x: i32) -> i32 {
     }
 }
 
+
+// FLS §6.11 — Struct expressions.
+//
+// FLS §6.11: "A struct expression constructs an instance of a struct type."
+// The field initialisers may appear in any order; the fields are stored in
+// declaration order.
+//
+// Note: FLS §6.11 does not provide a self-contained runnable code example.
+// This function is derived from the spec's semantic description.
+struct TestPoint { x: i32, y: i32 }
+
+fn struct_expr_example() -> i32 {
+    let p = TestPoint { x: 10, y: 20 };
+    p.x + p.y   // FLS §6.13: field access — loads x then y
+}
+
+// FLS §6.13 — Field access expressions.
+//
+// FLS §6.13: "A field access expression evaluates the receiver operand and
+// then accesses one of its fields."
+//
+// Note: FLS §6.13 does not provide a self-contained runnable code example.
+// This function is derived from the spec's semantic description.
+fn field_access_example() -> i32 {
+    let r = TestPoint { x: 6, y: 7 };
+    r.x * r.y   // FLS §6.13: field access on both fields
+}
