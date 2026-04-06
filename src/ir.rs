@@ -292,6 +292,27 @@ pub enum Instr {
         src: u8,
     },
 
+    /// Bitwise NOT: `dst = !src` (complement all bits).
+    ///
+    /// `Not { dst, src }` → `mvn x{dst}, x{src}` on ARM64.
+    ///
+    /// FLS §6.5.4: Negation operator expressions. The unary `!` applied to
+    /// an integer value produces its bitwise complement. For `i32`, this flips
+    /// all 32 bits: `!0` = `-1`, `!5` = `-6`.
+    ///
+    /// FLS §6.5.4: "The type of a negation expression is the type of the operand."
+    ///
+    /// FLS §6.1.2:37–45: Even `!literal` in a non-const context must emit a
+    /// runtime instruction, not fold to a complemented immediate.
+    ///
+    /// Cache-line note: ARM64 `mvn` is a 4-byte instruction (alias for orn xD, xzr, xS).
+    Not {
+        /// Destination register (receives the bitwise complement).
+        dst: u8,
+        /// Source register (holds the value to complement).
+        src: u8,
+    },
+
     /// Call a named function with arguments; result goes into a virtual register.
     ///
     /// `Call { dst, name, args }` emits (for each arg[i] ≠ i):

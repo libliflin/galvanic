@@ -343,6 +343,19 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool) 
             )?;
         }
 
+        // FLS §6.5.4: Bitwise NOT `!operand` — complement all bits.
+        // ARM64: `mvn x{dst}, x{src}` (alias for `orn xD, xzr, xS`).
+        // The GNU assembler accepts `mvn` directly; it encodes as a 4-byte instruction.
+        //
+        // FLS §6.1.2:37–45: Runtime instruction — no constant folding.
+        // Cache-line note: one 4-byte instruction, same footprint as `neg`.
+        Instr::Not { dst, src } => {
+            writeln!(
+                out,
+                "    mvn     x{dst}, x{src}               // FLS §6.5.4: bitwise NOT x{src}"
+            )?;
+        }
+
         // FLS §8.1: Store a virtual register to a stack slot.
         // ARM64: `str x{src}, [sp, #{offset}]` — offset = slot * 8.
         // Cache-line note: 8-byte slots keep stores naturally aligned;
