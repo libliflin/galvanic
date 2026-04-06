@@ -918,6 +918,19 @@ shadow_example:
     add     sp, sp, #32             // FLS §8.1: restore stack frame
     ret
 
+    // fn deref_ref_example — FLS §9
+    .global deref_ref_example
+deref_ref_example:
+    sub     sp, sp, #16             // FLS §8.1: frame for 2 slot(s)
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    add     x0, sp, #0                   // FLS §6.5.1: address of stack slot 0
+    str     x0, [sp, #8              ] // FLS §8.1: store slot 1
+    ldr     x1, [sp, #8              ] // FLS §8.1: load slot 1
+    ldr     x2, [x1]           // FLS §6.5.2: deref pointer in x1
+    mov     x0, x2              // FLS §6.19: return reg 2 → x0
+    add     sp, sp, #16             // FLS §8.1: restore stack frame
+    ret
+
     // ELF entry point — FLS §18.1
     .global _start
 _start:
