@@ -113,3 +113,22 @@ fn use_call() -> i32 {
 fn add_two(a: i32, b: i32) -> i32 {
     a + b
 }
+
+// FLS §6.5.11 — Compound assignment expressions
+// No direct FLS example provided; derived from the semantic description:
+// "A compound assignment expression combines a binary operator expression
+//  with an assignment expression." (FLS §6.5.11)
+fn compound_assign_example() -> i32 {
+    let mut x = 5;
+    x += 3;    // x = 8  (FLS §6.5.11: +=)
+    x -= 1;    // x = 7  (FLS §6.5.11: -=)
+    x *= 2;    // x = 14 (FLS §6.5.11: *=)
+    x /= 2;    // x = 7  (FLS §6.5.11: /=)
+    x %= 3;    // x = 1  (FLS §6.5.11: %=)
+    x &= 3;    // x = 1  (FLS §6.5.11: &=)
+    x |= 4;    // x = 5  (FLS §6.5.11: |=)
+    x ^= 2;    // x = 7  (FLS §6.5.11: ^=)
+    x <<= 1;   // x = 14 (FLS §6.5.11: <<=)
+    x >>= 1;   // x = 7  (FLS §6.5.11: >>=)
+    x
+}

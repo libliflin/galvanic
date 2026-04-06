@@ -759,6 +759,77 @@ impl<'src> LowerCtx<'src> {
                 Ok(IrValue::Unit)
             }
 
+            // FLS §6.5.11: Compound assignment expression `target op= value`.
+            //
+            // Desugars at the IR level to: load target, binop, store target.
+            // No new IR instructions needed — reuses Load, BinOp, Store.
+            //
+            // FLS §6.5.11: "The type of a compound assignment expression is the unit type ()."
+            // FLS §6.1.2:37–45: The load, binop, and store must all emit runtime instructions —
+            // even `x += 1` where x and 1 are statically known must emit ldr + add + str.
+            //
+            // FLS §14.1 AMBIGUOUS: The spec does not enumerate which place expressions are
+            // valid on the left-hand side of compound assignment. We restrict to simple
+            // variable paths, consistent with the restriction on plain assignment.
+            //
+            // Cache-line note: emits 3 instructions (ldr + binop + str) = 12 bytes.
+            // For a simple add, this is three sequential 4-byte instructions that will
+            // often land in the same 64-byte cache line.
+            ExprKind::CompoundAssign { op, target, value } => {
+                // Resolve target to a stack slot.
+                let slot = match &target.kind {
+                    ExprKind::Path(segments) if segments.len() == 1 => {
+                        let var_name = segments[0].text(self.source);
+                        self.locals.get(var_name).copied().ok_or_else(|| {
+                            LowerError::Unsupported(format!(
+                                "compound assignment to undefined variable `{var_name}`"
+                            ))
+                        })?
+                    }
+                    _ => {
+                        return Err(LowerError::Unsupported(
+                            "compound assignment to non-variable place expression not yet supported".into(),
+                        ));
+                    }
+                };
+
+                // Load current value of target at runtime.
+                // FLS §6.1.2:37–45: this load is a runtime instruction.
+                let lhs_reg = self.alloc_reg()?;
+                self.instrs.push(Instr::Load { dst: lhs_reg, slot });
+
+                // Lower the RHS value expression.
+                let rhs_val = self.lower_expr(value, &IrTy::I32)?;
+                let rhs_reg = self.val_to_reg(rhs_val)?;
+
+                // Map the compound operator to its IR binary op.
+                let ir_op = match op {
+                    BinOp::Add    => IrBinOp::Add,
+                    BinOp::Sub    => IrBinOp::Sub,
+                    BinOp::Mul    => IrBinOp::Mul,
+                    BinOp::Div    => IrBinOp::Div,
+                    BinOp::Rem    => IrBinOp::Rem,
+                    BinOp::BitAnd => IrBinOp::BitAnd,
+                    BinOp::BitOr  => IrBinOp::BitOr,
+                    BinOp::BitXor => IrBinOp::BitXor,
+                    BinOp::Shl    => IrBinOp::Shl,
+                    BinOp::Shr    => IrBinOp::Shr,
+                    _ => unreachable!(
+                        "compound assignment operator must be arithmetic or bitwise (got {op:?})"
+                    ),
+                };
+                let dst = self.alloc_reg()?;
+                self.instrs.push(Instr::BinOp { op: ir_op, dst, lhs: lhs_reg, rhs: rhs_reg });
+
+                // Store the result back to the same stack slot.
+                // FLS §6.5.11: "Compound assignment is equivalent to the binary expression
+                // followed by assignment." The store makes this observable to subsequent reads.
+                self.instrs.push(Instr::Store { src: dst, slot });
+
+                // FLS §6.5.11: compound assignment has type `()`.
+                Ok(IrValue::Unit)
+            }
+
             // FLS §6.5.3: Comparison operator expressions.
             //
             // Comparisons evaluate both operands (i32) at runtime and produce a
