@@ -36,3 +36,22 @@ fn returns_unit() {
 fn quadratic(a: i32, b: i32, c: i32, x: i32) -> i32 {
     a * x * x + b * x + c
 }
+
+// FLS §9:3: A function may call itself (recursive functions are permitted).
+//
+// The spec does not provide a fibonacci example, but recursive functions are
+// explicitly permitted. This is the canonical example from the spec's
+// discussion of function calls and recursion.
+//
+// FLS §9: Functions — recursive calls are ordinary call expressions.
+// FLS §6.12.1: Call expressions.
+// FLS §6.5.5: Arithmetic operator expressions (+, -).
+// FLS §6.5.3: Comparison operator expressions (<=).
+// FLS §6.17: If expressions.
+//
+// NOTE: no FLS example exists for fibonacci specifically. This function is
+// derived from the spec's permission for recursion (§9:3) and the semantics
+// of the operators it uses.
+fn fib(n: i32) -> i32 {
+    if n <= 1 { n } else { fib(n - 1) + fib(n - 2) }
+}

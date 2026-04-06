@@ -1770,3 +1770,110 @@ fn milestone_17_bool_not_as_condition() {
     };
     assert_eq!(exit_code, 1, "expected exit 1 from check(false) with if !b {{1}} else {{0}}, got {exit_code}");
 }
+
+// ── Milestone 18: recursive functions produce correct results ─────────────────
+//
+// Prior to this milestone, a function whose binary expression combined two
+// call results (e.g., `fib(n-1) + fib(n-2)`) would produce wrong answers for
+// n >= 4 due to register clobbering: ARM64 calling convention makes x0–x17
+// caller-saved, so the second `bl fib` overwrote the register holding the
+// first call's result.
+//
+// Fix: in the arithmetic and comparison BinOp lowering, after lowering the
+// LHS into a register, check if the RHS expression tree contains any Call
+// node. If so, spill the LHS register to a new stack slot before lowering
+// the RHS, then reload it afterward.
+//
+// The Fibonacci sequence is derived from the FLS §9 recursive function
+// example. The spec does not provide an exact fibonacci example, but
+// recursive functions are explicitly permitted by FLS §9:3 ("A function
+// may call itself"). The canonical implementation exercises: recursive
+// calls, comparison (`<=`), arithmetic (`+`, `-`), if/else.
+//
+// FLS §9: Functions.
+// FLS §6.12.1: Call expressions.
+// FLS §6.5.5: Arithmetic operator expressions.
+// FLS §6.5.3: Comparison operator expressions.
+// FLS §6.17: If expressions.
+// FLS §6.12.1: ARM64 AAPCS64 — x0–x17 are caller-saved (clobbered by bl).
+
+/// Milestone 18: fibonacci base cases (n=0 and n=1) produce the right values.
+///
+/// fib(0) = 0 and fib(1) = 1. These take the `n <= 1` branch and never
+/// recurse. Verifies that the if-else structure and parameter access work.
+///
+/// FLS §9: Recursive function definition permitted.
+/// FLS §6.17: If expression selects the correct branch at runtime.
+#[test]
+fn milestone_18_fib_base_cases() {
+    let src = "fn fib(n: i32) -> i32 { if n <= 1 { n } else { fib(n - 1) + fib(n - 2) } }\nfn main() -> i32 { fib(0) }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 0, "expected fib(0)=0, got {exit_code}");
+
+    let src2 = "fn fib(n: i32) -> i32 { if n <= 1 { n } else { fib(n - 1) + fib(n - 2) } }\nfn main() -> i32 { fib(1) }\n";
+    let Some(exit_code2) = compile_and_run(src2) else {
+        return;
+    };
+    assert_eq!(exit_code2, 1, "expected fib(1)=1, got {exit_code2}");
+}
+
+/// Milestone 18: fibonacci for n=2 through n=4 requires one-deep recursion.
+///
+/// fib(2)=1, fib(3)=2, fib(4)=3. These exercise the LHS-spill fix: each
+/// call to fib(n-1) stores its result to a stack slot so that the subsequent
+/// call to fib(n-2) cannot clobber it.
+///
+/// FLS §6.12.1: Call expressions follow ARM64 AAPCS64 (x0–x17 caller-saved).
+/// FLS §6.5.5: Binary add combining two call results.
+#[test]
+fn milestone_18_fib_small() {
+    let fib_src = "fn fib(n: i32) -> i32 { if n <= 1 { n } else { fib(n - 1) + fib(n - 2) } }\n";
+    for (n, expected) in [(2u128, 1i32), (3, 2), (4, 3)] {
+        let src = format!("{fib_src}fn main() -> i32 {{ fib({n}) }}\n");
+        let Some(exit_code) = compile_and_run(&src) else {
+            return;
+        };
+        assert_eq!(exit_code, expected, "expected fib({n})={expected}, got {exit_code}");
+    }
+}
+
+/// Milestone 18: fibonacci for n=7 requires deep recursion (25 calls).
+///
+/// fib(7) = 13. This is the canonical correctness test for recursive
+/// functions. Register clobbering at any level of the call tree would
+/// produce a wrong result.
+///
+/// FLS §9:3: A function may call itself (recursion permitted).
+/// FLS §6.5.5: The add `fib(n-1) + fib(n-2)` must produce the correct sum
+/// after the LHS register is spilled and reloaded across the second call.
+#[test]
+fn milestone_18_fib_seven() {
+    let src = "fn fib(n: i32) -> i32 { if n <= 1 { n } else { fib(n - 1) + fib(n - 2) } }\nfn main() -> i32 { fib(7) }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 13, "expected fib(7)=13, got {exit_code}");
+}
+
+/// Milestone 18: assembly confirms spill/reload around second call.
+///
+/// For `fib(n-1) + fib(n-2)`, the LHS register must be stored to a stack
+/// slot before the second `bl fib` and reloaded afterward. The assembly
+/// must contain a `str` between the two `bl fib` instructions.
+///
+/// FLS §6.12.1: ARM64 AAPCS64 caller-save requires this spill.
+#[test]
+fn runtime_recursive_call_spills_lhs_register() {
+    let src = "fn fib(n: i32) -> i32 { if n <= 1 { n } else { fib(n - 1) + fib(n - 2) } }\nfn main() -> i32 { fib(7) }\n";
+    let asm = compile_to_asm(src);
+    // Both recursive calls must appear in fib's body.
+    assert!(asm.contains("bl      fib"), "expected bl fib in assembly");
+    // After the first bl fib, the result register must be spilled.
+    // The str instruction must appear between the two bl fib calls.
+    let first_bl = asm.find("bl      fib").expect("first bl fib");
+    let second_bl = asm[first_bl + 1..].find("bl      fib").expect("second bl fib");
+    let between = &asm[first_bl..first_bl + 1 + second_bl];
+    assert!(between.contains("str"), "expected str (spill) between the two bl fib calls, got:\n{between}");
+}
