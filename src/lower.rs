@@ -342,8 +342,57 @@ fn lower_fn(
     //
     // Cache-line note: each spill is one `str` instruction (4 bytes); two
     // spills per 8-byte stack pair keep the spill sequence cache-aligned.
-    for (i, param) in fn_def.params.iter().enumerate() {
-        if i >= 8 {
+    // FLS §9: Spill parameters from ARM64 registers to stack slots.
+    // `reg_idx` tracks the current register number, which may advance by more
+    // than 1 per parameter when an enum type occupies multiple registers
+    // (discriminant + field registers).
+    let mut reg_idx: usize = 0;
+    for param in fn_def.params.iter() {
+        let param_name = param.name.text(source);
+
+        // FLS §15: Enum type parameters — `fn f(o: Opt)`.
+        //
+        // An enum value with max N fields occupies N+1 consecutive registers:
+        // register reg_idx holds the discriminant; registers reg_idx+1..=reg_idx+N
+        // hold the fields. All registers are spilled to consecutive stack slots so
+        // that TupleStruct patterns can access fields via `base_slot + 1 + fi`.
+        //
+        // FLS §6.1.2:37–45: All spills are runtime store instructions.
+        // Cache-line note: each spill is one `str` instruction (4 bytes).
+        if let TyKind::Path(segs) = &param.ty.kind
+            && segs.len() == 1
+        {
+            let type_name = segs[0].text(source);
+            if let Some(variants) = enum_defs.get(type_name) {
+                let max_fields = variants.values().map(|&(_, fc)| fc).max().unwrap_or(0);
+                let regs_needed = 1 + max_fields;
+                if reg_idx + regs_needed > 8 {
+                    return Err(LowerError::Unsupported(
+                        "enum parameter exceeds ARM64 register window (>8 total registers)".into(),
+                    ));
+                }
+                let base_slot = ctx.alloc_slot()?;
+                for _ in 0..max_fields {
+                    ctx.alloc_slot()?;
+                }
+                ctx.locals.insert(param_name, base_slot);
+                ctx.local_enum_types.insert(base_slot, type_name.to_owned());
+                // Spill discriminant register.
+                ctx.instrs.push(Instr::Store { src: reg_idx as u8, slot: base_slot });
+                // Spill field registers.
+                for fi in 0..max_fields {
+                    ctx.instrs.push(Instr::Store {
+                        src: (reg_idx + fi + 1) as u8,
+                        slot: base_slot + 1 + fi as u8,
+                    });
+                }
+                reg_idx += regs_needed;
+                continue;
+            }
+        }
+
+        // FLS §9: i32 and bool parameters — one register each.
+        if reg_idx >= 8 {
             return Err(LowerError::Unsupported(
                 "functions with more than 8 parameters (exceeds ARM64 register window)".into(),
             ));
@@ -356,12 +405,10 @@ fn lower_fn(
             return Err(LowerError::Unsupported("parameter type other than i32/bool".into()));
         }
         let slot = ctx.alloc_slot()?;
-        let param_name = param.name.text(source);
         ctx.locals.insert(param_name, slot);
-        // Spill parameter register i (arm64 x{i}) to its stack slot.
-        // `src: i as u8` directly names the incoming register — this is
-        // safe because the body hasn't allocated any virtual registers yet.
-        ctx.instrs.push(Instr::Store { src: i as u8, slot });
+        // Spill parameter register reg_idx (arm64 x{reg_idx}) to its stack slot.
+        ctx.instrs.push(Instr::Store { src: reg_idx as u8, slot });
+        reg_idx += 1;
     }
 
     ctx.lower_block(body, &ret_ty)?;
@@ -787,6 +834,47 @@ impl<'src> LowerCtx<'src> {
                             let src = self.val_to_reg(val)?;
                             self.instrs.push(Instr::Store { src, slot: base_slot + 1 + i as u8 });
                         }
+                        return Ok(());
+                    }
+                }
+
+                // FLS §15: Enum unit variant let binding — `let x = Opt::None;`
+                //
+                // Unit variants are path expressions (not call expressions), so they
+                // are not caught by the call-based enum check above. Detect them here
+                // and register the variable in `local_enum_types` so TupleStruct
+                // patterns can locate the discriminant slot during match lowering.
+                //
+                // Allocate enough field slots to accommodate the enum's max field
+                // count so that `base_slot + 1 + fi` is always a valid slot index
+                // even for unit variant values (fields are uninitialized but never
+                // accessed due to discriminant check in the pattern).
+                //
+                // FLS §6.1.2:37–45: Discriminant store is a runtime instruction.
+                if let Some(init_expr) = init.as_ref()
+                    && let ExprKind::Path(segs) = &init_expr.kind
+                    && segs.len() == 2
+                {
+                    let enum_name = segs[0].text(self.source);
+                    let variant_name = segs[1].text(self.source);
+                    if let Some(&(discriminant, 0)) = self.enum_defs
+                        .get(enum_name)
+                        .and_then(|v| v.get(variant_name))
+                    {
+                        // Compute max field count across all variants of this enum.
+                        let max_fields = self.enum_defs
+                            .get(enum_name)
+                            .map(|v| v.values().map(|&(_, fc)| fc).max().unwrap_or(0))
+                            .unwrap_or(0);
+                        let base_slot = self.alloc_slot()?;
+                        for _ in 0..max_fields {
+                            self.alloc_slot()?; // Reserve field slots (uninitialized for unit variant).
+                        }
+                        self.locals.insert(var_name, base_slot);
+                        self.local_enum_types.insert(base_slot, enum_name.to_owned());
+                        let disc_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(disc_reg, discriminant));
+                        self.instrs.push(Instr::Store { src: disc_reg, slot: base_slot });
                         return Ok(());
                     }
                 }
@@ -2395,14 +2483,60 @@ impl<'src> LowerCtx<'src> {
                     ));
                 }
 
-                // Lower each argument to a virtual register, left-to-right.
-                // We assume i32 arguments at this milestone — type inference
-                // is future work.
+                // Lower each argument to virtual registers, left-to-right.
+                //
+                // FLS §15: If an argument is an enum variable (recorded in
+                // `local_enum_types`), it expands to multiple registers:
+                // discriminant in the first, fields in subsequent registers.
+                // This matches the enum parameter calling convention in `lower_fn`.
+                //
+                // FLS §6.1.2:37–45: All loads are runtime instructions.
                 let mut arg_regs = Vec::with_capacity(args.len());
                 for arg in args {
-                    let val = self.lower_expr(arg, &IrTy::I32)?;
-                    let reg = self.val_to_reg(val)?;
-                    arg_regs.push(reg);
+                    // Check whether this argument is an enum variable.
+                    let enum_info: Option<(u8, usize)> = if let ExprKind::Path(segs) = &arg.kind
+                        && segs.len() == 1
+                    {
+                        let var_name = segs[0].text(self.source);
+                        let base_slot_opt = self.locals.get(var_name).copied();
+                        if let Some(base_slot) = base_slot_opt {
+                            if let Some(en) = self.local_enum_types.get(&base_slot) {
+                                let en_name = en.clone();
+                                let max_fields = self.enum_defs
+                                    .get(en_name.as_str())
+                                    .map(|v| v.values().map(|&(_, fc)| fc).max().unwrap_or(0))
+                                    .unwrap_or(0);
+                                Some((base_slot, max_fields))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    if let Some((base_slot, max_fields)) = enum_info {
+                        // Pass discriminant register.
+                        let disc_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: disc_reg, slot: base_slot });
+                        arg_regs.push(disc_reg);
+                        // Pass field registers (uninitialized for unit variants, but
+                        // discriminant check in callee prevents any use of them).
+                        for fi in 0..max_fields {
+                            let field_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load {
+                                dst: field_reg,
+                                slot: base_slot + 1 + fi as u8,
+                            });
+                            arg_regs.push(field_reg);
+                        }
+                    } else {
+                        let val = self.lower_expr(arg, &IrTy::I32)?;
+                        let reg = self.val_to_reg(val)?;
+                        arg_regs.push(reg);
+                    }
                 }
 
                 // Allocate the destination register for the return value.
