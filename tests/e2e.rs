@@ -11061,3 +11061,176 @@ fn main() -> i32 { apply(double, 5) }
     let has_blr = in_apply.iter().any(|l| l.trim_start().starts_with("blr"));
     assert!(has_blr, "expected blr in apply for indirect call:\n{}", in_apply.join("\n"));
 }
+
+// ── Milestone 89: Non-capturing closures (FLS §6.14) ─────────────────────────
+//
+// A non-capturing closure `|x: i32| -> i32 { body }` compiles to a hidden
+// named function and the closure expression evaluates to the function's address
+// (a function pointer). Non-capturing closures coerce to `fn` pointer types
+// (FLS §4.9, §6.14).
+//
+// FLS §6.14: Closure expressions evaluate to closure types that implement
+// Fn/FnMut/FnOnce. Non-capturing closures additionally coerce to bare
+// function pointer types.
+//
+// FLS §6.1.2:37–45: The closure body must emit runtime instructions.
+//
+// ARM64: the closure compiles to a separate function label; the closure
+// expression emits `adrp + add` to load the address (same as milestone 88
+// function pointer loading), and calling through the pointer emits `blr`.
+//
+// These tests derive from FLS §6.14 semantics. The spec provides no
+// worked examples; test inputs are derived from the section's semantic
+// description (closure parameters and body evaluation).
+
+/// Milestone 89: basic closure stored in a let binding and called through apply.
+///
+/// `let double = |x: i32| -> i32 { x * 2 };` stores the closure address.
+/// `apply(double, 21)` calls it via a fn pointer argument.
+///
+/// FLS §6.14: Non-capturing closure → fn pointer coercion.
+/// FLS §4.9: fn pointer type `fn(i32) -> i32`.
+#[test]
+fn milestone_89_closure_basic() {
+    let src = r#"
+fn apply(f: fn(i32) -> i32, x: i32) -> i32 { f(x) }
+fn main() -> i32 {
+    let double = |x: i32| -> i32 { x * 2 };
+    apply(double, 21)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "double(21)=42, got {exit_code}");
+}
+
+/// Milestone 89: zero-parameter closure `|| expr`.
+///
+/// FLS §6.14: `||` denotes a closure with no parameters.
+/// The closure body `-> i32 { 7 }` returns 7.
+#[test]
+fn milestone_89_closure_zero_params() {
+    let src = r#"
+fn call(f: fn() -> i32) -> i32 { f() }
+fn main() -> i32 {
+    let seven = || -> i32 { 7 };
+    call(seven)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "seven()=7, got {exit_code}");
+}
+
+/// Milestone 89: closure with arithmetic body.
+///
+/// `|x: i32, y: i32| -> i32 { x + y }` — two params, addition.
+/// FLS §6.14: Multiple closure parameters follow ARM64 calling convention.
+#[test]
+fn milestone_89_closure_two_params() {
+    let src = r#"
+fn apply2(f: fn(i32, i32) -> i32, a: i32, b: i32) -> i32 { f(a, b) }
+fn main() -> i32 {
+    let add = |x: i32, y: i32| -> i32 { x + y };
+    apply2(add, 17, 25)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "17+25=42, got {exit_code}");
+}
+
+/// Milestone 89: closure result used in arithmetic.
+///
+/// FLS §6.14: The fn pointer returned by a closure can be called and
+/// its result used in further computation.
+#[test]
+fn milestone_89_closure_result_in_arithmetic() {
+    let src = r#"
+fn apply(f: fn(i32) -> i32, x: i32) -> i32 { f(x) }
+fn main() -> i32 {
+    let inc = |x: i32| -> i32 { x + 1 };
+    apply(inc, 5) + apply(inc, 10)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 17, "6+11=17, got {exit_code}");
+}
+
+/// Milestone 89: closure passed directly as a function argument (no let binding).
+///
+/// FLS §6.14: A closure expression can appear inline where a fn pointer is expected.
+#[test]
+fn milestone_89_closure_inline_arg() {
+    let src = r#"
+fn apply(f: fn(i32) -> i32, x: i32) -> i32 { f(x) }
+fn main() -> i32 {
+    apply(|x: i32| -> i32 { x * 3 }, 14)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "14*3=42, got {exit_code}");
+}
+
+/// Milestone 89: closure with if-else body.
+///
+/// FLS §6.14: The closure body can contain any expression, including control flow.
+/// FLS §6.17: if-else inside the closure emits the same branch instructions as
+/// a normal if-else in a function body.
+#[test]
+fn milestone_89_closure_if_else_body() {
+    let src = r#"
+fn apply(f: fn(i32) -> i32, x: i32) -> i32 { f(x) }
+fn main() -> i32 {
+    let sign = |x: i32| -> i32 { if x > 0 { 1 } else { 0 } };
+    apply(sign, 5) + apply(sign, 0)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "sign(5)+sign(0)=1+0=1, got {exit_code}");
+}
+
+/// Milestone 89: closure passed as a parameter and called inside another function.
+///
+/// FLS §6.14: A fn pointer holding a closure address can be forwarded to other
+/// functions. FLS §4.9: fn pointer parameters use the same calling convention
+/// as other fn pointers.
+#[test]
+fn milestone_89_closure_on_parameter() {
+    let src = r#"
+fn apply(f: fn(i32) -> i32, x: i32) -> i32 { f(x) }
+fn transform(g: fn(i32) -> i32, n: i32) -> i32 { apply(g, n) }
+fn main() -> i32 {
+    let triple = |x: i32| -> i32 { x * 3 };
+    transform(triple, 14)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "14*3=42, got {exit_code}");
+}
+
+/// Assembly check: closure compiles to a hidden function label `__closure_*`.
+///
+/// FLS §6.14: Non-capturing closures compile to named functions.
+/// FLS §4.9: LoadFnAddr emits ADRP+ADD to materialise the address.
+/// FLS §6.1.2:37–45: The closure body emits runtime instructions.
+#[test]
+fn runtime_closure_emits_hidden_function_label() {
+    let src = r#"
+fn apply(f: fn(i32) -> i32, x: i32) -> i32 { f(x) }
+fn main() -> i32 {
+    let double = |x: i32| -> i32 { x * 2 };
+    apply(double, 21)
+}
+"#;
+    let asm = compile_to_asm(src);
+    // A hidden function label starting with __closure_ must appear.
+    assert!(
+        asm.lines().any(|l| l.starts_with("__closure_")),
+        "expected hidden closure function label `__closure_*` in assembly:\n{asm}"
+    );
+    // The closure body must contain a mul instruction for `x * 2`.
+    let closure_section: Vec<&str> = asm
+        .lines()
+        .skip_while(|l| !l.starts_with("__closure_"))
+        .collect();
+    let has_mul = closure_section.iter().any(|l| l.contains("mul"));
+    assert!(has_mul, "expected `mul` in closure body for `x * 2`:\n{}", closure_section.join("\n"));
+}

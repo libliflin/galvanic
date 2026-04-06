@@ -632,3 +632,35 @@ fn struct_if_else_example(a: i32, b: i32) -> Choice {
     // FLS §6.17: The if/else expression produces a struct value at runtime.
     if a < b { Choice { lo: a, hi: b } } else { Choice { lo: b, hi: a } }
 }
+
+// FLS §6.14 — Closure expressions (non-capturing).
+//
+// FLS §6.14: "A closure expression defines a closure type and evaluates to
+// a value of that type." Non-capturing closures can be coerced to bare
+// function pointer types (FLS §4.9).
+//
+// The FLS does not provide a concrete code example for closure expressions;
+// the following is derived from the section's semantic description.
+//
+// ARM64 codegen: a closure `|x: i32| -> i32 { x + 1 }` emits a hidden
+// function `__closure_*` in the assembly. The closure expression itself
+// emits ADRP+ADD to load the function's address (same as FLS §4.9 function
+// pointers). Calling through the pointer emits BLR.
+//
+// Cache-line note: ADRP+ADD = 8 bytes (same cost as a static address load).
+
+fn apply_closure(f: fn(i32) -> i32, x: i32) -> i32 { f(x) }
+
+fn closure_example() -> i32 {
+    // FLS §6.14: Closure with one parameter and explicit return type.
+    let increment = |x: i32| -> i32 { x + 1 };
+
+    // FLS §6.14: Zero-parameter closure.
+    let forty_two = || -> i32 { 42 };
+
+    // FLS §6.14: Closure with two parameters.
+    let add = |x: i32, y: i32| -> i32 { x + y };
+
+    // Use the closures via apply (fn pointer call).
+    apply_closure(increment, 5) + apply_closure(add, apply_closure(increment, 0), forty_two())
+}
