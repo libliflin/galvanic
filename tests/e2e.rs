@@ -5461,3 +5461,280 @@ fn main() -> i32 {
         "expected `bl Dir__code` in assembly:\n{asm}"
     );
 }
+
+// ── Milestone 52: TupleStruct and StructVariant patterns in if-let / while-let ──
+//
+// FLS §6.17: "An if let expression is syntactic sugar for a match expression
+// with a single arm." The pattern may be any valid pattern, including enum
+// tuple variant patterns (`Enum::Variant(f0, f1)`) and named variant patterns
+// (`Enum::Variant { field }`).
+//
+// FLS §6.15.4: while-let uses the same pattern language as if-let. A mismatch
+// exits the loop.
+//
+// FLS §5.4: Struct patterns (used here for tuple variant patterns in if-let
+// / while-let). Field bindings are positional: field 0 at base+1, field 1 at
+// base+2, etc.
+//
+// FLS §5.3: Named-field struct patterns. Field name lookup is by declaration
+// order in the enum definition.
+//
+// FLS §6.1.2:37–45: All discriminant checks and field loads emit runtime
+// instructions.
+//
+// No FLS code example exists for if-let / while-let with enum variant patterns
+// specifically; these tests are derived from the semantic descriptions in §6.17,
+// §6.15.4, §5.4, §5.3, and §15.
+
+/// Milestone 52: if-let with a tuple variant pattern — taken branch.
+///
+/// `if let Opt::Some(v) = x { v } else { 0 }` must load field 0 from the enum
+/// and return it when the discriminant matches.
+///
+/// FLS §6.17, §5.4, §15.
+#[test]
+fn milestone_52_if_let_tuple_variant_taken() {
+    let src = r#"
+enum Opt { None, Some(i32) }
+
+fn main() -> i32 {
+    let x = Opt::Some(42);
+    if let Opt::Some(v) = x { v } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+/// Milestone 52: if-let with a tuple variant pattern — else branch.
+///
+/// The pattern does not match (discriminant is `None = 0`, not `Some = 1`)
+/// so the else branch executes and returns 7.
+///
+/// FLS §6.17, §5.4, §15.
+#[test]
+fn milestone_52_if_let_tuple_variant_not_taken() {
+    let src = r#"
+enum Opt { None, Some(i32) }
+
+fn main() -> i32 {
+    let x = Opt::None;
+    if let Opt::Some(v) = x { v } else { 7 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected exit 7, got {exit_code}");
+}
+
+/// Milestone 52: if-let on a parameter with a tuple variant pattern.
+///
+/// FLS §6.17, §5.4, §9 (function parameters).
+#[test]
+fn milestone_52_if_let_tuple_variant_on_parameter() {
+    let src = r#"
+enum Opt { None, Some(i32) }
+
+fn extract(x: Opt) -> i32 {
+    if let Opt::Some(v) = x { v } else { 0 }
+}
+
+fn main() -> i32 {
+    extract(Opt::Some(13)) + extract(Opt::None)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 13, "expected exit 13, got {exit_code}");
+}
+
+/// Milestone 52: if-let with a two-field tuple variant.
+///
+/// FLS §5.4: positional field bindings — field 0 at base+1, field 1 at base+2.
+#[test]
+fn milestone_52_if_let_two_field_tuple_variant() {
+    let src = r#"
+enum Pair { Empty, Full(i32, i32) }
+
+fn main() -> i32 {
+    let p = Pair::Full(10, 32);
+    if let Pair::Full(a, b) = p { a + b } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+/// Milestone 52: if-let tuple variant field used in arithmetic.
+///
+/// FLS §6.17, §5.4, §6.5.5.
+#[test]
+fn milestone_52_if_let_tuple_variant_field_arithmetic() {
+    let src = r#"
+enum Opt { None, Some(i32) }
+
+fn main() -> i32 {
+    let x = Opt::Some(20);
+    if let Opt::Some(v) = x { v + v + 2 } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+/// Milestone 52: if-let unit (statement context) with tuple variant.
+///
+/// FLS §6.17: if-let with unit type (side effects only).
+#[test]
+fn milestone_52_if_let_tuple_variant_unit() {
+    let src = r#"
+enum Opt { None, Some(i32) }
+
+fn main() -> i32 {
+    let x = Opt::Some(42);
+    let mut result = 0;
+    if let Opt::Some(v) = x {
+        result = v;
+    }
+    result
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+/// Milestone 52: while-let with a tuple variant pattern — counts down.
+///
+/// FLS §6.15.4, §5.4, §15.
+#[test]
+fn milestone_52_while_let_tuple_variant_counts() {
+    let src = r#"
+enum Opt { None, Some(i32) }
+
+fn wrap(n: i32) -> Opt {
+    if n > 0 { Opt::Some(n) } else { Opt::None }
+}
+
+fn main() -> i32 {
+    let mut x = Opt::Some(5);
+    let mut sum = 0;
+    while let Opt::Some(v) = x {
+        sum = sum + v;
+        x = wrap(v - 1);
+    }
+    sum
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 15, "expected exit 15, got {exit_code}");
+}
+
+/// Milestone 52: while-let tuple variant exits immediately on non-matching variant.
+///
+/// FLS §6.15.4: mismatch terminates the loop without executing the body.
+#[test]
+fn milestone_52_while_let_tuple_variant_no_match() {
+    let src = r#"
+enum Opt { None, Some(i32) }
+
+fn main() -> i32 {
+    let x = Opt::None;
+    let mut result = 7;
+    while let Opt::Some(v) = x {
+        result = v;
+    }
+    result
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected exit 7, got {exit_code}");
+}
+
+/// Milestone 52: if-let with a named-field struct variant pattern — taken.
+///
+/// FLS §6.17, §5.3, §15.3.
+#[test]
+fn milestone_52_if_let_struct_variant_taken() {
+    let src = r#"
+enum Shape { Empty, Rect { w: i32, h: i32 } }
+
+fn main() -> i32 {
+    let s = Shape::Rect { w: 6, h: 7 };
+    if let Shape::Rect { w, h } = s { w * h } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+/// Milestone 52: if-let named-field variant pattern — not taken.
+///
+/// FLS §6.17, §5.3.
+#[test]
+fn milestone_52_if_let_struct_variant_not_taken() {
+    let src = r#"
+enum Shape { Empty, Rect { w: i32, h: i32 } }
+
+fn main() -> i32 {
+    let s = Shape::Empty;
+    if let Shape::Rect { w, h } = s { w * h } else { 99 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 99, "expected exit 99, got {exit_code}");
+}
+
+/// Milestone 52: while-let with a named-field struct variant pattern.
+///
+/// FLS §6.15.4, §5.3, §15.3.
+#[test]
+fn milestone_52_while_let_struct_variant() {
+    let src = r#"
+enum Step { Done, Go { n: i32 } }
+
+fn next(n: i32) -> Step {
+    if n > 1 { Step::Go { n: n - 1 } } else { Step::Done }
+}
+
+fn main() -> i32 {
+    let mut s = Step::Go { n: 4 };
+    let mut count = 0;
+    while let Step::Go { n } = s {
+        count = count + n;
+        s = next(n);
+    }
+    count
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "expected exit 10, got {exit_code}");
+}
+
+// ── Assembly inspection: milestone 52 ────────────────────────────────────────
+
+/// Milestone 52: if-let tuple variant emits discriminant comparison and cbz.
+///
+/// The discriminant check must emit: load scrut → load imm → cmp (BinOp Eq) →
+/// cbz to else. This confirms runtime code, not compile-time folding.
+///
+/// FLS §6.1.2:37–45: All checks are runtime.
+#[test]
+fn runtime_if_let_tuple_variant_emits_discriminant_check() {
+    let src = r#"
+enum Opt { None, Some(i32) }
+
+fn main() -> i32 {
+    let x = Opt::Some(1);
+    if let Opt::Some(v) = x { v } else { 0 }
+}
+"#;
+    let asm = compile_to_asm(src);
+    // The discriminant check must load the discriminant and compare.
+    assert!(
+        asm.contains("cbz"),
+        "expected `cbz` for discriminant branch in assembly:\n{asm}"
+    );
+    // The field load: ldr from base+1 slot.
+    assert!(
+        asm.contains("ldr"),
+        "expected `ldr` for field binding in assembly:\n{asm}"
+    );
+}
