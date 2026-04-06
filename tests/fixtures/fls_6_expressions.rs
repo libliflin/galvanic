@@ -256,3 +256,21 @@ fn match_bool_example(b: bool) -> i32 {
         false => 0,  // FLS §5.2: bool literal pattern false
     }
 }
+
+// FLS §5.2 — Negative integer literal patterns.
+//
+// FLS §5.2: "A LiteralPattern matches a value if the value equals the
+// literal value." Negative integer literals are valid literal patterns
+// (e.g., `-1`, `-42`).
+//
+// Note: FLS §5.2 describes literal patterns but does not provide a direct
+// code example for negative literals. This function is derived from the
+// spec's description and is equivalent to how rustc handles it.
+fn match_negative_pattern(n: i32) -> i32 {
+    match n {
+        -2 => 10,   // FLS §5.2: negative integer literal pattern -2
+        -1 => 20,   // FLS §5.2: negative integer literal pattern -1
+        0  => 30,   // FLS §5.2: integer literal pattern 0
+        _  => 40,   // FLS §5.1: wildcard — matches remaining values
+    }
+}

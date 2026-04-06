@@ -1517,6 +1517,29 @@ impl<'src> Parser<'src> {
                 let val = parse_int_literal(tok.text(self.src));
                 Ok(Pat::LitInt(val))
             }
+            // Negative integer literal pattern `-n`. FLS §5.2.
+            //
+            // A unary minus before an integer literal forms a negative literal
+            // pattern. This is the only place in pattern syntax where `-` is
+            // meaningful; it is not a unary operator expression in this context.
+            //
+            // FLS §5.2: Literal patterns include negative integer literals.
+            // The parser consumes `-` followed by `LitInteger` and produces
+            // `Pat::NegLitInt(n)` where `n` is the absolute value.
+            //
+            // Note: `-` followed by anything other than `LitInteger` is a
+            // parse error; negative booleans do not exist in Rust.
+            TokenKind::Minus => {
+                self.advance(); // consume `-`
+                if self.peek_kind() != TokenKind::LitInteger {
+                    return Err(self.error(
+                        "expected integer literal after `-` in pattern".to_owned(),
+                    ));
+                }
+                let tok = self.advance();
+                let val = parse_int_literal(tok.text(self.src));
+                Ok(Pat::NegLitInt(val))
+            }
             // Boolean literal patterns `true` / `false`. FLS §5.2.
             TokenKind::KwTrue => {
                 self.advance();
@@ -1527,7 +1550,7 @@ impl<'src> Parser<'src> {
                 Ok(Pat::LitBool(false))
             }
             kind => Err(self.error(format!(
-                "expected pattern (integer literal, `true`, `false`, or `_`), found {kind:?}"
+                "expected pattern (integer literal, `-` integer, `true`, `false`, or `_`), found {kind:?}"
             ))),
         }
     }
@@ -3114,5 +3137,39 @@ mod tests {
         assert!(matches!(lhs.kind, ExprKind::Path(_)), "lhs should be `a`");
         assert!(matches!(rhs.kind, ExprKind::Cast { .. }),
             "rhs should be `b as i32`, got {:?}", rhs.kind);
+    }
+
+    // ── Match expression patterns ─────────────────────────────────────────────
+
+    #[test]
+    fn negative_literal_pattern_in_match() {
+        // FLS §5.2: Negative integer literal pattern `-n`.
+        // `match x { -1 => 0, 0 => 1, _ => 2 }` should parse successfully
+        // and produce Pat::NegLitInt(1) for the first arm.
+        use crate::ast::{ExprKind, Pat};
+        let src = "fn f(x: i32) -> i32 { match x { -1 => 0, 0 => 1, _ => 2 } }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!() };
+        let body = f.body.as_ref().unwrap();
+        let tail = body.tail.as_ref().expect("expected tail");
+        let ExprKind::Match { ref arms, .. } = tail.kind else {
+            panic!("expected Match, got {:?}", tail.kind);
+        };
+        assert_eq!(arms.len(), 3, "expected 3 arms");
+        // First arm: -1 pattern
+        assert!(
+            matches!(arms[0].pat, Pat::NegLitInt(1)),
+            "expected NegLitInt(1), got {:?}", arms[0].pat
+        );
+        // Second arm: 0 pattern
+        assert!(
+            matches!(arms[1].pat, Pat::LitInt(0)),
+            "expected LitInt(0), got {:?}", arms[1].pat
+        );
+        // Third arm: wildcard
+        assert!(
+            matches!(arms[2].pat, Pat::Wildcard),
+            "expected Wildcard, got {:?}", arms[2].pat
+        );
     }
 }

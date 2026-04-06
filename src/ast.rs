@@ -728,8 +728,17 @@ pub struct MatchArm {
 pub enum Pat {
     /// Wildcard pattern `_`. Matches any value. FLS §5.1.
     Wildcard,
-    /// Integer literal pattern. FLS §5.2.
+    /// Non-negative integer literal pattern. FLS §5.2.
     LitInt(u128),
+    /// Negative integer literal pattern `-n`. FLS §5.2.
+    ///
+    /// Stored as the absolute value; the pattern matches `-(n as i32)`.
+    /// Parsed from `-` followed by an integer literal token.
+    ///
+    /// FLS §5.2: "A literal pattern matches a value by comparing it against
+    /// a constant literal value." Negative literals are valid literal patterns
+    /// per the Rust reference (e.g., `match x { -1 => ... }`).
+    NegLitInt(u128),
     /// Boolean literal pattern `true` / `false`. FLS §5.2.
     LitBool(bool),
 }

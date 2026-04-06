@@ -932,6 +932,8 @@ impl<'src> LowerCtx<'src> {
                             let pat_reg = self.alloc_reg()?;
                             let pat_imm = match &arm.pat {
                                 Pat::LitInt(n) => *n as i32,
+                                // FLS §5.2: Negative literal pattern — negate the absolute value.
+                                Pat::NegLitInt(n) => -(*n as i32),
                                 Pat::LitBool(b) => *b as i32,
                                 Pat::Wildcard => {
                                     // Wildcard in non-last position — treat as unconditional.
@@ -988,6 +990,8 @@ impl<'src> LowerCtx<'src> {
                             let pat_reg = self.alloc_reg()?;
                             let pat_imm = match &arm.pat {
                                 Pat::LitInt(n) => *n as i32,
+                                // FLS §5.2: Negative literal pattern — negate the absolute value.
+                                Pat::NegLitInt(n) => -(*n as i32),
                                 Pat::LitBool(b) => *b as i32,
                                 Pat::Wildcard => {
                                     self.lower_expr(&arm.body, &IrTy::Unit)?;
