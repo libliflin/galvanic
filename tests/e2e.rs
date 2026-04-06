@@ -1762,7 +1762,7 @@ fn milestone_17_bool_not_false() {
 /// FLS §6.17: The if condition is evaluated at runtime.
 #[test]
 fn milestone_17_bool_not_as_condition() {
-    let src = "fn main(b: bool) -> i32 { if !b { 1 } else { 0 } }\n";
+    let _src = "fn main(b: bool) -> i32 { if !b { 1 } else { 0 } }\n";
     // We test via the fixture: negate(false) → true → if-then branch → 1
     let src2 = "fn check(b: bool) -> i32 { if !b { 1 } else { 0 } }\nfn main() -> i32 { check(false) }\n";
     let Some(exit_code) = compile_and_run(src2) else {
@@ -3267,4 +3267,133 @@ fn runtime_field_assign_emits_str() {
     // At least 3 str instructions: 2 for struct init + 1 for field assignment.
     let store_count = asm.lines().filter(|l| l.trim().starts_with("str")).count();
     assert!(store_count >= 3, "expected ≥3 str instructions (2 init + 1 field assign), got {store_count}");
+}
+
+// ── Milestone 40: enum unit variants ─────────────────────────────────────────
+//
+// FLS §15: Enumerations. Unit variants are assigned integer discriminants
+// (0, 1, 2, ...) in declaration order. Variant values are produced by
+// two-segment path expressions (`Color::Red`). Pattern matching against
+// enum variant paths uses discriminant equality.
+//
+// FLS §6.3 + §5.5: Path expressions and path patterns resolve to discriminants.
+// FLS §6.1.2:37–45: All discriminant materialization emits runtime instructions.
+
+/// Milestone 40: simplest enum — two unit variants, match first.
+///
+/// FLS §15: `Color::Red` has discriminant 0, `Color::Blue` has discriminant 1.
+/// The match arm `Color::Red => 0` should fire.
+#[test]
+fn milestone_40_enum_unit_two_variants_first() {
+    let src = "enum Color { Red, Blue }\nfn main() -> i32 { let c = Color::Red; match c { Color::Red => 0, Color::Blue => 1, } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected Color::Red → 0, got {exit_code}");
+}
+
+/// Milestone 40: enum match on second variant.
+///
+/// FLS §15: `Color::Blue` has discriminant 1; the second arm fires.
+#[test]
+fn milestone_40_enum_unit_two_variants_second() {
+    let src = "enum Color { Red, Blue }\nfn main() -> i32 { let c = Color::Blue; match c { Color::Red => 0, Color::Blue => 1, } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected Color::Blue → 1, got {exit_code}");
+}
+
+/// Milestone 40: three-variant enum, match middle variant.
+///
+/// FLS §15: discriminants are 0=North, 1=South, 2=East. Selecting South → 1.
+#[test]
+fn milestone_40_enum_three_variants_middle() {
+    let src = "enum Dir { North, South, East }\nfn main() -> i32 { let d = Dir::South; match d { Dir::North => 0, Dir::South => 1, Dir::East => 2, } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected Dir::South → 1, got {exit_code}");
+}
+
+/// Milestone 40: enum match with wildcard fallthrough.
+///
+/// FLS §15 + §6.18: The first two arms check specific variants; the wildcard arm
+/// catches any remaining discriminant.
+#[test]
+fn milestone_40_enum_match_wildcard() {
+    let src = "enum Shape { Circle, Square, Triangle }\nfn main() -> i32 { let s = Shape::Triangle; match s { Shape::Circle => 10, Shape::Square => 20, _ => 30, } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 30, "expected Triangle → 30 via wildcard, got {exit_code}");
+}
+
+/// Milestone 40: enum variant passed as function argument.
+///
+/// FLS §15 + §9: An enum value (its discriminant) may be passed to a function.
+/// The called function receives an i32 and returns it directly.
+#[test]
+fn milestone_40_enum_passed_to_fn() {
+    let src = "enum Rank { Low, Mid, High }\nfn rank_val(r: i32) -> i32 { r }\nfn main() -> i32 { rank_val(Rank::High as i32) }\n";
+    // Note: `as i32` cast on an enum value — this tests that the enum discriminant is an i32.
+    // FLS §6.5.9: Cast expression. Enum → i32 cast is valid (discriminant value).
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2, "expected Rank::High discriminant 2, got {exit_code}");
+}
+
+/// Milestone 40: enum match with non-zero return from arm body.
+///
+/// FLS §15 + §6.18: Arm bodies are arbitrary expressions; here they return
+/// computed values, not literals.
+#[test]
+fn milestone_40_enum_arm_body_expr() {
+    let src = "enum Tier { Bronze, Silver, Gold }\nfn main() -> i32 { let t = Tier::Gold; match t { Tier::Bronze => 1 * 10, Tier::Silver => 2 * 10, Tier::Gold => 3 * 10, } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 30, "expected Gold → 3*10 = 30, got {exit_code}");
+}
+
+/// Milestone 40: enum variant used in conditional expression.
+///
+/// FLS §15 + §6.17: An enum discriminant may appear as scrutinee in an if-let.
+#[test]
+fn milestone_40_enum_if_let_taken() {
+    let src = "enum Flag { On, Off }\nfn main() -> i32 { let f = Flag::On; if let Flag::On = f { 1 } else { 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected Flag::On if-let to fire, got {exit_code}");
+}
+
+/// Milestone 40: enum if-let arm not taken.
+///
+/// FLS §15 + §6.17: Pattern `Flag::On` does not match `Flag::Off`; else arm fires.
+#[test]
+fn milestone_40_enum_if_let_not_taken() {
+    let src = "enum Flag { On, Off }\nfn main() -> i32 { let f = Flag::Off; if let Flag::On = f { 1 } else { 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected Flag::Off to fall to else, got {exit_code}");
+}
+
+/// Milestone 40: assembly inspection — enum variant path emits mov (LoadImm).
+///
+/// FLS §15 + §6.1.2:37–45: `Color::Red` must emit a runtime `mov` for the
+/// discriminant 0, not be constant-folded away.
+#[test]
+fn runtime_enum_variant_emits_mov() {
+    let src = "enum Color { Red, Blue }\nfn main() -> i32 { let c = Color::Blue; c }\n";
+    let asm = compile_to_asm(src);
+    // `Color::Blue` has discriminant 1; we expect a `mov` materializing #1.
+    // The exact register may vary; check that the immediate value appears.
+    let has_mov_1 = asm.lines().any(|l| {
+        let l = l.trim();
+        l.starts_with("mov") && l.contains("#1")
+    });
+    assert!(has_mov_1, "expected mov #1 for Color::Blue discriminant\nasm:\n{asm}");
+}
+
+/// Milestone 40: assembly inspection — enum match emits cmp + cbz.
+///
+/// FLS §6.18 + §15: Matching on an enum value emits a comparison instruction
+/// followed by a conditional branch, not a compile-time branch selection.
+#[test]
+fn runtime_enum_match_emits_comparison() {
+    let src = "enum Color { Red, Blue }\nfn main() -> i32 { let c = Color::Red; match c { Color::Red => 0, Color::Blue => 1, } }\n";
+    let asm = compile_to_asm(src);
+    // The comparison instruction (cmp or sub used for cmp, or cset after cmp).
+    let has_comparison = asm.lines().any(|l| {
+        let l = l.trim();
+        l.starts_with("cmp") || l.starts_with("cset")
+    });
+    assert!(has_comparison, "expected cmp/cset instruction for enum match\nasm:\n{asm}");
 }

@@ -1676,23 +1676,43 @@ impl<'src> Parser<'src> {
                 self.advance();
                 Ok(Pat::Wildcard)
             }
-            // Identifier pattern: `name` — binds matched value to a local.
+            // Identifier or path pattern.
             //
             // FLS §5.1.4: An identifier pattern matches any value and binds it
             // to the given name in the match arm body.
             //
-            // Note: In full Rust, an unqualified uppercase identifier may refer to
-            // a unit enum variant (a path pattern, FLS §5.5). Galvanic does not yet
-            // support enum variants, so all identifiers are treated as bindings.
-            // This is consistent with how rustc resolves them when no matching item
-            // is in scope.
+            // FLS §5.5: A path pattern resolves to a constant or enum unit
+            // variant. When the first identifier is followed by `::`, the
+            // pattern is a path (`Color::Red`), not a binding identifier.
+            //
+            // Disambiguation: peek ahead after consuming the first identifier.
+            // If the next token is `::`, consume additional `:: Ident` segments
+            // and produce `Pat::Path`. Otherwise produce `Pat::Ident`.
             //
             // FLS §5.1.4 AMBIGUOUS: The spec does not specify how identifier
             // patterns interact with `ref`/`mut` qualifiers. Galvanic supports
             // only the simplest form: `match x { n => ... }`.
             TokenKind::Ident => {
                 let tok = self.advance();
-                Ok(Pat::Ident(Self::span_of(&tok)))
+                let first_span = Self::span_of(&tok);
+                // Check for path continuation `::`.
+                if self.peek_kind() == TokenKind::ColonColon {
+                    // FLS §5.5: Path pattern — `Segment :: Segment (:: Segment)*`.
+                    let mut segments = vec![first_span];
+                    while self.peek_kind() == TokenKind::ColonColon {
+                        self.advance(); // consume `::`
+                        if self.peek_kind() != TokenKind::Ident {
+                            return Err(self.error(
+                                "expected identifier after `::` in path pattern".to_owned(),
+                            ));
+                        }
+                        let seg = self.advance();
+                        segments.push(Self::span_of(&seg));
+                    }
+                    Ok(Pat::Path(segments))
+                } else {
+                    Ok(Pat::Ident(first_span))
+                }
             }
             // Integer literal pattern. FLS §5.2.
             // Also handles range patterns `lo..=hi` and `lo..hi`. FLS §5.1.9.
@@ -3590,6 +3610,27 @@ mod tests {
         if let Pat::Ident(span) = &arms[1].pat {
             assert_eq!(span.text(src), "n");
         }
+    }
+
+    #[test]
+    fn path_pattern_two_segments() {
+        // FLS §5.5: Path pattern `Color::Red` — two-segment path.
+        use crate::ast::{ExprKind, Pat};
+        let src = "enum Color { Red, Blue }\nfn f(c: i32) -> i32 { match c { Color::Red => 0, _ => 1 } }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[1].kind else { panic!("expected fn item") };
+        let body = f.body.as_ref().unwrap();
+        let tail = body.tail.as_ref().expect("expected tail");
+        let ExprKind::Match { ref arms, .. } = tail.kind else { panic!("expected match") };
+        assert_eq!(arms.len(), 2);
+        if let Pat::Path(ref segs) = arms[0].pat {
+            assert_eq!(segs.len(), 2);
+            assert_eq!(segs[0].text(src), "Color");
+            assert_eq!(segs[1].text(src), "Red");
+        } else {
+            panic!("expected Pat::Path, got {:?}", arms[0].pat);
+        }
+        assert!(matches!(arms[1].pat, Pat::Wildcard));
     }
 
     #[test]
