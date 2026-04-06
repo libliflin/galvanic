@@ -5098,3 +5098,153 @@ fn main() -> i32 {
         "expected at least 2 load instructions for field access:\n{asm}"
     );
 }
+
+// ── Milestone 50: tuple element stores ───────────────────────────────────────
+
+/// Milestone 50: basic tuple element store.
+///
+/// FLS §6.5.10: Assignment where the LHS is a tuple field access is a place
+/// expression assignment. FLS §6.10: Tuple fields are indexed by integer.
+#[test]
+fn milestone_50_tuple_store_first_element() {
+    let src = r#"
+fn main() -> i32 {
+    let mut t = (0, 1);
+    t.0 = 42;
+    t.0
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+/// Milestone 50: store to second element.
+///
+/// FLS §6.10: `t.1` accesses slot base+1.
+#[test]
+fn milestone_50_tuple_store_second_element() {
+    let src = r#"
+fn main() -> i32 {
+    let mut t = (1, 0);
+    t.1 = 42;
+    t.1
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+/// Milestone 50: store does not clobber neighbouring element.
+///
+/// FLS §6.10: Elements occupy independent consecutive stack slots.
+#[test]
+fn milestone_50_tuple_store_does_not_clobber_neighbour() {
+    let src = r#"
+fn main() -> i32 {
+    let mut t = (10, 32);
+    t.0 = 10;
+    t.0 + t.1
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+/// Milestone 50: multiple stores to different elements.
+///
+/// FLS §6.5.10 + §6.10: Each assignment updates one slot independently.
+#[test]
+fn milestone_50_tuple_multiple_stores() {
+    let src = r#"
+fn main() -> i32 {
+    let mut t = (0, 0);
+    t.0 = 20;
+    t.1 = 22;
+    t.0 + t.1
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+/// Milestone 50: store from a function parameter.
+///
+/// FLS §6.5.10: The RHS is an arbitrary expression, including a parameter.
+#[test]
+fn milestone_50_tuple_store_from_param() {
+    let src = r#"
+fn set_first(val: i32) -> i32 {
+    let mut t = (0, 0);
+    t.0 = val;
+    t.0
+}
+fn main() -> i32 {
+    set_first(42)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+/// Milestone 50: store inside a loop.
+///
+/// FLS §6.5.10 + §6.15.3: Tuple element stores in while loops emit runtime
+/// store instructions each iteration.
+#[test]
+fn milestone_50_tuple_store_in_loop() {
+    let src = r#"
+fn main() -> i32 {
+    let mut t = (0, 0);
+    let mut i = 0;
+    while i < 6 {
+        t.0 = t.0 + i;
+        i = i + 1;
+    }
+    t.0
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    // 0+1+2+3+4+5 = 15
+    assert_eq!(exit_code, 15, "expected exit 15, got {exit_code}");
+}
+
+/// Milestone 50: store from expression (arithmetic RHS).
+///
+/// FLS §6.5.10: The RHS may be any value expression.
+#[test]
+fn milestone_50_tuple_store_expr_rhs() {
+    let src = r#"
+fn main() -> i32 {
+    let mut t = (0, 0);
+    t.0 = 6 * 7;
+    t.0
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+// ── Assembly inspection: milestone 50 ────────────────────────────────────────
+
+/// Milestone 50: tuple element store emits a `str` instruction.
+///
+/// FLS §6.5.10 + §6.10: `t.0 = v` must emit a runtime `str` to the tuple's
+/// base slot — no compile-time substitution.
+#[test]
+fn runtime_tuple_store_emits_str() {
+    let src = r#"
+fn main() -> i32 {
+    let mut t = (0, 0);
+    t.0 = 42;
+    t.0
+}
+"#;
+    let asm = compile_to_asm(src);
+    // The tuple init (t = (0,0)) emits 2 str instructions.
+    // The store (t.0 = 42) emits at least one more str.
+    let store_count = asm.lines().filter(|l| l.trim().starts_with("str")).count();
+    assert!(
+        store_count >= 3,
+        "expected at least 3 str instructions (2 init + 1 element store), got {store_count}:\n{asm}"
+    );
+}
