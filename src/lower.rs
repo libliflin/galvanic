@@ -1663,12 +1663,16 @@ fn lower_fn(
 /// type" but does not give a precise section number in the FLS TOC shown here.
 /// Galvanic maps char literals to their Unicode code point as a `u32`.
 fn parse_char_value(text: &str) -> Result<u32, LowerError> {
-    // Strip surrounding single quotes: `'A'` → `A`, `'\n'` → `\n`
+    // FLS §2.4.1: Byte literals have the form `b'...'`.
+    // FLS §2.4.5: Char literals have the form `'...'`.
+    // Strip the optional `b` prefix and surrounding single quotes.
     let inner = text
+        .strip_prefix('b')
+        .unwrap_or(text)
         .strip_prefix('\'')
         .and_then(|s| s.strip_suffix('\''))
         .ok_or_else(|| {
-            LowerError::Unsupported(format!("malformed char literal: {text}"))
+            LowerError::Unsupported(format!("malformed char/byte literal: {text}"))
         })?;
 
     if !inner.starts_with('\\') {
@@ -5118,16 +5122,21 @@ impl<'src> LowerCtx<'src> {
 
             // FLS §2.4.5: Character literal — materialize the Unicode scalar value
             // (code point) as a runtime immediate.
+            // FLS §2.4.1: Byte literal — materialize the ASCII/byte value as a
+            // runtime immediate.
             //
-            // A char literal like `'A'` evaluates to the code point 65. The span
-            // text includes the surrounding single quotes; `parse_char_value`
-            // strips them and handles escape sequences.
+            // A char literal like `'A'` evaluates to code point 65.
+            // A byte literal like `b'A'` evaluates to byte value 65 (type `u8`).
+            // Both are parsed into `ExprKind::LitChar` by the parser.
+            // The span text includes the surrounding quotes (and optional `b` prefix);
+            // `parse_char_value` strips them and handles escape sequences.
             //
-            // FLS §2.4.5: "A character literal is a character within single-quotes."
-            // The type of a char literal is `char` (FLS §2.4.5), which galvanic
+            // FLS §2.4.5: The type of a char literal is `char`, which galvanic
             // maps to `IrTy::U32` (see `lower_ty`).
+            // FLS §2.4.1: The type of a byte literal is `u8`, which galvanic also
+            // maps to `IrTy::U32` (8-bit values are zero-extended to 64-bit register).
             //
-            // FLS §6.1.2:37–45: Even a literal char emits a runtime `mov` — no
+            // FLS §6.1.2:37–45: Even a literal emits a runtime `mov` — no
             // constant folding across this boundary.
             //
             // Cache-line note: one `mov` instruction = 4 bytes (half a cache slot).
@@ -5137,6 +5146,7 @@ impl<'src> LowerCtx<'src> {
                 let r = self.alloc_reg()?;
                 // All valid Unicode scalar values fit in i32 (max 0x10FFFF = 1,114,111
                 // which is well below i32::MAX = 2,147,483,647).
+                // Byte values (0–255) also fit trivially.
                 self.instrs.push(Instr::LoadImm(r, code_point as i32));
                 Ok(IrValue::Reg(r))
             }

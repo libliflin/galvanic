@@ -11500,3 +11500,140 @@ fn main() -> i32 {
         "expected `blr` indirect call for capturing closure in assembly:\n{asm}"
     );
 }
+
+// ── Milestone 92: byte literals compile to runtime ARM64 ─────────────────────
+//
+// FLS §2.4.1: A byte literal is of the form `b'...'` and has type `u8`.
+// The value is the ASCII/byte code of the character (or escape sequence).
+// Galvanic maps `u8` to `IrTy::U32` (zero-extended in a 64-bit register).
+//
+// FLS §6.1.2:37–45: Byte literals emit a runtime `mov` instruction — no
+// constant folding.
+
+/// Milestone 92: byte literal for a printable ASCII character.
+///
+/// FLS §2.4.1: `b'A'` has value 65 (ASCII 'A').
+#[test]
+fn milestone_92_byte_literal_ascii() {
+    let src = r#"
+fn main() -> i32 {
+    let b: u8 = b'A';
+    b as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 65, "b'A'=65, got {exit_code}");
+}
+
+/// Milestone 92: byte literal for a digit.
+///
+/// FLS §2.4.1: `b'0'` has value 48 (ASCII '0').
+#[test]
+fn milestone_92_byte_literal_digit() {
+    let src = r#"
+fn main() -> i32 {
+    let b: u8 = b'0';
+    b as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 48, "b'0'=48, got {exit_code}");
+}
+
+/// Milestone 92: byte literal stored in a let binding and returned directly.
+///
+/// FLS §2.4.1: `b'*'` has value 42 (ASCII '*').
+#[test]
+fn milestone_92_byte_let_binding() {
+    let src = r#"
+fn main() -> i32 {
+    let star: u8 = b'*';
+    star as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "b'*'=42, got {exit_code}");
+}
+
+/// Milestone 92: byte escape `b'\n'` produces the newline byte value (10).
+///
+/// FLS §2.4.1: Byte literals support the same escape sequences as char literals.
+/// `b'\n'` → 10 (LINE FEED).
+#[test]
+fn milestone_92_byte_escape_newline() {
+    let src = r#"
+fn main() -> i32 {
+    let nl: u8 = b'\n';
+    nl as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "b'\\n'=10, got {exit_code}");
+}
+
+/// Milestone 92: byte escape `b'\t'` produces the tab byte value (9).
+///
+/// FLS §2.4.1: `b'\t'` → 9 (HORIZONTAL TAB).
+#[test]
+fn milestone_92_byte_escape_tab() {
+    let src = r#"
+fn main() -> i32 {
+    let tab: u8 = b'\t';
+    tab as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 9, "b'\\t'=9, got {exit_code}");
+}
+
+/// Milestone 92: byte literal passed as a function parameter.
+///
+/// FLS §2.4.1: A byte literal value is an ordinary `u8` that can be passed
+/// as a function argument.
+#[test]
+fn milestone_92_byte_parameter() {
+    let src = r#"
+fn identity(b: u8) -> i32 { b as i32 }
+fn main() -> i32 { identity(b'Z') }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 90, "b'Z'=90, got {exit_code}");
+}
+
+/// Milestone 92: byte literal used in arithmetic.
+///
+/// FLS §2.4.1: Byte values participate in integer arithmetic after cast.
+/// `b'A' as i32 + 1 == 66`.
+#[test]
+fn milestone_92_byte_in_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    let b: u8 = b'A';
+    b as i32 + 1
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 66, "65+1=66, got {exit_code}");
+}
+
+/// Assembly check: byte literal emits a single `mov` immediate instruction.
+///
+/// FLS §2.4.1: A byte literal is a compile-time constant value but must
+/// be materialized as a runtime `mov` (FLS §6.1.2:37–45).
+/// Cache-line note: one `mov` = 4 bytes (fits alongside adjacent instructions
+/// in a 64-byte cache line).
+#[test]
+fn runtime_byte_literal_emits_mov() {
+    let src = r#"
+fn main() -> i32 {
+    let b: u8 = b'A';
+    b as i32
+}
+"#;
+    let asm = compile_to_asm(src);
+    // b'A' == 65 == 0x41; the assembler may emit `mov w0, #65` or `mov x0, #65`.
+    assert!(
+        asm.contains("#65") || asm.contains("#0x41"),
+        "expected immediate 65 (b'A') in assembly:\n{asm}"
+    );
+}
