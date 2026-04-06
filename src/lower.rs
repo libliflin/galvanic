@@ -33,7 +33,10 @@ use crate::ir::{IrBinOp, Instr, IrFn, IrTy, IrValue, Module};
 // ── FLS citations added in this module ───────────────────────────────────────
 // FLS §6.12.1: Call expressions — `lower_expr` handles `ExprKind::Call`.
 // FLS §9: Functions with parameters — `lower_fn` spills x0..x{n-1} to stack.
+// FLS §6.15.2: Infinite loop expressions — `lower_expr` handles `ExprKind::Loop`.
 // FLS §6.15.3: While loop expressions — `lower_expr` handles `ExprKind::While`.
+// FLS §6.15.5: Continue expressions — `lower_expr` handles `ExprKind::Continue`.
+// FLS §6.15.6: Break expressions — `lower_expr` handles `ExprKind::Break`.
 // FLS §6.5.3: Comparison operator expressions — `lower_expr` handles Lt/Le/Gt/Ge/Eq/Ne.
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -163,6 +166,27 @@ fn lower_ty(ty: &crate::ast::Ty, source: &str) -> Result<IrTy, LowerError> {
     }
 }
 
+// ── Loop context ─────────────────────────────────────────────────────────────
+
+/// Context for a loop being lowered.
+///
+/// Pushed onto `LowerCtx::loop_stack` when entering a loop expression and
+/// popped when the loop body has been fully lowered.
+///
+/// `break` consults the top entry for `exit_label` to branch past the loop.
+/// `continue` consults `header_label` to jump back to the loop top.
+///
+/// FLS §6.15.2: Infinite loop expressions.
+/// FLS §6.15.3: While loop expressions.
+/// FLS §6.15.6: Break expressions.
+/// FLS §6.15.7: Continue expressions.
+struct LoopCtx {
+    /// Label at the top of the loop. Target for `continue` and the back-edge.
+    header_label: u32,
+    /// Label immediately after the loop. Target for `break`.
+    exit_label: u32,
+}
+
 // ── Lowering context ─────────────────────────────────────────────────────────
 
 /// Mutable state threaded through the lowering of a single function body.
@@ -203,6 +227,17 @@ struct LowerCtx<'src> {
     /// FLS §6.12.1: Call expressions make a function non-leaf; the link
     /// register must be preserved so the function can return correctly.
     has_calls: bool,
+    /// Stack of enclosing loop contexts.
+    ///
+    /// Each entry corresponds to one loop currently being lowered. The top
+    /// (last) entry is the innermost loop — the target of an unqualified
+    /// `break` or `continue`.
+    ///
+    /// FLS §6.15.6: "A break expression without a label exits the innermost
+    /// enclosing loop expression."
+    /// FLS §6.15.7: "A continue expression without a label continues the
+    /// innermost enclosing loop expression."
+    loop_stack: Vec<LoopCtx>,
 }
 
 impl<'src> LowerCtx<'src> {
@@ -212,9 +247,11 @@ impl<'src> LowerCtx<'src> {
             instrs: Vec::new(),
             next_reg: 0,
             next_slot: 0,
+
             next_label: 0,
             locals: HashMap::new(),
             has_calls: false,
+            loop_stack: Vec::new(),
         }
     }
 
@@ -475,19 +512,29 @@ impl<'src> LowerCtx<'src> {
             // instructions. A `true` condition still emits `mov x0, #1; cbz x0, ...`
             // — the branch resolves at runtime, not compile time.
             //
-            // Limitation: this implementation handles the i32-valued case. Unit-
-            // returning if expressions (if without else, or with `-> ()` branches)
-            // are not yet supported and will return Unsupported.
             ExprKind::If { cond, then_block, else_expr } => {
                 match ret_ty {
+                    // FLS §6.17: If expression producing an i32 value.
+                    //
+                    // Lowering uses a "phi slot": a stack slot written by both
+                    // branches and read once after the if expression to yield
+                    // the result in a virtual register.
+                    //
+                    // FLS §6.17: "The type of the if expression is the type of
+                    // the last expression in the block." Both branches must have
+                    // the same type.
+                    //
+                    // FLS §6.1.2:37–45: Even statically-known conditions emit
+                    // a `cbz` — no constant folding of `if true { ... }`.
+                    //
+                    // Cache-line note: the phi slot is one 8-byte stack entry;
+                    // read exactly once after the if expression completes.
                     IrTy::I32 => {
                         let else_label = self.alloc_label();
                         let end_label = self.alloc_label();
 
                         // Allocate the phi slot before entering either branch so
                         // both branches write to the same stack location.
-                        // Cache-line note: the phi slot is one 8-byte stack entry;
-                        // it is read exactly once after the if expression completes.
                         let phi_slot = self.alloc_slot()?;
 
                         // Lower condition (bool → 0 or 1 in a register).
@@ -525,9 +572,42 @@ impl<'src> LowerCtx<'src> {
                         self.instrs.push(Instr::Load { dst: result_reg, slot: phi_slot });
                         Ok(IrValue::Reg(result_reg))
                     }
-                    _ => Err(LowerError::Unsupported(
-                        "if expression with non-i32 return type".into(),
-                    )),
+
+                    // FLS §6.17: If expression with unit type (no value needed).
+                    //
+                    // Used when the if expression is a statement (value discarded)
+                    // or when both branches produce `()`. The body of a loop uses
+                    // this path, so `if cond { break; }` lowers correctly.
+                    //
+                    // No phi slot is allocated — the branches run for side effects.
+                    //
+                    // FLS §6.17: "If an if expression does not have an else expression,
+                    // its type is the unit type."
+                    //
+                    // FLS §6.1.2:37–45: The condition still emits a runtime `cbz`.
+                    IrTy::Unit => {
+                        let else_label = self.alloc_label();
+                        let end_label = self.alloc_label();
+
+                        let cond_val = self.lower_expr(cond, &IrTy::I32)?;
+                        let cond_reg = self.val_to_reg(cond_val)?;
+
+                        // Jump to else (or end) if condition is false.
+                        self.instrs.push(Instr::CondBranch { reg: cond_reg, label: else_label });
+
+                        // ── Then branch (unit, side effects only) ─────────────────
+                        self.lower_block_to_value(then_block, &IrTy::Unit)?;
+                        self.instrs.push(Instr::Branch(end_label));
+
+                        // ── Else branch ───────────────────────────────────────────
+                        self.instrs.push(Instr::Label(else_label));
+                        if let Some(e) = else_expr {
+                            self.lower_expr(e, &IrTy::Unit)?;
+                        }
+
+                        self.instrs.push(Instr::Label(end_label));
+                        Ok(IrValue::Unit)
+                    }
                 }
             }
 
@@ -696,6 +776,11 @@ impl<'src> LowerCtx<'src> {
                 let header_label = self.alloc_label();
                 let exit_label = self.alloc_label();
 
+                // Push a loop context so that `break`/`continue` inside the body
+                // can resolve to the correct labels.
+                // FLS §6.15.3, §6.15.6, §6.15.7.
+                self.loop_stack.push(LoopCtx { header_label, exit_label });
+
                 // Loop top: the branch target for the back-edge.
                 self.instrs.push(Instr::Label(header_label));
 
@@ -718,7 +803,125 @@ impl<'src> LowerCtx<'src> {
                 // Exit: the while expression produces `()`.
                 self.instrs.push(Instr::Label(exit_label));
 
+                self.loop_stack.pop();
+
                 // FLS §6.15.3: "The type of a while expression is the unit type ()."
+                Ok(IrValue::Unit)
+            }
+
+            // FLS §6.15.2: Infinite loop expression `loop { body }`.
+            //
+            // A loop expression repeatedly executes its body until a `break`
+            // expression transfers control past the loop. Unlike `while`, there
+            // is no condition — the only exit is an explicit `break`.
+            //
+            // Lowering strategy:
+            //   1. Emit header label (back-edge target for continue / back-edge).
+            //   2. Push LoopCtx so `break`/`continue` resolve to the right labels.
+            //   3. Lower body block (unit type — value discarded).
+            //   4. Emit unconditional back-edge Branch to header_label.
+            //   5. Emit exit_label (where `break` branches to).
+            //   6. Pop LoopCtx.
+            //   7. Return Unit (loop without break value has type `()`).
+            //
+            // FLS §6.15.2: "A loop expression evaluates its block repeatedly
+            // until a break expression is encountered."
+            // FLS §6.15.2: "The type of a loop expression without a break value
+            // is the unit type ()."
+            // FLS §6.1.2:37–45: The back-edge is a runtime branch instruction
+            // — it is not eliminated even if the body contains no side effects.
+            //
+            // Cache-line note: the header and exit labels have no instruction cost.
+            // The back-edge `b .L{header}` is 4 bytes — one instruction slot.
+            ExprKind::Loop(body) => {
+                let header_label = self.alloc_label();
+                let exit_label = self.alloc_label();
+
+                self.loop_stack.push(LoopCtx { header_label, exit_label });
+
+                // Loop top: the branch-back target.
+                self.instrs.push(Instr::Label(header_label));
+
+                // Execute body. Value is discarded; only side effects matter.
+                self.lower_block_to_value(body, &IrTy::Unit)?;
+
+                // Back-edge: jump unconditionally to the top of the loop.
+                // FLS §6.15.2: execution continues indefinitely until `break`.
+                self.instrs.push(Instr::Branch(header_label));
+
+                // Exit: where `break` transfers control.
+                self.instrs.push(Instr::Label(exit_label));
+
+                self.loop_stack.pop();
+
+                // FLS §6.15.2: "The type of a loop expression is the unit type."
+                // (Break-with-value support is a future milestone.)
+                Ok(IrValue::Unit)
+            }
+
+            // FLS §6.15.6: Break expression — exit the innermost enclosing loop.
+            //
+            // An unqualified `break` jumps to the exit label of the innermost
+            // loop. A `break value` expression would additionally store the value
+            // to a break slot; break-with-value is not yet supported.
+            //
+            // FLS §6.15.6: "A break expression exits the innermost enclosing loop
+            // expression or block expression labelled with a block label."
+            // FLS §6.15.6: "The type of a break expression is the never type `!`."
+            // We approximate `!` as Unit since the never type is not yet in the IR.
+            //
+            // FLS §6.1.2:37–45: The branch is a runtime `b` instruction — even if
+            // the condition leading to `break` is statically known, the branch
+            // resolves at runtime.
+            //
+            // Cache-line note: `b .L{exit}` is 4 bytes — one instruction slot.
+            ExprKind::Break(value) => {
+                // Resolve the exit label from the innermost loop context.
+                let exit_label = self.loop_stack.last()
+                    .map(|ctx| ctx.exit_label)
+                    .ok_or_else(|| LowerError::Unsupported(
+                        "break expression outside of a loop".into()
+                    ))?;
+
+                // Break-with-value is not yet supported at this milestone.
+                // FLS §6.15.6: only `loop` expressions support break-with-value;
+                // `while` and `for` loops do not. Full support requires a break
+                // slot allocated in the enclosing `loop` lowering.
+                if value.is_some() {
+                    return Err(LowerError::Unsupported(
+                        "break with value (loop-as-expression) not yet supported".into(),
+                    ));
+                }
+
+                // Emit the branch to the loop exit.
+                self.instrs.push(Instr::Branch(exit_label));
+
+                // FLS §6.15.6: break has type `!` (never). Approximated as Unit.
+                Ok(IrValue::Unit)
+            }
+
+            // FLS §6.15.7: Continue expression — restart the innermost loop.
+            //
+            // A `continue` transfers control to the header of the innermost
+            // enclosing loop, skipping any remaining statements in the body.
+            //
+            // FLS §6.15.7: "A continue expression advances to the next iteration
+            // of the innermost enclosing loop expression."
+            // FLS §6.15.7: "The type of a continue expression is the never type `!`."
+            // We approximate `!` as Unit since the never type is not yet in the IR.
+            //
+            // Cache-line note: `b .L{header}` is 4 bytes — same cost as `break`.
+            ExprKind::Continue => {
+                // Resolve the header label from the innermost loop context.
+                let header_label = self.loop_stack.last()
+                    .map(|ctx| ctx.header_label)
+                    .ok_or_else(|| LowerError::Unsupported(
+                        "continue expression outside of a loop".into()
+                    ))?;
+
+                self.instrs.push(Instr::Branch(header_label));
+
+                // FLS §6.15.7: continue has type `!` (never). Approximated as Unit.
                 Ok(IrValue::Unit)
             }
 

@@ -630,3 +630,116 @@ fn runtime_while_emits_cmp_cset_cbz_and_b() {
         "expected unconditional `b` back-edge instruction in while loop, got:\n{asm}"
     );
 }
+
+// ── Milestone 8: loop / break / continue ─────────────────────────────────────
+//
+// FLS §6.15.2: Infinite loop expressions. A `loop` block executes indefinitely
+// until a `break` expression is encountered. The type of a loop without a
+// break value is `()`.
+//
+// FLS §6.15.6: Break expressions exit the innermost enclosing loop. The branch
+// to the loop exit must be emitted as a runtime instruction — not constant-folded
+// even when the break condition is statically known.
+//
+// FLS §6.15.7: Continue expressions restart the innermost loop by branching to
+// the loop header.
+//
+// FLS §6.1.2:37–45: All branches are runtime instructions.
+
+/// Milestone 8: `loop { break; }` — simplest infinite loop, exits immediately.
+///
+/// The loop executes one iteration, hits `break`, and exits. The rest of main
+/// returns 0.
+///
+/// FLS §6.15.2: `loop` executes the body until a break.
+/// FLS §6.15.6: `break` without a value exits the loop.
+#[test]
+fn milestone_8_loop_immediate_break() {
+    let src = "fn main() -> i32 { loop { break; } 0 }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 0, "expected exit 0 from `loop {{ break; }} 0`, got {exit_code}");
+}
+
+/// Milestone 8: loop with a conditional break that runs the body multiple times.
+///
+/// ```rust
+/// fn main() -> i32 {
+///     let mut i = 0;
+///     loop {
+///         if i == 3 { break; }
+///         i = i + 1;
+///     }
+///     i
+/// }
+/// ```
+/// The body runs 3 times (`i` = 0, 1, 2), then `i == 3` is true and `break`
+/// exits the loop. The tail expression reads `i` = 3.
+///
+/// FLS §6.15.2: Loop body runs until break.
+/// FLS §6.15.6: `break` in a nested if exits the enclosing loop.
+/// FLS §6.17: The `if` test is evaluated at runtime each iteration.
+#[test]
+fn milestone_8_loop_count_to_three() {
+    let src = "fn main() -> i32 { let mut i = 0; loop { if i == 3 { break; } i = i + 1; } i }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 3, "expected exit 3 from loop-count-to-three, got {exit_code}");
+}
+
+/// Milestone 8: continue skips remaining body and restarts loop.
+///
+/// ```rust
+/// fn main() -> i32 {
+///     let mut i = 0;
+///     let mut j = 0;
+///     loop {
+///         if i == 5 { break; }
+///         i = i + 1;
+///         if i == 3 { continue; }
+///         j = j + 1;
+///     }
+///     j
+/// }
+/// ```
+/// `i` goes 0→1→2→3→4→5. When `i == 3`, `continue` skips `j = j + 1`.
+/// So `j` is incremented for i=1,2,4,5 → j ends at 4.
+///
+/// FLS §6.15.7: `continue` restarts the loop body from the header.
+/// FLS §6.15.6: `break` exits the loop when `i == 5`.
+#[test]
+fn milestone_8_loop_continue_skips_body() {
+    let src = "fn main() -> i32 { let mut i = 0; let mut j = 0; loop { if i == 5 { break; } i = i + 1; if i == 3 { continue; } j = j + 1; } j }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 4, "expected exit 4 from loop-continue test, got {exit_code}");
+}
+
+/// Assembly inspection: `loop { break; }` must emit a back-edge `b` and a `cbz`-free loop header.
+///
+/// A `loop` has no condition — its header emits no `cbz`. The only branch
+/// out of the loop is the `break`'s unconditional `b` to the exit label.
+/// The back-edge unconditional `b` to the header must also appear.
+///
+/// FLS §6.15.2: `loop` is an infinite loop — no condition check at the header.
+/// FLS §6.15.6: `break` emits a runtime `b` to the exit label.
+/// FLS §6.1.2:37–45: Both branches are runtime instructions.
+#[test]
+fn runtime_loop_emits_back_edge_and_break_branch() {
+    let asm = compile_to_asm("fn main() -> i32 { loop { break; } 0 }\n");
+    // The back-edge must appear — this is what makes it a loop structure.
+    let b_count = asm.lines().filter(|l| l.trim_start().starts_with("b ")).count();
+    assert!(
+        b_count >= 2,
+        "expected at least 2 unconditional `b` instructions (back-edge + break branch), found {b_count}:\n{asm}"
+    );
+    // Unlike `while`, a `loop` has no condition — `cbz` must NOT appear at the header.
+    // (It may appear if there's an `if` inside the body, but this simple case has none.)
+    assert!(
+        !asm.contains("cbz"),
+        "expected no `cbz` for unconditional `loop {{ break; }}`, got:\n{asm}"
+    );
+}
