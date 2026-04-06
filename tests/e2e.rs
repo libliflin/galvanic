@@ -831,6 +831,102 @@ fn runtime_explicit_return_emits_ret() {
     );
 }
 
+// ── Milestone 10: integer division and remainder ──────────────────────────────
+//
+// FLS §6.5.5: Arithmetic operator expressions include `/` (division) and `%`
+// (remainder). For integer types, division truncates toward zero. Remainder
+// satisfies `(a / b) * b + (a % b) == a`.
+//
+// FLS §6.23: Division by zero and signed MIN / -1 overflow panic at runtime.
+// Galvanic does not yet insert a panic check — this is noted as a known gap.
+//
+// FLS §6.1.2:37–45: Division must emit a runtime `sdiv` instruction, not
+// be constant-folded — even `10 / 2` must emit `sdiv`.
+
+/// Milestone 10: `fn main() -> i32 { 10 / 2 }` exits with code 5.
+///
+/// FLS §6.5.5: Integer division operator `/`.
+/// ARM64: `sdiv` — signed integer division.
+#[test]
+fn milestone_10_div() {
+    let Some(exit_code) = compile_and_run("fn main() -> i32 { 10 / 2 }\n") else {
+        return;
+    };
+    assert_eq!(exit_code, 5, "expected exit 5 from `10 / 2`, got {exit_code}");
+}
+
+/// Milestone 10 (variant): division with non-even result truncates toward zero.
+///
+/// FLS §6.5.5: Integer division truncates toward zero.
+/// `7 / 2 = 3` (rounds toward zero, not down).
+#[test]
+fn milestone_10_div_truncates() {
+    let Some(exit_code) = compile_and_run("fn main() -> i32 { 7 / 2 }\n") else {
+        return;
+    };
+    assert_eq!(exit_code, 3, "expected exit 3 from `7 / 2`, got {exit_code}");
+}
+
+/// Milestone 10: `fn main() -> i32 { 10 % 3 }` exits with code 1.
+///
+/// FLS §6.5.5: Integer remainder operator `%`.
+/// ARM64: `sdiv` + `msub` — `lhs - (lhs / rhs) * rhs`.
+#[test]
+fn milestone_10_rem() {
+    let Some(exit_code) = compile_and_run("fn main() -> i32 { 10 % 3 }\n") else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "expected exit 1 from `10 % 3`, got {exit_code}");
+}
+
+/// Milestone 10 (variant): division composed with other arithmetic.
+///
+/// FLS §6.5.5: Division has higher precedence than addition.
+/// `fn main() -> i32 { 6 / 2 + 1 }` → `(6 / 2) + 1` = `3 + 1` = 4.
+/// FLS §6.21: Expression precedence — `*`, `/`, `%` bind tighter than `+`, `-`.
+#[test]
+fn milestone_10_div_in_expr() {
+    let Some(exit_code) = compile_and_run("fn main() -> i32 { 6 / 2 + 1 }\n") else {
+        return;
+    };
+    assert_eq!(exit_code, 4, "expected exit 4 from `6 / 2 + 1`, got {exit_code}");
+}
+
+/// Assembly inspection: `10 / 2` must emit `sdiv` (not constant-fold to 5).
+///
+/// FLS §6.5.5: Division operator.
+/// FLS §6.1.2:37–45: Non-const division must emit a runtime `sdiv` instruction.
+#[test]
+fn runtime_div_emits_sdiv() {
+    let asm = compile_to_asm("fn main() -> i32 { 10 / 2 }\n");
+    assert!(
+        asm.contains("sdiv"),
+        "expected `sdiv` instruction for `10 / 2`, got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #5"),
+        "assembly must not constant-fold `10 / 2` to #5:\n{asm}"
+    );
+}
+
+/// Assembly inspection: `10 % 3` must emit `sdiv` + `msub`.
+///
+/// FLS §6.5.5: Remainder operator `%`.
+/// FLS §6.1.2:37–45: Non-const remainder must emit runtime instructions.
+/// ARM64: remainder requires two instructions (`sdiv` + `msub`).
+#[test]
+fn runtime_rem_emits_sdiv_and_msub() {
+    let asm = compile_to_asm("fn main() -> i32 { 10 % 3 }\n");
+    assert!(
+        asm.contains("sdiv"),
+        "expected `sdiv` in remainder sequence for `10 % 3`, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("msub"),
+        "expected `msub` in remainder sequence for `10 % 3`, got:\n{asm}"
+    );
+}
+
 /// Assembly inspection: unary negation `-x` must emit a `neg` instruction.
 ///
 /// FLS §6.5.4: Negation operator expressions. The unary `-` applied to an

@@ -103,6 +103,18 @@ pub enum IrBinOp {
     Eq,
     /// Inequality `!=`. FLS §6.5.3.
     Ne,
+    /// Signed integer division `/`. FLS §6.5.5.
+    ///
+    /// ARM64: `sdiv x{dst}, x{lhs}, x{rhs}`.
+    /// FLS §6.23: Division by zero panics at runtime (debug mode). Galvanic
+    /// does not yet insert a divide-by-zero check — this is FLS §6.23 AMBIGUOUS:
+    /// the spec requires a panic but the mechanism is unspecified.
+    Div,
+    /// Signed integer remainder `%`. FLS §6.5.5.
+    ///
+    /// Computed as `lhs - (lhs / rhs) * rhs` using `sdiv` + `msub`.
+    /// ARM64: two instructions — see codegen for details.
+    Rem,
 }
 
 /// An IR instruction.

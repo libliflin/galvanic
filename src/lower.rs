@@ -473,8 +473,12 @@ impl<'src> LowerCtx<'src> {
             //
             // Both operands are lowered recursively, producing LoadImm/BinOp
             // instructions. The result is in a virtual register.
+            //
+            // Division and remainder are included here. FLS §6.23: division by
+            // zero panics at runtime; galvanic does not yet insert a check
+            // (FLS §6.23 AMBIGUOUS: the panic mechanism is not yet specified).
             ExprKind::Binary { op, lhs, rhs }
-                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) =>
+                if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem) =>
             {
                 match ret_ty {
                     IrTy::I32 => {
@@ -489,6 +493,8 @@ impl<'src> LowerCtx<'src> {
                             BinOp::Add => IrBinOp::Add,
                             BinOp::Sub => IrBinOp::Sub,
                             BinOp::Mul => IrBinOp::Mul,
+                            BinOp::Div => IrBinOp::Div,
+                            BinOp::Rem => IrBinOp::Rem,
                             _ => unreachable!("matched above"),
                         };
                         self.instrs.push(Instr::BinOp { op: ir_op, dst, lhs: lhs_reg, rhs: rhs_reg });
