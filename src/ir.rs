@@ -313,6 +313,32 @@ pub enum Instr {
         src: u8,
     },
 
+    /// Logical NOT: `dst = !src` (0 → 1, 1 → 0), for boolean operands.
+    ///
+    /// `BoolNot { dst, src }` → `eor x{dst}, x{src}, #1` on ARM64.
+    ///
+    /// FLS §6.5.4: Negation operator expressions. The unary `!` applied to
+    /// a `bool` value produces its logical complement: `!true` = `false` (0),
+    /// `!false` = `true` (1).
+    ///
+    /// ARM64: `eor xD, xS, #1` XORs the source with the immediate 1,
+    /// flipping only the least-significant bit. Since booleans are represented
+    /// as 0 or 1, this produces the correct logical complement in a single
+    /// 4-byte instruction — more efficient than the two-instruction alternative
+    /// of `LoadImm(1)` + `BinOp(BitXor)`.
+    ///
+    /// FLS §6.1.2:37–45: Runtime instruction — `!b` always emits `eor`,
+    /// even when `b` is statically known.
+    ///
+    /// Cache-line note: ARM64 `eor` with logical immediate is 4 bytes —
+    /// same footprint as `mvn` (bitwise NOT for integers).
+    BoolNot {
+        /// Destination register (receives the logical complement 0 or 1).
+        dst: u8,
+        /// Source register (holds the bool value 0 or 1 to negate).
+        src: u8,
+    },
+
     /// Call a named function with arguments; result goes into a virtual register.
     ///
     /// `Call { dst, name, args }` emits (for each arg[i] ≠ i):
@@ -386,10 +412,22 @@ pub enum IrValue {
 /// `Clone` and `Copy` are derived so that `LowerCtx` can store the function
 /// return type and pass it to `return` expression lowering without borrow
 /// conflicts (FLS §6.19).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum IrTy {
     /// The `i32` type. FLS §4.1.
     I32,
     /// The unit type `()`. FLS §4.4.
     Unit,
+    /// The boolean type `bool`. FLS §4.3.
+    ///
+    /// Represented as a 0/1 integer in a 64-bit register, but kept distinct
+    /// from `IrTy::I32` so that `!` can emit logical NOT (`eor reg, #1`)
+    /// rather than bitwise NOT (`mvn`). On ARM64, `bool` uses the same
+    /// register layout as `i32` — no extra cost.
+    ///
+    /// FLS §4.3: "The boolean type bool has two values: true and false."
+    /// FLS §6.5.4: `!` on bool is logical NOT; `!` on integer is bitwise NOT.
+    ///
+    /// Cache-line note: same register width as `IrTy::I32`.
+    Bool,
 }

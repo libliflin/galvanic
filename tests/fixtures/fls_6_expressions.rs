@@ -134,6 +134,16 @@ fn bool_return_example(x: i32) -> bool {
     x > 0
 }
 
+// FLS §6.5.4 — Logical NOT for boolean values.
+// FLS §6.5.4: "The type of a negation expression is the type of the operand."
+// For bool, `!` is logical NOT (0 → 1, 1 → 0).
+// No direct FLS example provided; derived from the semantic description:
+// "The negation operator `!` applied to type bool is not supported in the
+// same way as integers." (FLS §6.5.4 implies bool and integer NOT are distinct.)
+fn bool_not_example(b: bool) -> bool {
+    !b
+}
+
 // FLS §6.5.11 — Compound assignment expressions
 // No direct FLS example provided; derived from the semantic description:
 // "A compound assignment expression combines a binary operator expression

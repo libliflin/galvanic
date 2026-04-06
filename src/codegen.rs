@@ -356,6 +356,23 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool) 
             )?;
         }
 
+        // FLS §6.5.4: Logical NOT `!operand` for boolean values — 0 → 1, 1 → 0.
+        // ARM64: `eor x{dst}, x{src}, #1` — XOR source with immediate 1.
+        // Since booleans are represented as 0 or 1, XOR with 1 flips bit 0,
+        // producing the correct logical complement in a single instruction.
+        //
+        // Contrast with bitwise NOT (Instr::Not → `mvn`): `mvn` of 0 = -1 (not 1),
+        // and `mvn` of 1 = -2 (not 0). `mvn` is wrong for booleans.
+        //
+        // FLS §6.1.2:37–45: Runtime instruction — no constant folding.
+        // Cache-line note: ARM64 `eor` with logical immediate is 4 bytes.
+        Instr::BoolNot { dst, src } => {
+            writeln!(
+                out,
+                "    eor     x{dst}, x{src}, #1             // FLS §6.5.4: logical NOT x{src} (bool)"
+            )?;
+        }
+
         // FLS §8.1: Store a virtual register to a stack slot.
         // ARM64: `str x{src}, [sp, #{offset}]` — offset = slot * 8.
         // Cache-line note: 8-byte slots keep stores naturally aligned;
