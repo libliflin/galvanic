@@ -1962,7 +1962,19 @@ impl<'src> LowerCtx<'src> {
             // Cache-line note: the emitted `str` is 4 bytes — same footprint
             // as the `str` emitted by a let-binding initializer.
             ExprKind::Binary { op: BinOp::Assign, lhs, rhs } => {
-                // Resolve the LHS to a stack slot (must be a declared local).
+                // Resolve the LHS to a stack slot (must be a declared local or field).
+                //
+                // FLS §6.5.10: The left operand must be a place expression. Galvanic
+                // supports two place expression forms here:
+                //   1. A simple variable path (e.g., `x = value`)
+                //   2. A struct field access (e.g., `s.field = value`) — FLS §6.13
+                //
+                // FLS §6.13: Field access on a struct variable resolves to the slot
+                // at `base_slot + field_index`, where the layout mirrors struct literal
+                // construction (field 0 at base_slot, field 1 at base_slot+1, etc.).
+                //
+                // Cache-line note: field store emits one `str` instruction (4 bytes),
+                // identical in cost to a plain variable store.
                 let slot = match &lhs.kind {
                     ExprKind::Path(segments) if segments.len() == 1 => {
                         let var_name = segments[0].text(self.source);
@@ -1971,6 +1983,53 @@ impl<'src> LowerCtx<'src> {
                                 "assignment to undefined variable `{var_name}`"
                             ))
                         })?
+                    }
+                    ExprKind::FieldAccess { receiver, field } => {
+                        // Resolve the receiver to its base slot and struct type.
+                        let (base_slot, struct_type_name) = match &receiver.kind {
+                            ExprKind::Path(segs) if segs.len() == 1 => {
+                                let var_name = segs[0].text(self.source);
+                                let base_slot =
+                                    self.locals.get(var_name).copied().ok_or_else(|| {
+                                        LowerError::Unsupported(format!(
+                                            "undefined variable `{var_name}` in field assignment"
+                                        ))
+                                    })?;
+                                let type_name = self
+                                    .local_struct_types
+                                    .get(&base_slot)
+                                    .ok_or_else(|| {
+                                        LowerError::Unsupported(format!(
+                                            "variable `{var_name}` is not a struct"
+                                        ))
+                                    })?
+                                    .clone();
+                                (base_slot, type_name)
+                            }
+                            _ => {
+                                return Err(LowerError::Unsupported(
+                                    "field assignment on non-variable receiver not yet supported"
+                                        .into(),
+                                ));
+                            }
+                        };
+                        // Look up the field index in the struct definition.
+                        let field_name = field.text(self.source);
+                        let field_names =
+                            self.struct_defs.get(&struct_type_name).ok_or_else(|| {
+                                LowerError::Unsupported(format!(
+                                    "unknown struct type `{struct_type_name}`"
+                                ))
+                            })?;
+                        let field_idx = field_names
+                            .iter()
+                            .position(|n| n == field_name)
+                            .ok_or_else(|| {
+                                LowerError::Unsupported(format!(
+                                    "no field `{field_name}` in struct `{struct_type_name}`"
+                                ))
+                            })?;
+                        base_slot + field_idx as u8
                     }
                     _ => {
                         return Err(LowerError::Unsupported(
