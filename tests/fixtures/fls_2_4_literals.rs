@@ -62,4 +62,24 @@ fn main() {
     let _bc = b"";              // 0 bytes
     let _bd = b"a\nb";          // 3 bytes (\n is 1 byte)
     let _be = b"a\tb";          // 3 bytes (\t is 1 byte)
+
+    // FLS §2.4.6.2 — Raw string literals
+    // A raw string literal has type `&str` and contains NO escape sequences.
+    // Backslash is a literal character: r"hello\n" is 7 bytes, not 6.
+    // The FLS does not provide standalone example programs; these are derived
+    // from the section's semantic description (§2.4.6.2: "raw string literals
+    // … do not process any escape sequences").
+    let _rf = r"hello";         // 5 bytes (identical to "hello")
+    let _rg = r"hello\n";       // 7 bytes (\n = two chars: backslash + n)
+    let _rh = r"hello\t";       // 7 bytes (\t = two chars: backslash + t)
+    let _ri = r"";              // 0 bytes
+
+    // FLS §2.4.2.2 — Raw byte string literals
+    // A raw byte string literal has type `&[u8]` and contains no escape sequences.
+    // br"hello\n" is 7 bytes, not 6.
+    // The FLS does not provide standalone example programs; these are derived
+    // from the section's semantic description (§2.4.2.2).
+    let _rj = br"hello";        // 5 bytes
+    let _rk = br"hello\n";      // 7 bytes (\n = two chars)
+    let _rl = br"";             // 0 bytes
 }
