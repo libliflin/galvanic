@@ -25,6 +25,27 @@
 
 // ── Module ────────────────────────────────────────────────────────────────────
 
+/// A static variable in the data section.
+///
+/// FLS §7.2: Static items. Each static has a fixed memory address in the
+/// `.data` (mutable) or `.rodata` (immutable) section. Galvanic emits all
+/// statics into `.data` at this milestone.
+///
+/// FLS §7.2:15: "All references to a static refer to the same memory address."
+///
+/// Cache-line note: each static occupies 8 bytes in the `.data` section.
+/// Eight statics fit in one 64-byte data cache line. Reading a static costs
+/// an ADRP + ADD + LDR sequence (12 bytes in the instruction stream),
+/// whereas a `const` costs a single MOV (4 bytes) — the primary cache-line
+/// tradeoff documented in galvanic's design.
+pub struct StaticData {
+    /// The assembly label for this static (matches the Rust name).
+    pub name: String,
+    /// The compile-time initializer value. Only integer literals are supported
+    /// at this milestone (FLS §6.1.2: constant expressions).
+    pub value: i32,
+}
+
 /// The top-level IR compilation unit.
 ///
 /// FLS §18.1: A crate is the unit of compilation. The `Module` holds all
@@ -32,6 +53,11 @@
 pub struct Module {
     /// The functions defined in this module.
     pub fns: Vec<IrFn>,
+    /// Static variables in the data section.
+    ///
+    /// FLS §7.2: Static items. Populated during lowering when the source
+    /// file contains `static` declarations.
+    pub statics: Vec<StaticData>,
 }
 
 // ── Functions ─────────────────────────────────────────────────────────────────
@@ -462,6 +488,32 @@ pub enum Instr {
         index_reg: u8,
         /// Scratch register for base address computation (must not alias src or index_reg).
         scratch: u8,
+    },
+
+    /// Load from a static variable in the data section.
+    ///
+    /// `LoadStatic { dst, name }` emits:
+    ///   `adrp x{dst}, {name}`
+    ///   `add x{dst}, x{dst}, :lo12:{name}`
+    ///   `ldr x{dst}, [x{dst}]`
+    ///
+    /// FLS §7.2: Static items. All references to a static refer to the same
+    /// memory address — unlike `const` (which substitutes a value), a static
+    /// reference must load from the data section at runtime.
+    ///
+    /// ARM64 addressing: ADRP loads the page-aligned base address into the
+    /// register; the ADD applies the page offset (:lo12:) to form the full
+    /// 64-bit address; LDR loads the 64-bit value from that address.
+    ///
+    /// Cache-line note: three 4-byte instructions (12 bytes) per static load.
+    /// A `const` load is one instruction (4 bytes). The extra 8 bytes bring
+    /// the static-load sequence to exactly one half of a 64-byte instruction
+    /// cache line, while the value itself occupies one half of a data cache line.
+    LoadStatic {
+        /// Destination register for the loaded value.
+        dst: u8,
+        /// The assembly label of the static (same as the Rust static name).
+        name: String,
     },
 
     /// Call a `&mut self` method and write modified fields back to the caller's struct.

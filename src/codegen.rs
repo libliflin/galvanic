@@ -84,6 +84,30 @@ pub fn emit_asm(module: &Module) -> Result<String, CodegenError> {
     writeln!(out)?;
     emit_start(&mut out)?;
 
+    // Emit the .data section for static items.
+    //
+    // FLS §7.2: Static items reside in the data section.
+    // FLS §7.2:15: All references to a static refer to the same memory address.
+    //
+    // Cache-line note: each static occupies 8 bytes (.quad). Eight statics
+    // fill one 64-byte data cache line. We align each static to 8 bytes
+    // (.align 3) to prevent two statics from sharing a single alignment unit
+    // and to match the 64-bit LDR requirement on ARM64.
+    //
+    // FLS §7.2 AMBIGUOUS: The spec does not mandate a specific data section
+    // alignment. Galvanic uses .align 3 (8-byte alignment) as the minimum
+    // for correct 64-bit LDR addressing.
+    if !module.statics.is_empty() {
+        writeln!(out)?;
+        writeln!(out, "    .data")?;
+        for s in &module.statics {
+            writeln!(out, "    .align 3")?;
+            writeln!(out, "    .global {}", s.name)?;
+            writeln!(out, "{}:", s.name)?;
+            writeln!(out, "    .quad {}", s.value)?;
+        }
+    }
+
     Ok(out)
 }
 
@@ -213,6 +237,25 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool) 
                 out,
                 "    mov     x{reg}, #{n:<19} // FLS §2.4.4.1: load imm {n}"
             )?;
+        }
+
+        // FLS §7.2: Load from a static variable in the data section.
+        //
+        // ARM64 addressing: ADRP loads the PC-relative page address; ADD
+        // applies the page offset (:lo12:) to form the full address; LDR
+        // loads the 64-bit value. Three 4-byte instructions = 12 bytes.
+        //
+        // FLS §7.2:15: All references to a static refer to the same memory
+        // address — unlike const substitution (which inlines a value via MOV),
+        // every static reference goes through the data section.
+        //
+        // Cache-line note: three 4-byte instructions (12 bytes) occupy three
+        // slots in the instruction cache line. The loaded value occupies one
+        // 8-byte slot in the data cache line — one half of a 16-byte row.
+        Instr::LoadStatic { dst, name } => {
+            writeln!(out, "    adrp    x{dst}, {name}              // FLS §7.2: static addr (page)")?;
+            writeln!(out, "    add     x{dst}, x{dst}, :lo12:{name}  // FLS §7.2: static addr (offset)")?;
+            writeln!(out, "    ldr     x{dst}, [x{dst}]             // FLS §7.2: static load")?;
         }
 
         // FLS §6.5.5: Integer binary arithmetic.

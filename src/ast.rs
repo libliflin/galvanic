@@ -97,8 +97,8 @@ pub struct Item {
 ///
 /// FLS §3: item kinds include functions, structs, enums, unions, traits,
 /// implementations, type aliases, constants, statics, use declarations,
-/// and extern blocks. `Fn`, `Struct`, `Enum`, `Impl`, and `Trait` are
-/// implemented here.
+/// and extern blocks. `Fn`, `Struct`, `Enum`, `Impl`, `Trait`, and `Const`
+/// are implemented here.
 #[derive(Debug)]
 pub enum ItemKind {
     /// A function definition. FLS §9.
@@ -118,6 +118,80 @@ pub enum ItemKind {
     /// Trait definitions are parsed but not yet used for type checking.
     /// They drive static dispatch via `impl Trait for Type`.
     Trait(Box<TraitDef>),
+    /// A constant item. FLS §7.1.
+    ///
+    /// `const NAME: Type = expr;` — names a compile-time constant value.
+    /// Every use of a constant is replaced with its value (FLS §7.1:10).
+    Const(Box<ConstDef>),
+    /// A static item. FLS §7.2.
+    ///
+    /// `static NAME: Type = expr;` — names a value with a fixed memory address.
+    /// All references to a static refer to the same memory location (FLS §7.2:15).
+    /// Unlike constants, statics are not substituted inline; they reside in the
+    /// data section and are loaded via an address reference at runtime.
+    ///
+    /// Cache-line note: a static occupies one 8-byte slot in the `.data` section
+    /// (one slot per half cache line). Reading it costs an ADRP + ADD + LDR
+    /// sequence (12 bytes in the instruction stream), whereas a `const` costs
+    /// only a single MOV (4 bytes). This is the primary cache-line tradeoff
+    /// documented in galvanic's design.
+    Static(Box<StaticDef>),
+}
+
+/// A static item declaration.
+///
+/// FLS §7.2: Static items.
+///
+/// Grammar (abridged):
+/// ```text
+/// StaticDeclaration ::= "static" "mut"? Identifier ":" Type "=" Expression ";"
+/// ```
+///
+/// FLS §7.2:15: "All references to a static refer to the same memory address."
+/// FLS §7.2 AMBIGUOUS: The spec does not specify the data-section alignment for
+/// statics. Galvanic aligns each static to 8 bytes (`.align 3`) matching the
+/// 64-bit register width.
+///
+/// Cache-line note: each `StaticDef` is only allocated during parsing.
+#[derive(Debug)]
+pub struct StaticDef {
+    /// The name of the static.
+    pub name: Span,
+    /// The declared type. Currently only `i32` is supported.
+    pub ty: Ty,
+    /// The initializer expression. Must be a constant expression (FLS §6.1.2).
+    pub value: Expr,
+    /// Whether this static is mutable (`static mut`).
+    ///
+    /// FLS §7.2: Mutable statics can only be accessed inside `unsafe` blocks
+    /// (FLS §19). Galvanic parses `mut` but does not yet enforce the unsafe
+    /// requirement — this is future work.
+    pub mutable: bool,
+    /// Span of the entire declaration including the trailing semicolon.
+    pub span: Span,
+}
+
+/// A constant item declaration.
+///
+/// FLS §7.1: Constant items.
+///
+/// Grammar (abridged):
+/// ```text
+/// ConstantDeclaration ::= "const" Identifier ":" Type "=" Expression ";"
+/// ```
+///
+/// Cache-line note: `ConstDef` is only allocated during parsing;
+/// it is not on any hot lowering path.
+#[derive(Debug)]
+pub struct ConstDef {
+    /// The name of the constant.
+    pub name: Span,
+    /// The declared type. Currently only `i32` is supported.
+    pub ty: Ty,
+    /// The initializer expression. Must be a constant expression (FLS §6.1.2).
+    pub value: Expr,
+    /// Span of the entire declaration including the trailing semicolon.
+    pub span: Span,
 }
 
 // ── Functions ─────────────────────────────────────────────────────────────────
