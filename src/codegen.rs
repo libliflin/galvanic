@@ -377,6 +377,27 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool) 
                     out,
                     "    asr     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.7: arithmetic shift right (signed)"
                 )?,
+
+                // FLS §4.1: Unsigned integer division.
+                // ARM64: `udiv x{dst}, x{lhs}, x{rhs}` — unsigned division.
+                // Used when the operand type is unsigned (IrTy::U32).
+                // FLS §6.5.5: Division by zero: galvanic does not yet insert
+                // a divide-by-zero check (FLS §6.23 AMBIGUOUS on mechanism).
+                // Cache-line note: one 4-byte instruction per unsigned division.
+                IrBinOp::UDiv => writeln!(
+                    out,
+                    "    udiv    x{dst}, x{lhs}, x{rhs}          // FLS §4.1: div (unsigned)"
+                )?,
+
+                // FLS §4.1: Unsigned (logical) right shift.
+                // ARM64: `lsr x{dst}, x{lhs}, x{rhs}` — logical shift right,
+                // zero-extends from the right (vs `asr` which sign-extends).
+                // Used when the operand type is unsigned (IrTy::U32).
+                // Cache-line note: one 4-byte instruction per unsigned shift.
+                IrBinOp::UShr => writeln!(
+                    out,
+                    "    lsr     x{dst}, x{lhs}, x{rhs}          // FLS §4.1: logical shift right (unsigned)"
+                )?,
             }
         }
 

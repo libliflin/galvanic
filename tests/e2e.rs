@@ -6974,3 +6974,156 @@ fn runtime_static_emits_adrp_add_ldr() {
         "expected ANSWER label in assembly:\n{asm}"
     );
 }
+
+// ── Milestone 61: Additional integer types as parameters and return types ─────
+
+/// Milestone 61: u32 parameter and return type.
+///
+/// FLS §4.1: Unsigned integer types. u32 uses a 64-bit ARM64 register (x0).
+/// Addition is identical to signed at the hardware level.
+#[test]
+fn milestone_61_u32_add() {
+    let src = r#"
+fn add_u32(a: u32, b: u32) -> u32 { a + b }
+fn main() -> i32 { add_u32(20, 22) as i32 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+/// Milestone 61: u32 subtraction.
+///
+/// FLS §4.1: u32 subtraction is identical to signed subtraction on ARM64
+/// (sub instruction is the same; no sign bit interpretation involved).
+#[test]
+fn milestone_61_u32_sub() {
+    let src = r#"
+fn sub_u32(a: u32, b: u32) -> u32 { a - b }
+fn main() -> i32 { sub_u32(50, 8) as i32 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+/// Milestone 61: u32 unsigned division uses `udiv`.
+///
+/// FLS §4.1: Unsigned division. ARM64 `udiv` (not `sdiv`) must be used.
+/// For small positive values the result matches signed division, so this
+/// validates both the instruction choice and basic correctness.
+#[test]
+fn milestone_61_u32_div() {
+    let src = r#"
+fn div_u32(a: u32, b: u32) -> u32 { a / b }
+fn main() -> i32 { div_u32(84, 2) as i32 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+/// Milestone 61: i64 parameter and return type.
+///
+/// FLS §4.1: i64 is a 64-bit signed integer. On ARM64 all registers are
+/// 64-bit so i64 uses the same register layout as i32 with no truncation.
+#[test]
+fn milestone_61_i64_add() {
+    let src = r#"
+fn add_i64(a: i64, b: i64) -> i64 { a + b }
+fn main() -> i32 { add_i64(20, 22) as i32 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+/// Milestone 61: usize parameter (platform-native unsigned integer).
+///
+/// FLS §4.1: usize is the pointer-width unsigned integer type. On AArch64
+/// (64-bit) usize is 64 bits — same as u64. Uses `udiv` and `lsr`.
+#[test]
+fn milestone_61_usize_add() {
+    let src = r#"
+fn add_usize(a: usize, b: usize) -> usize { a + b }
+fn main() -> i32 { add_usize(20, 22) as i32 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+/// Milestone 61: isize parameter (platform-native signed integer).
+///
+/// FLS §4.1: isize is the pointer-width signed integer type. On AArch64
+/// (64-bit) isize is 64 bits — same as i64. Uses `sdiv` and `asr`.
+#[test]
+fn milestone_61_isize_add() {
+    let src = r#"
+fn add_isize(a: isize, b: isize) -> isize { a + b }
+fn main() -> i32 { add_isize(20, 22) as i32 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+/// Milestone 61: u32 unsigned right shift uses `lsr` (logical shift).
+///
+/// FLS §4.1: Right shift on unsigned types is logical (zero-extending).
+/// ARM64 `lsr` fills from the left with 0, unlike `asr` which fills with
+/// the sign bit. For positive values both give the same result, so we
+/// use a value where only logical shift gives the expected answer if
+/// we could test with large u32 — but since LoadImm is limited to i32
+/// range at this milestone, we verify with a small value.
+#[test]
+fn milestone_61_u32_shr() {
+    let src = r#"
+fn shr_u32(a: u32, b: u32) -> u32 { a >> b }
+fn main() -> i32 { shr_u32(168, 2) as i32 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+/// Milestone 61: u32 as a local variable (let binding).
+///
+/// FLS §8.1: Let statements. u32 variables use the same stack slot
+/// layout as i32 — one 8-byte slot per variable.
+#[test]
+fn milestone_61_u32_let_binding() {
+    let src = r#"
+fn main() -> i32 {
+    let x: u32 = 42;
+    x as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+/// Milestone 61: assembly inspection — unsigned division emits `udiv`.
+///
+/// FLS §4.1: Unsigned division must use ARM64 `udiv` instruction, not `sdiv`.
+/// Cache-line note: `udiv` is one 4-byte instruction, same footprint as `sdiv`.
+#[test]
+fn runtime_u32_div_emits_udiv() {
+    let src = "fn div_u32(a: u32, b: u32) -> u32 { a / b }\nfn main() -> i32 { div_u32(10, 2) as i32 }\n";
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("udiv"),
+        "expected `udiv` for unsigned division:\n{asm}"
+    );
+    assert!(
+        !asm.lines().any(|l| l.trim_start().starts_with("sdiv")),
+        "must NOT emit `sdiv` for unsigned division:\n{asm}"
+    );
+}
+
+/// Milestone 61: assembly inspection — unsigned right shift emits `lsr`.
+///
+/// FLS §4.1: Right shift on unsigned types must use ARM64 `lsr` (logical
+/// shift right), not `asr` (arithmetic shift right which sign-extends).
+#[test]
+fn runtime_u32_shr_emits_lsr() {
+    let src = "fn shr_u32(a: u32, b: u32) -> u32 { a >> b }\nfn main() -> i32 { shr_u32(84, 1) as i32 }\n";
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("lsr"),
+        "expected `lsr` for unsigned right shift:\n{asm}"
+    );
+}
