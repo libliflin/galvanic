@@ -27,7 +27,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{BinOp, Block, Expr, ExprKind, ItemKind, SourceFile, Stmt, StmtKind, TyKind};
+use crate::ast::{BinOp, Block, Expr, ExprKind, ItemKind, Pat, SourceFile, Stmt, StmtKind, TyKind};
 use crate::ir::{IrBinOp, Instr, IrFn, IrTy, IrValue, Module};
 
 // ── FLS citations added in this module ───────────────────────────────────────
@@ -40,6 +40,7 @@ use crate::ir::{IrBinOp, Instr, IrFn, IrTy, IrValue, Module};
 // FLS §6.5.3: Comparison operator expressions — `lower_expr` handles Lt/Le/Gt/Ge/Eq/Ne.
 // FLS §6.5.6: Bit operator expressions — `lower_expr` handles BitAnd/BitOr/BitXor.
 // FLS §6.5.7: Shift operator expressions — `lower_expr` handles Shl/Shr.
+// FLS §6.18: Match expressions — `lower_expr` handles `ExprKind::Match`.
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
@@ -103,6 +104,10 @@ fn expr_contains_call(expr: &Expr) -> bool {
         ExprKind::For { iter, body, .. } => {
             expr_contains_call(iter) || block_contains_call(body)
         }
+        ExprKind::Match { scrutinee, arms } => {
+            expr_contains_call(scrutinee)
+                || arms.iter().any(|a| expr_contains_call(&a.body))
+        }
         // Leaves: literals, paths, unit — none contain calls.
         _ => false,
     }
@@ -161,6 +166,10 @@ fn expr_contains_break_with_value(expr: &Expr) -> bool {
                 || else_expr.as_ref().is_some_and(|e| expr_contains_break_with_value(e))
         }
         ExprKind::Block(b) => block_contains_break_with_value(b),
+        ExprKind::Match { scrutinee, arms } => {
+            expr_contains_break_with_value(scrutinee)
+                || arms.iter().any(|a| expr_contains_break_with_value(&a.body))
+        }
         // Do NOT recurse into nested loops — their `break` belongs to them.
         ExprKind::Loop(_) | ExprKind::While { .. } | ExprKind::For { .. } => false,
         _ => false,
@@ -481,31 +490,42 @@ impl<'src> LowerCtx<'src> {
     /// FLS §8: Statements.
     fn lower_stmt(&mut self, stmt: &crate::ast::Stmt) -> Result<(), LowerError> {
         match &stmt.kind {
-            // FLS §8.1: Let statement — allocate a stack slot and store the
-            // initializer value. The variable name is registered in `locals`
-            // so that later path expressions can emit a Load.
+            // FLS §8.1: Let statement — allocate a stack slot and optionally
+            // store the initializer value. The variable name is registered in
+            // `locals` so that later path expressions can emit a Load.
             //
-            // FLS §6.1.2:37–45: The store is a runtime instruction; the
-            // initializer is evaluated at runtime, not compile time.
+            // FLS §8.1: "A LetStatement may optionally have an Initializer."
+            // When no initializer is present the slot is allocated but left
+            // uninitialized (no Store is emitted). A later plain-assignment
+            // expression statement (`x = expr;`) will store to this slot via
+            // the `BinOp::Assign` path in `lower_expr`.
+            //
+            // FLS §8.1 NOTE: The spec requires definite initialization before
+            // use (via flow analysis). Galvanic does not yet enforce this —
+            // reading an uninitialized slot produces architecturally undefined
+            // behavior. Programs that always initialize before use are correct.
+            //
+            // FLS §6.1.2:37–45: Any store instruction is a runtime instruction;
+            // the initializer (when present) is evaluated at runtime.
             StmtKind::Let { name, ty: _, init } => {
-                let init_expr = init.as_ref().ok_or_else(|| {
-                    LowerError::Unsupported("uninitialized let binding (no initializer)".into())
-                })?;
-
-                // Lower the initializer. We assume i32 for numeric expressions.
-                // Type inference is future work; this is sufficient for milestone 3.
-                //
-                // FLS §8.1 AMBIGUOUS: the spec does not describe how type
-                // inference resolves the type of the initializer in the absence
-                // of a type annotation. We default to i32 for integer-producing
-                // expressions.
-                let val = self.lower_expr(init_expr, &IrTy::I32)?;
-                let src = self.val_to_reg(val)?;
-
                 let slot = self.alloc_slot()?;
                 let var_name = name.text(self.source);
                 self.locals.insert(var_name, slot);
-                self.instrs.push(Instr::Store { src, slot });
+
+                if let Some(init_expr) = init.as_ref() {
+                    // Lower the initializer. We assume i32 for numeric
+                    // expressions. Type inference is future work.
+                    //
+                    // FLS §8.1 AMBIGUOUS: the spec does not describe how type
+                    // inference resolves the type of the initializer in the
+                    // absence of a type annotation. We default to i32 for
+                    // integer-producing expressions.
+                    let val = self.lower_expr(init_expr, &IrTy::I32)?;
+                    let src = self.val_to_reg(val)?;
+                    self.instrs.push(Instr::Store { src, slot });
+                }
+                // If no initializer: slot is allocated and registered but no
+                // Store is emitted. FLS §8.1 (uninitialized let binding).
 
                 Ok(())
             }
@@ -835,6 +855,165 @@ impl<'src> LowerCtx<'src> {
                         }
 
                         self.instrs.push(Instr::Label(end_label));
+                        Ok(IrValue::Unit)
+                    }
+                }
+            }
+
+            // FLS §6.18: Match expression.
+            //
+            // `match scrutinee { pat0 => body0, ..., default => bodyN }`
+            //
+            // Lowering strategy (comparison chain):
+            //   1. Lower scrutinee → spill to a stack slot so it is safe across
+            //      subsequent instruction sequences (each arm re-loads it).
+            //   2. For each arm except the last: test `scrutinee == pat_val`
+            //      using the existing BinOp(Eq) path and CondBranch; if the
+            //      check fails, jump to the next arm's label.
+            //   3. The last arm is emitted unconditionally (the compiler assumes
+            //      exhaustiveness; a future type-checking pass will enforce it).
+            //   4. Each arm stores its result to a phi slot (non-unit result)
+            //      and branches to exit_label, or executes for side effects
+            //      (unit result).
+            //
+            // FLS §6.18: "A match expression evaluates the scrutinee and then
+            // matches it against each pattern in order. The first matching arm
+            // executes."
+            //
+            // FLS §6.1.2:37–45: The scrutinee load and all pattern comparisons
+            // emit runtime instructions — even a match on a literal constant
+            // emits `ldr` + `mov` + `cmp` + `cset` + `cbz`.
+            //
+            // FLS §6.18 AMBIGUOUS: The spec requires exhaustiveness but does not
+            // specify the checking algorithm. Galvanic defers exhaustiveness
+            // checking to a future pass; the last arm is always emitted
+            // unconditionally.
+            //
+            // Cache-line note: each arm costs ~5 instructions (ldr scrut + mov
+            // pat + cmp + cset + cbz = 20 bytes); with the branch (4 bytes) and
+            // label (0 bytes) that is 24 bytes per arm — two arms per 64-byte line.
+            ExprKind::Match { scrutinee, arms } => {
+                if arms.is_empty() {
+                    return Err(LowerError::Unsupported("match expression with no arms".into()));
+                }
+
+                // Lower the scrutinee and spill to a stack slot.
+                // The scrutinee may be i32 or bool; both use integer registers.
+                // We infer the scrutinee type from context: use i32 by default,
+                // and use bool if any arm has a bool literal pattern.
+                let scrut_ty = if arms.iter().any(|a| matches!(a.pat, Pat::LitBool(_))) {
+                    IrTy::Bool
+                } else {
+                    IrTy::I32
+                };
+                let scrut_val = self.lower_expr(scrutinee, &scrut_ty)?;
+                let scrut_reg = self.val_to_reg(scrut_val)?;
+                let scrut_slot = self.alloc_slot()?;
+                self.instrs.push(Instr::Store { src: scrut_reg, slot: scrut_slot });
+
+                // Split into checked arms (all but the last) and the default arm.
+                // The default arm is emitted unconditionally (exhaustiveness deferred).
+                let (checked_arms, default_arm) = arms.split_at(arms.len() - 1);
+
+                let exit_label = self.alloc_label();
+
+                match ret_ty {
+                    IrTy::I32 | IrTy::Bool => {
+                        let phi_slot = self.alloc_slot()?;
+
+                        for arm in checked_arms {
+                            let next_label = self.alloc_label();
+
+                            // Load scrutinee from stack slot (safe across arm boundaries).
+                            let s_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+
+                            // Materialize the pattern value.
+                            let pat_reg = self.alloc_reg()?;
+                            let pat_imm = match &arm.pat {
+                                Pat::LitInt(n) => *n as i32,
+                                Pat::LitBool(b) => *b as i32,
+                                Pat::Wildcard => {
+                                    // Wildcard in non-last position — treat as unconditional.
+                                    // Lower body, store to phi, branch to exit.
+                                    let body_val = self.lower_expr(&arm.body, ret_ty)?;
+                                    let body_reg = self.val_to_reg(body_val)?;
+                                    self.instrs.push(Instr::Store { src: body_reg, slot: phi_slot });
+                                    self.instrs.push(Instr::Branch(exit_label));
+                                    self.instrs.push(Instr::Label(next_label));
+                                    continue;
+                                }
+                            };
+                            self.instrs.push(Instr::LoadImm(pat_reg, pat_imm));
+
+                            // Compare scrutinee == pattern → 1 if equal, 0 if not.
+                            let cmp_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::BinOp {
+                                op: IrBinOp::Eq,
+                                dst: cmp_reg,
+                                lhs: s_reg,
+                                rhs: pat_reg,
+                            });
+
+                            // cbz: skip this arm if condition is 0 (not equal).
+                            self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
+
+                            // Arm body.
+                            let body_val = self.lower_expr(&arm.body, ret_ty)?;
+                            let body_reg = self.val_to_reg(body_val)?;
+                            self.instrs.push(Instr::Store { src: body_reg, slot: phi_slot });
+                            self.instrs.push(Instr::Branch(exit_label));
+
+                            self.instrs.push(Instr::Label(next_label));
+                        }
+
+                        // Default arm — unconditional.
+                        let body_val = self.lower_expr(&default_arm[0].body, ret_ty)?;
+                        let body_reg = self.val_to_reg(body_val)?;
+                        self.instrs.push(Instr::Store { src: body_reg, slot: phi_slot });
+
+                        self.instrs.push(Instr::Label(exit_label));
+                        let result_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: result_reg, slot: phi_slot });
+                        Ok(IrValue::Reg(result_reg))
+                    }
+
+                    IrTy::Unit => {
+                        for arm in checked_arms {
+                            let next_label = self.alloc_label();
+
+                            let s_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+
+                            let pat_reg = self.alloc_reg()?;
+                            let pat_imm = match &arm.pat {
+                                Pat::LitInt(n) => *n as i32,
+                                Pat::LitBool(b) => *b as i32,
+                                Pat::Wildcard => {
+                                    self.lower_expr(&arm.body, &IrTy::Unit)?;
+                                    self.instrs.push(Instr::Branch(exit_label));
+                                    self.instrs.push(Instr::Label(next_label));
+                                    continue;
+                                }
+                            };
+                            self.instrs.push(Instr::LoadImm(pat_reg, pat_imm));
+
+                            let cmp_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::BinOp {
+                                op: IrBinOp::Eq,
+                                dst: cmp_reg,
+                                lhs: s_reg,
+                                rhs: pat_reg,
+                            });
+                            self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
+
+                            self.lower_expr(&arm.body, &IrTy::Unit)?;
+                            self.instrs.push(Instr::Branch(exit_label));
+                            self.instrs.push(Instr::Label(next_label));
+                        }
+
+                        self.lower_expr(&default_arm[0].body, &IrTy::Unit)?;
+                        self.instrs.push(Instr::Label(exit_label));
                         Ok(IrValue::Unit)
                     }
                 }

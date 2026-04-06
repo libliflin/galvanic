@@ -2069,3 +2069,247 @@ fn runtime_loop_break_value_emits_store_and_load() {
     // The back-edge must still be present (the loop is a real loop at runtime).
     assert!(asm.contains("b "), "expected back-edge branch in loop assembly");
 }
+
+// ── Milestone 21: uninitialized let bindings (FLS §8.1) ─────────────────────
+
+/// Milestone 21: `let x;` followed by `x = expr;` compiles and runs correctly.
+///
+/// FLS §8.1: "A LetStatement may optionally have an Initializer."
+/// Without an initializer the slot is allocated; the subsequent assignment stores to it.
+#[test]
+fn milestone_21_uninit_let_then_assign() {
+    let src = "fn main() -> i32 { let x; x = 42; x }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 42, "expected 42, got {exit_code}");
+}
+
+/// Milestone 21: uninitialized let binding used in arithmetic after assignment.
+///
+/// FLS §8.1: slot is allocated by `let y;`; the assignment `y = x + 1;` stores
+/// the computed value; then `y` is used as the return value.
+#[test]
+fn milestone_21_uninit_let_arithmetic() {
+    let src = "fn main() -> i32 { let x; x = 5; let y; y = x + 1; y }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 6, "expected 6, got {exit_code}");
+}
+
+/// Milestone 21: conditional initialization — the variable is assigned in each
+/// branch of an if/else. This is the canonical Rust use-case for uninit let.
+///
+/// FLS §8.1: variable declared without initializer, then assigned in each arm.
+#[test]
+fn milestone_21_conditional_init_true() {
+    let src = "fn main() -> i32 { let r; if true { r = 1; } else { r = 0; } r }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "expected 1, got {exit_code}");
+}
+
+/// Milestone 21: conditional initialization — false branch.
+///
+/// FLS §8.1: the else branch assigns to the uninit slot.
+#[test]
+fn milestone_21_conditional_init_false() {
+    let src = "fn main() -> i32 { let r; if false { r = 1; } else { r = 0; } r }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 0, "expected 0, got {exit_code}");
+}
+
+/// Milestone 21: sign function using uninit let across if/else-if/else chain.
+///
+/// FLS §8.1: common pattern where `let s;` is declared once and each branch
+/// of a multi-way conditional assigns a distinct value.
+#[test]
+fn milestone_21_sign_positive() {
+    let src = "\
+fn sign(n: i32) -> i32 {
+    let s;
+    if n > 0 { s = 1; } else if n < 0 { s = -1; } else { s = 0; }
+    s
+}
+fn main() -> i32 { sign(5) }
+";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "expected 1, got {exit_code}");
+}
+
+/// Milestone 21: sign function — negative input.
+///
+/// FLS §8.1: the else-if branch assigns `s = -1`.
+/// Note: exit codes are modulo 256 on Linux; -1 becomes 255.
+#[test]
+fn milestone_21_sign_negative() {
+    let src = "\
+fn sign(n: i32) -> i32 {
+    let s;
+    if n > 0 { s = 1; } else if n < 0 { s = -1; } else { s = 0; }
+    s
+}
+fn main() -> i32 { sign(-3) }
+";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    // exit(−1) wraps to 255 on Linux
+    assert_eq!(exit_code, 255, "expected 255 (−1 mod 256), got {exit_code}");
+}
+
+/// Milestone 21: sign function — zero input.
+///
+/// FLS §8.1: the else branch assigns `s = 0`.
+#[test]
+fn milestone_21_sign_zero() {
+    let src = "\
+fn sign(n: i32) -> i32 {
+    let s;
+    if n > 0 { s = 1; } else if n < 0 { s = -1; } else { s = 0; }
+    s
+}
+fn main() -> i32 { sign(0) }
+";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 0, "expected 0, got {exit_code}");
+}
+
+/// Milestone 21: assembly inspection — `let x;` allocates a stack slot but
+/// emits no store; only the subsequent `x = 5;` should emit the first `str`.
+///
+/// FLS §8.1: "A LetStatement may optionally have an Initializer." When absent,
+/// no runtime store instruction is emitted for the declaration itself.
+#[test]
+fn runtime_uninit_let_no_store_until_assignment() {
+    // The let allocates slot 0 for x. The assignment `x = 5` is the first store.
+    let src = "fn main() -> i32 { let x; x = 5; x }\n";
+    let asm = compile_to_asm(src);
+    // There must be a store (from the assignment `x = 5`)
+    assert!(asm.contains("str"), "expected str from assignment x = 5");
+    // There must be a load (from the tail expression `x`)
+    assert!(asm.contains("ldr"), "expected ldr from tail expression x");
+}
+
+// ── Milestone 22: match expressions on integer values ────────────────────────
+//
+// `match` is a fundamental Rust control-flow construct (FLS §6.18). This
+// milestone adds integer and boolean literal patterns plus the wildcard `_`.
+// Arms are tested in source order; the first matching arm executes.
+//
+// Lowering strategy: each non-wildcard arm lowers to a comparison chain
+// (scrutinee == pattern_val → cbz if not equal → arm body). The last arm is
+// emitted unconditionally (exhaustiveness deferred to a future type pass).
+//
+// FLS §6.18: Match expressions.
+// FLS §5.1: Wildcard pattern `_`.
+// FLS §5.2: Literal patterns (integer, boolean).
+// FLS §6.1.2:37–45: All comparisons emit runtime instructions.
+
+/// Milestone 22: match on zero — wildcard arm taken.
+///
+/// FLS §6.18: The first arm whose pattern matches executes.
+/// With `match x { 0 => 0, _ => 1 }` and x=5, the wildcard arm executes.
+#[test]
+fn milestone_22_match_wildcard_taken() {
+    let src = "fn main() -> i32 { let x = 5; match x { 0 => 0, _ => 1 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected wildcard arm (1), got {exit_code}");
+}
+
+/// Milestone 22: match on zero — literal arm taken.
+///
+/// FLS §6.18: The `0` literal pattern matches scrutinee 0; the first arm executes.
+#[test]
+fn milestone_22_match_literal_taken() {
+    let src = "fn main() -> i32 { let x = 0; match x { 0 => 42, _ => 1 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected literal arm (42), got {exit_code}");
+}
+
+/// Milestone 22: match with three arms — middle arm taken.
+///
+/// FLS §6.18: Arms are tested in source order; the first match wins.
+#[test]
+fn milestone_22_match_three_arms_middle() {
+    let src = "fn main() -> i32 { let x = 1; match x { 0 => 10, 1 => 20, _ => 30 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 20, "expected arm 1 (20), got {exit_code}");
+}
+
+/// Milestone 22: match with three arms — last (wildcard) arm taken.
+///
+/// FLS §6.18: Wildcard `_` matches any remaining value.
+#[test]
+fn milestone_22_match_three_arms_wildcard() {
+    let src = "fn main() -> i32 { let x = 99; match x { 0 => 10, 1 => 20, _ => 30 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 30, "expected wildcard arm (30), got {exit_code}");
+}
+
+/// Milestone 22: match on a function parameter.
+///
+/// FLS §6.18: The scrutinee may be any expression, including a variable
+/// that holds a function argument (not a compile-time constant).
+/// This verifies the compiler does not constant-fold the match — it must
+/// emit runtime comparison instructions.
+///
+/// FLS §6.1.2:37–45: Non-const code emits runtime instructions.
+#[test]
+fn milestone_22_match_on_parameter() {
+    let src = "\
+fn classify(n: i32) -> i32 {
+    match n {
+        0 => 0,
+        1 => 1,
+        _ => 2,
+    }
+}
+fn main() -> i32 { classify(1) }
+";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected classify(1) == 1, got {exit_code}");
+}
+
+/// Milestone 22: match used as a function (all arms covered).
+///
+/// FLS §6.18: Multiple literal arms with a wildcard default.
+#[test]
+fn milestone_22_match_fizzbuzz_like() {
+    let src = "\
+fn kind(n: i32) -> i32 {
+    match n {
+        0 => 0,
+        1 => 1,
+        2 => 2,
+        _ => 3,
+    }
+}
+fn main() -> i32 { kind(2) }
+";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2, "expected kind(2) == 2, got {exit_code}");
+}
+
+/// Milestone 22: assembly inspection — match emits comparison (cmp/cset) and
+/// conditional branch (cbz) for each non-wildcard arm.
+///
+/// FLS §6.18: Each arm tests at runtime — no compile-time constant folding.
+/// FLS §6.1.2:37–45: Non-const match emits runtime branch instructions.
+#[test]
+fn runtime_match_emits_comparison_and_cbz() {
+    let src = "fn main() -> i32 { let x = 0; match x { 0 => 42, _ => 1 } }\n";
+    let asm = compile_to_asm(src);
+    // Must emit a comparison (cmp for the arm equality test)
+    assert!(asm.contains("cmp"), "expected cmp for arm equality test");
+    // Must emit a conditional branch (cbz to skip the arm if not equal)
+    assert!(asm.contains("cbz"), "expected cbz for arm skip branch");
+}

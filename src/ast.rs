@@ -678,6 +678,60 @@ pub enum ExprKind {
         /// another `If` expression.
         else_expr: Option<Box<Expr>>,
     },
+
+    /// A match expression. FLS §6.18.
+    ///
+    /// `match scrutinee { arm0, arm1, ... }`
+    ///
+    /// FLS §6.18: A match expression branches over all possible values of the
+    /// scrutinee. Arms are tested in source order; the first arm whose pattern
+    /// matches executes the arm's body. The wildcard pattern `_` matches any
+    /// value.
+    ///
+    /// Cache-line note: lowered to a comparison chain — no new IR instructions.
+    Match {
+        /// The value being matched.
+        scrutinee: Box<Expr>,
+        /// The match arms, in source order.
+        arms: Vec<MatchArm>,
+    },
+}
+
+// ── Match arms and patterns ───────────────────────────────────────────────────
+
+/// A single arm in a match expression.
+///
+/// FLS §6.18: Each `MatchArm` consists of a pattern, an optional guard (not
+/// yet supported), and a body expression.
+///
+/// Cache-line note: `pat` is a small enum (fits in 2 words), `body` is a
+/// pointer. The struct fits comfortably in a single 64-byte cache line.
+#[derive(Debug)]
+pub struct MatchArm {
+    /// The pattern to test.
+    pub pat: Pat,
+    /// The body expression executed when the pattern matches.
+    pub body: Box<Expr>,
+    /// Source span covering the full arm (`pat => body`).
+    pub span: Span,
+}
+
+/// A pattern in a match arm.
+///
+/// FLS §5: Patterns. This is an intentionally minimal subset covering the
+/// most common match patterns for integer and boolean scrutinees. Struct,
+/// tuple, enum, and binding patterns are future work.
+///
+/// FLS §5.1: Wildcard pattern `_` — matches any value without binding.
+/// FLS §5.2: Literal patterns — integer and boolean literals.
+#[derive(Debug, Clone)]
+pub enum Pat {
+    /// Wildcard pattern `_`. Matches any value. FLS §5.1.
+    Wildcard,
+    /// Integer literal pattern. FLS §5.2.
+    LitInt(u128),
+    /// Boolean literal pattern `true` / `false`. FLS §5.2.
+    LitBool(bool),
 }
 
 // ── Operators ─────────────────────────────────────────────────────────────────

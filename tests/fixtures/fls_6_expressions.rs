@@ -187,3 +187,72 @@ fn for_loop_inclusive_example() -> i32 {
     }
     product              // = 24
 }
+
+// FLS §8.1 — Let statement with no initializer.
+//
+// FLS §8.1: "A LetStatement may optionally have an Initializer."
+// When no initializer is present the variable is declared but not initialized.
+// A subsequent assignment expression stores the first value to the slot.
+//
+// The FLS §8.1 grammar is:
+//   LetStatement ::= `let` PatternWithoutAlternation (`:` TypeSpecification)?
+//                    (`=` Expression (ExpressionWithoutBlock `else` BlockExpression)?)? `;`
+//
+// Note: FLS §8.1 does not provide a direct code example for the uninit form;
+// this function is derived from the grammar's optional-initializer clause.
+fn uninit_let_example() -> i32 {
+    let x;               // FLS §8.1: declared, no initializer
+    x = 7;               // FLS §6.5.10: assignment stores to slot
+    let y;               // FLS §8.1: second uninit binding
+    y = x + 1;           // FLS §6.5.5: arithmetic then assignment
+    y                    // = 8
+}
+
+// FLS §8.1 — Conditional initialization pattern.
+//
+// A common Rust idiom: declare with `let`, assign in each branch of an
+// if/else, then use after the control flow rejoins. The compiler allocates
+// the slot at the `let` point; the branches store distinct values.
+//
+// FLS §8.1 NOTE: Full Rust requires definite initialization analysis
+// (every path must assign before use). Galvanic does not yet enforce this.
+fn conditional_init_example(flag: bool) -> i32 {
+    let result;
+    if flag {
+        result = 1;      // FLS §8.1: first possible initializer
+    } else {
+        result = 0;      // FLS §8.1: second possible initializer
+    }
+    result               // FLS §6.3: path expression reads the assigned slot
+}
+
+// FLS §6.18 — Match expressions.
+//
+// FLS §6.18: "A match expression branches on a pattern."
+// Arms are tested in source order; the first matching arm executes.
+//
+// FLS §5.1: Wildcard pattern `_` — matches any value.
+// FLS §5.2: Literal patterns — integer and boolean literals.
+//
+// Note: FLS §6.18 does not provide a direct code example in the spec text;
+// this function is derived from the semantic description of match arms
+// and the grammar in §6.18.
+fn match_example(n: i32) -> i32 {
+    match n {
+        0 => 0,     // FLS §5.2: integer literal pattern 0
+        1 => 1,     // FLS §5.2: integer literal pattern 1
+        _ => 2,     // FLS §5.1: wildcard — matches any remaining value
+    }
+}
+
+// FLS §6.18 — Match on a boolean scrutinee.
+//
+// FLS §4.3: The boolean type `bool` has two values: `true` and `false`.
+// FLS §5.2: Boolean literal patterns.
+// No FLS §6.18 example provided for bool scrutinees; derived from the spec.
+fn match_bool_example(b: bool) -> i32 {
+    match b {
+        true  => 1,  // FLS §5.2: bool literal pattern true
+        false => 0,  // FLS §5.2: bool literal pattern false
+    }
+}

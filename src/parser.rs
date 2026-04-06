@@ -1359,6 +1359,9 @@ impl<'src> Parser<'src> {
                 Ok(Expr { kind: ExprKind::Continue, span: start })
             }
 
+            // Match expression — FLS §6.18
+            TokenKind::KwMatch => self.parse_match_expr(),
+
             kind => Err(self.error(format!("expected expression, found {kind:?}"))),
         }
     }
@@ -1435,6 +1438,98 @@ impl<'src> Parser<'src> {
             kind: ExprKind::If { cond, then_block, else_expr },
             span: start.to(end),
         })
+    }
+
+    /// Parse a match expression.
+    ///
+    /// FLS §6.18: Match expressions.
+    ///
+    /// Grammar:
+    /// ```text
+    /// MatchExpression ::=
+    ///     "match" Expression "{" MatchArm* "}"
+    /// MatchArm ::=
+    ///     Pattern "=>" Expression ","?
+    /// ```
+    ///
+    /// FLS §6.18: "A match expression branches on a pattern." Arms are tested
+    /// in source order; the first matching arm executes. All arms must have the
+    /// same type.
+    ///
+    /// FLS §6.18 AMBIGUOUS: The spec requires exhaustiveness but does not
+    /// specify the compile-time algorithm. This implementation defers
+    /// exhaustiveness checking to a future type-checking phase; the lowering
+    /// emits an unconditional jump to the last arm (wildcard assumed).
+    fn parse_match_expr(&mut self) -> Result<Expr, ParseError> {
+        use crate::ast::MatchArm;
+        let start = self.current_span();
+        self.expect(TokenKind::KwMatch)?;
+
+        // Scrutinee — parsed without consuming the `{`.
+        let scrutinee = Box::new(self.parse_expr()?);
+
+        self.expect(TokenKind::OpenBrace)?;
+
+        let mut arms = Vec::new();
+        while self.peek_kind() != TokenKind::CloseBrace && self.peek_kind() != TokenKind::Eof {
+            let arm_start = self.current_span();
+            let pat = self.parse_pattern()?;
+            self.expect(TokenKind::FatArrow)?;
+
+            // The arm body is an expression. If it is a block expression the
+            // trailing comma is optional; otherwise the comma is required
+            // (rustc) but we accept it as optional to keep parsing lenient.
+            let body = Box::new(self.parse_expr()?);
+            let arm_end = body.span;
+            arms.push(MatchArm { pat, body, span: arm_start.to(arm_end) });
+
+            // Consume trailing comma if present.
+            self.eat(TokenKind::Comma);
+        }
+
+        let end = self.current_span();
+        self.expect(TokenKind::CloseBrace)?;
+
+        Ok(Expr {
+            kind: ExprKind::Match { scrutinee, arms },
+            span: start.to(end),
+        })
+    }
+
+    /// Parse a match arm pattern.
+    ///
+    /// FLS §5: Patterns. Only the minimal subset needed for integer/bool
+    /// matching is supported: wildcard `_`, integer literals, bool literals.
+    ///
+    /// FLS §5.1: Wildcard pattern — `_`.
+    /// FLS §5.2: Literal patterns — integer and boolean literals.
+    fn parse_pattern(&mut self) -> Result<crate::ast::Pat, ParseError> {
+        use crate::ast::Pat;
+        match self.peek_kind() {
+            // Wildcard pattern `_`. FLS §5.1.
+            TokenKind::Underscore => {
+                self.advance();
+                Ok(Pat::Wildcard)
+            }
+            // Integer literal pattern. FLS §5.2.
+            TokenKind::LitInteger => {
+                let tok = self.advance();
+                let val = parse_int_literal(tok.text(self.src));
+                Ok(Pat::LitInt(val))
+            }
+            // Boolean literal patterns `true` / `false`. FLS §5.2.
+            TokenKind::KwTrue => {
+                self.advance();
+                Ok(Pat::LitBool(true))
+            }
+            TokenKind::KwFalse => {
+                self.advance();
+                Ok(Pat::LitBool(false))
+            }
+            kind => Err(self.error(format!(
+                "expected pattern (integer literal, `true`, `false`, or `_`), found {kind:?}"
+            ))),
+        }
     }
 
     /// Parse a while loop expression.
