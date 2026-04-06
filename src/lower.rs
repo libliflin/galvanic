@@ -1645,6 +1645,86 @@ fn lower_fn(
 /// (the same layout as `i32`), so `bool` maps to `IrTy::I32` in the IR.
 /// This is consistent with `LitBool` materialisation (FLS §6.1.3), which
 /// already represents `true`/`false` as immediates 1/0.
+/// Parse a char literal span text (including surrounding single quotes) to its
+/// Unicode scalar value (code point) as a `u32`.
+///
+/// FLS §2.4.5: A character literal is a `char`-typed expression whose value
+/// is a Unicode scalar value represented within single-quote delimiters.
+///
+/// Supported forms:
+/// - Simple ASCII: `'A'` → 65
+/// - Common escape sequences: `'\n'` → 10, `'\t'` → 9, `'\r'` → 13,
+///   `'\\'` → 92, `'\''` → 39, `'\"'` → 34, `'\0'` → 0
+/// - Hex escapes: `'\x7F'` → 127
+/// - Unicode escapes: `'\u{1F600}'` → 128512
+///
+/// FLS §2.4.5: "A character literal is a character within single-quotes."
+/// FLS §4.2 AMBIGUOUS: The spec refers to `char` as "the Unicode scalar value
+/// type" but does not give a precise section number in the FLS TOC shown here.
+/// Galvanic maps char literals to their Unicode code point as a `u32`.
+fn parse_char_value(text: &str) -> Result<u32, LowerError> {
+    // Strip surrounding single quotes: `'A'` → `A`, `'\n'` → `\n`
+    let inner = text
+        .strip_prefix('\'')
+        .and_then(|s| s.strip_suffix('\''))
+        .ok_or_else(|| {
+            LowerError::Unsupported(format!("malformed char literal: {text}"))
+        })?;
+
+    if !inner.starts_with('\\') {
+        // Plain (non-escaped) character — the source text contains the raw Unicode char.
+        let ch = inner.chars().next().ok_or_else(|| {
+            LowerError::Unsupported(format!("empty char literal: {text}"))
+        })?;
+        return Ok(ch as u32);
+    }
+
+    // Escape sequence: inner starts with `\`.
+    // `escaped` is the text after the leading backslash.
+    let escaped = &inner[1..];
+    match escaped.chars().next() {
+        Some('n')  => Ok(10),   // FLS §2.4.5: `\n` → LINE FEED (U+000A)
+        Some('r')  => Ok(13),   // FLS §2.4.5: `\r` → CARRIAGE RETURN (U+000D)
+        Some('t')  => Ok(9),    // FLS §2.4.5: `\t` → CHARACTER TABULATION (U+0009)
+        Some('\\') => Ok(92),   // FLS §2.4.5: `\\` → REVERSE SOLIDUS (U+005C)
+        Some('\'') => Ok(39),   // FLS §2.4.5: `\'` → APOSTROPHE (U+0027)
+        Some('"')  => Ok(34),   // FLS §2.4.5: `\"` → QUOTATION MARK (U+0022)
+        Some('0')  => Ok(0),    // FLS §2.4.5: `\0` → NULL (U+0000)
+        Some('x')  => {
+            // FLS §2.4.5: `\xNN` — ASCII code point in [0x00, 0x7F].
+            // The two hex digits always follow immediately after `x`.
+            let hex = escaped.get(1..3).ok_or_else(|| {
+                LowerError::Unsupported(format!("malformed \\x escape in char literal: {text}"))
+            })?;
+            u32::from_str_radix(hex, 16).map_err(|_| {
+                LowerError::Unsupported(format!("malformed \\x hex value in char literal: {text}"))
+            })
+        }
+        Some('u')  => {
+            // FLS §2.4.5: `\u{N..}` — Unicode code point, 1–6 hex digits.
+            let braced = escaped.get(1..).ok_or_else(|| {
+                LowerError::Unsupported(format!("malformed \\u escape in char literal: {text}"))
+            })?;
+            let hex = braced
+                .strip_prefix('{')
+                .and_then(|s| s.strip_suffix('}'))
+                .ok_or_else(|| {
+                    LowerError::Unsupported(format!(
+                        "malformed \\u{{}} escape in char literal: {text}"
+                    ))
+                })?;
+            u32::from_str_radix(hex, 16).map_err(|_| {
+                LowerError::Unsupported(format!(
+                    "malformed \\u{{}} code point in char literal: {text}"
+                ))
+            })
+        }
+        other => Err(LowerError::Unsupported(format!(
+            "unknown escape sequence \\{other:?} in char literal: {text}"
+        ))),
+    }
+}
+
 fn lower_ty(ty: &crate::ast::Ty, source: &str) -> Result<IrTy, LowerError> {
     match &ty.kind {
         TyKind::Unit => Ok(IrTy::Unit),
@@ -1664,6 +1744,16 @@ fn lower_ty(ty: &crate::ast::Ty, source: &str) -> Result<IrTy, LowerError> {
                 // and unsigned right shift uses `lsr` (see IrBinOp::UDiv/UShr).
                 // Width truncation for narrower types is deferred.
                 "u8" | "u16" | "u32" | "u64" | "usize" => Ok(IrTy::U32),
+                // FLS §2.4.5: The `char` type is a Unicode scalar value — a u32
+                // in the range [0, 0x10FFFF]. On ARM64, char is stored in a
+                // 64-bit general-purpose register identical to `u32`.
+                // Comparison of chars uses unsigned ordering (code point ordering).
+                //
+                // FLS §2.4.5 AMBIGUOUS: The FLS TOC does not list a dedicated
+                // section for the char type (unlike §4.1 for integers or §4.3
+                // for bool). The char type is described in §2.4.5 (character
+                // literals) rather than in its own type section.
+                "char" => Ok(IrTy::U32),
                 name => Err(LowerError::Unsupported(format!("type `{name}`"))),
             }
         }
@@ -4829,6 +4919,31 @@ impl<'src> LowerCtx<'src> {
             ExprKind::LitBool(b) => {
                 let r = self.alloc_reg()?;
                 self.instrs.push(Instr::LoadImm(r, if *b { 1 } else { 0 }));
+                Ok(IrValue::Reg(r))
+            }
+
+            // FLS §2.4.5: Character literal — materialize the Unicode scalar value
+            // (code point) as a runtime immediate.
+            //
+            // A char literal like `'A'` evaluates to the code point 65. The span
+            // text includes the surrounding single quotes; `parse_char_value`
+            // strips them and handles escape sequences.
+            //
+            // FLS §2.4.5: "A character literal is a character within single-quotes."
+            // The type of a char literal is `char` (FLS §2.4.5), which galvanic
+            // maps to `IrTy::U32` (see `lower_ty`).
+            //
+            // FLS §6.1.2:37–45: Even a literal char emits a runtime `mov` — no
+            // constant folding across this boundary.
+            //
+            // Cache-line note: one `mov` instruction = 4 bytes (half a cache slot).
+            ExprKind::LitChar => {
+                let text = expr.span.text(self.source);
+                let code_point = parse_char_value(text)?;
+                let r = self.alloc_reg()?;
+                // All valid Unicode scalar values fit in i32 (max 0x10FFFF = 1,114,111
+                // which is well below i32::MAX = 2,147,483,647).
+                self.instrs.push(Instr::LoadImm(r, code_point as i32));
                 Ok(IrValue::Reg(r))
             }
 
@@ -8956,6 +9071,21 @@ impl<'src> LowerCtx<'src> {
                     // Narrowing casts (u64→u8, u64→u16) are identity for small
                     // values; truncation deferred (see FLS §6.5.9 AMBIGUOUS above).
                     "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => {
+                        self.lower_expr(inner, &IrTy::U32)
+                    }
+
+                    // FLS §6.5.9: Cast char to integer.
+                    // `char as i32` / `char as u32`: the char's Unicode code point
+                    // is reinterpreted as the target integer. All valid char values
+                    // (0..=0x10FFFF = 1,114,111) are non-negative and fit in both
+                    // i32 and u32, so no masking or sign-extension is needed.
+                    //
+                    // FLS §6.5.9: "Casting between integer types is allowed."
+                    // FLS §2.4.5: char values are Unicode scalar values (u32-range).
+                    //
+                    // The inner expression is lowered as U32 (char's IR type) and
+                    // the result register is used directly — zero extra instructions.
+                    "char" => {
                         self.lower_expr(inner, &IrTy::U32)
                     }
 

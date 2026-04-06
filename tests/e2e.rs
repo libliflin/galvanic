@@ -11234,3 +11234,116 @@ fn main() -> i32 {
     let has_mul = closure_section.iter().any(|l| l.contains("mul"));
     assert!(has_mul, "expected `mul` in closure body for `x * 2`:\n{}", closure_section.join("\n"));
 }
+
+// ── Milestone 90: char literals compile to runtime ARM64 (FLS §2.4.5) ────────
+//
+// FLS §2.4.5: A character literal is a char-typed expression whose value is
+// a Unicode scalar value. `'A'` evaluates to 65 (U+0041), `'\n'` to 10, etc.
+//
+// Galvanic maps `char` to `IrTy::U32` (Unicode scalar values fit in u32).
+// A char literal emits `mov x{r}, #<code_point>` — one instruction.
+// `char as i32` is an identity cast: all char values are ≤ 0x10FFFF < i32::MAX.
+
+/// Milestone 90: simple ASCII char literal cast to i32.
+///
+/// FLS §2.4.5: `'A'` has code point 65 (U+0041).
+/// FLS §6.5.9: `char as i32` is a numeric cast — the code point becomes
+/// a signed integer value.
+#[test]
+fn milestone_90_char_literal_ascii() {
+    let src = "fn main() -> i32 { 'A' as i32 }";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 65, "'A' as i32 = 65, got {exit_code}");
+}
+
+/// Milestone 90: digit char literal.
+///
+/// FLS §2.4.5: `'0'` has code point 48 (U+0030).
+#[test]
+fn milestone_90_char_literal_digit() {
+    let src = "fn main() -> i32 { '0' as i32 }";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 48, "'0' as i32 = 48, got {exit_code}");
+}
+
+/// Milestone 90: char literal stored in a let binding, then cast.
+///
+/// FLS §2.4.5: char literal evaluates to its code point.
+/// FLS §8.1: let binding stores the char value in a stack slot.
+#[test]
+fn milestone_90_char_let_binding() {
+    let src = r#"
+fn main() -> i32 {
+    let c = 'Z';
+    c as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 90, "'Z' as i32 = 90, got {exit_code}");
+}
+
+/// Milestone 90: newline escape sequence char literal.
+///
+/// FLS §2.4.5: `'\n'` is U+000A (LINE FEED), code point 10.
+#[test]
+fn milestone_90_char_escape_newline() {
+    let src = r#"fn main() -> i32 { '\n' as i32 }"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "'\\n' as i32 = 10, got {exit_code}");
+}
+
+/// Milestone 90: tab escape sequence char literal.
+///
+/// FLS §2.4.5: `'\t'` is U+0009 (CHARACTER TABULATION), code point 9.
+#[test]
+fn milestone_90_char_escape_tab() {
+    let src = r#"fn main() -> i32 { '\t' as i32 }"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 9, "'\\t' as i32 = 9, got {exit_code}");
+}
+
+/// Milestone 90: char literal passed to a function that takes `char`.
+///
+/// FLS §2.4.5: char values are passed in integer registers on ARM64.
+/// FLS §9: parameters of type `char` are spilled to a stack slot as u32.
+#[test]
+fn milestone_90_char_parameter() {
+    let src = r#"
+fn char_to_i32(c: char) -> i32 { c as i32 }
+fn main() -> i32 { char_to_i32('*') }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "'*' as i32 = 42, got {exit_code}");
+}
+
+/// Milestone 90: char literal in arithmetic — offset from 'A'.
+///
+/// FLS §2.4.5: char values are u32 integers; arithmetic on `as i32` is
+/// standard integer arithmetic.
+#[test]
+fn milestone_90_char_in_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    let base = 'A' as i32;
+    base + 5
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 70, "'A' as i32 + 5 = 65 + 5 = 70, got {exit_code}");
+}
+
+/// Assembly check: char literal emits a single `mov` instruction with the code point.
+///
+/// FLS §2.4.5: char literals are compile-time constants whose code point is
+/// materialized with `LoadImm` → `mov x{r}, #<code_point>`.
+/// FLS §6.1.2:37–45: The mov is a runtime instruction — no compile-time folding.
+#[test]
+fn runtime_char_literal_emits_mov() {
+    let src = "fn main() -> i32 { 'A' as i32 }";
+    let asm = compile_to_asm(src);
+    // LoadImm for code point 65 emits `mov x{r}, #65`.
+    assert!(
+        asm.contains("mov") && asm.contains("#65"),
+        "expected `mov ... #65` for 'A' (code point 65) in assembly:\n{asm}"
+    );
+}
