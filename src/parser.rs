@@ -32,8 +32,8 @@
 
 use crate::ast::{
     BinOp, Block, EnumDef, EnumVariant, EnumVariantKind, Expr, ExprKind, FnDef, Item, ItemKind,
-    NamedField, Param, Pat, SourceFile, Span, Stmt, StmtKind, StructDef, StructKind, Ty, TyKind,
-    TupleField, UnaryOp, Visibility, ImplDef, TraitDef, ConstDef, StaticDef,
+    NamedField, Param, ParamKind, Pat, SourceFile, Span, Stmt, StmtKind, StructDef, StructKind,
+    Ty, TyKind, TupleField, UnaryOp, Visibility, ImplDef, TraitDef, ConstDef, StaticDef,
 };
 use crate::lexer::{Token, TokenKind};
 
@@ -841,20 +841,97 @@ impl<'src> Parser<'src> {
             // part of the name — consume and discard it.
             self.eat(TokenKind::KwMut);
 
-            if self.peek_kind() != TokenKind::Ident {
+            // FLS §5.10.3, §9.2: Tuple pattern in parameter position
+            // `(a, b, ...): (T1, T2, ...)`.
+            let kind = if self.peek_kind() == TokenKind::OpenParen {
+                self.advance(); // consume `(`
+                let mut names: Vec<Span> = Vec::new();
+                loop {
+                    // Each element is an identifier or `_`.
+                    if matches!(self.peek_kind(), TokenKind::Underscore | TokenKind::Ident) {
+                        names.push(self.current_span());
+                        self.advance();
+                    } else {
+                        return Err(self.error(format!(
+                            "expected identifier or `_` in tuple parameter pattern, found {:?}",
+                            self.peek_kind()
+                        )));
+                    }
+                    if !self.eat(TokenKind::Comma) {
+                        break;
+                    }
+                    if self.peek_kind() == TokenKind::CloseParen {
+                        break;
+                    }
+                }
+                self.expect(TokenKind::CloseParen)?;
+                ParamKind::Tuple(names)
+            } else if self.peek_kind() == TokenKind::Ident
+                && self.peek_nth(1) == TokenKind::OpenBrace
+            {
+                // FLS §5.10.2, §9.2: Struct pattern in parameter position
+                // `Point { x, y }: Point`.
+                let type_span = self.current_span();
+                self.advance(); // consume struct type name
+                self.advance(); // consume `{`
+                let mut fields: Vec<(Span, Option<Span>)> = Vec::new();
+                loop {
+                    if self.peek_kind() == TokenKind::CloseBrace {
+                        break;
+                    }
+                    // Each entry is `field_name` (shorthand) or `field_name: binding`.
+                    let field_name = if self.peek_kind() == TokenKind::Ident {
+                        let s = self.current_span();
+                        self.advance();
+                        s
+                    } else {
+                        return Err(self.error(format!(
+                            "expected field name in struct parameter pattern, found {:?}",
+                            self.peek_kind()
+                        )));
+                    };
+                    let binding = if self.eat(TokenKind::Colon) {
+                        // Explicit binding: `field: name` or `field: _`.
+                        if self.peek_kind() == TokenKind::Underscore {
+                            self.advance();
+                            None
+                        } else if self.peek_kind() == TokenKind::Ident {
+                            let b = self.current_span();
+                            self.advance();
+                            Some(b)
+                        } else {
+                            return Err(self.error(format!(
+                                "expected identifier or `_` after `:` in struct parameter pattern, found {:?}",
+                                self.peek_kind()
+                            )));
+                        }
+                    } else {
+                        // Shorthand: `{ x }` is sugar for `{ x: x }`.
+                        Some(field_name)
+                    };
+                    fields.push((field_name, binding));
+                    if !self.eat(TokenKind::Comma) {
+                        break;
+                    }
+                }
+                self.expect(TokenKind::CloseBrace)?;
+                ParamKind::Struct { type_span, fields }
+            } else if self.peek_kind() == TokenKind::Ident {
+                let name = self.current_span();
+                self.advance();
+                ParamKind::Ident(name)
+            } else {
                 return Err(self.error(format!(
-                    "expected parameter name (identifier), found {:?}",
+                    "expected parameter name (identifier, tuple, or struct pattern), found {:?}",
                     self.peek_kind()
                 )));
-            }
-            let name = self.current_span();
-            self.advance();
+            };
 
             self.expect(TokenKind::Colon)?;
             let ty = self.parse_ty()?;
             let end = ty.span;
 
-            params.push(Param { name, ty, span: start.to(end) });
+            params.push(Param { kind, ty, span: start.to(end) });
 
             if !self.eat(TokenKind::Comma) {
                 break;
@@ -883,12 +960,29 @@ impl<'src> Parser<'src> {
         let start = self.current_span();
 
         match self.peek_kind() {
-            // Unit type `()` — FLS §4.4
+            // Unit type `()` or tuple type `(T1, T2, ...)` — FLS §4.4
             TokenKind::OpenParen => {
                 self.advance();
+                // Peek: if immediately `)` it is the unit type.
+                if self.peek_kind() == TokenKind::CloseParen {
+                    let end = self.current_span();
+                    self.advance();
+                    return Ok(Ty { kind: TyKind::Unit, span: start.to(end) });
+                }
+                // Otherwise parse a non-empty tuple type `(T1, T2, ...)`.
+                let mut elems = Vec::new();
+                loop {
+                    elems.push(self.parse_ty()?);
+                    if !self.eat(TokenKind::Comma) {
+                        break;
+                    }
+                    if self.peek_kind() == TokenKind::CloseParen {
+                        break;
+                    }
+                }
                 let end = self.current_span();
                 self.expect(TokenKind::CloseParen)?;
-                Ok(Ty { kind: TyKind::Unit, span: start.to(end) })
+                Ok(Ty { kind: TyKind::Tuple(elems), span: start.to(end) })
             }
 
             // Reference type `&T` or `&mut T` — FLS §4.8
@@ -2548,7 +2642,7 @@ fn strip_int_suffix(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{EnumVariantKind, ExprKind, ItemKind, Pat, StmtKind, StructKind, TyKind, Visibility};
+    use crate::ast::{EnumVariantKind, ExprKind, ItemKind, ParamKind, Pat, StmtKind, StructKind, TyKind, Visibility};
     use crate::lexer::tokenize;
 
     /// Parse `src` into a SourceFile, panicking on error.
@@ -2607,8 +2701,8 @@ mod tests {
         let sf = parse_ok(src);
         let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         assert_eq!(f.params.len(), 2);
-        assert_eq!(f.params[0].name.text(src), "a");
-        assert_eq!(f.params[1].name.text(src), "b");
+        assert!(matches!(&f.params[0].kind, ParamKind::Ident(s) if s.text(src) == "a"));
+        assert!(matches!(&f.params[1].kind, ParamKind::Ident(s) if s.text(src) == "b"));
     }
 
     #[test]
@@ -2618,7 +2712,7 @@ mod tests {
         let sf = parse_ok(src);
         let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         assert_eq!(f.params.len(), 1);
-        assert_eq!(f.params[0].name.text(src), "x");
+        assert!(matches!(&f.params[0].kind, ParamKind::Ident(s) if s.text(src) == "x"));
     }
 
     #[test]
@@ -2628,6 +2722,59 @@ mod tests {
         let sf = parse_ok(src);
         let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         assert_eq!(f.params.len(), 1);
+    }
+
+    #[test]
+    fn fn_struct_pattern_param_shorthand() {
+        // FLS §5.10.2, §9.2: struct pattern in parameter position (shorthand).
+        // `fn sum(Point { x, y }: Point)` — shorthand `{ x }` is sugar for `{ x: x }`.
+        let src = "fn sum(Point { x, y }: Point) -> i32 { x + y }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        assert_eq!(f.params.len(), 1);
+        let ParamKind::Struct { type_span, fields } = &f.params[0].kind else {
+            panic!("expected ParamKind::Struct")
+        };
+        assert_eq!(type_span.text(src), "Point");
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].0.text(src), "x");
+        assert!(fields[0].1.is_some_and(|b| b.text(src) == "x"));
+        assert_eq!(fields[1].0.text(src), "y");
+        assert!(fields[1].1.is_some_and(|b| b.text(src) == "y"));
+    }
+
+    #[test]
+    fn fn_struct_pattern_param_explicit_binding() {
+        // FLS §5.10.2, §9.2: struct pattern with explicit `field: binding` form.
+        let src = "fn f(Point { x: a, y: b }: Point) -> i32 { a + b }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        assert_eq!(f.params.len(), 1);
+        let ParamKind::Struct { type_span, fields } = &f.params[0].kind else {
+            panic!("expected ParamKind::Struct")
+        };
+        assert_eq!(type_span.text(src), "Point");
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].0.text(src), "x");
+        assert!(fields[0].1.is_some_and(|b| b.text(src) == "a"));
+        assert_eq!(fields[1].0.text(src), "y");
+        assert!(fields[1].1.is_some_and(|b| b.text(src) == "b"));
+    }
+
+    #[test]
+    fn fn_struct_pattern_param_wildcard_field() {
+        // FLS §5.10.2, §9.2: wildcard `_` in struct pattern parameter.
+        let src = "fn f(Point { x, y: _ }: Point) -> i32 { x }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let ParamKind::Struct { fields, .. } = &f.params[0].kind else {
+            panic!("expected ParamKind::Struct")
+        };
+        assert_eq!(fields.len(), 2);
+        // First field: shorthand x → binding Some(x).
+        assert!(fields[0].1.is_some());
+        // Second field: wildcard y: _ → binding None.
+        assert!(fields[1].1.is_none());
     }
 
     #[test]
