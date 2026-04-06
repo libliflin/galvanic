@@ -661,6 +661,26 @@ pub enum Instr {
         /// Source register — holds the pointer (memory address).
         src: u8,
     },
+
+    /// Store through a pointer: `*addr = src` (store 8 bytes at address in addr).
+    ///
+    /// `StorePtr { src, addr }` → `str x{src}, [x{addr}]` on ARM64.
+    ///
+    /// FLS §6.5.10: Assignment expression `*place = value` where the place is
+    /// a dereferenced reference. The address is held in register `addr`; the
+    /// value to store is in register `src`.
+    ///
+    /// ARM64: `str xS, [xA]` stores 8 bytes from `xS` to the address in `xA`.
+    ///
+    /// Cache-line note: one 4-byte instruction. The store targets the same
+    /// cache line as the referent value (8-byte aligned). Symmetric with
+    /// `LoadPtr` — same instruction count, same cache footprint.
+    StorePtr {
+        /// Source register — holds the value to store.
+        src: u8,
+        /// Address register — holds the pointer (memory address to write to).
+        addr: u8,
+    },
 }
 
 // ── Values ────────────────────────────────────────────────────────────────────

@@ -8153,3 +8153,108 @@ fn runtime_deref_emits_ldr_indirect() {
     });
     assert!(has_indirect_ldr, "expected `ldr xD, [xN]` for *x, got:\n{asm}");
 }
+
+// ── Milestone 69: Write through mutable reference (`*ref = value`) ──────────
+
+/// Milestone 69: basic increment through a mutable reference.
+///
+/// FLS §6.5.10: Assignment expression `*x = *x + 1` where `x: &mut i32`.
+/// The callee receives a pointer, loads the current value, increments it,
+/// and stores the result back through the pointer.
+#[test]
+fn milestone_69_mut_ref_increment() {
+    let src = "fn increment(x: &mut i32) { *x = *x + 1; }\nfn main() -> i32 { let mut n = 5; increment(&mut n); n }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "expected 6, got {exit_code}");
+}
+
+/// Milestone 69: store a fixed value through a mutable reference.
+///
+/// FLS §6.5.10: `*x = 42` — unconditional store through pointer.
+#[test]
+fn milestone_69_mut_ref_assign_fixed() {
+    let src = "fn set_value(x: &mut i32, v: i32) { *x = v; }\nfn main() -> i32 { let mut n = 0; set_value(&mut n, 42); n }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected 42, got {exit_code}");
+}
+
+/// Milestone 69: double-increment — two writes through the same pointer.
+///
+/// FLS §6.5.10: Each `*x = *x + 1` is a separate load-increment-store triple.
+/// The second write reads the value left by the first.
+#[test]
+fn milestone_69_mut_ref_double_increment() {
+    let src = "fn add_two(x: &mut i32) { *x = *x + 1; *x = *x + 1; }\nfn main() -> i32 { let mut n = 10; add_two(&mut n); n }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 12, "expected 12, got {exit_code}");
+}
+
+/// Milestone 69: mutable reference passed as a parameter, store zero.
+///
+/// FLS §6.5.10: `*x = 0` resets the referent to zero regardless of its prior value.
+#[test]
+fn milestone_69_mut_ref_reset_to_zero() {
+    let src = "fn reset(x: &mut i32) { *x = 0; }\nfn main() -> i32 { let mut n = 99; reset(&mut n); n }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected 0, got {exit_code}");
+}
+
+/// Milestone 69: store result of arithmetic through pointer.
+///
+/// FLS §6.5.10: The RHS is a full arithmetic expression; it must be evaluated
+/// at runtime before the store.
+#[test]
+fn milestone_69_mut_ref_store_arithmetic() {
+    let src = "fn compute(x: &mut i32, a: i32, b: i32) { *x = a * b + 1; }\nfn main() -> i32 { let mut n = 0; compute(&mut n, 3, 4); n }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 13, "expected 13, got {exit_code}");
+}
+
+/// Milestone 69: increment in a loop through a mutable reference.
+///
+/// FLS §6.15.3: While loop combined with FLS §6.5.10: each iteration stores
+/// through the pointer. Tests that the pointer survives across loop iterations.
+#[test]
+fn milestone_69_mut_ref_in_loop() {
+    let src = "fn count_up(x: &mut i32, n: i32) { let mut i = 0; while i < n { *x = *x + 1; i = i + 1; } }\nfn main() -> i32 { let mut result = 0; count_up(&mut result, 5); result }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "expected 5, got {exit_code}");
+}
+
+/// Milestone 69: two mutable reference parameters, both written.
+///
+/// FLS §6.5.10: Independent stores through two separate pointers. Each pointer
+/// resides in its own register; no aliasing is assumed.
+#[test]
+fn milestone_69_two_mut_ref_params() {
+    let src = "fn swap_vals(a: &mut i32, b: &mut i32) { let tmp = *a; *a = *b; *b = tmp; }\nfn main() -> i32 { let mut x = 3; let mut y = 7; swap_vals(&mut x, &mut y); x }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 7, got {exit_code}");
+}
+
+/// Milestone 69: assembly inspection — `*x = value` emits `str xS, [xA]`.
+///
+/// FLS §6.5.10: The store-through-pointer must emit `str x{src}, [x{addr}]`
+/// — register-indirect store, not a stack-relative store.
+///
+/// Cache-line note: `str [xN]` is one 4-byte instruction — same footprint as
+/// `str [sp, #offset]`. The indirect form costs no extra cycles on modern
+/// ARM64 when the pointer is already in a register.
+#[test]
+fn runtime_store_ptr_emits_str_indirect() {
+    let src = "fn set(x: &mut i32, v: i32) { *x = v; }\nfn main() -> i32 { let mut n = 0; set(&mut n, 1); n }\n";
+    let asm = compile_to_asm(src);
+    // `*x = v` must produce `str xS, [xA]` (register-indirect, no #offset inside brackets).
+    let has_indirect_str = asm.lines().any(|l| {
+        let t = l.trim();
+        if !t.starts_with("str") { return false; }
+        if let Some(bracket_start) = t.find('[') {
+            let inside = &t[bracket_start + 1..];
+            // Must start with 'x' (register) not 's' (sp) and must close immediately.
+            inside.starts_with('x') && inside.contains(']') && !inside.contains(',')
+        } else {
+            false
+        }
+    });
+    assert!(has_indirect_str, "expected `str xS, [xA]` for *x = v, got:\n{asm}");
+}
