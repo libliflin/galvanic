@@ -481,31 +481,42 @@ impl<'src> LowerCtx<'src> {
     /// FLS §8: Statements.
     fn lower_stmt(&mut self, stmt: &crate::ast::Stmt) -> Result<(), LowerError> {
         match &stmt.kind {
-            // FLS §8.1: Let statement — allocate a stack slot and store the
-            // initializer value. The variable name is registered in `locals`
-            // so that later path expressions can emit a Load.
+            // FLS §8.1: Let statement — allocate a stack slot and optionally
+            // store the initializer value. The variable name is registered in
+            // `locals` so that later path expressions can emit a Load.
             //
-            // FLS §6.1.2:37–45: The store is a runtime instruction; the
-            // initializer is evaluated at runtime, not compile time.
+            // FLS §8.1: "A LetStatement may optionally have an Initializer."
+            // When no initializer is present the slot is allocated but left
+            // uninitialized (no Store is emitted). A later plain-assignment
+            // expression statement (`x = expr;`) will store to this slot via
+            // the `BinOp::Assign` path in `lower_expr`.
+            //
+            // FLS §8.1 NOTE: The spec requires definite initialization before
+            // use (via flow analysis). Galvanic does not yet enforce this —
+            // reading an uninitialized slot produces architecturally undefined
+            // behavior. Programs that always initialize before use are correct.
+            //
+            // FLS §6.1.2:37–45: Any store instruction is a runtime instruction;
+            // the initializer (when present) is evaluated at runtime.
             StmtKind::Let { name, ty: _, init } => {
-                let init_expr = init.as_ref().ok_or_else(|| {
-                    LowerError::Unsupported("uninitialized let binding (no initializer)".into())
-                })?;
-
-                // Lower the initializer. We assume i32 for numeric expressions.
-                // Type inference is future work; this is sufficient for milestone 3.
-                //
-                // FLS §8.1 AMBIGUOUS: the spec does not describe how type
-                // inference resolves the type of the initializer in the absence
-                // of a type annotation. We default to i32 for integer-producing
-                // expressions.
-                let val = self.lower_expr(init_expr, &IrTy::I32)?;
-                let src = self.val_to_reg(val)?;
-
                 let slot = self.alloc_slot()?;
                 let var_name = name.text(self.source);
                 self.locals.insert(var_name, slot);
-                self.instrs.push(Instr::Store { src, slot });
+
+                if let Some(init_expr) = init.as_ref() {
+                    // Lower the initializer. We assume i32 for numeric
+                    // expressions. Type inference is future work.
+                    //
+                    // FLS §8.1 AMBIGUOUS: the spec does not describe how type
+                    // inference resolves the type of the initializer in the
+                    // absence of a type annotation. We default to i32 for
+                    // integer-producing expressions.
+                    let val = self.lower_expr(init_expr, &IrTy::I32)?;
+                    let src = self.val_to_reg(val)?;
+                    self.instrs.push(Instr::Store { src, slot });
+                }
+                // If no initializer: slot is allocated and registered but no
+                // Store is emitted. FLS §8.1 (uninitialized let binding).
 
                 Ok(())
             }

@@ -187,3 +187,41 @@ fn for_loop_inclusive_example() -> i32 {
     }
     product              // = 24
 }
+
+// FLS §8.1 — Let statement with no initializer.
+//
+// FLS §8.1: "A LetStatement may optionally have an Initializer."
+// When no initializer is present the variable is declared but not initialized.
+// A subsequent assignment expression stores the first value to the slot.
+//
+// The FLS §8.1 grammar is:
+//   LetStatement ::= `let` PatternWithoutAlternation (`:` TypeSpecification)?
+//                    (`=` Expression (ExpressionWithoutBlock `else` BlockExpression)?)? `;`
+//
+// Note: FLS §8.1 does not provide a direct code example for the uninit form;
+// this function is derived from the grammar's optional-initializer clause.
+fn uninit_let_example() -> i32 {
+    let x;               // FLS §8.1: declared, no initializer
+    x = 7;               // FLS §6.5.10: assignment stores to slot
+    let y;               // FLS §8.1: second uninit binding
+    y = x + 1;           // FLS §6.5.5: arithmetic then assignment
+    y                    // = 8
+}
+
+// FLS §8.1 — Conditional initialization pattern.
+//
+// A common Rust idiom: declare with `let`, assign in each branch of an
+// if/else, then use after the control flow rejoins. The compiler allocates
+// the slot at the `let` point; the branches store distinct values.
+//
+// FLS §8.1 NOTE: Full Rust requires definite initialization analysis
+// (every path must assign before use). Galvanic does not yet enforce this.
+fn conditional_init_example(flag: bool) -> i32 {
+    let result;
+    if flag {
+        result = 1;      // FLS §8.1: first possible initializer
+    } else {
+        result = 0;      // FLS §8.1: second possible initializer
+    }
+    result               // FLS §6.3: path expression reads the assigned slot
+}

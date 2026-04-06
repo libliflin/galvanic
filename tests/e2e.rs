@@ -2069,3 +2069,132 @@ fn runtime_loop_break_value_emits_store_and_load() {
     // The back-edge must still be present (the loop is a real loop at runtime).
     assert!(asm.contains("b "), "expected back-edge branch in loop assembly");
 }
+
+// ── Milestone 21: uninitialized let bindings (FLS §8.1) ─────────────────────
+
+/// Milestone 21: `let x;` followed by `x = expr;` compiles and runs correctly.
+///
+/// FLS §8.1: "A LetStatement may optionally have an Initializer."
+/// Without an initializer the slot is allocated; the subsequent assignment stores to it.
+#[test]
+fn milestone_21_uninit_let_then_assign() {
+    let src = "fn main() -> i32 { let x; x = 42; x }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 42, "expected 42, got {exit_code}");
+}
+
+/// Milestone 21: uninitialized let binding used in arithmetic after assignment.
+///
+/// FLS §8.1: slot is allocated by `let y;`; the assignment `y = x + 1;` stores
+/// the computed value; then `y` is used as the return value.
+#[test]
+fn milestone_21_uninit_let_arithmetic() {
+    let src = "fn main() -> i32 { let x; x = 5; let y; y = x + 1; y }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 6, "expected 6, got {exit_code}");
+}
+
+/// Milestone 21: conditional initialization — the variable is assigned in each
+/// branch of an if/else. This is the canonical Rust use-case for uninit let.
+///
+/// FLS §8.1: variable declared without initializer, then assigned in each arm.
+#[test]
+fn milestone_21_conditional_init_true() {
+    let src = "fn main() -> i32 { let r; if true { r = 1; } else { r = 0; } r }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "expected 1, got {exit_code}");
+}
+
+/// Milestone 21: conditional initialization — false branch.
+///
+/// FLS §8.1: the else branch assigns to the uninit slot.
+#[test]
+fn milestone_21_conditional_init_false() {
+    let src = "fn main() -> i32 { let r; if false { r = 1; } else { r = 0; } r }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 0, "expected 0, got {exit_code}");
+}
+
+/// Milestone 21: sign function using uninit let across if/else-if/else chain.
+///
+/// FLS §8.1: common pattern where `let s;` is declared once and each branch
+/// of a multi-way conditional assigns a distinct value.
+#[test]
+fn milestone_21_sign_positive() {
+    let src = "\
+fn sign(n: i32) -> i32 {
+    let s;
+    if n > 0 { s = 1; } else if n < 0 { s = -1; } else { s = 0; }
+    s
+}
+fn main() -> i32 { sign(5) }
+";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "expected 1, got {exit_code}");
+}
+
+/// Milestone 21: sign function — negative input.
+///
+/// FLS §8.1: the else-if branch assigns `s = -1`.
+/// Note: exit codes are modulo 256 on Linux; -1 becomes 255.
+#[test]
+fn milestone_21_sign_negative() {
+    let src = "\
+fn sign(n: i32) -> i32 {
+    let s;
+    if n > 0 { s = 1; } else if n < 0 { s = -1; } else { s = 0; }
+    s
+}
+fn main() -> i32 { sign(-3) }
+";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    // exit(−1) wraps to 255 on Linux
+    assert_eq!(exit_code, 255, "expected 255 (−1 mod 256), got {exit_code}");
+}
+
+/// Milestone 21: sign function — zero input.
+///
+/// FLS §8.1: the else branch assigns `s = 0`.
+#[test]
+fn milestone_21_sign_zero() {
+    let src = "\
+fn sign(n: i32) -> i32 {
+    let s;
+    if n > 0 { s = 1; } else if n < 0 { s = -1; } else { s = 0; }
+    s
+}
+fn main() -> i32 { sign(0) }
+";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 0, "expected 0, got {exit_code}");
+}
+
+/// Milestone 21: assembly inspection — `let x;` allocates a stack slot but
+/// emits no store; only the subsequent `x = 5;` should emit the first `str`.
+///
+/// FLS §8.1: "A LetStatement may optionally have an Initializer." When absent,
+/// no runtime store instruction is emitted for the declaration itself.
+#[test]
+fn runtime_uninit_let_no_store_until_assignment() {
+    // The let allocates slot 0 for x. The assignment `x = 5` is the first store.
+    let src = "fn main() -> i32 { let x; x = 5; x }\n";
+    let asm = compile_to_asm(src);
+    // There must be a store (from the assignment `x = 5`)
+    assert!(asm.contains("str"), "expected str from assignment x = 5");
+    // There must be a load (from the tail expression `x`)
+    assert!(asm.contains("ldr"), "expected ldr from tail expression x");
+}
