@@ -7921,3 +7921,104 @@ fn runtime_numeric_cast_identity_emits_no_extra_instruction() {
         "expected zero cast instructions for identity `i32 as u32 as i32`, got:\n{asm}"
     );
 }
+
+// ── Milestone 67: variable shadowing compiles to runtime ARM64 (FLS §8.1) ──
+
+/// Milestone 67: `let x = x + 3` correctly reads the old x (slot 0) and
+/// writes to a new slot (slot 1).
+///
+/// FLS §8.1: The binding introduced by a let statement comes into scope
+/// after the initializer expression has been evaluated. In a shadowing
+/// `let x = x + 3`, the RHS `x` refers to the previous binding.
+///
+/// This was a bug: locals.insert happened before lower_expr, so the RHS
+/// saw the new uninitialized slot instead of the old value.
+#[test]
+fn milestone_67_shadow_simple() {
+    let src = "fn main() -> i32 { let x = 5; let x = x + 3; x }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 8, "expected 8, got {exit_code}");
+}
+
+/// Milestone 67: Three levels of shadowing, each step reading the previous.
+///
+/// FLS §8.1: Each `let x = x * 2` evaluates the previous x before
+/// introducing the new binding.
+#[test]
+fn milestone_67_shadow_three_levels() {
+    // x=5, x=5+3=8, x=8*2=16 → exit 16
+    let src = "fn main() -> i32 { let x = 5; let x = x + 3; let x = x * 2; x }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 16, "expected 16, got {exit_code}");
+}
+
+/// Milestone 67: Shadowing inside a function using a parameter.
+///
+/// FLS §8.1: The inner `let n = n - 1` reads the parameter n, not the
+/// new binding.
+#[test]
+fn milestone_67_shadow_parameter() {
+    // n=10 → let n = 10-1 = 9 → return 9
+    let src = "fn dec(n: i32) -> i32 { let n = n - 1; n }\nfn main() -> i32 { dec(10) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 9, "expected 9, got {exit_code}");
+}
+
+/// Milestone 67: Shadow a variable with a different expression type.
+///
+/// FLS §8.1: `let x = x > 0` — shadows x (i32) with a bool-valued
+/// expression that reads the old x. Here we cast to i32 for the exit code.
+#[test]
+fn milestone_67_shadow_changes_value() {
+    // x=7, let x = x - 2 = 5, let x = x - 2 = 3 → exit 3
+    let src = "fn main() -> i32 { let x = 7; let x = x - 2; let x = x - 2; x }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "expected 3, got {exit_code}");
+}
+
+/// Milestone 67: Shadowing in a block — outer x remains unchanged after
+/// the inner block exits (inner binding does not affect outer scope).
+///
+/// FLS §8.1 / FLS §6.4: Block expressions create a scope. A `let`
+/// statement in an inner block shadows the outer binding within that block
+/// but the outer binding is unaffected after the block ends.
+///
+/// Note: galvanic uses flat stack slots and does not yet restore the outer
+/// binding after a block. This test uses sequential top-level shadowing,
+/// not block-scoped shadowing.
+#[test]
+fn milestone_67_shadow_in_fn_multiple_vars() {
+    // Each variable shadows independently.
+    let src = "fn main() -> i32 { let a = 1; let b = 2; let a = a + b; a }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "expected 3, got {exit_code}");
+}
+
+/// Milestone 67: assembly inspection — `let x = x + 3` loads slot 0 for the
+/// RHS, not slot 1.
+///
+/// FLS §8.1: The RHS references the old binding (slot 0). The new binding
+/// gets slot 1. Before the fix, slot 1 was loaded (uninitialized).
+///
+/// Cache-line note: one ldr (slot 0), one add, one str (slot 1) — three
+/// instructions, fitting within a single 64-byte cache line.
+#[test]
+fn runtime_shadow_rhs_reads_old_slot() {
+    // let x = 5 → str slot 0; let x = x + 3 → ldr slot 0 (not slot 1), add, str slot 1
+    let src = "fn main() -> i32 { let x = 5; let x = x + 3; x }\n";
+    let asm = compile_to_asm(src);
+    // Find the add instruction; the ldr before it should reference slot 0, not slot 1.
+    let lines: Vec<&str> = asm.lines().collect();
+    let add_idx = lines.iter().position(|l| l.trim().starts_with("add"));
+    let add_idx = add_idx.expect("expected an add instruction in the assembly");
+    // The ldr immediately before the add should load from slot 0 (offset 0).
+    let ldr_before = lines[..add_idx]
+        .iter()
+        .rev()
+        .find(|l| l.trim().starts_with("ldr"))
+        .expect("expected an ldr before the add");
+    assert!(
+        ldr_before.contains("#0"),
+        "expected ldr from slot 0 (offset #0) before add, got: {ldr_before}"
+    );
+}

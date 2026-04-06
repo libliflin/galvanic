@@ -502,3 +502,19 @@ fn chained_field_access_example() -> i32 {
     // Manhattan distance: |end_pt.x - start.x| + |end_pt.y - start.y| = 3 + 4 = 7.
     s.end_pt.x + s.end_pt.y
 }
+
+// FLS §8.1 — Let statement with shadowing (variable shadowing via re-binding).
+//
+// FLS §8.1: "A let statement introduces a new binding for the remainder of
+// the enclosing block." The binding is NOT in scope during evaluation of the
+// initializer expression. Thus `let x = x + 3` evaluates `x` in the scope
+// where `x` refers to the previous binding, not the one being introduced.
+//
+// The FLS does not provide a direct code example for shadowing; this is
+// derived from the semantic description in §8.1 and the scoping rules in §14.
+fn shadow_example() -> i32 {
+    let x = 5;          // FLS §8.1: x bound to 5 (slot 0)
+    let x = x + 3;      // FLS §8.1: RHS reads old x (5), new x = 8 (slot 1)
+    let x = x * 2;      // FLS §8.1: RHS reads slot 1 (8), new x = 16 (slot 2)
+    x                   // returns 16
+}

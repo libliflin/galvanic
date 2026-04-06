@@ -2859,8 +2859,19 @@ impl<'src> LowerCtx<'src> {
                 }
 
                 // Normal (non-struct) let binding.
+                //
+                // FLS §8.1: The introduced binding comes into scope for the
+                // remainder of the block *after* the let statement completes.
+                // In particular, the RHS initializer is evaluated in the scope
+                // that does NOT yet include the new binding. This is the
+                // shadowing rule: `let x = x + 3` means "evaluate the old x,
+                // add 3, bind the result to a new x". The old x remains
+                // accessible during RHS evaluation.
+                //
+                // Ordering: alloc slot first (so the slot index is stable),
+                // evaluate RHS (still sees the old `var_name` binding if any),
+                // then insert the new binding into locals.
                 let slot = self.alloc_slot()?;
-                self.locals.insert(var_name, slot);
 
                 if let Some(init_expr) = init.as_ref() {
                     // Lower the initializer. We assume i32 for numeric
@@ -2874,8 +2885,10 @@ impl<'src> LowerCtx<'src> {
                     let src = self.val_to_reg(val)?;
                     self.instrs.push(Instr::Store { src, slot });
                 }
-                // If no initializer: slot is allocated and registered but no
-                // Store is emitted. FLS §8.1 (uninitialized let binding).
+                // Bring the new binding into scope only after the initializer
+                // has been fully evaluated. FLS §8.1: uninitialized let
+                // bindings (no init_expr) also become visible here.
+                self.locals.insert(var_name, slot);
 
                 Ok(())
             }
