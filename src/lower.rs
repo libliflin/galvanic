@@ -3764,6 +3764,14 @@ impl<'src> LowerCtx<'src> {
                 let header_label = self.alloc_label();
                 let exit_label = self.alloc_label();
 
+                // Save the register watermark before entering the loop.
+                // After the loop exits (exit_label), all registers allocated inside
+                // the loop are dead — the loop returns unit and carries no value
+                // forward. Resetting next_reg here allows subsequent code (e.g., the
+                // function tail expression) to reuse those register numbers, keeping
+                // the total register count well below x30 (the ARM64 link register).
+                let reg_mark = self.next_reg;
+
                 // Push a loop context so that `break`/`continue` inside the body
                 // can resolve to the correct labels.
                 // FLS §6.15.3, §6.15.6, §6.15.7.
@@ -3795,6 +3803,11 @@ impl<'src> LowerCtx<'src> {
                 self.instrs.push(Instr::Label(exit_label));
 
                 self.loop_stack.pop();
+
+                // Restore register watermark. Registers allocated inside the loop
+                // are only referenced by instructions between header_label and the
+                // back-edge Branch. After exit_label, none of them are live.
+                self.next_reg = reg_mark;
 
                 // FLS §6.15.3: "The type of a while expression is the unit type ()."
                 Ok(IrValue::Unit)
@@ -3833,6 +3846,9 @@ impl<'src> LowerCtx<'src> {
             ExprKind::WhileLet { pat, scrutinee, body } => {
                 let header_label = self.alloc_label();
                 let exit_label = self.alloc_label();
+
+                // Save register watermark — same rationale as While above.
+                let reg_mark = self.next_reg;
 
                 // Push loop context — while-let has no break-with-value.
                 // FLS §6.15.4, §6.15.6.
@@ -4083,6 +4099,9 @@ impl<'src> LowerCtx<'src> {
                 self.instrs.push(Instr::Label(exit_label));
                 self.loop_stack.pop();
 
+                // Restore register watermark (see While above for rationale).
+                self.next_reg = reg_mark;
+
                 // FLS §6.15.4: "The type of a while let loop expression is the unit type ()."
                 Ok(IrValue::Unit)
             }
@@ -4135,6 +4154,11 @@ impl<'src> LowerCtx<'src> {
                 // Allocate a slot for the end bound (evaluated once before the loop).
                 // FLS §6.16: The range bounds are evaluated once, not on each iteration.
                 let end_slot = self.alloc_slot()?;
+
+                // Save register watermark — same rationale as While above. Saved
+                // BEFORE lowering start/end expressions so those temp registers are
+                // also recyclable (they are consumed by Store and not live after it).
+                let reg_mark = self.next_reg;
 
                 // Lower and store the start bound into the loop variable slot.
                 // FLS §6.16: `start` is evaluated first (left-to-right, FLS §6:3).
@@ -4200,6 +4224,9 @@ impl<'src> LowerCtx<'src> {
 
                 self.loop_stack.pop();
 
+                // Restore register watermark (see While above for rationale).
+                self.next_reg = reg_mark;
+
                 // FLS §6.15.1: "The type of a for loop expression is the unit type ()."
                 Ok(IrValue::Unit)
             }
@@ -4245,6 +4272,11 @@ impl<'src> LowerCtx<'src> {
                     None
                 };
 
+                // Save register watermark — same rationale as While above.
+                // Saved AFTER break_slot allocation (a stack slot, not a register)
+                // and BEFORE any register allocations inside the body.
+                let reg_mark = self.next_reg;
+
                 self.loop_stack.push(LoopCtx { header_label, exit_label, break_slot, break_ret_ty: *ret_ty });
 
                 // Loop top: the branch-back target.
@@ -4262,6 +4294,12 @@ impl<'src> LowerCtx<'src> {
                 self.instrs.push(Instr::Label(exit_label));
 
                 self.loop_stack.pop();
+
+                // Restore register watermark. Any registers used inside the loop body
+                // are only live between header_label and the back-edge Branch. After
+                // exit_label they are dead, so we can reuse their numbers. The result
+                // register (if any) is freshly allocated below from the restored mark.
+                self.next_reg = reg_mark;
 
                 // FLS §6.15.2: "The type of a loop expression is determined by
                 // its break expressions." If break-with-value was used, load the
