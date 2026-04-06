@@ -87,25 +87,25 @@ main:
     str     x53, [sp, #152            ] // FLS §8.1: store slot 19
     mov     x54, #1                   // FLS §2.4.4.1: load imm 1
     cbz     x54, .L0                     // FLS §6.17: branch if false
-    str     x54, [sp, #160            ] // FLS §8.1: store slot 20
+    str     x54, [sp, #168            ] // FLS §8.1: store slot 21
     b       .L1                        // FLS §6.17: branch to end
 .L0:                              // FLS §6.17: branch target
     mov     x55, #0                   // FLS §2.4.4.1: load imm 0
-    str     x55, [sp, #160            ] // FLS §8.1: store slot 20
+    str     x55, [sp, #168            ] // FLS §8.1: store slot 21
 .L1:                              // FLS §6.17: branch target
-    ldr     x56, [sp, #160            ] // FLS §8.1: load slot 20
-    str     x56, [sp, #168            ] // FLS §8.1: store slot 21
+    ldr     x56, [sp, #168            ] // FLS §8.1: load slot 21
+    str     x56, [sp, #160            ] // FLS §8.1: store slot 20
     mov     x57, #1                   // FLS §2.4.4.1: load imm 1
     cbz     x57, .L2                     // FLS §6.17: branch if false
     mov     x58, #0                   // FLS §2.4.4.1: load imm 0
-    str     x58, [sp, #176            ] // FLS §8.1: store slot 22
+    str     x58, [sp, #184            ] // FLS §8.1: store slot 23
     b       .L3                        // FLS §6.17: branch to end
 .L2:                              // FLS §6.17: branch target
     mov     x59, #0                   // FLS §2.4.4.1: load imm 0
-    str     x59, [sp, #176            ] // FLS §8.1: store slot 22
+    str     x59, [sp, #184            ] // FLS §8.1: store slot 23
 .L3:                              // FLS §6.17: branch target
-    ldr     x60, [sp, #176            ] // FLS §8.1: load slot 22
-    str     x60, [sp, #184            ] // FLS §8.1: store slot 23
+    ldr     x60, [sp, #184            ] // FLS §8.1: load slot 23
+    str     x60, [sp, #176            ] // FLS §8.1: store slot 22
     mov     x61, #5                   // FLS §2.4.4.1: load imm 5
     str     x61, [sp, #192            ] // FLS §8.1: store slot 24
     mov     x62, #1                   // FLS §2.4.4.1: load imm 1
@@ -231,16 +231,16 @@ loop_returning_value:
     cset    x6, ge                    // FLS §6.5.3: x6 = (x4 >= x5)
     cbz     x6, .L2                     // FLS §6.17: branch if false
     ldr     x7, [sp, #0              ] // FLS §8.1: load slot 0
-    str     x7, [sp, #8              ] // FLS §8.1: store slot 1
+    str     x7, [sp, #16             ] // FLS §8.1: store slot 2
     b       .L1                        // FLS §6.17: branch to end
     b       .L3                        // FLS §6.17: branch to end
 .L2:                              // FLS §6.17: branch target
 .L3:                              // FLS §6.17: branch target
     b       .L0                        // FLS §6.17: branch to end
 .L1:                              // FLS §6.17: branch target
-    ldr     x8, [sp, #8              ] // FLS §8.1: load slot 1
-    str     x8, [sp, #16             ] // FLS §8.1: store slot 2
-    ldr     x9, [sp, #16             ] // FLS §8.1: load slot 2
+    ldr     x8, [sp, #16             ] // FLS §8.1: load slot 2
+    str     x8, [sp, #8              ] // FLS §8.1: store slot 1
+    ldr     x9, [sp, #8              ] // FLS §8.1: load slot 1
     mov     x0, x9              // FLS §6.19: return reg 9 → x0
     add     sp, sp, #32             // FLS §8.1: restore stack frame
     ret
@@ -469,6 +469,40 @@ for_loop_inclusive_example:
     ldr     x12, [sp, #0              ] // FLS §8.1: load slot 0
     mov     x0, x12              // FLS §6.19: return reg 12 → x0
     add     sp, sp, #32             // FLS §8.1: restore stack frame
+    ret
+
+    // fn uninit_let_example — FLS §9
+    .global uninit_let_example
+uninit_let_example:
+    sub     sp, sp, #16             // FLS §8.1: frame for 2 slot(s)
+    mov     x0, #7                   // FLS §2.4.4.1: load imm 7
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    ldr     x1, [sp, #0              ] // FLS §8.1: load slot 0
+    mov     x2, #1                   // FLS §2.4.4.1: load imm 1
+    add     x3, x1, x2          // FLS §6.5.5: add
+    str     x3, [sp, #8              ] // FLS §8.1: store slot 1
+    ldr     x4, [sp, #8              ] // FLS §8.1: load slot 1
+    mov     x0, x4              // FLS §6.19: return reg 4 → x0
+    add     sp, sp, #16             // FLS §8.1: restore stack frame
+    ret
+
+    // fn conditional_init_example — FLS §9
+    .global conditional_init_example
+conditional_init_example:
+    sub     sp, sp, #16             // FLS §8.1: frame for 2 slot(s)
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    ldr     x0, [sp, #0              ] // FLS §8.1: load slot 0
+    cbz     x0, .L0                     // FLS §6.17: branch if false
+    mov     x1, #1                   // FLS §2.4.4.1: load imm 1
+    str     x1, [sp, #8              ] // FLS §8.1: store slot 1
+    b       .L1                        // FLS §6.17: branch to end
+.L0:                              // FLS §6.17: branch target
+    mov     x2, #0                   // FLS §2.4.4.1: load imm 0
+    str     x2, [sp, #8              ] // FLS §8.1: store slot 1
+.L1:                              // FLS §6.17: branch target
+    ldr     x3, [sp, #8              ] // FLS §8.1: load slot 1
+    mov     x0, x3              // FLS §6.19: return reg 3 → x0
+    add     sp, sp, #16             // FLS §8.1: restore stack frame
     ret
 
     // ELF entry point — FLS §18.1
