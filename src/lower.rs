@@ -1043,6 +1043,87 @@ impl<'src> LowerCtx<'src> {
                                         label: next_label,
                                     });
                                 }
+                                // FLS §5.1.9: Inclusive range pattern `lo..=hi`.
+                                //
+                                // Emit: lo <= scrutinee && scrutinee <= hi.
+                                // Strategy: compare scrutinee >= lo (IrBinOp::Ge) → cmp1,
+                                // compare scrutinee <= hi (IrBinOp::Le) → cmp2,
+                                // AND the two results → matched, cbz on matched.
+                                //
+                                // FLS §6.1.2:37–45: All comparisons emit runtime instructions.
+                                //
+                                // Cache-line note: 7 instructions per range arm (ldr + 2×mov
+                                // + 2×cmp + and + cbz = 28 bytes) — two arms per 64-byte line.
+                                Pat::RangeInclusive { lo, hi } => {
+                                    let s_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                                    let lo_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::LoadImm(lo_reg, *lo as i32));
+                                    let cmp1 = self.alloc_reg()?;
+                                    self.instrs.push(Instr::BinOp {
+                                        op: IrBinOp::Ge,
+                                        dst: cmp1,
+                                        lhs: s_reg,
+                                        rhs: lo_reg,
+                                    });
+                                    let hi_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
+                                    let cmp2 = self.alloc_reg()?;
+                                    self.instrs.push(Instr::BinOp {
+                                        op: IrBinOp::Le,
+                                        dst: cmp2,
+                                        lhs: s_reg,
+                                        rhs: hi_reg,
+                                    });
+                                    let matched = self.alloc_reg()?;
+                                    self.instrs.push(Instr::BinOp {
+                                        op: IrBinOp::BitAnd,
+                                        dst: matched,
+                                        lhs: cmp1,
+                                        rhs: cmp2,
+                                    });
+                                    self.instrs.push(Instr::CondBranch {
+                                        reg: matched,
+                                        label: next_label,
+                                    });
+                                }
+                                // FLS §5.1.9: Exclusive range pattern `lo..hi`.
+                                //
+                                // Emit: lo <= scrutinee && scrutinee < hi.
+                                // Same as inclusive but uses Lt for the upper bound.
+                                Pat::RangeExclusive { lo, hi } => {
+                                    let s_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                                    let lo_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::LoadImm(lo_reg, *lo as i32));
+                                    let cmp1 = self.alloc_reg()?;
+                                    self.instrs.push(Instr::BinOp {
+                                        op: IrBinOp::Ge,
+                                        dst: cmp1,
+                                        lhs: s_reg,
+                                        rhs: lo_reg,
+                                    });
+                                    let hi_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
+                                    let cmp2 = self.alloc_reg()?;
+                                    self.instrs.push(Instr::BinOp {
+                                        op: IrBinOp::Lt,
+                                        dst: cmp2,
+                                        lhs: s_reg,
+                                        rhs: hi_reg,
+                                    });
+                                    let matched = self.alloc_reg()?;
+                                    self.instrs.push(Instr::BinOp {
+                                        op: IrBinOp::BitAnd,
+                                        dst: matched,
+                                        lhs: cmp1,
+                                        rhs: cmp2,
+                                    });
+                                    self.instrs.push(Instr::CondBranch {
+                                        reg: matched,
+                                        label: next_label,
+                                    });
+                                }
                                 _ => {
                                     // Single literal pattern: load scrutinee, compare, cbz.
                                     let s_reg = self.alloc_reg()?;
@@ -1188,6 +1269,74 @@ impl<'src> LowerCtx<'src> {
                                     }
                                     self.instrs.push(Instr::CondBranch {
                                         reg: matched_reg,
+                                        label: next_label,
+                                    });
+                                }
+                                // FLS §5.1.9: Inclusive range pattern `lo..=hi` (unit branch).
+                                Pat::RangeInclusive { lo, hi } => {
+                                    let s_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                                    let lo_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::LoadImm(lo_reg, *lo as i32));
+                                    let cmp1 = self.alloc_reg()?;
+                                    self.instrs.push(Instr::BinOp {
+                                        op: IrBinOp::Ge,
+                                        dst: cmp1,
+                                        lhs: s_reg,
+                                        rhs: lo_reg,
+                                    });
+                                    let hi_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
+                                    let cmp2 = self.alloc_reg()?;
+                                    self.instrs.push(Instr::BinOp {
+                                        op: IrBinOp::Le,
+                                        dst: cmp2,
+                                        lhs: s_reg,
+                                        rhs: hi_reg,
+                                    });
+                                    let matched = self.alloc_reg()?;
+                                    self.instrs.push(Instr::BinOp {
+                                        op: IrBinOp::BitAnd,
+                                        dst: matched,
+                                        lhs: cmp1,
+                                        rhs: cmp2,
+                                    });
+                                    self.instrs.push(Instr::CondBranch {
+                                        reg: matched,
+                                        label: next_label,
+                                    });
+                                }
+                                // FLS §5.1.9: Exclusive range pattern `lo..hi` (unit branch).
+                                Pat::RangeExclusive { lo, hi } => {
+                                    let s_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                                    let lo_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::LoadImm(lo_reg, *lo as i32));
+                                    let cmp1 = self.alloc_reg()?;
+                                    self.instrs.push(Instr::BinOp {
+                                        op: IrBinOp::Ge,
+                                        dst: cmp1,
+                                        lhs: s_reg,
+                                        rhs: lo_reg,
+                                    });
+                                    let hi_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
+                                    let cmp2 = self.alloc_reg()?;
+                                    self.instrs.push(Instr::BinOp {
+                                        op: IrBinOp::Lt,
+                                        dst: cmp2,
+                                        lhs: s_reg,
+                                        rhs: hi_reg,
+                                    });
+                                    let matched = self.alloc_reg()?;
+                                    self.instrs.push(Instr::BinOp {
+                                        op: IrBinOp::BitAnd,
+                                        dst: matched,
+                                        lhs: cmp1,
+                                        rhs: cmp2,
+                                    });
+                                    self.instrs.push(Instr::CondBranch {
+                                        reg: matched,
                                         label: next_label,
                                     });
                                 }

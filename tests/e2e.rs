@@ -2646,3 +2646,151 @@ fn runtime_ident_pattern_emits_ldr_str_binding() {
     // Must emit mul for the `n * 2` body expression.
     assert!(asm.contains("mul"), "expected mul for n * 2 in arm body");
 }
+
+// ── Milestone 34: range patterns in match ────────────────────────────────────
+//
+// FLS §5.1.9: A range pattern `lo..=hi` matches any value `v` where `lo <= v
+// && v <= hi`. A range pattern `lo..hi` matches where `lo <= v && v < hi`.
+//
+// Lowering strategy:
+//   1. Load scrutinee from its spill slot.
+//   2. Load `lo` immediate; compare scrutinee >= lo → cmp1.
+//   3. Load `hi` immediate; compare scrutinee <= hi (or < hi) → cmp2.
+//   4. AND cmp1 and cmp2 → matched.
+//   5. CondBranch on matched to the next arm if zero (arm not taken).
+//
+// FLS §6.1.2:37–45: All comparisons emit runtime instructions — no compile-time
+// folding even when the scrutinee is a literal.
+
+/// Milestone 34: inclusive range `1..=3` — scrutinee 2 is in range → arm taken.
+///
+/// FLS §5.1.9: The inclusive range `1..=3` matches any value in [1, 3].
+#[test]
+fn milestone_34_range_inclusive_taken() {
+    let src = "fn main() -> i32 { let x = 2; match x { 1..=3 => 1, _ => 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected 2 to match 1..=3, got {exit_code}");
+}
+
+/// Milestone 34: inclusive range `1..=3` — scrutinee 5 is outside → wildcard.
+///
+/// FLS §5.1.9: Value 5 falls outside [1, 3]; the wildcard arm executes.
+#[test]
+fn milestone_34_range_inclusive_not_taken() {
+    let src = "fn main() -> i32 { let x = 5; match x { 1..=3 => 1, _ => 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected 5 to miss 1..=3 and hit wildcard, got {exit_code}");
+}
+
+/// Milestone 34: inclusive range boundary — scrutinee equals lower bound.
+///
+/// FLS §5.1.9: The lower bound is inclusive; `v == lo` must match.
+#[test]
+fn milestone_34_range_boundary_lower() {
+    let src = "fn main() -> i32 { let x = 1; match x { 1..=3 => 1, _ => 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected lower bound 1 to match 1..=3, got {exit_code}");
+}
+
+/// Milestone 34: inclusive range boundary — scrutinee equals upper bound.
+///
+/// FLS §5.1.9: The upper bound is inclusive for `..=`; `v == hi` must match.
+#[test]
+fn milestone_34_range_boundary_upper() {
+    let src = "fn main() -> i32 { let x = 3; match x { 1..=3 => 1, _ => 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected upper bound 3 to match 1..=3, got {exit_code}");
+}
+
+/// Milestone 34: multiple range arms — three disjoint ranges.
+///
+/// FLS §5.1.9: Multiple range arms are checked in order; the first match wins.
+#[test]
+fn milestone_34_multiple_range_arms() {
+    let src = "\
+fn classify(n: i32) -> i32 {
+    match n {
+        1..=3 => 1,
+        4..=6 => 2,
+        _ => 3,
+    }
+}
+fn main() -> i32 { classify(5) }
+";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2, "expected classify(5) == 2, got {exit_code}");
+}
+
+/// Milestone 34: range pattern on a function parameter.
+///
+/// FLS §5.1.9: Range patterns work on non-literal scrutinees (parameters).
+/// FLS §6.1.2:37–45: Comparisons emit runtime instructions regardless.
+#[test]
+fn milestone_34_range_on_parameter() {
+    let src = "\
+fn grade(score: i32) -> i32 {
+    match score {
+        90..=100 => 4,
+        80..=89 => 3,
+        _ => 0,
+    }
+}
+fn main() -> i32 { grade(85) }
+";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "expected grade(85) == 3, got {exit_code}");
+}
+
+/// Milestone 34: range pattern with negative bounds.
+///
+/// FLS §5.1.9: Range patterns may have negative bounds.
+/// FLS §5.2: Negative literal patterns are valid range bounds.
+#[test]
+fn milestone_34_range_negative_bounds() {
+    let src = "\
+fn main() -> i32 {
+    let x = -3;
+    match x {
+        -5..=-1 => 1,
+        _ => 0,
+    }
+}
+";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected -3 to match -5..=-1, got {exit_code}");
+}
+
+/// Milestone 34: exclusive range `1..4` — scrutinee 3 is in [1, 4) → arm taken.
+///
+/// FLS §5.1.9: Exclusive range `lo..hi` matches `lo <= v && v < hi`.
+#[test]
+fn milestone_34_range_exclusive_taken() {
+    let src = "fn main() -> i32 { let x = 3; match x { 1..4 => 1, _ => 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected 3 to match 1..4, got {exit_code}");
+}
+
+/// Milestone 34: exclusive range — upper bound is exclusive.
+///
+/// FLS §5.1.9: `v == hi` must NOT match for exclusive range `lo..hi`.
+#[test]
+fn milestone_34_range_exclusive_upper_excluded() {
+    let src = "fn main() -> i32 { let x = 4; match x { 1..4 => 1, _ => 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected upper bound 4 NOT to match 1..4, got {exit_code}");
+}
+
+/// Milestone 34: assembly inspection — range pattern emits ge+le+and+cbz.
+///
+/// FLS §5.1.9: The inclusive range `1..=3` requires two comparisons (>= lo
+/// and <= hi) combined with AND. All instructions emit at runtime.
+/// FLS §6.1.2:37–45: Runtime instructions — no compile-time folding.
+#[test]
+fn runtime_range_pattern_emits_cmp_and_cbz() {
+    let src = "fn main() -> i32 { let x = 2; match x { 1..=3 => 1, _ => 0 } }\n";
+    let asm = compile_to_asm(src);
+    // The range check emits AND of two comparison results.
+    assert!(asm.contains("and"), "expected 'and' for range intersection check");
+    // Must have a conditional branch to skip the arm if outside range.
+    assert!(asm.contains("cbz"), "expected 'cbz' for range arm guard");
+}

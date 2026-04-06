@@ -1551,12 +1551,26 @@ impl<'src> Parser<'src> {
                 Ok(Pat::Ident(Self::span_of(&tok)))
             }
             // Integer literal pattern. FLS §5.2.
+            // Also handles range patterns `lo..=hi` and `lo..hi`. FLS §5.1.9.
             TokenKind::LitInteger => {
                 let tok = self.advance();
                 let val = parse_int_literal(tok.text(self.src));
+                // FLS §5.1.9: `lo..=hi` — inclusive range pattern.
+                if self.peek_kind() == TokenKind::DotDotEq {
+                    self.advance(); // consume `..=`
+                    let hi = self.parse_range_bound()?;
+                    return Ok(Pat::RangeInclusive { lo: val as i128, hi });
+                }
+                // FLS §5.1.9: `lo..hi` — exclusive range pattern.
+                if self.peek_kind() == TokenKind::DotDot {
+                    self.advance(); // consume `..`
+                    let hi = self.parse_range_bound()?;
+                    return Ok(Pat::RangeExclusive { lo: val as i128, hi });
+                }
                 Ok(Pat::LitInt(val))
             }
             // Negative integer literal pattern `-n`. FLS §5.2.
+            // Also handles negative lower bounds in range patterns. FLS §5.1.9.
             //
             // A unary minus before an integer literal forms a negative literal
             // pattern. This is the only place in pattern syntax where `-` is
@@ -1577,6 +1591,18 @@ impl<'src> Parser<'src> {
                 }
                 let tok = self.advance();
                 let val = parse_int_literal(tok.text(self.src));
+                // FLS §5.1.9: `-lo..=hi` — inclusive range with negative lower bound.
+                if self.peek_kind() == TokenKind::DotDotEq {
+                    self.advance(); // consume `..=`
+                    let hi = self.parse_range_bound()?;
+                    return Ok(Pat::RangeInclusive { lo: -(val as i128), hi });
+                }
+                // FLS §5.1.9: `-lo..hi` — exclusive range with negative lower bound.
+                if self.peek_kind() == TokenKind::DotDot {
+                    self.advance(); // consume `..`
+                    let hi = self.parse_range_bound()?;
+                    return Ok(Pat::RangeExclusive { lo: -(val as i128), hi });
+                }
                 Ok(Pat::NegLitInt(val))
             }
             // Boolean literal patterns `true` / `false`. FLS §5.2.
@@ -1591,6 +1617,32 @@ impl<'src> Parser<'src> {
             kind => Err(self.error(format!(
                 "expected pattern (identifier, integer literal, `-` integer, `true`, `false`, or `_`), found {kind:?}"
             ))),
+        }
+    }
+
+    /// Parse the upper (or lower) bound of a range pattern.
+    ///
+    /// FLS §5.1.9: Range pattern bounds are integer literals (positive or
+    /// negative). This helper parses either `n` or `-n`.
+    fn parse_range_bound(&mut self) -> Result<i128, ParseError> {
+        if self.peek_kind() == TokenKind::Minus {
+            self.advance(); // consume `-`
+            if self.peek_kind() != TokenKind::LitInteger {
+                return Err(self.error(
+                    "expected integer literal after `-` in range pattern bound".to_owned(),
+                ));
+            }
+            let tok = self.advance();
+            let val = parse_int_literal(tok.text(self.src));
+            Ok(-(val as i128))
+        } else if self.peek_kind() == TokenKind::LitInteger {
+            let tok = self.advance();
+            let val = parse_int_literal(tok.text(self.src));
+            Ok(val as i128)
+        } else {
+            Err(self.error(
+                "expected integer literal for range pattern bound".to_owned(),
+            ))
         }
     }
 
@@ -3271,5 +3323,64 @@ mod tests {
         if let Pat::Ident(span) = &arms[1].pat {
             assert_eq!(span.text(src), "n");
         }
+    }
+
+    #[test]
+    fn range_inclusive_pattern_in_match() {
+        // FLS §5.1.9: Inclusive range pattern `lo..=hi`.
+        use crate::ast::{ExprKind, Pat};
+        let src = "fn f(x: i32) -> i32 { match x { 1..=3 => 1, _ => 0 } }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!() };
+        let body = f.body.as_ref().unwrap();
+        let tail = body.tail.as_ref().expect("expected tail");
+        let ExprKind::Match { ref arms, .. } = tail.kind else {
+            panic!("expected Match");
+        };
+        assert_eq!(arms.len(), 2, "expected 2 arms");
+        assert!(
+            matches!(arms[0].pat, Pat::RangeInclusive { lo: 1, hi: 3 }),
+            "expected RangeInclusive{{lo:1, hi:3}}, got {:?}", arms[0].pat
+        );
+        assert!(matches!(arms[1].pat, Pat::Wildcard));
+    }
+
+    #[test]
+    fn range_exclusive_pattern_in_match() {
+        // FLS §5.1.9: Exclusive range pattern `lo..hi`.
+        use crate::ast::{ExprKind, Pat};
+        let src = "fn f(x: i32) -> i32 { match x { 1..4 => 1, _ => 0 } }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!() };
+        let body = f.body.as_ref().unwrap();
+        let tail = body.tail.as_ref().expect("expected tail");
+        let ExprKind::Match { ref arms, .. } = tail.kind else {
+            panic!("expected Match");
+        };
+        assert_eq!(arms.len(), 2, "expected 2 arms");
+        assert!(
+            matches!(arms[0].pat, Pat::RangeExclusive { lo: 1, hi: 4 }),
+            "expected RangeExclusive{{lo:1, hi:4}}, got {:?}", arms[0].pat
+        );
+        assert!(matches!(arms[1].pat, Pat::Wildcard));
+    }
+
+    #[test]
+    fn range_pattern_negative_lower_bound() {
+        // FLS §5.1.9: Inclusive range pattern with negative lower bound `-5..=-1`.
+        use crate::ast::{ExprKind, Pat};
+        let src = "fn f(x: i32) -> i32 { match x { -5..=-1 => 1, _ => 0 } }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!() };
+        let body = f.body.as_ref().unwrap();
+        let tail = body.tail.as_ref().expect("expected tail");
+        let ExprKind::Match { ref arms, .. } = tail.kind else {
+            panic!("expected Match");
+        };
+        assert_eq!(arms.len(), 2);
+        assert!(
+            matches!(arms[0].pat, Pat::RangeInclusive { lo: -5, hi: -1 }),
+            "expected RangeInclusive{{lo:-5, hi:-1}}, got {:?}", arms[0].pat
+        );
     }
 }
