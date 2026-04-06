@@ -9367,3 +9367,113 @@ fn main() -> i32 { let p = Point { x: 1, y: 2 }; sum(p) }\n";
         "struct param spill must emit ≥2 str instructions, got {str_count}:\n{asm}"
     );
 }
+
+// ── Milestone 79: Tuple struct pattern destructuring in function parameters ───
+
+/// FLS §5.10.4, §9.2: Simple tuple struct pattern parameter — sum of fields.
+#[test]
+fn milestone_79_tuple_struct_param_sum() {
+    let src = "\
+struct Pair(i32, i32);\n\
+fn sum(Pair(a, b): Pair) -> i32 { a + b }\n\
+fn main() -> i32 { let p = Pair(3, 4); sum(p) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 3+4=7, got {exit_code}");
+}
+
+/// FLS §5.10.4, §9.2: First field of tuple struct pattern parameter.
+#[test]
+fn milestone_79_tuple_struct_param_first_field() {
+    let src = "\
+struct Pair(i32, i32);\n\
+fn first(Pair(a, _): Pair) -> i32 { a }\n\
+fn main() -> i32 { let p = Pair(10, 20); first(p) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "expected 10, got {exit_code}");
+}
+
+/// FLS §5.10.4, §9.2: Second field of tuple struct pattern parameter.
+#[test]
+fn milestone_79_tuple_struct_param_second_field() {
+    let src = "\
+struct Pair(i32, i32);\n\
+fn second(Pair(_, b): Pair) -> i32 { b }\n\
+fn main() -> i32 { let p = Pair(10, 20); second(p) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 20, "expected 20, got {exit_code}");
+}
+
+/// FLS §5.10.4, §9.2: Tuple struct pattern result used in arithmetic.
+#[test]
+fn milestone_79_tuple_struct_param_result_in_arithmetic() {
+    let src = "\
+struct Pair(i32, i32);\n\
+fn diff(Pair(a, b): Pair) -> i32 { a - b }\n\
+fn main() -> i32 { let p = Pair(10, 3); diff(p) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 10-3=7, got {exit_code}");
+}
+
+/// FLS §5.10.4, §9.2: Tuple struct pattern parameter from a variable.
+#[test]
+fn milestone_79_tuple_struct_param_from_variable() {
+    let src = "\
+struct Pair(i32, i32);\n\
+fn sum(Pair(a, b): Pair) -> i32 { a + b }\n\
+fn main() -> i32 { let p = Pair(5, 6); sum(p) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 11, "expected 5+6=11, got {exit_code}");
+}
+
+/// FLS §5.10.4, §9.2: Three-field tuple struct pattern parameter.
+#[test]
+fn milestone_79_tuple_struct_param_three_fields() {
+    let src = "\
+struct Triple(i32, i32, i32);\n\
+fn sum3(Triple(a, b, c): Triple) -> i32 { a + b + c }\n\
+fn main() -> i32 { let t = Triple(1, 2, 3); sum3(t) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "expected 1+2+3=6, got {exit_code}");
+}
+
+/// FLS §5.10.4, §9.2: Tuple struct pattern mixed with a scalar parameter.
+#[test]
+fn milestone_79_tuple_struct_param_mixed_with_scalar() {
+    let src = "\
+struct Pair(i32, i32);\n\
+fn scaled_sum(Pair(a, b): Pair, scale: i32) -> i32 { (a + b) * scale }\n\
+fn main() -> i32 { let p = Pair(3, 4); scaled_sum(p, 2) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 14, "expected (3+4)*2=14, got {exit_code}");
+}
+
+/// FLS §5.10.4, §9.2: Tuple struct pattern parameter used in an if expression.
+#[test]
+fn milestone_79_tuple_struct_param_in_if() {
+    let src = "\
+struct Pair(i32, i32);\n\
+fn larger(Pair(a, b): Pair) -> i32 { if a > b { a } else { b } }\n\
+fn main() -> i32 { let p = Pair(5, 3); larger(p) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "expected larger=5, got {exit_code}");
+}
+
+/// Runtime inspection: tuple struct pattern parameter generates runtime spill stores.
+///
+/// FLS §6.1.2:37–45, §5.10.4: The parameter spill must emit `str` instructions
+/// at the function entry regardless of whether the caller passes literals or variables.
+///
+/// Cache-line note: 2 fields → 2 × 4-byte `str` = 8 bytes, identical to tuple params.
+#[test]
+fn runtime_tuple_struct_param_emits_spill_stores() {
+    let src = "\
+struct Pair(i32, i32);\n\
+fn sum(Pair(a, b): Pair) -> i32 { a + b }\n\
+fn main() -> i32 { let p = Pair(1, 2); sum(p) }\n";
+    let asm = compile_to_asm(src);
+    let str_count = asm.lines().filter(|l: &&str| l.trim_start().starts_with("str ")).count();
+    assert!(
+        str_count >= 2,
+        "tuple struct param spill must emit ≥2 str instructions, got {str_count}:\n{asm}"
+    );
+}

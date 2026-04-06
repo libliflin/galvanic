@@ -200,6 +200,17 @@ fn area(Rect { w, h }: Rect) -> i32 {
     w * h
 }
 
+// FLS §5.10.4, §9.2: Tuple struct pattern in parameter position.
+// The spec does not provide a canonical example; this is derived from §5.10.4
+// (TupleStructPattern) and §9.2 (FunctionParameters).
+struct Scale(i32, i32);
+
+fn scaled_diff(Scale(a, b): Scale) -> i32 {
+    // FLS §5.10.4: `a` and `b` are bound from the incoming registers.
+    // `Scale(3, 1)` → a=3, b=1 → 3-1 = 2.
+    a - b
+}
+
 fn main() -> i32 {
     // FLS §5.1.9: inclusive range — value 2 in [1,3] → 1.
     let a = range_inclusive(2);
@@ -237,6 +248,9 @@ fn main() -> i32 {
     // FLS §5.10.2, §9.2: struct pattern param — area(Rect { w:3, h:4 }) = 12.
     let r = Rect { w: 3, h: 4 };
     let r2 = area(r);
-    // a=1, b=2, c=1, d=1, e=1, f=1, g=4, h=2, i=3, j=0, k=2, m=3, n2=1, n3=1, q=7, r2=12 → sum=42
-    a + b + c + d + e + f + g + h + i + j + k + m + n2 + n3 + q + r2
+    // FLS §5.10.4, §9.2: tuple struct pattern param — scaled_diff(Scale(3,1)) = 2.
+    let sc = Scale(3, 1);
+    let r3 = scaled_diff(sc);
+    // a=1, b=2, c=1, d=1, e=1, f=1, g=4, h=2, i=3, j=0, k=2, m=3, n2=1, n3=1, q=7, r2=12, r3=2 → sum=44
+    a + b + c + d + e + f + g + h + i + j + k + m + n2 + n3 + q + r2 + r3
 }
