@@ -5248,3 +5248,216 @@ fn main() -> i32 {
         "expected at least 3 str instructions (2 init + 1 element store), got {store_count}:\n{asm}"
     );
 }
+
+// ── Milestone 51: impl blocks on enum types ───────────────────────────────────
+//
+// FLS §10.1: Associated items may be defined for any nominal type, including
+// enums. FLS §11: Inherent implementations attach methods to a type.
+// FLS §15: Enum variants carry a discriminant; methods on enums typically
+// use match to dispatch on the discriminant.
+
+/// Milestone 51: basic method on a unit-variant enum, dispatch via match.
+///
+/// FLS §10.1, §11, §15: impl on an enum type. The method matches `self` and
+/// returns different values for each variant.
+#[test]
+fn milestone_51_enum_method_unit_variants() {
+    let src = r#"
+enum Dir { North, South }
+
+impl Dir {
+    fn code(&self) -> i32 {
+        match self {
+            Dir::North => 1,
+            Dir::South => 2,
+        }
+    }
+}
+
+fn main() -> i32 {
+    let d = Dir::South;
+    d.code()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2, "expected exit 2, got {exit_code}");
+}
+
+/// Milestone 51: method extracts field from a tuple variant.
+///
+/// FLS §10.1, §11, §15: Method on enum with tuple variant — pattern binds the
+/// field so the method can compute with it.
+#[test]
+fn milestone_51_enum_method_extracts_tuple_field() {
+    let src = r#"
+enum Wrap { Val(i32) }
+
+impl Wrap {
+    fn get(&self) -> i32 {
+        match self {
+            Wrap::Val(v) => v,
+        }
+    }
+}
+
+fn main() -> i32 {
+    let w = Wrap::Val(42);
+    w.get()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+/// Milestone 51: method on multi-variant enum with different field shapes.
+///
+/// FLS §10.1, §15: The method must dispatch on the discriminant at runtime
+/// and access variant-specific fields. Matches the FLS §15 requirement that
+/// only the active variant's fields are accessible.
+#[test]
+fn milestone_51_enum_method_multi_variant() {
+    let src = r#"
+enum Shape { Circle(i32), Rect(i32, i32) }
+
+impl Shape {
+    fn area(&self) -> i32 {
+        match self {
+            Shape::Circle(r) => r * r,
+            Shape::Rect(w, h) => w * h,
+        }
+    }
+}
+
+fn main() -> i32 {
+    let s = Shape::Rect(3, 4);
+    s.area()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 12, "expected exit 12, got {exit_code}");
+}
+
+/// Milestone 51: method on enum parameter (not just local variable).
+///
+/// FLS §10.1: Method receiver is passed by value. Caller loads discriminant
+/// and fields from the enum parameter's slots before calling.
+#[test]
+fn milestone_51_enum_method_on_parameter() {
+    let src = r#"
+enum Shape { Circle(i32), Rect(i32, i32) }
+
+impl Shape {
+    fn area(&self) -> i32 {
+        match self {
+            Shape::Circle(r) => r * r,
+            Shape::Rect(w, h) => w * h,
+        }
+    }
+}
+
+fn compute(s: Shape) -> i32 {
+    s.area()
+}
+
+fn main() -> i32 {
+    compute(Shape::Circle(7))
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 49, "expected exit 49, got {exit_code}");
+}
+
+/// Milestone 51: method result used in arithmetic.
+///
+/// FLS §6.12.2, §10.1: Method call expression evaluates to the return value,
+/// which may be used in any expression context.
+#[test]
+fn milestone_51_enum_method_result_in_arithmetic() {
+    let src = r#"
+enum Val { Num(i32) }
+
+impl Val {
+    fn get(&self) -> i32 {
+        match self {
+            Val::Num(n) => n,
+        }
+    }
+}
+
+fn main() -> i32 {
+    let a = Val::Num(5);
+    let b = Val::Num(7);
+    a.get() + b.get()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 12, "expected exit 12, got {exit_code}");
+}
+
+/// Milestone 51: two methods on the same enum.
+///
+/// FLS §11: An inherent impl may contain multiple methods, each compiled to a
+/// separately mangled top-level function.
+#[test]
+fn milestone_51_two_enum_methods() {
+    let src = r#"
+enum Pair { Both(i32, i32) }
+
+impl Pair {
+    fn first(&self) -> i32 {
+        match self {
+            Pair::Both(a, b) => a,
+        }
+    }
+    fn second(&self) -> i32 {
+        match self {
+            Pair::Both(a, b) => b,
+        }
+    }
+}
+
+fn main() -> i32 {
+    let p = Pair::Both(3, 39);
+    p.first() + p.second()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+// ── Assembly inspection: milestone 51 ────────────────────────────────────────
+
+/// Milestone 51: enum method emits a mangled function name.
+///
+/// FLS §10.1: Methods are lowered to top-level functions with mangled names
+/// `TypeName__method_name`. Enum methods use the same mangling as struct methods.
+#[test]
+fn runtime_enum_method_emits_mangled_name() {
+    let src = r#"
+enum Dir { North, South }
+
+impl Dir {
+    fn code(&self) -> i32 {
+        match self {
+            Dir::North => 1,
+            Dir::South => 2,
+        }
+    }
+}
+
+fn main() -> i32 {
+    let d = Dir::North;
+    d.code()
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("Dir__code"),
+        "expected mangled name `Dir__code` in assembly:\n{asm}"
+    );
+    // The call site must use `bl Dir__code`.
+    assert!(
+        asm.contains("bl      Dir__code"),
+        "expected `bl Dir__code` in assembly:\n{asm}"
+    );
+}
