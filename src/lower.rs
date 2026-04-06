@@ -1443,10 +1443,12 @@ fn lower_fn(
             ctx.instrs.push(Instr::RetFieldsAndValue { base_slot: 0, n_fields, val_reg });
         }
     } else if let Some(ref struct_name) = struct_ret_name {
-        // FLS §10.1: Associated function returning a struct type.
-        // The tail expression must be a struct literal. Lower all statements,
-        // then store the struct literal fields to consecutive slots, then emit
-        // RetFields to return them in x0..x{N-1}.
+        // FLS §9, §10.1: Function returning a named struct type.
+        //
+        // The tail expression may be a struct literal, if-else, block, or variable
+        // path — any form handled by lower_struct_expr_into. All statements are
+        // lowered first, then the tail is lowered into N consecutive return slots,
+        // then RetFields emits the fields in x0..x{N-1}.
         //
         // ARM64 ABI: multiple return values packed into x0..x{N-1} (small structs).
         // The call site uses CallMut-style write-back to store them into the
@@ -1456,60 +1458,40 @@ fn lower_fn(
         // returning struct types from associated functions. Galvanic uses the same
         // register-packing convention as &mut self (fields in x0..x{N-1}).
         //
-        // Cache-line note: N field stores (4 bytes each) + RetFields ldr sequence
-        // (N loads) = 2N instructions before the epilogue.
-        let field_names = struct_defs.get(struct_name.as_str())
+        // Cache-line note: lower_struct_expr_into emits N store instructions per
+        // struct-literal arm + the RetFields N-ldr sequence = 2N instructions total.
+        let n_fields = struct_defs.get(struct_name.as_str())
             .ok_or_else(|| LowerError::Unsupported(format!("unknown struct `{struct_name}`")))?
-            .clone();
-        let n_fields = field_names.len();
+            .len();
 
         // Lower all statements.
         for stmt in &body.stmts {
             ctx.lower_stmt(stmt)?;
         }
 
-        // The tail expression must be a struct literal.
+        // The tail expression produces a struct value.
+        //
+        // FLS §6.11: The tail may be a struct literal, an if-else expression,
+        // a block, or a variable path — any expression yielding the declared
+        // struct type.
+        // FLS §6.17: If-else is the canonical way to conditionally return a struct.
         let tail = body.tail.as_deref().ok_or_else(|| {
             LowerError::Unsupported(format!(
-                "associated function returning `{struct_name}` must end with a struct literal"
+                "function returning `{struct_name}` must end with a struct expression"
             ))
         })?;
-        let ExprKind::StructLit { name: sn, fields: lit_fields, .. } = &tail.kind else {
-            return Err(LowerError::Unsupported(format!(
-                "associated function returning `{struct_name}`: tail must be a struct literal"
-            )));
-        };
-
-        let actual_struct_name = sn.text(source);
-        if actual_struct_name != struct_name.as_str() {
-            return Err(LowerError::Unsupported(format!(
-                "associated function declared to return `{struct_name}` but tail is `{actual_struct_name}`"
-            )));
-        }
 
         // Allocate consecutive slots for the return struct fields.
+        // FLS §6.11: Struct fields are stored in declaration order.
+        // Cache-line note: N consecutive 8-byte slots = N×8 bytes on the stack.
         let base_slot = ctx.alloc_slot()?;
         for _ in 1..n_fields {
             ctx.alloc_slot()?;
         }
 
-        // Store each field in declaration order.
-        // FLS §6.11: Field initializers evaluated in source order, stored in
-        // declaration order for layout stability.
-        for (field_idx, field_name) in field_names.iter().enumerate() {
-            let slot = base_slot + field_idx as u8;
-            let field_init = lit_fields
-                .iter()
-                .find(|(f, _)| f.text(source) == field_name.as_str())
-                .ok_or_else(|| {
-                    LowerError::Unsupported(format!(
-                        "missing field `{field_name}` in `{struct_name}` literal"
-                    ))
-                })?;
-            let val = ctx.lower_expr(&field_init.1, &IrTy::I32)?;
-            let src = ctx.val_to_reg(val)?;
-            ctx.instrs.push(Instr::Store { src, slot });
-        }
+        // Delegate to lower_struct_expr_into, which handles struct literals,
+        // if/else, blocks, and variable paths (FLS §6.11, §6.17, §6.4, §6.3).
+        ctx.lower_struct_expr_into(tail, base_slot, n_fields, struct_name)?;
 
         // Emit RetFields: loads fields from base_slot..base_slot+n_fields-1
         // into x0..x{N-1} before the epilogue.
@@ -2855,9 +2837,482 @@ impl<'src> LowerCtx<'src> {
                 }
             }
 
+            // FLS §6.18, §6.10: Match expression producing a tuple value.
+            //
+            // Each arm body is lowered via `lower_tuple_expr_into`, storing N
+            // elements into base_slot..base_slot+n_elems-1. The pattern check
+            // follows the same strategy as scalar match: emit a comparison and
+            // `cbz` to the next arm label on mismatch.
+            //
+            // FLS §6.18: "A match expression is used to branch over the possible
+            // values of the scrutinee operand." Arms are tried in source order.
+            // FLS §6.10: All tuple elements are in declaration order and stored
+            // to consecutive stack slots.
+            // FLS §6.1.2:37–45: All comparisons and stores are runtime instructions.
+            //
+            // Cache-line note: each literal-pattern arm emits ~5 instructions
+            // (ldr + mov + cmp + cbz + stores = 20+ bytes). Two short arms fit
+            // in a 64-byte cache line.
+            ExprKind::Match { scrutinee, arms } => {
+                if arms.is_empty() {
+                    return Err(LowerError::Unsupported(
+                        "match expression with no arms".into(),
+                    ));
+                }
+
+                // FLS §6.18: The scrutinee is evaluated once before any arm is
+                // tried. We spill it to a stack slot so each arm's pattern check
+                // can reload it without re-evaluating the scrutinee.
+                let scrut_val = self.lower_expr(scrutinee, &IrTy::I32)?;
+                let scrut_reg = self.val_to_reg(scrut_val)?;
+                let scrut_slot = self.alloc_slot()?;
+                self.instrs.push(Instr::Store { src: scrut_reg, slot: scrut_slot });
+
+                // Split into checked arms (all but last) and the default arm.
+                // FLS §6.18: Arms are tested in source order; the last arm is
+                // emitted without a pattern check (unconditional fall-through).
+                let (checked_arms, default_arm) = arms.split_at(arms.len() - 1);
+                let exit_label = self.alloc_label();
+
+                for arm in checked_arms {
+                    let next_label = self.alloc_label();
+
+                    match &arm.pat {
+                        // FLS §5.1: Wildcard — always matches. Check guard only.
+                        Pat::Wildcard => {
+                            if let Some(guard) = &arm.guard {
+                                let gv = self.lower_expr(guard, &IrTy::Bool)?;
+                                let gr = self.val_to_reg(gv)?;
+                                self.instrs.push(Instr::CondBranch { reg: gr, label: next_label });
+                            }
+                            self.lower_tuple_expr_into(&arm.body, base_slot, n_elems)?;
+                            self.instrs.push(Instr::Branch(exit_label));
+                            self.instrs.push(Instr::Label(next_label));
+                            continue;
+                        }
+
+                        // FLS §5.1.4: Identifier pattern — always matches, binds name.
+                        // FLS §6.18: Binding is visible inside the arm body and guard.
+                        Pat::Ident(span) => {
+                            let name = span.text(self.source);
+                            let bind_slot = self.alloc_slot()?;
+                            let bind_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst: bind_reg, slot: scrut_slot });
+                            self.instrs.push(Instr::Store { src: bind_reg, slot: bind_slot });
+                            self.locals.insert(name, bind_slot);
+                            if let Some(guard) = &arm.guard {
+                                let gv = self.lower_expr(guard, &IrTy::Bool)?;
+                                let gr = self.val_to_reg(gv)?;
+                                self.instrs.push(Instr::CondBranch { reg: gr, label: next_label });
+                            }
+                            self.lower_tuple_expr_into(&arm.body, base_slot, n_elems)?;
+                            self.locals.remove(name);
+                            self.instrs.push(Instr::Branch(exit_label));
+                            self.instrs.push(Instr::Label(next_label));
+                            continue;
+                        }
+
+                        // FLS §5.4: Literal/path pattern — emit equality check.
+                        // LitInt, NegLitInt, LitBool, or two-segment path (enum variant).
+                        Pat::LitInt(n) => {
+                            let s_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                            let p_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::LoadImm(p_reg, *n as i32));
+                            let eq_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg });
+                            self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label });
+                        }
+
+                        Pat::NegLitInt(n) => {
+                            let s_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                            let p_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::LoadImm(p_reg, -(*n as i32)));
+                            let eq_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg });
+                            self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label });
+                        }
+
+                        Pat::LitBool(b) => {
+                            let s_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                            let p_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::LoadImm(p_reg, *b as i32));
+                            let eq_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg });
+                            self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label });
+                        }
+
+                        _ => {
+                            return Err(LowerError::Unsupported(
+                                "match arm pattern type not yet supported in tuple-returning match".into(),
+                            ));
+                        }
+                    }
+
+                    // Pattern matched: check guard (if any), then lower the arm body.
+                    if let Some(guard) = &arm.guard {
+                        let gv = self.lower_expr(guard, &IrTy::Bool)?;
+                        let gr = self.val_to_reg(gv)?;
+                        self.instrs.push(Instr::CondBranch { reg: gr, label: next_label });
+                    }
+                    self.lower_tuple_expr_into(&arm.body, base_slot, n_elems)?;
+                    self.instrs.push(Instr::Branch(exit_label));
+                    self.instrs.push(Instr::Label(next_label));
+                }
+
+                // Default (last) arm — no pattern check.
+                // FLS §6.18: The last arm is typically a wildcard or identifier
+                // pattern; it is executed unconditionally if all prior arms failed.
+                let default = &default_arm[0];
+                match &default.pat {
+                    Pat::Ident(span) => {
+                        let name = span.text(self.source);
+                        let bind_slot = self.alloc_slot()?;
+                        let bind_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: bind_reg, slot: scrut_slot });
+                        self.instrs.push(Instr::Store { src: bind_reg, slot: bind_slot });
+                        self.locals.insert(name, bind_slot);
+                        self.lower_tuple_expr_into(&default.body, base_slot, n_elems)?;
+                        self.locals.remove(name);
+                    }
+                    _ => {
+                        // Wildcard or literal (exhaustive last arm).
+                        self.lower_tuple_expr_into(&default.body, base_slot, n_elems)?;
+                    }
+                }
+
+                self.instrs.push(Instr::Label(exit_label));
+                Ok(())
+            }
+
             _ => Err(LowerError::Unsupported(
                 "tuple return: unsupported expression form".into(),
             )),
+        }
+    }
+
+    /// Lower an expression that produces a named struct value into pre-allocated
+    /// stack slots.
+    ///
+    /// Stores the N fields of `struct_name` into `base_slot..base_slot+n_fields-1`.
+    /// Used for functions returning named struct types (FLS §9, §6.11, §6.17).
+    ///
+    /// Handles:
+    /// - Struct literal `S { field: expr, ... }` — stores fields in declaration order
+    /// - If-else expression — each branch stores into the same slots
+    /// - Block expression — lowers statements then handles tail
+    /// - Variable path `x` (where x is a local of struct type) — copies all N slots
+    ///
+    /// FLS §6.11: Struct expression field initializers are evaluated in source order,
+    /// stored in declaration order for layout stability.
+    /// FLS §6.17: If-else expression — both branches must yield the same struct type.
+    /// FLS §6.4: Block expressions — statements then tail.
+    /// FLS §6.1.2:37–45: All stores are runtime instructions.
+    ///
+    /// Cache-line note: a 2-field struct literal emits 2 store instructions = 8 bytes,
+    /// fitting alongside the RetFields sequence in a single 64-byte cache line.
+    fn lower_struct_expr_into(
+        &mut self,
+        expr: &Expr,
+        base_slot: u8,
+        n_fields: usize,
+        struct_name: &str,
+    ) -> Result<(), LowerError> {
+        match &expr.kind {
+            // FLS §6.11: Struct literal `S { field: expr, ... }`.
+            //
+            // Fields may appear in any order in the source; they are stored in
+            // declaration order. If struct update syntax (`..base`) is used,
+            // unspecified fields are copied from the base variable.
+            ExprKind::StructLit { name: sn, fields: lit_fields, base: update_base, .. } => {
+                let actual_name = sn.text(self.source);
+                let field_names = self.struct_defs
+                    .get(actual_name)
+                    .ok_or_else(|| {
+                        LowerError::Unsupported(format!("unknown struct `{actual_name}`"))
+                    })?
+                    .clone();
+                for (field_idx, field_name) in field_names.iter().enumerate() {
+                    let slot = base_slot + field_idx as u8;
+                    if let Some(field_init) = lit_fields
+                        .iter()
+                        .find(|(f, _)| f.text(self.source) == field_name.as_str())
+                    {
+                        // Explicitly provided field initializer.
+                        let val = self.lower_expr(&field_init.1, &IrTy::I32)?;
+                        let src = self.val_to_reg(val)?;
+                        self.instrs.push(Instr::Store { src, slot });
+                    } else if let Some(base_expr) = update_base.as_deref() {
+                        // FLS §6.11: Struct update syntax — copy this field from base.
+                        let base_var = match &base_expr.kind {
+                            ExprKind::Path(segs) if segs.len() == 1 => segs[0].text(self.source),
+                            _ => {
+                                return Err(LowerError::Unsupported(
+                                    "struct update base must be a simple variable path".into(),
+                                ))
+                            }
+                        };
+                        let base_base = *self.locals.get(base_var).ok_or_else(|| {
+                            LowerError::Unsupported(format!(
+                                "struct update: undefined base variable `{base_var}`"
+                            ))
+                        })?;
+                        let offset = self
+                            .struct_field_offsets
+                            .get(actual_name)
+                            .and_then(|o| o.get(field_idx))
+                            .copied()
+                            .unwrap_or(field_idx);
+                        let tmp = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: tmp, slot: base_base + offset as u8 });
+                        self.instrs.push(Instr::Store { src: tmp, slot });
+                    } else {
+                        return Err(LowerError::Unsupported(format!(
+                            "missing field `{field_name}` in `{actual_name}` literal"
+                        )));
+                    }
+                }
+                Ok(())
+            }
+
+            // FLS §6.17: If-else expression — each branch stores the struct fields
+            // into the shared return slots.
+            //
+            // FLS §6.17: Both branches must produce a value of the same struct type.
+            // Galvanic enforces this structurally: both branches must lower
+            // successfully via lower_struct_expr_into with the same struct_name.
+            //
+            // FLS §6.1.2:37–45: The condition check and all stores are runtime.
+            //
+            // Cache-line note: the condition check emits 2 instructions (ldr + cbz).
+            // Each struct-literal branch emits N stores (N×4 bytes).
+            ExprKind::If { cond, then_block, else_expr } => {
+                let else_label = self.alloc_label();
+                let end_label = self.alloc_label();
+
+                let cond_val = self.lower_expr(cond, &IrTy::Bool)?;
+                let cond_reg = self.val_to_reg(cond_val)?;
+                self.instrs.push(Instr::CondBranch { reg: cond_reg, label: else_label });
+
+                // Then branch: lower statements then store struct result.
+                for stmt in &then_block.stmts {
+                    self.lower_stmt(stmt)?;
+                }
+                if let Some(tail) = then_block.tail.as_deref() {
+                    self.lower_struct_expr_into(tail, base_slot, n_fields, struct_name)?;
+                } else {
+                    return Err(LowerError::Unsupported(
+                        "struct-returning if expression: then branch must have a tail".into(),
+                    ));
+                }
+                self.instrs.push(Instr::Branch(end_label));
+
+                // Else branch: store struct result.
+                self.instrs.push(Instr::Label(else_label));
+                match else_expr {
+                    Some(e) => self.lower_struct_expr_into(e, base_slot, n_fields, struct_name)?,
+                    None => {
+                        return Err(LowerError::Unsupported(
+                            "struct-returning if expression must have an else branch".into(),
+                        ))
+                    }
+                }
+
+                self.instrs.push(Instr::Label(end_label));
+                Ok(())
+            }
+
+            // FLS §6.4: Block expression — lower statements then handle tail.
+            ExprKind::Block(block) => {
+                for stmt in &block.stmts {
+                    self.lower_stmt(stmt)?;
+                }
+                match block.tail.as_deref() {
+                    Some(tail) => {
+                        self.lower_struct_expr_into(tail, base_slot, n_fields, struct_name)
+                    }
+                    None => Err(LowerError::Unsupported(
+                        "struct-returning block must have a tail expression".into(),
+                    )),
+                }
+            }
+
+            // FLS §6.3, §7.1: Variable path — copy all struct slots from the source.
+            //
+            // Reading a local variable in a value context copies its contents
+            // (value semantics, FLS §7.1). For a struct with N fields we copy
+            // each of the N consecutive stack slots.
+            //
+            // Cache-line note: N copies = N ldr + N str = 2N instructions.
+            ExprKind::Path(segs) if segs.len() == 1 => {
+                let var_name = segs[0].text(self.source);
+                let src_base = *self.locals.get(var_name).ok_or_else(|| {
+                    LowerError::Unsupported(format!(
+                        "struct return: undefined variable `{var_name}`"
+                    ))
+                })?;
+                for i in 0..n_fields as u8 {
+                    let tmp = self.alloc_reg()?;
+                    self.instrs.push(Instr::Load { dst: tmp, slot: src_base + i });
+                    self.instrs.push(Instr::Store { src: tmp, slot: base_slot + i });
+                }
+                Ok(())
+            }
+
+            // FLS §6.18, §6.11: Match expression producing a struct value.
+            //
+            // Each arm body is lowered via `lower_struct_expr_into`, storing N
+            // fields into base_slot..base_slot+n_fields-1. The pattern check
+            // follows the same strategy as scalar match: emit a comparison and
+            // `cbz` to the next arm label on mismatch.
+            //
+            // FLS §6.18: "A match expression is used to branch over the possible
+            // values of the scrutinee operand." Arms are tried in source order.
+            // FLS §6.11: All struct fields are stored in declaration order to
+            // consecutive stack slots.
+            // FLS §6.1.2:37–45: All comparisons and stores are runtime instructions.
+            //
+            // Cache-line note: each literal-pattern arm emits ~5 instructions
+            // (ldr + mov + cmp + cbz + N stores). Compact arms fit in a 64-byte
+            // cache line.
+            ExprKind::Match { scrutinee, arms } => {
+                if arms.is_empty() {
+                    return Err(LowerError::Unsupported(
+                        "struct-returning match expression with no arms".into(),
+                    ));
+                }
+
+                // FLS §6.18: The scrutinee is evaluated once before any arm is
+                // tried. We spill it to a stack slot so each arm's pattern check
+                // can reload it without re-evaluating the scrutinee.
+                let scrut_val = self.lower_expr(scrutinee, &IrTy::I32)?;
+                let scrut_reg = self.val_to_reg(scrut_val)?;
+                let scrut_slot = self.alloc_slot()?;
+                self.instrs.push(Instr::Store { src: scrut_reg, slot: scrut_slot });
+
+                // Split into checked arms (all but last) and the default arm.
+                // FLS §6.18: Arms are tested in source order; the last arm is
+                // emitted without a pattern check (unconditional fall-through).
+                let (checked_arms, default_arm) = arms.split_at(arms.len() - 1);
+                let exit_label = self.alloc_label();
+
+                for arm in checked_arms {
+                    let next_label = self.alloc_label();
+
+                    match &arm.pat {
+                        // FLS §5.1: Wildcard — always matches. Check guard only.
+                        Pat::Wildcard => {
+                            if let Some(guard) = &arm.guard {
+                                let gv = self.lower_expr(guard, &IrTy::Bool)?;
+                                let gr = self.val_to_reg(gv)?;
+                                self.instrs.push(Instr::CondBranch { reg: gr, label: next_label });
+                            }
+                            self.lower_struct_expr_into(&arm.body, base_slot, n_fields, struct_name)?;
+                            self.instrs.push(Instr::Branch(exit_label));
+                            self.instrs.push(Instr::Label(next_label));
+                            continue;
+                        }
+
+                        // FLS §5.1.4: Identifier pattern — always matches, binds name.
+                        // FLS §6.18: Binding is visible inside the arm body and guard.
+                        Pat::Ident(span) => {
+                            let name = span.text(self.source);
+                            let bind_slot = self.alloc_slot()?;
+                            let bind_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst: bind_reg, slot: scrut_slot });
+                            self.instrs.push(Instr::Store { src: bind_reg, slot: bind_slot });
+                            self.locals.insert(name, bind_slot);
+                            if let Some(guard) = &arm.guard {
+                                let gv = self.lower_expr(guard, &IrTy::Bool)?;
+                                let gr = self.val_to_reg(gv)?;
+                                self.instrs.push(Instr::CondBranch { reg: gr, label: next_label });
+                            }
+                            self.lower_struct_expr_into(&arm.body, base_slot, n_fields, struct_name)?;
+                            self.locals.remove(name);
+                            self.instrs.push(Instr::Branch(exit_label));
+                            self.instrs.push(Instr::Label(next_label));
+                            continue;
+                        }
+
+                        // FLS §5.4: Literal/path pattern — emit equality check.
+                        Pat::LitInt(n) => {
+                            let s_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                            let p_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::LoadImm(p_reg, *n as i32));
+                            let eq_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg });
+                            self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label });
+                        }
+
+                        Pat::NegLitInt(n) => {
+                            let s_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                            let p_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::LoadImm(p_reg, -(*n as i32)));
+                            let eq_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg });
+                            self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label });
+                        }
+
+                        Pat::LitBool(b) => {
+                            let s_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                            let p_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::LoadImm(p_reg, *b as i32));
+                            let eq_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg });
+                            self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label });
+                        }
+
+                        _ => {
+                            return Err(LowerError::Unsupported(
+                                "match arm pattern type not yet supported in struct-returning match".into(),
+                            ));
+                        }
+                    }
+
+                    // Pattern matched: check guard (if any), then lower the arm body.
+                    if let Some(guard) = &arm.guard {
+                        let gv = self.lower_expr(guard, &IrTy::Bool)?;
+                        let gr = self.val_to_reg(gv)?;
+                        self.instrs.push(Instr::CondBranch { reg: gr, label: next_label });
+                    }
+                    self.lower_struct_expr_into(&arm.body, base_slot, n_fields, struct_name)?;
+                    self.instrs.push(Instr::Branch(exit_label));
+                    self.instrs.push(Instr::Label(next_label));
+                }
+
+                // Default (last) arm — no pattern check.
+                // FLS §6.18: The last arm is typically a wildcard or identifier
+                // pattern; it is executed unconditionally if all prior arms failed.
+                let default = &default_arm[0];
+                match &default.pat {
+                    Pat::Ident(span) => {
+                        let name = span.text(self.source);
+                        let bind_slot = self.alloc_slot()?;
+                        let bind_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: bind_reg, slot: scrut_slot });
+                        self.instrs.push(Instr::Store { src: bind_reg, slot: bind_slot });
+                        self.locals.insert(name, bind_slot);
+                        self.lower_struct_expr_into(&default.body, base_slot, n_fields, struct_name)?;
+                        self.locals.remove(name);
+                    }
+                    _ => {
+                        // Wildcard or literal (exhaustive last arm).
+                        self.lower_struct_expr_into(&default.body, base_slot, n_fields, struct_name)?;
+                    }
+                }
+
+                self.instrs.push(Instr::Label(exit_label));
+                Ok(())
+            }
+
+            _ => Err(LowerError::Unsupported(format!(
+                "struct return (`{struct_name}`): unsupported expression form",
+            ))),
         }
     }
 
@@ -6533,6 +6988,78 @@ impl<'src> LowerCtx<'src> {
                             self.instrs.push(Instr::Load { dst: reg, slot: base_slot + i as u8 });
                             arg_regs.push(reg);
                         }
+                    } else if let ExprKind::Call { callee: inner_callee, args: inner_args } = &arg.kind
+                        && let ExprKind::Path(inner_segs) = &inner_callee.kind
+                        && inner_segs.len() == 1
+                        && self.struct_return_free_fns.contains_key(inner_segs[0].text(self.source))
+                    {
+                        // FLS §9, §6.12.1: Struct-returning free function used directly as a
+                        // function argument — e.g., `sum(make(1))` where `make` returns a struct.
+                        //
+                        // Problem: a plain `Instr::Call` captures only x0 (the scalar return
+                        // register). After `bl make`, x0..x{N-1} hold the N struct fields
+                        // (via `RetFields`). If we capture only x0 and then emit
+                        // `mov x{dst}, x0`, that overwrites x1 (which held field[1]) before
+                        // we can pass it to the outer call. The result is that the outer
+                        // function receives x1 = field[0] instead of x1 = field[1].
+                        //
+                        // Fix: use `CallMut` to store all N return registers into temporary
+                        // stack slots, then load them back as individual argument registers.
+                        // This matches the `let p = make(1); sum(p)` path but without a
+                        // named binding.
+                        //
+                        // FLS §6.1.2:37–45: All instructions are runtime.
+                        // Cache-line note: CallMut emits bl + N stores; the subsequent N
+                        // loads re-materialize the fields. For N=2: 4 instructions = 16 bytes.
+                        let inner_fn_name = inner_segs[0].text(self.source);
+                        let struct_name = self
+                            .struct_return_free_fns
+                            .get(inner_fn_name)
+                            .cloned()
+                            .unwrap();
+                        let field_names = self
+                            .struct_defs
+                            .get(&struct_name)
+                            .ok_or_else(|| {
+                                LowerError::Unsupported(format!(
+                                    "struct-returning arg: unknown struct `{struct_name}`"
+                                ))
+                            })?
+                            .clone();
+                        let n_fields = field_names.len();
+
+                        // Allocate N temporary slots for the struct return value.
+                        let base_slot = self.alloc_slot()?;
+                        for _ in 1..n_fields {
+                            self.alloc_slot()?;
+                        }
+
+                        // Evaluate inner call arguments.
+                        let mut inner_arg_regs: Vec<u8> = Vec::new();
+                        for inner_arg in inner_args.iter() {
+                            let val = self.lower_expr(inner_arg, &IrTy::I32)?;
+                            let reg = self.val_to_reg(val)?;
+                            inner_arg_regs.push(reg);
+                        }
+
+                        self.has_calls = true;
+                        // Emit CallMut: bl inner_fn, then store x0..x{N-1} to temp slots.
+                        self.instrs.push(Instr::CallMut {
+                            name: inner_fn_name.to_owned(),
+                            args: inner_arg_regs,
+                            write_back_slot: base_slot,
+                            n_fields: n_fields as u8,
+                        });
+
+                        // Load fields from temp slots as arguments to the outer call.
+                        for fi in 0..n_fields {
+                            let field_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load {
+                                dst: field_reg,
+                                slot: base_slot + fi as u8,
+                            });
+                            arg_regs.push(field_reg);
+                        }
                     } else {
                         let val = self.lower_expr(arg, &IrTy::I32)?;
                         let reg = self.val_to_reg(val)?;
@@ -8195,7 +8722,87 @@ impl<'src> LowerCtx<'src> {
             // For a struct with N fields, the Nth field load touches slot
             // `base + field_offset[N-1]`; if base is cache-line-aligned, all
             // scalar fields fit within the same 64-byte cache lines as their slots.
-            ExprKind::FieldAccess { .. } => {
+            ExprKind::FieldAccess { receiver, field } => {
+                let field_name = field.text(self.source);
+
+                // FLS §6.13, §9: Field access directly on a struct-returning free
+                // function call — e.g., `make(1).x` where `make` is in
+                // `struct_return_free_fns`.
+                //
+                // `resolve_place` only handles place expressions (named variables
+                // and chained field accesses). A `Call` expression is not a place,
+                // so we must handle this pattern before calling `resolve_place`.
+                //
+                // Strategy: allocate N temporary slots, emit `CallMut` to store all
+                // N return registers, then load the requested field from the
+                // appropriate slot. This mirrors the `let p = make(1); p.x` path
+                // without a named binding.
+                //
+                // FLS §6.1.2:37–45: All instructions are runtime.
+                // Cache-line note: CallMut emits bl + N stores; the Load re-materialises
+                // one field. For N=2: 4 instructions = 16 bytes.
+                if let ExprKind::Call { callee, args } = &receiver.kind
+                    && let ExprKind::Path(segs) = &callee.kind
+                    && segs.len() == 1
+                {
+                    let fn_name = segs[0].text(self.source);
+                    if let Some(struct_name) = self.struct_return_free_fns.get(fn_name).cloned() {
+                        let field_names = self
+                            .struct_defs
+                            .get(&struct_name)
+                            .ok_or_else(|| {
+                                LowerError::Unsupported(format!(
+                                    "unknown struct `{struct_name}` from free fn `{fn_name}`"
+                                ))
+                            })?
+                            .clone();
+                        let n_fields = field_names.len();
+                        let field_idx = field_names
+                            .iter()
+                            .position(|n| n == field_name)
+                            .ok_or_else(|| {
+                                LowerError::Unsupported(format!(
+                                    "no field `{field_name}` in struct `{struct_name}`"
+                                ))
+                            })?;
+                        // Use struct_field_offsets if available (handles nested structs).
+                        let offset = self
+                            .struct_field_offsets
+                            .get(&struct_name)
+                            .and_then(|o| o.get(field_idx))
+                            .copied()
+                            .unwrap_or(field_idx);
+
+                        // Allocate N temporary slots for the struct return value.
+                        let base_slot = self.alloc_slot()?;
+                        for _ in 1..n_fields {
+                            self.alloc_slot()?;
+                        }
+
+                        // Evaluate arguments.
+                        let mut arg_regs: Vec<u8> = Vec::new();
+                        for arg_expr in args.iter() {
+                            let val = self.lower_expr(arg_expr, &IrTy::I32)?;
+                            let reg = self.val_to_reg(val)?;
+                            arg_regs.push(reg);
+                        }
+
+                        self.has_calls = true;
+                        // Emit CallMut: bl fn_name, then store x0..x{N-1} to slots.
+                        self.instrs.push(Instr::CallMut {
+                            name: fn_name.to_owned(),
+                            args: arg_regs,
+                            write_back_slot: base_slot,
+                            n_fields: n_fields as u8,
+                        });
+
+                        // Load the requested field from its slot.
+                        let dst = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst, slot: base_slot + offset as u8 });
+                        return Ok(IrValue::Reg(dst));
+                    }
+                }
+
                 // Use resolve_place to handle both simple (`p.x`) and chained
                 // (`r.b.x`) field access in a uniform way.
                 //

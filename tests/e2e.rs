@@ -10035,3 +10035,637 @@ fn main() -> i32 {\n\
         .any(|l| l.trim_start().starts_with("cbz") || l.trim_start().starts_with("b."));
     assert!(has_branch, "expected conditional branch in minmax:\n{}", in_minmax.join("\n"));
 }
+
+// ── Milestone 84: tuple return from match expression ──────────────────────────
+
+/// Milestone 84: match on zero returns (0, 0); wildcard arm returns (1, n).
+///
+/// FLS §6.18: Arms tested in source order; first match wins.
+/// FLS §6.10: Tuple elements stored to consecutive slots.
+#[test]
+fn milestone_84_tuple_match_basic_literal_arm() {
+    let src = "\
+fn classify(x: i32) -> (i32, i32) {\n\
+    match x {\n\
+        0 => (0, 0),\n\
+        _ => (1, x),\n\
+    }\n\
+}\n\
+fn main() -> i32 {\n\
+    let (flag, val) = classify(0);\n\
+    flag + val\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "classify(0)=(0,0), sum=0, got {exit_code}");
+}
+
+/// Milestone 84: match wildcard arm taken when literal arm does not match.
+///
+/// FLS §6.18: Wildcard pattern matches any value.
+#[test]
+fn milestone_84_tuple_match_wildcard_arm_taken() {
+    let src = "\
+fn classify(x: i32) -> (i32, i32) {\n\
+    match x {\n\
+        0 => (0, 0),\n\
+        _ => (1, x),\n\
+    }\n\
+}\n\
+fn main() -> i32 {\n\
+    let (flag, val) = classify(5);\n\
+    flag + val\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "classify(5)=(1,5), 1+5=6, got {exit_code}");
+}
+
+/// Milestone 84: match on parameter — scrutinee is a runtime value.
+///
+/// FLS §6.18: The scrutinee is evaluated at runtime; the pattern check
+/// emits a comparison instruction.
+#[test]
+fn milestone_84_tuple_match_on_parameter() {
+    let src = "\
+fn split(n: i32) -> (i32, i32) {\n\
+    match n {\n\
+        1 => (1, 0),\n\
+        2 => (1, 1),\n\
+        _ => (0, n),\n\
+    }\n\
+}\n\
+fn main() -> i32 {\n\
+    let (a, b) = split(2);\n\
+    a + b\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2, "split(2)=(1,1), 1+1=2, got {exit_code}");
+}
+
+/// Milestone 84: three literal arms — middle arm taken.
+///
+/// FLS §6.18: Arms are tested in order; the second arm fires when x==2.
+#[test]
+fn milestone_84_tuple_match_three_literal_arms_middle() {
+    let src = "\
+fn label(x: i32) -> (i32, i32) {\n\
+    match x {\n\
+        1 => (10, 1),\n\
+        2 => (20, 2),\n\
+        _ => (0, 0),\n\
+    }\n\
+}\n\
+fn main() -> i32 {\n\
+    let (a, b) = label(2);\n\
+    a - b\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 18, "label(2)=(20,2), 20-2=18, got {exit_code}");
+}
+
+/// Milestone 84: identifier pattern in default arm binds scrutinee.
+///
+/// FLS §5.1.4: An identifier pattern in the last arm binds the matched value.
+/// The body may use the bound name in the tuple expression.
+#[test]
+fn milestone_84_tuple_match_ident_default_binds_value() {
+    let src = "\
+fn wrap(x: i32) -> (i32, i32) {\n\
+    match x {\n\
+        0 => (0, 0),\n\
+        n => (1, n),\n\
+    }\n\
+}\n\
+fn main() -> i32 {\n\
+    let (a, b) = wrap(7);\n\
+    a + b\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 8, "wrap(7)=(1,7), 1+7=8, got {exit_code}");
+}
+
+/// Milestone 84: tuple result from match used in arithmetic.
+///
+/// FLS §6.5: Arithmetic on destructured tuple elements.
+#[test]
+fn milestone_84_tuple_match_result_in_arithmetic() {
+    let src = "\
+fn pair(x: i32) -> (i32, i32) {\n\
+    match x {\n\
+        0 => (3, 4),\n\
+        _ => (5, 12),\n\
+    }\n\
+}\n\
+fn main() -> i32 {\n\
+    let (a, b) = pair(0);\n\
+    a + b\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "pair(0)=(3,4), 3+4=7, got {exit_code}");
+}
+
+/// Milestone 84: tuple returned from match passed to another function.
+///
+/// FLS §9: Destructured tuple elements are ordinary locals passed as arguments.
+#[test]
+fn milestone_84_tuple_match_result_passed_to_fn() {
+    let src = "\
+fn add(a: i32, b: i32) -> i32 { a + b }\n\
+fn pair(flag: i32) -> (i32, i32) {\n\
+    match flag {\n\
+        0 => (10, 5),\n\
+        _ => (20, 3),\n\
+    }\n\
+}\n\
+fn main() -> i32 {\n\
+    let (a, b) = pair(0);\n\
+    add(a, b)\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 15, "pair(0)=(10,5), add(10,5)=15, got {exit_code}");
+}
+
+/// Milestone 84: match emits runtime comparison instruction (not compile-time eval).
+///
+/// FLS §6.1.2:37–45: Non-const code must emit runtime instructions.
+/// The match arm check must produce a `cmp`-style comparison, not constant-fold.
+#[test]
+fn runtime_tuple_match_emits_comparison_and_cbz() {
+    let src = "\
+fn classify(x: i32) -> (i32, i32) {\n\
+    match x {\n\
+        0 => (0, 0),\n\
+        _ => (1, x),\n\
+    }\n\
+}\n\
+fn main() -> i32 {\n\
+    let (a, b) = classify(0);\n\
+    a + b\n\
+}\n";
+    let asm = compile_to_asm(src);
+    // classify must contain a comparison (cmp or sub) and a conditional branch.
+    let in_classify: Vec<&str> = asm
+        .lines()
+        .skip_while(|l| !l.starts_with("classify:"))
+        .take_while(|l| !l.starts_with("main:"))
+        .collect();
+    let has_cmp = in_classify.iter().any(|l| {
+        let t = l.trim_start();
+        t.starts_with("cmp") || t.starts_with("sub") || t.starts_with("cbz")
+    });
+    assert!(has_cmp, "expected comparison/branch in classify:\n{}", in_classify.join("\n"));
+}
+
+// ── Milestone 85: struct-returning functions with if/else tails ──────────────
+
+/// Milestone 85: struct-returning function with if/else — true branch taken.
+///
+/// FLS §6.17: If/else expression. The condition evaluates at runtime; the branch
+/// taken stores its struct fields into the return slots via RetFields.
+/// FLS §6.11: Named struct fields are stored in declaration order.
+/// FLS §9: Free functions may return named struct types.
+#[test]
+fn milestone_85_struct_return_if_else_true_branch() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(flag: i32) -> Point {
+    if flag > 0 { Point { x: 1, y: 2 } } else { Point { x: -1, y: -2 } }
+}
+fn main() -> i32 {
+    let p = make(5);
+    p.x
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "flag=5>0, x=1, got {exit_code}");
+}
+
+/// Milestone 85: struct-returning function with if/else — false branch taken.
+///
+/// FLS §6.17, §6.11, §9
+#[test]
+fn milestone_85_struct_return_if_else_false_branch() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(flag: i32) -> Point {
+    if flag > 0 { Point { x: 1, y: 2 } } else { Point { x: -1, y: -2 } }
+}
+fn main() -> i32 {
+    let p = make(0);
+    p.y
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    // Linux exit codes are 0–255 (unsigned); -2 wraps to 254.
+    assert_eq!(exit_code, 254, "flag=0, false branch y=-2 (wraps to 254), got {exit_code}");
+}
+
+/// Milestone 85: both fields from a struct-returning if/else.
+///
+/// FLS §6.17, §6.11, §9, §6.13: Field access on the returned struct reads the
+/// correct slot regardless of which branch ran.
+#[test]
+fn milestone_85_struct_return_if_else_field_sum() {
+    let src = r#"
+struct Pair { a: i32, b: i32 }
+fn choose(flag: i32) -> Pair {
+    if flag == 0 { Pair { a: 3, b: 4 } } else { Pair { a: 10, b: 20 } }
+}
+fn main() -> i32 {
+    let p = choose(0);
+    p.a + p.b
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "flag=0, a=3+b=4=7, got {exit_code}");
+}
+
+/// Milestone 85: struct returned from if/else, result used in arithmetic.
+///
+/// FLS §6.17, §6.11, §9, §6.5.5
+#[test]
+fn milestone_85_struct_return_if_else_in_arithmetic() {
+    let src = r#"
+struct Val { n: i32 }
+fn wrap(x: i32) -> Val {
+    if x > 10 { Val { n: x - 10 } } else { Val { n: x } }
+}
+fn main() -> i32 {
+    let v = wrap(15);
+    v.n + 1
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "wrap(15).n=5, +1=6, got {exit_code}");
+}
+
+/// Milestone 85: struct returned from if/else, passed to another function.
+///
+/// FLS §6.17, §6.11, §9: The returned struct can be passed as an argument
+/// to a second function that reads its fields.
+#[test]
+fn milestone_85_struct_return_if_else_passed_to_fn() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(flag: i32) -> Point {
+    if flag > 0 { Point { x: 3, y: 4 } } else { Point { x: 0, y: 0 } }
+}
+fn sum(p: Point) -> i32 { p.x + p.y }
+fn main() -> i32 {
+    sum(make(1))
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "make(1)=Point{{3,4}}, sum=7, got {exit_code}");
+}
+
+/// Milestone 85: struct-returning function with if/else on a runtime parameter.
+///
+/// FLS §6.17: The condition is a runtime comparison — the branch taken is
+/// determined at runtime, not at compile time.
+#[test]
+fn milestone_85_struct_return_if_else_on_parameter() {
+    let src = r#"
+struct Range { lo: i32, hi: i32 }
+fn order(a: i32, b: i32) -> Range {
+    if a < b { Range { lo: a, hi: b } } else { Range { lo: b, hi: a } }
+}
+fn main() -> i32 {
+    let r = order(7, 3);
+    r.hi - r.lo
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 4, "order(7,3): hi=7,lo=3, diff=4, got {exit_code}");
+}
+
+/// Milestone 85: three-field struct returned from if/else.
+///
+/// FLS §6.17, §6.11: All N fields are stored correctly regardless of which
+/// branch executes.
+#[test]
+fn milestone_85_struct_return_if_else_three_fields() {
+    let src = r#"
+struct Triple { x: i32, y: i32, z: i32 }
+fn pick(flag: i32) -> Triple {
+    if flag > 0 {
+        Triple { x: 1, y: 2, z: 3 }
+    } else {
+        Triple { x: 4, y: 5, z: 6 }
+    }
+}
+fn main() -> i32 {
+    let t = pick(1);
+    t.z
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "pick(1).z=3, got {exit_code}");
+}
+
+/// Runtime: if/else in struct-returning function emits conditional branch.
+///
+/// FLS §6.17: The condition must emit a runtime comparison before branching.
+/// The assembly for the if/else must contain a `cbz` or conditional branch
+/// instruction.
+/// FLS §6.1.2:37–45: All comparisons and stores are runtime instructions.
+#[test]
+fn runtime_struct_return_if_else_emits_cbz() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(flag: i32) -> Point {
+    if flag > 0 { Point { x: 1, y: 2 } } else { Point { x: -1, y: -2 } }
+}
+fn main() -> i32 {
+    let p = make(5);
+    p.x
+}
+"#;
+    let asm = compile_to_asm(src);
+    let in_make: Vec<&str> = asm
+        .lines()
+        .skip_while(|l| !l.starts_with("make:"))
+        .take_while(|l| !l.starts_with("main:"))
+        .collect();
+    let has_branch = in_make
+        .iter()
+        .any(|l| l.trim_start().starts_with("cbz") || l.trim_start().starts_with("b."));
+    assert!(has_branch, "expected conditional branch in make:\n{}", in_make.join("\n"));
+}
+
+// ── Milestone 86: struct return from match expression ──────────────────────
+// FLS §6.18: Match expressions; FLS §6.11: Struct expressions; FLS §9: Functions
+
+/// Milestone 86: struct-returning function with match — literal arm taken.
+///
+/// FLS §6.18: "A match expression is used to branch over the possible values
+/// of the scrutinee operand." FLS §6.11: Struct literal stores fields in order.
+#[test]
+fn milestone_86_struct_match_literal_arm_taken() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(flag: i32) -> Point {
+    match flag {
+        1 => Point { x: 3, y: 4 },
+        _ => Point { x: 0, y: 0 },
+    }
+}
+fn main() -> i32 { make(1).x }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3);
+}
+
+/// Milestone 86: struct-returning match — wildcard arm taken.
+///
+/// FLS §6.18: Default arm executes when no prior arm matched.
+#[test]
+fn milestone_86_struct_match_wildcard_arm_taken() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(flag: i32) -> Point {
+    match flag {
+        1 => Point { x: 3, y: 4 },
+        _ => Point { x: 7, y: 8 },
+    }
+}
+fn main() -> i32 { make(0).y }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 8);
+}
+
+/// Milestone 86: struct-returning match — second field from taken arm.
+///
+/// FLS §6.11: Fields stored in declaration order at base_slot+i.
+#[test]
+fn milestone_86_struct_match_second_field() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(flag: i32) -> Point {
+    match flag {
+        1 => Point { x: 10, y: 20 },
+        _ => Point { x: 0, y: 0 },
+    }
+}
+fn main() -> i32 { make(1).y }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 20);
+}
+
+/// Milestone 86: struct-returning match on a parameter passed to another function.
+///
+/// FLS §6.12.1: call site must preserve all struct fields before forwarding.
+#[test]
+fn milestone_86_struct_match_passed_to_fn() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(flag: i32) -> Point {
+    match flag {
+        1 => Point { x: 3, y: 4 },
+        _ => Point { x: 0, y: 0 },
+    }
+}
+fn sum(p: Point) -> i32 { p.x + p.y }
+fn main() -> i32 { sum(make(1)) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7);
+}
+
+/// Milestone 86: struct-returning match — sum of fields used in arithmetic.
+///
+/// FLS §6.5.5: Addition of field values.
+#[test]
+fn milestone_86_struct_match_field_sum() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(flag: i32) -> Point {
+    match flag {
+        2 => Point { x: 5, y: 6 },
+        _ => Point { x: 1, y: 1 },
+    }
+}
+fn main() -> i32 { let p = make(2); p.x + p.y }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 11);
+}
+
+/// Milestone 86: struct-returning match — three arms, middle one taken.
+///
+/// FLS §6.18: Arms tested in source order.
+#[test]
+fn milestone_86_struct_match_three_arms_middle() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(flag: i32) -> Point {
+    match flag {
+        1 => Point { x: 1, y: 0 },
+        2 => Point { x: 0, y: 2 },
+        _ => Point { x: 0, y: 0 },
+    }
+}
+fn main() -> i32 { make(2).y }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2);
+}
+
+/// Milestone 86: struct-returning match — result used in if expression.
+///
+/// FLS §6.17: if condition on struct field.
+#[test]
+fn milestone_86_struct_match_in_if() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(flag: i32) -> Point {
+    match flag {
+        1 => Point { x: 10, y: 0 },
+        _ => Point { x: 0, y: 5 },
+    }
+}
+fn main() -> i32 {
+    let p = make(1);
+    if p.x > 0 { p.x } else { p.y }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10);
+}
+
+/// Milestone 86: struct-returning match on parameter.
+///
+/// FLS §9.2: Function parameters can be used as match scrutinee.
+#[test]
+fn milestone_86_struct_match_on_parameter() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(flag: i32) -> Point {
+    match flag {
+        42 => Point { x: 42, y: 0 },
+        _ => Point { x: 0, y: 42 },
+    }
+}
+fn check(flag: i32) -> i32 { make(flag).x }
+fn main() -> i32 { check(42) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42);
+}
+
+/// Assembly check: struct-returning match emits comparison and cbz.
+///
+/// FLS §6.18: Pattern check requires a comparison instruction.
+/// FLS §6.1.2:37–45: All instructions are runtime.
+#[test]
+fn runtime_struct_match_emits_comparison_and_cbz() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(flag: i32) -> Point {
+    match flag {
+        1 => Point { x: 3, y: 4 },
+        _ => Point { x: 0, y: 0 },
+    }
+}
+fn main() -> i32 { let p = make(1); p.x }
+"#;
+    let asm = compile_to_asm(src);
+    let in_make: Vec<&str> = asm
+        .lines()
+        .skip_while(|l| !l.starts_with("make:"))
+        .take_while(|l| !l.starts_with("main:"))
+        .collect();
+    let has_cbz = in_make.iter().any(|l| l.trim_start().starts_with("cbz"));
+    let has_cset = in_make.iter().any(|l| l.trim_start().starts_with("cset"));
+    assert!(
+        has_cbz && has_cset,
+        "expected cset+cbz in make:\n{}",
+        in_make.join("\n")
+    );
+}
+
+/// Assembly check: struct-returning free function used directly as argument.
+///
+/// `sum(make(1))` must NOT capture only x0 after `bl make` — it must store
+/// both x0 and x1 (the struct fields) before they get clobbered.
+///
+/// FLS §9: struct-returning functions return fields in x0..x{N-1}.
+/// FLS §6.12.1: the call site must preserve all return registers before use.
+/// FLS §6.1.2:37–45: all instructions are runtime.
+#[test]
+fn runtime_struct_return_used_as_arg_stores_all_fields() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(flag: i32) -> Point {
+    if flag > 0 { Point { x: 3, y: 4 } } else { Point { x: 0, y: 0 } }
+}
+fn sum(p: Point) -> i32 { p.x + p.y }
+fn main() -> i32 {
+    sum(make(1))
+}
+"#;
+    let asm = compile_to_asm(src);
+    // In `main`, after `bl make` there must be at least two `str` instructions
+    // that save x0 and x1 to stack slots before the `bl sum`. This is the
+    // CallMut write-back that prevents x1 from being overwritten.
+    let in_main: Vec<&str> = asm
+        .lines()
+        .skip_while(|l| !l.starts_with("main:"))
+        .collect();
+    let str_count = in_main
+        .iter()
+        .take_while(|l| !l.trim_start().starts_with("bl      sum"))
+        .filter(|l| l.trim_start().starts_with("str"))
+        .count();
+    assert!(
+        str_count >= 2,
+        "expected ≥2 str instructions before bl sum (to save both struct fields), got {str_count}:\n{}",
+        in_main.join("\n")
+    );
+}
+
+/// Assembly check: field access directly on struct-returning free function call
+/// emits CallMut write-back followed by ldr.
+///
+/// FLS §6.13: Field access on a struct-returning call result.
+/// FLS §9: Free functions returning structs use write-back convention.
+#[test]
+fn runtime_struct_return_direct_field_access_emits_callmut_and_ldr() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(flag: i32) -> Point {
+    match flag {
+        1 => Point { x: 3, y: 4 },
+        _ => Point { x: 0, y: 0 },
+    }
+}
+fn main() -> i32 { make(1).x }
+"#;
+    let asm = compile_to_asm(src);
+    // In `main`, there must be:
+    // 1. bl make — the call
+    // 2. at least two str instructions — CallMut write-back of x0 and x1
+    // 3. an ldr instruction — loading the requested field
+    let in_main: Vec<&str> = asm
+        .lines()
+        .skip_while(|l| !l.starts_with("main:"))
+        .collect();
+    assert!(
+        in_main.iter().any(|l| l.trim_start().starts_with("bl      make")),
+        "expected bl make in main:\n{}",
+        in_main.join("\n")
+    );
+    let str_count = in_main
+        .iter()
+        .skip_while(|l| !l.trim_start().starts_with("bl      make"))
+        .skip(1)
+        .take_while(|l| !l.trim_start().starts_with("ldr"))
+        .filter(|l| l.trim_start().starts_with("str"))
+        .count();
+    assert!(
+        str_count >= 2,
+        "expected ≥2 str instructions after bl make (write-back), got {str_count}:\n{}",
+        in_main.join("\n")
+    );
+}

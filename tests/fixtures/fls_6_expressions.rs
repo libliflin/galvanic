@@ -591,3 +591,44 @@ fn borrow_field_example(mut p: FieldPair, delta: i32) -> i32 {
     *r += delta;
     p.a
 }
+
+// FLS §6.18, §6.10: Match expression producing a tuple value.
+//
+// FLS §6.18: "A match expression is used to branch over the possible values
+// of the scrutinee operand." Each arm body here is a tuple expression.
+// FLS §6.10: Tuple elements are evaluated left-to-right and stored to
+// consecutive stack slots.
+//
+// FLS §6.18 does not provide a concrete example of a match arm whose body is
+// a tuple expression. This function is derived from the semantic description
+// in §6.18 (arm selection) and §6.10 (tuple construction).
+//
+// ARM64 codegen: each literal arm emits `ldr + mov + cmp + cbz` (pattern
+// check) followed by `str` instructions for the tuple elements and `b` to
+// the exit label.
+fn match_tuple_return_example(x: i32) -> (i32, i32) {
+    // FLS §6.18: Arms tested in source order; first match wins.
+    match x {
+        0 => (0, 0),    // FLS §5.4: literal pattern, FLS §6.10: tuple expression
+        _ => (1, x),    // FLS §5.1: wildcard pattern
+    }
+}
+
+// FLS §6.17 + §6.11: If-else expression producing a named struct value.
+//
+// The FLS does not provide a concrete code example for an if-else that returns
+// a struct; this is derived from §6.17 (if expressions return the value of the
+// executed branch) and §6.11 (struct expressions yield a value of the struct type).
+//
+// ARM64 codegen: the condition emits a comparison and `cbz`; each branch
+// stores the struct fields into the same return slots, then falls through to
+// `RetFields` which loads them into x0..x{N-1}.
+//
+// Cache-line note: each branch emits N stores (N×4 bytes); the cbz + branch
+// overhead is 8 bytes. For a 2-field struct the total per-branch cost is 16 bytes.
+struct Choice { lo: i32, hi: i32 }
+
+fn struct_if_else_example(a: i32, b: i32) -> Choice {
+    // FLS §6.17: The if/else expression produces a struct value at runtime.
+    if a < b { Choice { lo: a, hi: b } } else { Choice { lo: b, hi: a } }
+}
