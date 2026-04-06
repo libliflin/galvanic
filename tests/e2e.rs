@@ -10624,3 +10624,48 @@ fn main() -> i32 {
         in_main.join("\n")
     );
 }
+
+/// Assembly check: field access directly on struct-returning free function call
+/// emits CallMut write-back followed by ldr.
+///
+/// FLS §6.13: Field access on a struct-returning call result.
+/// FLS §9: Free functions returning structs use write-back convention.
+#[test]
+fn runtime_struct_return_direct_field_access_emits_callmut_and_ldr() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(flag: i32) -> Point {
+    match flag {
+        1 => Point { x: 3, y: 4 },
+        _ => Point { x: 0, y: 0 },
+    }
+}
+fn main() -> i32 { make(1).x }
+"#;
+    let asm = compile_to_asm(src);
+    // In `main`, there must be:
+    // 1. bl make — the call
+    // 2. at least two str instructions — CallMut write-back of x0 and x1
+    // 3. an ldr instruction — loading the requested field
+    let in_main: Vec<&str> = asm
+        .lines()
+        .skip_while(|l| !l.starts_with("main:"))
+        .collect();
+    assert!(
+        in_main.iter().any(|l| l.trim_start().starts_with("bl      make")),
+        "expected bl make in main:\n{}",
+        in_main.join("\n")
+    );
+    let str_count = in_main
+        .iter()
+        .skip_while(|l| !l.trim_start().starts_with("bl      make"))
+        .skip(1)
+        .take_while(|l| !l.trim_start().starts_with("ldr"))
+        .filter(|l| l.trim_start().starts_with("str"))
+        .count();
+    assert!(
+        str_count >= 2,
+        "expected ≥2 str instructions after bl make (write-back), got {str_count}:\n{}",
+        in_main.join("\n")
+    );
+}

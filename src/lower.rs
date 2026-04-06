@@ -8722,7 +8722,87 @@ impl<'src> LowerCtx<'src> {
             // For a struct with N fields, the Nth field load touches slot
             // `base + field_offset[N-1]`; if base is cache-line-aligned, all
             // scalar fields fit within the same 64-byte cache lines as their slots.
-            ExprKind::FieldAccess { .. } => {
+            ExprKind::FieldAccess { receiver, field } => {
+                let field_name = field.text(self.source);
+
+                // FLS §6.13, §9: Field access directly on a struct-returning free
+                // function call — e.g., `make(1).x` where `make` is in
+                // `struct_return_free_fns`.
+                //
+                // `resolve_place` only handles place expressions (named variables
+                // and chained field accesses). A `Call` expression is not a place,
+                // so we must handle this pattern before calling `resolve_place`.
+                //
+                // Strategy: allocate N temporary slots, emit `CallMut` to store all
+                // N return registers, then load the requested field from the
+                // appropriate slot. This mirrors the `let p = make(1); p.x` path
+                // without a named binding.
+                //
+                // FLS §6.1.2:37–45: All instructions are runtime.
+                // Cache-line note: CallMut emits bl + N stores; the Load re-materialises
+                // one field. For N=2: 4 instructions = 16 bytes.
+                if let ExprKind::Call { callee, args } = &receiver.kind
+                    && let ExprKind::Path(segs) = &callee.kind
+                    && segs.len() == 1
+                {
+                    let fn_name = segs[0].text(self.source);
+                    if let Some(struct_name) = self.struct_return_free_fns.get(fn_name).cloned() {
+                        let field_names = self
+                            .struct_defs
+                            .get(&struct_name)
+                            .ok_or_else(|| {
+                                LowerError::Unsupported(format!(
+                                    "unknown struct `{struct_name}` from free fn `{fn_name}`"
+                                ))
+                            })?
+                            .clone();
+                        let n_fields = field_names.len();
+                        let field_idx = field_names
+                            .iter()
+                            .position(|n| n == field_name)
+                            .ok_or_else(|| {
+                                LowerError::Unsupported(format!(
+                                    "no field `{field_name}` in struct `{struct_name}`"
+                                ))
+                            })?;
+                        // Use struct_field_offsets if available (handles nested structs).
+                        let offset = self
+                            .struct_field_offsets
+                            .get(&struct_name)
+                            .and_then(|o| o.get(field_idx))
+                            .copied()
+                            .unwrap_or(field_idx);
+
+                        // Allocate N temporary slots for the struct return value.
+                        let base_slot = self.alloc_slot()?;
+                        for _ in 1..n_fields {
+                            self.alloc_slot()?;
+                        }
+
+                        // Evaluate arguments.
+                        let mut arg_regs: Vec<u8> = Vec::new();
+                        for arg_expr in args.iter() {
+                            let val = self.lower_expr(arg_expr, &IrTy::I32)?;
+                            let reg = self.val_to_reg(val)?;
+                            arg_regs.push(reg);
+                        }
+
+                        self.has_calls = true;
+                        // Emit CallMut: bl fn_name, then store x0..x{N-1} to slots.
+                        self.instrs.push(Instr::CallMut {
+                            name: fn_name.to_owned(),
+                            args: arg_regs,
+                            write_back_slot: base_slot,
+                            n_fields: n_fields as u8,
+                        });
+
+                        // Load the requested field from its slot.
+                        let dst = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst, slot: base_slot + offset as u8 });
+                        return Ok(IrValue::Reg(dst));
+                    }
+                }
+
                 // Use resolve_place to handle both simple (`p.x`) and chained
                 // (`r.b.x`) field access in a uniform way.
                 //
