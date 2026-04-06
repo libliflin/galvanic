@@ -4194,6 +4194,43 @@ impl<'src> LowerCtx<'src> {
                             let reg = self.val_to_reg(val)?;
                             arg_regs.push(reg);
                         }
+                    } else if let ExprKind::StructLit {
+                        name: struct_name_span,
+                        fields: lit_fields,
+                    } = &arg.kind
+                    {
+                        // FLS §6.11 + §11: Struct literal used directly as a function
+                        // argument — e.g., `sum(Point { x: 3, y: 4 })`.
+                        //
+                        // Inline-evaluate each field expression in declaration order and
+                        // pass the results as separate registers. This mirrors the struct
+                        // parameter calling convention set up in `lower_fn` (field 0 →
+                        // x{i}, field 1 → x{i+1}, …) without allocating a named slot.
+                        //
+                        // FLS §6.11: Field initializers may appear in any source order;
+                        // galvanic stores and passes them in struct declaration order for
+                        // layout stability.
+                        // FLS §6.1.2:37–45: All field evaluations emit runtime instructions.
+                        // Cache-line note: N field registers = N × 4-byte `mov` or load
+                        // instructions, one per field.
+                        let struct_name = struct_name_span.text(self.source);
+                        let field_names = self.struct_defs
+                            .get(struct_name)
+                            .cloned()
+                            .ok_or_else(|| LowerError::Unsupported(format!(
+                                "unknown struct type `{struct_name}` in function argument"
+                            )))?;
+                        for field_name in &field_names {
+                            let (_, field_val_expr) = lit_fields
+                                .iter()
+                                .find(|(f, _)| f.text(self.source) == field_name.as_str())
+                                .ok_or_else(|| LowerError::Unsupported(format!(
+                                    "missing field `{field_name}` in `{struct_name}` literal argument"
+                                )))?;
+                            let val = self.lower_expr(field_val_expr, &IrTy::I32)?;
+                            let reg = self.val_to_reg(val)?;
+                            arg_regs.push(reg);
+                        }
                     } else {
                         let val = self.lower_expr(arg, &IrTy::I32)?;
                         let reg = self.val_to_reg(val)?;
