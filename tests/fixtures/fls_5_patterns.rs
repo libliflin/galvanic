@@ -154,6 +154,20 @@ fn sum_pair(x: i32, y: i32) -> i32 {
     p + q
 }
 
+// FLS §5.10.3: Nested tuple pattern — `(p0, (p1, p2))` in a let statement.
+// FLS §5.10.3: "A tuple pattern is a pattern that matches a tuple which
+// satisfies all criteria defined by its subpatterns." Sub-patterns may
+// themselves be tuple patterns, giving recursive destructuring.
+//
+// Note: The FLS does not provide a concrete code example for nested tuple
+// patterns in let position; this is derived from the recursive sub-pattern
+// grammar in §5.10.3 and the let statement grammar in §8.1.
+fn nested_sum(x: i32, y: i32, z: i32) -> i32 {
+    // FLS §5.10.3: Nested tuple literal — binds `a`, `b`, `c` from two levels.
+    let (a, (b, c)) = (x, (y, z));
+    a + b + c
+}
+
 // FLS §5.10.4: Tuple struct pattern — `TupleStructName(p0, p1, ...)` in a
 // let statement. FLS §8.1: Let statements accept any irrefutable pattern,
 // including tuple struct patterns. FLS §5.10.4: "A tuple struct pattern is a
@@ -202,6 +216,8 @@ fn main() -> i32 {
     // FLS §5.10.4: tuple struct destructure — dist_sq(Coord(1,0)) = 1.
     let p = Coord(1, 0);
     let n3 = dist_sq(p);
-    // a=1, b=2, c=1, d=1, e=1, f=1, g=4, h=2, i=3, j=0, k=2, m=3, n2=1, n3=1 → sum=23
-    a + b + c + d + e + f + g + h + i + j + k + m + n2 + n3
+    // FLS §5.10.3: nested tuple — nested_sum(1,2,4) = 7.
+    let q = nested_sum(1, 2, 4);
+    // a=1, b=2, c=1, d=1, e=1, f=1, g=4, h=2, i=3, j=0, k=2, m=3, n2=1, n3=1, q=7 → sum=30
+    a + b + c + d + e + f + g + h + i + j + k + m + n2 + n3 + q
 }

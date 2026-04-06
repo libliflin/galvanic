@@ -1740,6 +1740,70 @@ impl<'src> LowerCtx<'src> {
         Ok(s)
     }
 
+    /// FLS §5.10.3 + §8.1: Recursively bind a tuple pattern to a tuple literal init.
+    ///
+    /// Handles `let (a, (b, c)) = (1, (2, 3));` by recursing into nested
+    /// `Pat::Tuple` sub-patterns. Each leaf `Pat::Ident` gets its own stack
+    /// slot; `Pat::Wildcard` discards (no slot allocated); nested `Pat::Tuple`
+    /// requires the corresponding expression to also be a `ExprKind::Tuple`.
+    ///
+    /// Elements are evaluated left-to-right (FLS §6.4:14). All stores are
+    /// runtime instructions (FLS §6.1.2:37–45).
+    ///
+    /// Returns the base slot of the first allocated slot in this call (used
+    /// by the caller to optionally register the tuple in `local_tuple_lens`).
+    fn lower_tuple_pat_from_literal(
+        &mut self,
+        pats: &[Pat],
+        exprs: &[Expr],
+    ) -> Result<u8, LowerError> {
+        if pats.len() != exprs.len() {
+            return Err(LowerError::Unsupported(format!(
+                "tuple pattern has {} elements but initializer has {}",
+                pats.len(),
+                exprs.len()
+            )));
+        }
+        let base_slot = self.next_slot;
+        for (sub_pat, elem_expr) in pats.iter().zip(exprs.iter()) {
+            match sub_pat {
+                Pat::Ident(span) => {
+                    let slot = self.alloc_slot()?;
+                    // FLS §6.4:14: Evaluate left-to-right before storing.
+                    let val = self.lower_expr(elem_expr, &IrTy::I32)?;
+                    let src = self.val_to_reg(val)?;
+                    self.instrs.push(Instr::Store { src, slot });
+                    self.locals.insert(span.text(self.source), slot);
+                }
+                Pat::Wildcard => {
+                    // FLS §6.4:14: Evaluate for side effects; discard result.
+                    // No stack slot allocated — wildcard binds nothing.
+                    self.lower_expr(elem_expr, &IrTy::I32)?;
+                }
+                Pat::Tuple(inner_pats) => {
+                    // FLS §5.10.3: Nested tuple — the corresponding element
+                    // must itself be a tuple literal at this milestone.
+                    let ExprKind::Tuple(inner_exprs) = &elem_expr.kind else {
+                        return Err(LowerError::Unsupported(
+                            "nested tuple pattern requires a tuple literal initializer; \
+                             variable-init nested tuples are not yet supported"
+                                .into(),
+                        ));
+                    };
+                    self.lower_tuple_pat_from_literal(inner_pats, inner_exprs)?;
+                }
+                _ => {
+                    return Err(LowerError::Unsupported(
+                        "only ident, wildcard, and tuple sub-patterns are supported \
+                         in tuple let-patterns at this milestone"
+                            .into(),
+                    ));
+                }
+            }
+        }
+        Ok(base_slot)
+    }
+
     /// Allocate the next unique label ID.
     ///
     /// FLS §6.17: Each if expression needs two labels (else and end).
@@ -2226,47 +2290,24 @@ impl<'src> LowerCtx<'src> {
                 // variable rebind costs 0 instructions (slot alias only).
                 if let Pat::Tuple(pats) = pat {
                     // Case 1: init is a tuple literal `(e0, e1, ...)`.
+                    //
+                    // Supports nested `Pat::Tuple` sub-patterns recursively via
+                    // `lower_tuple_pat_from_literal` (FLS §5.10.3). Each leaf
+                    // `Pat::Ident` gets its own stack slot; wildcards are evaluated
+                    // for side effects but bind nothing.
+                    //
+                    // FLS §6.4:14: Elements evaluated left-to-right.
+                    // FLS §6.1.2:37–45: All stores are runtime instructions.
+                    // Cache-line note: N leaf slots → N stores (4N bytes).
                     if let Some(init_expr) = init.as_ref()
                         && let ExprKind::Tuple(elems) = &init_expr.kind
                     {
-                        if elems.len() != pats.len() {
-                            return Err(LowerError::Unsupported(format!(
-                                "tuple pattern has {} elements but initializer has {}",
-                                pats.len(), elems.len()
-                            )));
-                        }
-                        let n = pats.len();
-                        let base_slot = self.alloc_slot()?;
-                        for _ in 1..n {
-                            self.alloc_slot()?;
-                        }
-                        // Evaluate and store each element left-to-right (FLS §6.4:14).
-                        for (i, elem_expr) in elems.iter().enumerate() {
-                            let val = self.lower_expr(elem_expr, &IrTy::I32)?;
-                            let src = self.val_to_reg(val)?;
-                            self.instrs.push(Instr::Store {
-                                src,
-                                slot: base_slot + i as u8,
-                            });
-                        }
-                        // Bind each sub-pattern to its slot.
-                        for (i, sub_pat) in pats.iter().enumerate() {
-                            match sub_pat {
-                                Pat::Ident(span) => {
-                                    let name = span.text(self.source);
-                                    self.locals.insert(name, base_slot + i as u8);
-                                }
-                                Pat::Wildcard => {} // no binding
-                                _ => {
-                                    return Err(LowerError::Unsupported(
-                                        "nested tuple pattern not yet supported".into(),
-                                    ));
-                                }
-                            }
-                        }
-                        // Register as a tuple so element re-access works later.
-                        if n > 0 {
-                            self.local_tuple_lens.insert(base_slot, n);
+                        let base_slot =
+                            self.lower_tuple_pat_from_literal(pats, elems)?;
+                        // Register top-level tuple length for potential re-access
+                        // via `.0`, `.1` field expressions (FLS §6.10).
+                        if !pats.is_empty() {
+                            self.local_tuple_lens.insert(base_slot, pats.len());
                         }
                         return Ok(());
                     }
