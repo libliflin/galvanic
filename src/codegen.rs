@@ -258,6 +258,48 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool) 
             writeln!(out, "    ldr     x{dst}, [x{dst}]             // FLS §7.2: static load")?;
         }
 
+        // FLS §4.9: Load the address of a named function into a register.
+        //
+        // ARM64 PC-relative addressing: ADRP loads the page-aligned base address;
+        // ADD applies :lo12: to form the complete 64-bit function address.
+        //
+        // This is how `fn double` becomes a `fn(i32) -> i32` value that can be
+        // passed as an argument or stored in a variable.
+        //
+        // Cache-line note: two 4-byte instructions (8 bytes) — one fewer than
+        // LoadStatic because we don't dereference the address.
+        Instr::LoadFnAddr { dst, name } => {
+            writeln!(out, "    adrp    x{dst}, {name}              // FLS §4.9: fn ptr addr (page)")?;
+            writeln!(out, "    add     x{dst}, x{dst}, :lo12:{name}  // FLS §4.9: fn ptr addr (offset)")?;
+        }
+
+        // FLS §4.9: Call through a function pointer stored on the stack.
+        //
+        // ARM64: load the function address into x9 (caller-saved temp that
+        // is not an argument register), set up argument registers x0..xN-1,
+        // then `blr x9` to branch to the address and link.
+        //
+        // Loading the fn ptr AFTER setting up args avoids a register conflict:
+        // the args occupy x0..x{N-1} and x9 is never an argument register.
+        //
+        // Cache-line note: N arg moves + ldr + blr + 1 result move.
+        // The extra `ldr` is the unavoidable cost of indirection vs direct `bl`.
+        Instr::CallIndirect { dst, ptr_slot, args } => {
+            // Move arguments into x0..xN-1.
+            for (i, &arg) in args.iter().enumerate() {
+                if arg as usize != i {
+                    writeln!(out, "    mov     x{i}, x{arg:<24} // FLS §4.9: arg {i}")?;
+                }
+            }
+            // Load the function pointer from its stack slot into x9 (scratch).
+            let offset = (*ptr_slot as usize) * 8;
+            writeln!(out, "    ldr     x9, [sp, #{offset:<22}] // FLS §4.9: load fn ptr")?;
+            writeln!(out, "    blr     x9                       // FLS §4.9: indirect call")?;
+            if *dst != 0 {
+                writeln!(out, "    mov     x{dst}, x0               // FLS §4.9: capture return")?;
+            }
+        }
+
         // FLS §6.5.5: Integer binary arithmetic.
         // ARM64: `add`/`sub`/`mul` operate on 64-bit registers.
         // Virtual register N maps to ARM64 register xN (trivial allocation).

@@ -539,9 +539,9 @@ pub struct Ty {
 ///
 /// FLS §4: Type kinds.
 ///
-/// Many type forms are not yet represented: tuple types (§4.4), array types
-/// (§4.5), slice types (§4.6), function pointer types (§4.9), trait objects
-/// (§4.10), impl-Trait types (§4.11), and generic type arguments (`Vec<i32>`).
+/// Many type forms are not yet represented: array types (§4.5), slice types
+/// (§4.6), trait objects (§4.10), impl-Trait types (§4.11), and generic type
+/// arguments (`Vec<i32>`).
 #[derive(Debug)]
 pub enum TyKind {
     /// A named type (a path). FLS §4.1, §14.
@@ -569,6 +569,21 @@ pub enum TyKind {
     /// FLS §4.4: A tuple type with N elements contains N components in order.
     /// The unit type `()` is the zero-element tuple (represented as `TyKind::Unit`).
     Tuple(Vec<Ty>),
+
+    /// A function pointer type `fn(T1, T2) -> R`. FLS §4.9.
+    ///
+    /// FLS §4.9: "Function pointer types reference a function whose identity
+    /// is not necessarily known at compile-time." A value of function pointer
+    /// type holds the address of a function and can be called through it.
+    ///
+    /// Cache-line note: a function pointer is one 64-bit address — same
+    /// register footprint as any other scalar value.
+    FnPtr {
+        /// Parameter types in declaration order.
+        params: Vec<Ty>,
+        /// Return type. `None` means the return type is omitted (implicitly `()`).
+        ret: Option<Box<Ty>>,
+    },
 }
 
 // ── Blocks ────────────────────────────────────────────────────────────────────

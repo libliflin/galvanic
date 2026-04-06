@@ -124,3 +124,27 @@ impl Rect {
 fn minmax(a: i32, b: i32) -> (i32, i32) {
     if a < b { (a, b) } else { (b, a) }
 }
+
+// FLS §4.9: Function pointer type `fn(T) -> R`.
+//
+// FLS §4.9: "Function pointer types reference a function whose identity is not
+// necessarily known at compile-time." A function pointer value holds the address
+// of a function item and can be called through it.
+//
+// FLS §4.9 AMBIGUOUS: The spec does not provide a direct code example for function
+// pointer types in §4.9. This example is derived from the section's semantic
+// description combined with §9 (Functions) and §6.12.1 (Call Expressions).
+//
+// Calling convention: identical to a direct call — args in x0..xN-1, return in x0.
+// The pointer itself is passed as a 64-bit integer register (function address).
+fn double(x: i32) -> i32 { x * 2 }
+
+fn apply(f: fn(i32) -> i32, x: i32) -> i32 {
+    f(x)
+}
+
+fn apply2(f: fn(i32, i32) -> i32, a: i32, b: i32) -> i32 {
+    f(a, b)
+}
+
+fn add(a: i32, b: i32) -> i32 { a + b }

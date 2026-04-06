@@ -410,6 +410,21 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         }
     }
 
+    // Collect free function names for function pointer support.
+    //
+    // FLS §4.9: When a single-segment path expression resolves to a function
+    // item (not a local variable), it materializes the function's address via
+    // `LoadFnAddr` (ADRP + ADD). This set is used to distinguish function-name
+    // paths from undefined variables.
+    //
+    // Cache-line note: populated once at compile time; not on any hot path.
+    let mut fn_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for item in &src.items {
+        if let ItemKind::Fn(fn_def) = &item.kind {
+            fn_names.insert(fn_def.name.text(source).to_owned());
+        }
+    }
+
     // Build method self-kind registry: mangled name → SelfKind.
     //
     // FLS §10.1: `&mut self` methods must propagate mutations back to the caller.
@@ -707,7 +722,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     for item in &src.items {
         match &item.kind {
             ItemKind::Fn(fn_def) => {
-                let (ir_fn, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &enum_defs, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &const_vals, &static_names, &struct_raw_field_types, &struct_field_offsets, &struct_sizes, None, label_base)?;
+                let (ir_fn, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &enum_defs, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &const_vals, &static_names, &fn_names, &struct_raw_field_types, &struct_field_offsets, &struct_sizes, None, label_base)?;
                 label_base = next_label;
                 fns.push(ir_fn);
             }
@@ -747,6 +762,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         &tuple_return_free_fns,
                         &const_vals,
                         &static_names,
+                        &fn_names,
                         &struct_raw_field_types,
                         &struct_field_offsets,
                         &struct_sizes,
@@ -856,6 +872,7 @@ fn lower_fn(
     tuple_return_free_fns: &HashMap<String, usize>,
     const_vals: &HashMap<String, i32>,
     static_names: &std::collections::HashSet<String>,
+    fn_names: &std::collections::HashSet<String>,
     struct_field_types: &HashMap<String, Vec<Option<String>>>,
     struct_field_offsets: &HashMap<String, Vec<usize>>,
     struct_sizes: &HashMap<String, usize>,
@@ -931,7 +948,7 @@ fn lower_fn(
         Some(block) => block,
     };
 
-    let mut ctx = LowerCtx::new(source, ret_ty, struct_defs, tuple_struct_defs, enum_defs, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, const_vals, static_names, struct_field_types, struct_field_offsets, struct_sizes, start_label);
+    let mut ctx = LowerCtx::new(source, ret_ty, struct_defs, tuple_struct_defs, enum_defs, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, const_vals, static_names, fn_names, struct_field_types, struct_field_offsets, struct_sizes, start_label);
 
     // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
     // to stack slots. Each parameter slot is allocated in parameter order
@@ -1382,15 +1399,20 @@ fn lower_fn(
         // FLS §4.1: i32 parameters occupy one 64-bit register (x0–x7).
         // FLS §4.1: All primitive integer types and bool are supported as
         // parameters. Each uses one 64-bit ARM64 register (x0–x7).
-        if !matches!(param_ty, IrTy::I32 | IrTy::Bool | IrTy::U32) {
+        if !matches!(param_ty, IrTy::I32 | IrTy::Bool | IrTy::U32 | IrTy::FnPtr) {
             return Err(LowerError::Unsupported(
-                "parameter type other than i32/bool/u32/i64/u64/usize/isize/i8/i16/u8/u16".into(),
+                "parameter type other than i32/bool/u32/i64/u64/usize/isize/i8/i16/u8/u16/fn ptr".into(),
             ));
         }
         let slot = ctx.alloc_slot()?;
         ctx.locals.insert(param_name, slot);
         // Spill parameter register reg_idx (arm64 x{reg_idx}) to its stack slot.
         ctx.instrs.push(Instr::Store { src: reg_idx as u8, slot });
+        // FLS §4.9: Track function pointer parameters so Call lowering can
+        // emit CallIndirect rather than a direct `bl {name}`.
+        if param_ty == IrTy::FnPtr {
+            ctx.local_fn_ptr_slots.insert(slot);
+        }
         reg_idx += 1;
     }
 
@@ -1648,6 +1670,9 @@ fn lower_ty(ty: &crate::ast::Ty, source: &str) -> Result<IrTy, LowerError> {
         TyKind::Tuple(_) => Err(LowerError::Unsupported(
             "tuple type in scalar context (use tuple pattern parameter instead)".into(),
         )),
+        // FLS §4.9: Function pointer types `fn(T1, ...) -> R`.
+        // A function pointer is a 64-bit address — one register, like a scalar.
+        TyKind::FnPtr { .. } => Ok(IrTy::FnPtr),
         _ => Err(LowerError::Unsupported("complex type".into())),
     }
 }
@@ -1894,6 +1919,25 @@ struct LowerCtx<'src> {
     /// read once per method call on a tuple struct receiver. Not on a hot path.
     local_tuple_struct_types: HashMap<u8, String>,
 
+    /// Stack slots that hold function pointer values.
+    ///
+    /// FLS §4.9: Function pointer types. When a parameter or local variable has
+    /// type `fn(T) -> R`, its stack slot is recorded here. The Call lowering
+    /// path checks this set to decide between direct (`bl {name}`) and indirect
+    /// (`blr x9`) call emission.
+    ///
+    /// Cache-line note: a function pointer occupies one stack slot — same as i32.
+    local_fn_ptr_slots: std::collections::HashSet<u8>,
+
+    /// Names of all free functions declared in the current source file.
+    ///
+    /// FLS §4.9: Used to detect when a single-segment path expression refers to a
+    /// function item (and should emit `LoadFnAddr`) rather than a local variable.
+    /// Populated from the top-level `lower()` function before lowering begins.
+    ///
+    /// Cache-line note: read-only during lowering; not on any hot path.
+    fn_names: &'src std::collections::HashSet<String>,
+
     /// Compile-time constant values: maps const name → i32.
     ///
     /// FLS §7.1: Constant items. Every use of a constant is replaced with its
@@ -1969,6 +2013,7 @@ impl<'src> LowerCtx<'src> {
         tuple_return_free_fns: &'src HashMap<String, usize>,
         const_vals: &'src HashMap<String, i32>,
         static_names: &'src std::collections::HashSet<String>,
+        fn_names: &'src std::collections::HashSet<String>,
         struct_field_types: &'src HashMap<String, Vec<Option<String>>>,
         struct_field_offsets: &'src HashMap<String, Vec<usize>>,
         struct_sizes: &'src HashMap<String, usize>,
@@ -1996,6 +2041,7 @@ impl<'src> LowerCtx<'src> {
             tuple_return_free_fns,
             const_vals,
             static_names,
+            fn_names,
             struct_field_types,
             struct_field_offsets,
             struct_sizes,
@@ -2004,6 +2050,7 @@ impl<'src> LowerCtx<'src> {
             local_array_lens: HashMap::new(),
             local_tuple_lens: HashMap::new(),
             local_tuple_struct_types: HashMap::new(),
+            local_fn_ptr_slots: std::collections::HashSet::new(),
         }
     }
 
@@ -4772,6 +4819,14 @@ impl<'src> LowerCtx<'src> {
                     self.instrs.push(Instr::LoadStatic { dst: r, name: var_name.to_owned() });
                     return Ok(IrValue::Reg(r));
                 }
+                // Check fn_names: FLS §4.9 — a path that names a function item
+                // (and is not a local variable) materializes the function's address
+                // via ADRP + ADD. This is how function pointers are passed as values.
+                if !self.locals.contains_key(var_name) && self.fn_names.contains(var_name) {
+                    let r = self.alloc_reg()?;
+                    self.instrs.push(Instr::LoadFnAddr { dst: r, name: var_name.to_owned() });
+                    return Ok(IrValue::Reg(r));
+                }
                 let slot = self.locals.get(var_name).copied().ok_or_else(|| {
                     LowerError::Unsupported(format!("undefined variable `{var_name}`"))
                 })?;
@@ -5011,7 +5066,7 @@ impl<'src> LowerCtx<'src> {
                     //
                     // Cache-line note: the phi slot is one 8-byte stack entry;
                     // read exactly once after the if expression completes.
-                    IrTy::I32 | IrTy::Bool | IrTy::U32 => {
+                    IrTy::I32 | IrTy::Bool | IrTy::U32 | IrTy::FnPtr => {
                         let else_label = self.alloc_label();
                         let end_label = self.alloc_label();
 
@@ -5566,7 +5621,7 @@ impl<'src> LowerCtx<'src> {
                 }
 
                 match ret_ty {
-                    IrTy::I32 | IrTy::Bool | IrTy::U32 => {
+                    IrTy::I32 | IrTy::Bool | IrTy::U32 | IrTy::FnPtr => {
                         let phi_slot = self.alloc_slot()?;
 
                         // Then branch.
@@ -5718,7 +5773,7 @@ impl<'src> LowerCtx<'src> {
                 let exit_label = self.alloc_label();
 
                 match ret_ty {
-                    IrTy::I32 | IrTy::Bool | IrTy::U32 => {
+                    IrTy::I32 | IrTy::Bool | IrTy::U32 | IrTy::FnPtr => {
                         let phi_slot = self.alloc_slot()?;
 
                         for arm in checked_arms {
@@ -6866,6 +6921,35 @@ impl<'src> LowerCtx<'src> {
             // Limitation: only direct (named) calls are supported; function
             // pointers and method calls are deferred to a future milestone.
             ExprKind::Call { callee, args } => {
+                // FLS §4.9: If the callee is a single-segment path that names a
+                // local variable holding a function pointer, emit CallIndirect
+                // (`blr x9`) rather than a direct call (`bl {name}`).
+                if let ExprKind::Path(segments) = &callee.kind
+                    && segments.len() == 1
+                {
+                    let var_name = segments[0].text(self.source);
+                    if let Some(&ptr_slot) = self.locals.get(var_name)
+                        && self.local_fn_ptr_slots.contains(&ptr_slot)
+                    {
+                        // Lower arguments left-to-right.
+                        if args.len() > 7 {
+                            return Err(LowerError::Unsupported(
+                                "indirect call with more than 7 arguments".into(),
+                            ));
+                        }
+                        let mut arg_regs = Vec::with_capacity(args.len());
+                        for arg in args {
+                            let v = self.lower_expr(arg, ret_ty)?;
+                            let r = self.val_to_reg(v)?;
+                            arg_regs.push(r);
+                        }
+                        let dst = self.alloc_reg()?;
+                        self.has_calls = true;
+                        self.instrs.push(Instr::CallIndirect { dst, ptr_slot, args: arg_regs });
+                        return Ok(IrValue::Reg(dst));
+                    }
+                }
+
                 // Resolve the callee to a function name.
                 // FLS §15: Two-segment path callees are enum tuple variant constructors.
                 // As standalone expressions they are only supported inside let-binding
@@ -6897,7 +6981,7 @@ impl<'src> LowerCtx<'src> {
                     }
                     _ => {
                         return Err(LowerError::Unsupported(
-                            "call expression with non-path callee (function pointers not yet supported)".into(),
+                            "call expression with non-path callee".into(),
                         ));
                     }
                 };

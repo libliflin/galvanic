@@ -1041,6 +1041,35 @@ impl<'src> Parser<'src> {
                 })
             }
 
+            // Function pointer type `fn(T1, T2) -> R` — FLS §4.9
+            TokenKind::KwFn => {
+                self.advance(); // consume `fn`
+                self.expect(TokenKind::OpenParen)?;
+                let mut params = Vec::new();
+                if self.peek_kind() != TokenKind::CloseParen {
+                    loop {
+                        params.push(self.parse_ty()?);
+                        if !self.eat(TokenKind::Comma) {
+                            break;
+                        }
+                        if self.peek_kind() == TokenKind::CloseParen {
+                            break;
+                        }
+                    }
+                }
+                let end = self.current_span();
+                self.expect(TokenKind::CloseParen)?;
+                // Optional `-> ReturnType`
+                let ret = if self.peek_kind() == TokenKind::RArrow {
+                    self.advance(); // consume `->`
+                    Some(Box::new(self.parse_ty()?))
+                } else {
+                    None
+                };
+                let end = if let Some(ref r) = ret { r.span } else { end };
+                Ok(Ty { kind: TyKind::FnPtr { params, ret }, span: start.to(end) })
+            }
+
             // Named type — FLS §4.1, §14
             TokenKind::Ident => {
                 let mut segments = vec![self.current_span()];
@@ -2757,6 +2786,34 @@ mod tests {
         let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         assert_eq!(f.params.len(), 1);
         assert!(matches!(&f.params[0].kind, ParamKind::Ident(s) if s.text(src) == "x"));
+    }
+
+    #[test]
+    fn fn_ptr_type_no_ret() {
+        // FLS §4.9: function pointer type `fn(i32)` with implicit unit return.
+        let src = "fn f(g: fn(i32)) {}";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        assert!(matches!(&f.params[0].ty.kind, TyKind::FnPtr { ret: None, .. }));
+    }
+
+    #[test]
+    fn fn_ptr_type_with_ret() {
+        // FLS §4.9: function pointer type `fn(i32) -> i32`.
+        let src = "fn apply(f: fn(i32) -> i32, x: i32) -> i32 { x }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        assert!(matches!(&f.params[0].ty.kind, TyKind::FnPtr { ret: Some(_), .. }));
+    }
+
+    #[test]
+    fn fn_ptr_type_two_params() {
+        // FLS §4.9: function pointer type with two parameters `fn(i32, i32) -> i32`.
+        let src = "fn apply2(f: fn(i32, i32) -> i32) -> i32 { 0 }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let TyKind::FnPtr { ref params, .. } = f.params[0].ty.kind else { panic!("expected FnPtr") };
+        assert_eq!(params.len(), 2);
     }
 
     #[test]
