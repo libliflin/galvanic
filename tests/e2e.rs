@@ -3900,3 +3900,234 @@ fn main() -> i32 {
         "expected `bl Point__sum` call instruction in main:\n{asm}"
     );
 }
+
+// ── Milestone 44: &mut self methods compile to runtime ARM64 ─────────────────
+
+/// Milestone 44: basic `&mut self` method increments a counter field.
+///
+/// FLS §10.1: Methods with `&mut self` receivers take a mutable reference to
+/// `self`. Mutations to `self.field` must be visible to the caller after the
+/// method returns. FLS §6.5.11: compound assignment `self.n += 1` inside the
+/// method body.
+#[test]
+fn milestone_44_mut_self_basic_increment() {
+    let src = r#"
+struct Counter { n: i32 }
+impl Counter {
+    fn increment(&mut self) { self.n += 1; }
+    fn value(&self) -> i32 { self.n }
+}
+fn main() -> i32 {
+    let mut c = Counter { n: 0 };
+    c.increment();
+    c.value()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected 1 after one increment, got {exit_code}");
+}
+
+/// Milestone 44: multiple `&mut self` calls accumulate state.
+///
+/// FLS §10.1: Each `&mut self` call must write back modified fields. After
+/// two increments the counter field should hold 2.
+#[test]
+fn milestone_44_mut_self_two_increments() {
+    let src = r#"
+struct Counter { n: i32 }
+impl Counter {
+    fn increment(&mut self) { self.n += 1; }
+    fn value(&self) -> i32 { self.n }
+}
+fn main() -> i32 {
+    let mut c = Counter { n: 0 };
+    c.increment();
+    c.increment();
+    c.value()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2, "expected 2 after two increments, got {exit_code}");
+}
+
+/// Milestone 44: `&mut self` with initial non-zero field value.
+///
+/// FLS §10.1: Mutation adds to an existing value, not to zero.
+#[test]
+fn milestone_44_mut_self_nonzero_start() {
+    let src = r#"
+struct Counter { n: i32 }
+impl Counter {
+    fn increment(&mut self) { self.n += 1; }
+    fn value(&self) -> i32 { self.n }
+}
+fn main() -> i32 {
+    let mut c = Counter { n: 10 };
+    c.increment();
+    c.increment();
+    c.increment();
+    c.value()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 13, "expected 13, got {exit_code}");
+}
+
+/// Milestone 44: `&mut self` with two fields — mutation only touches one.
+///
+/// FLS §10.1: Write-back must preserve all fields, not just the mutated one.
+/// The un-mutated field `y` must keep its original value after a call that
+/// only modifies `x`.
+#[test]
+fn milestone_44_mut_self_two_fields_partial_mutation() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+impl Point {
+    fn shift_x(&mut self) { self.x += 5; }
+    fn sum(&self) -> i32 { self.x + self.y }
+}
+fn main() -> i32 {
+    let mut p = Point { x: 1, y: 2 };
+    p.shift_x();
+    p.sum()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 8, "expected 1+5+2=8, got {exit_code}");
+}
+
+/// Milestone 44: `&mut self` translate with extra arguments.
+///
+/// FLS §10.1: Extra explicit arguments follow self fields in the parameter list.
+/// ARM64 ABI: struct fields in x0..x{N-1}, extra args in x{N}..x{N+M-1}.
+#[test]
+fn milestone_44_mut_self_with_extra_args() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+impl Point {
+    fn translate(&mut self, dx: i32, dy: i32) { self.x += dx; self.y += dy; }
+    fn sum(&self) -> i32 { self.x + self.y }
+}
+fn main() -> i32 {
+    let mut p = Point { x: 1, y: 2 };
+    p.translate(3, 4);
+    p.sum()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "expected 1+3 + 2+4 = 10, got {exit_code}");
+}
+
+/// Milestone 44: `&mut self` in a loop — accumulates over iterations.
+///
+/// FLS §6.15.3: While loop. FLS §10.1: Each call must write back.
+/// After 5 increments the counter should hold 5.
+#[test]
+fn milestone_44_mut_self_in_loop() {
+    let src = r#"
+struct Counter { n: i32 }
+impl Counter {
+    fn increment(&mut self) { self.n += 1; }
+    fn value(&self) -> i32 { self.n }
+}
+fn main() -> i32 {
+    let mut c = Counter { n: 0 };
+    let mut i = 0;
+    while i < 5 {
+        c.increment();
+        i += 1;
+    }
+    c.value()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "expected 5 after 5 increments, got {exit_code}");
+}
+
+/// Milestone 44: `&mut self` on a parameter (struct passed by value).
+///
+/// FLS §10.1: The mutation applies to the local copy passed to the outer
+/// function, not to the caller's original struct (value semantics).
+#[test]
+fn milestone_44_mut_self_on_parameter() {
+    let src = r#"
+struct Counter { n: i32 }
+impl Counter {
+    fn increment(&mut self) { self.n += 1; }
+    fn value(&self) -> i32 { self.n }
+}
+fn bump(mut c: Counter) -> i32 {
+    c.increment();
+    c.value()
+}
+fn main() -> i32 {
+    let c = Counter { n: 7 };
+    bump(c)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 8, "expected 7+1=8, got {exit_code}");
+}
+
+/// Milestone 44: assembly inspection — `&mut self` emits write-back stores.
+///
+/// FLS §10.1: The `CallMut` instruction emits `str` instructions after `bl`
+/// to write x0..x{N-1} back to the struct's stack slots.
+#[test]
+fn runtime_mut_self_emits_write_back_stores() {
+    let src = r#"
+struct Counter { n: i32 }
+impl Counter {
+    fn increment(&mut self) { self.n += 1; }
+}
+fn main() -> i32 {
+    let mut c = Counter { n: 0 };
+    c.increment();
+    c.n
+}
+"#;
+    let asm = compile_to_asm(src);
+    // The call site must emit a bl followed by str to write x0 back.
+    assert!(
+        asm.contains("bl") && asm.contains("Counter__increment"),
+        "expected bl Counter__increment in assembly:\n{asm}"
+    );
+    // At least one str instruction must follow (write-back).
+    let bl_pos = asm.find("bl").unwrap_or(0);
+    let after_bl = &asm[bl_pos..];
+    assert!(
+        after_bl.contains("str"),
+        "expected str write-back after bl Counter__increment:\n{asm}"
+    );
+}
+
+/// Milestone 44: assembly inspection — `&mut self` method emits RetFields ldr sequence.
+///
+/// FLS §10.1: The `RetFields` instruction emits `ldr` instructions to load
+/// self fields into x0..x{N-1} before the `ret`, so the caller can read them.
+#[test]
+fn runtime_mut_self_method_emits_ret_fields_ldr() {
+    let src = r#"
+struct Counter { n: i32 }
+impl Counter {
+    fn increment(&mut self) { self.n += 1; }
+}
+fn main() -> i32 {
+    let mut c = Counter { n: 0 };
+    c.increment();
+    c.n
+}
+"#;
+    let asm = compile_to_asm(src);
+    // The Counter__increment function body must emit an ldr before ret
+    // to return the modified field in x0.
+    assert!(
+        asm.contains("Counter__increment"),
+        "expected Counter__increment function in assembly:\n{asm}"
+    );
+    // The method must load x0 from its slot before returning.
+    assert!(
+        asm.contains("ldr     x0"),
+        "expected ldr x0 (RetFields) in Counter__increment:\n{asm}"
+    );
+}

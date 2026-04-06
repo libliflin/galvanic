@@ -467,6 +467,74 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool) 
                 )?;
             }
         }
+
+        // FLS §10.1: Return from a `&mut self` method, writing modified fields back.
+        //
+        // Emits N `ldr` instructions (field 0..N-1 from their stack slots into
+        // x0..x{N-1}), then the standard epilogue (sp restore + lr restore + ret).
+        //
+        // The field loads happen BEFORE sp is restored so that [sp, #slot*8]
+        // addresses are still valid (they point into the local frame).
+        //
+        // FLS §10.1 AMBIGUOUS: The spec does not define the calling convention
+        // for &mut self. Galvanic uses a value-copy write-back convention:
+        // fields passed in, modified locally, returned in x0..x{N-1}.
+        //
+        // Cache-line note: N loads = N × 4-byte instructions. For N=2: 8 bytes.
+        Instr::RetFields { base_slot, n_fields } => {
+            // Load each field from its stack slot into the corresponding return register.
+            for i in 0..*n_fields {
+                let slot_offset = (*base_slot as usize + i as usize) * 8;
+                writeln!(
+                    out,
+                    "    ldr     x{i}, [sp, #{slot_offset:<16}] // FLS §10.1: write-back field {i}"
+                )?;
+            }
+            // Standard epilogue (mirrors Instr::Ret handling).
+            if frame_size > 0 {
+                writeln!(
+                    out,
+                    "    add     sp, sp, #{frame_size:<14} // FLS §8.1: restore stack frame"
+                )?;
+            }
+            if saves_lr {
+                writeln!(
+                    out,
+                    "    ldr     x30, [sp], #16         // FLS §6.12.1: restore lr"
+                )?;
+            }
+            writeln!(out, "    ret")?;
+        }
+
+        // FLS §6.12.2 + §10.1: Call a `&mut self` method and write modified fields back.
+        //
+        // After the `bl`, x0..x{N-1} hold the method's modified field values
+        // (returned via `RetFields`). Store them immediately back to the caller's
+        // struct slots so subsequent field reads see the updated values.
+        //
+        // Cache-line note: arg moves + bl + N stores. For a 2-field struct the
+        // write-back is 2 × 4-byte `str` = 8 bytes, fitting in one cache line
+        // alongside the `bl`.
+        Instr::CallMut { name, args, write_back_slot, n_fields } => {
+            // Move arguments to x0, x1, ... (struct fields first, then extra args).
+            for (i, &src_reg) in args.iter().enumerate() {
+                if src_reg != i as u8 {
+                    writeln!(
+                        out,
+                        "    mov     x{i}, x{src_reg:<19} // FLS §6.12.2: arg {i}"
+                    )?;
+                }
+            }
+            writeln!(out, "    bl      {name:<24} // FLS §6.12.2: call &mut self {name}")?;
+            // Write back modified fields from x0..x{N-1} to the struct's stack slots.
+            for i in 0..*n_fields {
+                let slot_offset = (*write_back_slot as usize + i as usize) * 8;
+                writeln!(
+                    out,
+                    "    str     x{i}, [sp, #{slot_offset:<16}] // FLS §10.1: write-back field {i}"
+                )?;
+            }
+        }
     }
     Ok(())
 }
