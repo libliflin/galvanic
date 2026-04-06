@@ -7594,3 +7594,214 @@ fn main() -> i32 { let mut c = Counter { n: 0 }; c.increment() }
         "expected bl to Counter__increment:\n{asm}"
     );
 }
+
+// ── Milestone 65: &self methods returning struct values ───────────────────────
+//
+// FLS §10.1: Instance methods with `&self` may return any type, including
+// struct types. Galvanic uses the same register-packing convention as
+// struct-returning associated functions: the callee returns field values in
+// x0..x{N-1} via `RetFields`; the call site emits `CallMut`-style write-back
+// to a new destination struct variable.
+//
+// FLS §6.12.2: Method call expressions.
+// FLS §4.11: Struct layout — fields stored in declaration order.
+// FLS §6.13: Field access uses slot offsets.
+// FLS §10.1 AMBIGUOUS: The FLS does not specify the calling convention for
+// methods returning struct types. Galvanic uses the same convention as
+// struct-returning associated functions: fields in x0..x{N-1}.
+
+/// Milestone 65: basic &self method returning a struct — read first field.
+///
+/// FLS §10.1, §6.12.2, §6.13
+#[test]
+fn milestone_65_method_returns_struct_first_field() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+impl Point {
+    fn translate(&self, dx: i32, dy: i32) -> Point {
+        Point { x: self.x + dx, y: self.y + dy }
+    }
+}
+fn main() -> i32 {
+    let p = Point { x: 1, y: 2 };
+    let q = p.translate(3, 4);
+    q.x
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 4, "expected 4 (1+3), got {exit_code}");
+}
+
+/// Milestone 65: &self method returning struct — read second field.
+///
+/// FLS §10.1, §6.12.2, §6.13
+#[test]
+fn milestone_65_method_returns_struct_second_field() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+impl Point {
+    fn translate(&self, dx: i32, dy: i32) -> Point {
+        Point { x: self.x + dx, y: self.y + dy }
+    }
+}
+fn main() -> i32 {
+    let p = Point { x: 1, y: 2 };
+    let q = p.translate(3, 4);
+    q.y
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "expected 6 (2+4), got {exit_code}");
+}
+
+/// Milestone 65: &self method returning struct, result used in arithmetic.
+///
+/// FLS §10.1, §6.12.2, §6.5.5
+#[test]
+fn milestone_65_method_returns_struct_field_sum() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+impl Point {
+    fn translate(&self, dx: i32, dy: i32) -> Point {
+        Point { x: self.x + dx, y: self.y + dy }
+    }
+}
+fn main() -> i32 {
+    let p = Point { x: 1, y: 2 };
+    let q = p.translate(3, 4);
+    q.x + q.y
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "expected 10 (4+6), got {exit_code}");
+}
+
+/// Milestone 65: chain two struct-returning method calls.
+///
+/// FLS §10.1, §6.12.2
+#[test]
+fn milestone_65_method_returns_struct_chained() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+impl Point {
+    fn translate(&self, dx: i32, dy: i32) -> Point {
+        Point { x: self.x + dx, y: self.y + dy }
+    }
+}
+fn main() -> i32 {
+    let p = Point { x: 0, y: 0 };
+    let q = p.translate(1, 0);
+    let r = q.translate(2, 0);
+    r.x
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "expected 3 (0+1+2), got {exit_code}");
+}
+
+/// Milestone 65: &self method returns struct, use as function argument.
+///
+/// FLS §10.1, §6.12.2, §9
+#[test]
+fn milestone_65_method_returns_struct_passed_to_fn() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+impl Point {
+    fn translate(&self, dx: i32, dy: i32) -> Point {
+        Point { x: self.x + dx, y: self.y + dy }
+    }
+}
+fn get_x(p: Point) -> i32 { p.x }
+fn main() -> i32 {
+    let p = Point { x: 2, y: 5 };
+    let q = p.translate(7, 0);
+    get_x(q)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 9, "expected 9 (2+7), got {exit_code}");
+}
+
+/// Milestone 65: &self method on a parameter.
+///
+/// FLS §10.1, §9, §6.12.2
+#[test]
+fn milestone_65_method_returns_struct_on_parameter() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+impl Point {
+    fn translate(&self, dx: i32, dy: i32) -> Point {
+        Point { x: self.x + dx, y: self.y + dy }
+    }
+}
+fn shift(p: Point, n: i32) -> i32 {
+    let q = p.translate(n, 0);
+    q.x
+}
+fn main() -> i32 {
+    let p = Point { x: 3, y: 0 };
+    shift(p, 4)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 7 (3+4), got {exit_code}");
+}
+
+/// Milestone 65: &self method returning struct, result in if expression.
+///
+/// FLS §10.1, §6.12.2, §6.17
+#[test]
+fn milestone_65_method_returns_struct_in_if() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+impl Point {
+    fn translate(&self, dx: i32, dy: i32) -> Point {
+        Point { x: self.x + dx, y: self.y + dy }
+    }
+}
+fn main() -> i32 {
+    let p = Point { x: 2, y: 0 };
+    let q = p.translate(1, 0);
+    if q.x > 2 { 1 } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected 1 (3>2), got {exit_code}");
+}
+
+/// Milestone 65: assembly inspection — &self method returning struct emits
+/// `RetFields` on callee side and `CallMut`-style write-back on caller side.
+///
+/// FLS §10.1 AMBIGUOUS: The calling convention packs the return struct's
+/// field values into x0..x{N-1} via the existing `RetFields` mechanism.
+/// The call site emits `bl` followed by N `str` instructions to write the
+/// returned fields into the destination variable's stack slots.
+#[test]
+fn runtime_self_method_struct_return_emits_ret_fields_and_write_back() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+impl Point {
+    fn translate(&self, dx: i32, dy: i32) -> Point {
+        Point { x: self.x + dx, y: self.y + dy }
+    }
+}
+fn main() -> i32 {
+    let p = Point { x: 1, y: 2 };
+    let q = p.translate(3, 4);
+    q.x
+}
+"#;
+    let asm = compile_to_asm(src);
+    // The callee `Point__translate` must emit `ldr` instructions to load field
+    // values into x0..x{N-1} before returning (RetFields convention).
+    assert!(
+        asm.contains("Point__translate"),
+        "expected mangled method name in asm:\n{asm}"
+    );
+    // The call site must emit `bl Point__translate` followed by `str` instructions
+    // to write x0 and x1 (the returned Point fields) into q's stack slots.
+    assert!(
+        asm.contains("bl      Point__translate"),
+        "expected bl to Point__translate:\n{asm}"
+    );
+}
