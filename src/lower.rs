@@ -1582,26 +1582,16 @@ fn lower_fn(
             ctx.lower_stmt(stmt)?;
         }
 
-        // The tail expression must be a tuple literal.
+        // The tail expression produces a tuple value via lower_tuple_expr_into.
         // FLS §6.10: A tuple expression `(e0, e1, ...)` evaluates each element
         // left-to-right and produces a tuple value.
+        // FLS §6.17: If/else expressions may also produce tuple values when both
+        // branches yield the same tuple type.
         let tail = body.tail.as_deref().ok_or_else(|| {
             LowerError::Unsupported(
                 "function returning a tuple must end with a tuple expression".into(),
             )
         })?;
-        let ExprKind::Tuple(elems) = &tail.kind else {
-            return Err(LowerError::Unsupported(
-                "function returning a tuple: tail must be a tuple literal".into(),
-            ));
-        };
-        if elems.len() != n_elems as usize {
-            return Err(LowerError::Unsupported(format!(
-                "declared {} return elements but tail tuple has {}",
-                n_elems,
-                elems.len()
-            )));
-        }
 
         // Allocate N consecutive stack slots for the tuple elements.
         // FLS §6.10: Tuple elements are in declaration order.
@@ -1612,14 +1602,9 @@ fn lower_fn(
             ctx.alloc_slot()?;
         }
 
-        // Lower each element left-to-right and store to its slot.
-        // FLS §6:3: Tuple elements are evaluated left-to-right.
-        // FLS §6.1.2:37–45: All stores are runtime instructions.
-        for (i, elem) in elems.iter().enumerate() {
-            let val = ctx.lower_expr(elem, &IrTy::I32)?;
-            let src = ctx.val_to_reg(val)?;
-            ctx.instrs.push(Instr::Store { src, slot: base_slot + i as u8 });
-        }
+        // Delegate to lower_tuple_expr_into, which handles tuple literals,
+        // if/else, and block expressions (FLS §6.10, §6.17, §6.4).
+        ctx.lower_tuple_expr_into(tail, base_slot, n_elems)?;
 
         // RetFields: load elements from base_slot..base_slot+N-1 into x0..x{N-1}.
         ctx.instrs.push(Instr::RetFields { base_slot, n_fields: n_elems });
@@ -2775,6 +2760,103 @@ impl<'src> LowerCtx<'src> {
 
             _ => Err(LowerError::Unsupported(
                 "enum return: unsupported expression form".into(),
+            )),
+        }
+    }
+
+    /// Lower an expression that must produce a tuple value into consecutive
+    /// stack slots `base_slot..base_slot+n_elems`.
+    ///
+    /// FLS §6.10: Tuple expressions evaluate each element left-to-right.
+    /// FLS §6.17: If/else expressions where both branches produce tuples.
+    /// FLS §6.4: Block expressions whose tail produces a tuple.
+    ///
+    /// This follows the same "expr-into-slots" pattern as `lower_enum_expr_into`
+    /// but for tuple types. The slots are pre-allocated by the caller; this
+    /// function only emits Store instructions to fill them.
+    fn lower_tuple_expr_into(
+        &mut self,
+        expr: &Expr,
+        base_slot: u8,
+        n_elems: u8,
+    ) -> Result<(), LowerError> {
+        match &expr.kind {
+            // FLS §6.10: Tuple literal `(e0, e1, ...)`.
+            ExprKind::Tuple(elems) => {
+                if elems.len() != n_elems as usize {
+                    return Err(LowerError::Unsupported(format!(
+                        "declared {} return elements but tuple literal has {}",
+                        n_elems,
+                        elems.len()
+                    )));
+                }
+                // FLS §6:3: Tuple elements are evaluated left-to-right.
+                // FLS §6.1.2:37–45: All stores are runtime instructions.
+                for (i, elem) in elems.iter().enumerate() {
+                    let val = self.lower_expr(elem, &IrTy::I32)?;
+                    let src = self.val_to_reg(val)?;
+                    self.instrs.push(Instr::Store { src, slot: base_slot + i as u8 });
+                }
+                Ok(())
+            }
+
+            // FLS §6.17: If-else expression — each branch stores its tuple
+            // elements into the shared return slots.
+            //
+            // FLS §6.17: Both branches must produce a value of the same type.
+            // Galvanic enforces this structurally: both branches must lower
+            // successfully via lower_tuple_expr_into with the same n_elems.
+            ExprKind::If { cond, then_block, else_expr } => {
+                let else_label = self.alloc_label();
+                let end_label = self.alloc_label();
+
+                let cond_val = self.lower_expr(cond, &IrTy::Bool)?;
+                let cond_reg = self.val_to_reg(cond_val)?;
+                self.instrs.push(Instr::CondBranch { reg: cond_reg, label: else_label });
+
+                // Then branch: lower stmts, then store tuple result.
+                for stmt in &then_block.stmts {
+                    self.lower_stmt(stmt)?;
+                }
+                if let Some(tail) = then_block.tail.as_deref() {
+                    self.lower_tuple_expr_into(tail, base_slot, n_elems)?;
+                } else {
+                    return Err(LowerError::Unsupported(
+                        "tuple-returning if expression: then branch must have a tail".into(),
+                    ));
+                }
+                self.instrs.push(Instr::Branch(end_label));
+
+                // Else branch: store tuple result.
+                self.instrs.push(Instr::Label(else_label));
+                match else_expr {
+                    Some(e) => self.lower_tuple_expr_into(e, base_slot, n_elems)?,
+                    None => {
+                        return Err(LowerError::Unsupported(
+                            "tuple-returning if expression must have an else branch".into(),
+                        ))
+                    }
+                }
+
+                self.instrs.push(Instr::Label(end_label));
+                Ok(())
+            }
+
+            // FLS §6.4: Block expression — lower stmts then handle tail.
+            ExprKind::Block(block) => {
+                for stmt in &block.stmts {
+                    self.lower_stmt(stmt)?;
+                }
+                match block.tail.as_deref() {
+                    Some(tail) => self.lower_tuple_expr_into(tail, base_slot, n_elems),
+                    None => Err(LowerError::Unsupported(
+                        "tuple-returning block must have a tail expression".into(),
+                    )),
+                }
+            }
+
+            _ => Err(LowerError::Unsupported(
+                "tuple return: unsupported expression form".into(),
             )),
         }
     }

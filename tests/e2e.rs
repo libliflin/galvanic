@@ -9934,3 +9934,104 @@ fn main() -> i32 {\n\
         in_main.len()
     );
 }
+
+// ── Milestone 83: tuple-returning functions with if/else tails ───────────────
+
+/// Milestone 83: tuple-returning function with if/else selects correct branch.
+///
+/// FLS §6.17: If/else expression. The condition evaluates at runtime; the
+/// branch taken stores its tuple elements into the return slots.
+/// FLS §6.10: Tuple elements are in left-to-right order.
+#[test]
+fn milestone_83_tuple_return_if_else_false_branch() {
+    let src = "\
+fn minmax(a: i32, b: i32) -> (i32, i32) {\n\
+    if a < b { (a, b) } else { (b, a) }\n\
+}\n\
+fn main() -> i32 {\n\
+    let (lo, hi) = minmax(7, 3);\n\
+    hi - lo\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 4, "max(7,3)-min(7,3)=7-3=4, got {exit_code}");
+}
+
+/// Milestone 83: tuple-returning if/else — true branch taken.
+///
+/// FLS §6.17: When condition is true, then-branch executes.
+#[test]
+fn milestone_83_tuple_return_if_else_true_branch() {
+    let src = "\
+fn minmax(a: i32, b: i32) -> (i32, i32) {\n\
+    if a < b { (a, b) } else { (b, a) }\n\
+}\n\
+fn main() -> i32 {\n\
+    let (lo, hi) = minmax(2, 9);\n\
+    hi - lo\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "9-2=7, got {exit_code}");
+}
+
+/// Milestone 83: if/else tuple return — result used in arithmetic.
+///
+/// FLS §6.5: Arithmetic expressions. Destructured elements are ordinary locals.
+#[test]
+fn milestone_83_tuple_return_if_else_sum() {
+    let src = "\
+fn pair_or_swap(flag: i32) -> (i32, i32) {\n\
+    if flag > 0 { (3, 5) } else { (5, 3) }\n\
+}\n\
+fn main() -> i32 {\n\
+    let (a, b) = pair_or_swap(1);\n\
+    a + b\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 8, "3+5=8, got {exit_code}");
+}
+
+/// Milestone 83: if/else tuple return — passed to another function.
+///
+/// FLS §9: Function arguments evaluated at call site. Destructured tuple
+/// elements from an if/else-returning function are ordinary locals.
+#[test]
+fn milestone_83_tuple_return_if_else_passed_to_fn() {
+    let src = "\
+fn sub(a: i32, b: i32) -> i32 { a - b }\n\
+fn ordered(a: i32, b: i32) -> (i32, i32) {\n\
+    if a < b { (a, b) } else { (b, a) }\n\
+}\n\
+fn main() -> i32 {\n\
+    let (lo, hi) = ordered(10, 4);\n\
+    sub(hi, lo)\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "10-4=6, got {exit_code}");
+}
+
+/// Runtime: if/else in tuple-returning function emits conditional branch.
+///
+/// FLS §6.17: The condition must emit a `cbz` or comparison before the branch.
+/// Both branches must emit `str` instructions for the tuple elements.
+#[test]
+fn runtime_tuple_return_if_else_emits_cbz() {
+    let src = "\
+fn minmax(a: i32, b: i32) -> (i32, i32) {\n\
+    if a < b { (a, b) } else { (b, a) }\n\
+}\n\
+fn main() -> i32 {\n\
+    let (lo, hi) = minmax(7, 3);\n\
+    hi - lo\n\
+}\n";
+    let asm = compile_to_asm(src);
+    // minmax must contain a conditional branch (cbz or b.lt etc.)
+    let in_minmax: Vec<&str> = asm
+        .lines()
+        .skip_while(|l| !l.starts_with("minmax:"))
+        .take_while(|l| !l.starts_with("main:"))
+        .collect();
+    let has_branch = in_minmax
+        .iter()
+        .any(|l| l.trim_start().starts_with("cbz") || l.trim_start().starts_with("b."));
+    assert!(has_branch, "expected conditional branch in minmax:\n{}", in_minmax.join("\n"));
+}
