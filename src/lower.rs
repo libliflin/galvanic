@@ -6866,9 +6866,17 @@ impl<'src> LowerCtx<'src> {
             // expression is a unary operator expression that uses the borrow
             // operator."
             //
-            // Restriction: only single-segment path expressions (local variables)
-            // are supported as the borrow operand at this milestone. Borrowing
-            // a complex place (field access, index) is deferred.
+            // Supported place expressions (FLS §6.1.4):
+            //   - Simple local variables: `&x`, `&mut x`
+            //   - Named struct fields:    `&p.a`, `&mut p.a`
+            //   - Tuple fields:           `&t.0`, `&mut t.0`
+            //   - Chained field access:   `&p.inner.x`
+            //
+            // Resolution delegates to `resolve_place`, which recursively
+            // converts the place expression to a flat stack-slot index.
+            // Since all fields occupy contiguous numbered slots in the
+            // function's stack frame, `add xD, sp, #(slot * 8)` is correct
+            // for any depth of field access.
             //
             // FLS §6.1.2:37–45: Runtime instruction — the address is formed
             // at runtime even if the stack layout is statically known.
@@ -6879,22 +6887,11 @@ impl<'src> LowerCtx<'src> {
                 op: crate::ast::UnaryOp::Ref | crate::ast::UnaryOp::RefMut,
                 operand,
             } => {
-                // Resolve the operand to a stack slot — must be a simple local variable.
-                let slot = match &operand.kind {
-                    ExprKind::Path(segments) if segments.len() == 1 => {
-                        let var_name = segments[0].text(self.source);
-                        *self.locals.get(var_name).ok_or_else(|| {
-                            LowerError::Unsupported(format!(
-                                "borrow of undefined variable `{var_name}`"
-                            ))
-                        })?
-                    }
-                    _ => {
-                        return Err(LowerError::Unsupported(
-                            "borrow of complex place not yet supported (FLS §6.5.1)".into(),
-                        ));
-                    }
-                };
+                // Resolve the operand to a stack slot via resolve_place, which
+                // handles simple paths, named-field access, and tuple-field access.
+                // FLS §6.1.4: Place expressions denote memory locations;
+                // borrowing yields a pointer to the underlying slot.
+                let (slot, _) = self.resolve_place(operand)?;
                 let dst = self.alloc_reg()?;
                 self.instrs.push(Instr::AddrOf { dst, slot });
                 Ok(IrValue::Reg(dst))
