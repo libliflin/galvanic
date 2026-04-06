@@ -309,7 +309,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                 }
                 enum_defs.insert(enum_name, variants);
             }
-            ItemKind::Fn(_) | ItemKind::Impl(_) => {}
+            ItemKind::Fn(_) | ItemKind::Impl(_) | ItemKind::Trait(_) => {}
         }
     }
 
@@ -384,9 +384,12 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                 fns.push(ir_fn);
             }
             ItemKind::Impl(impl_def) => {
-                // FLS §11: Inherent impl. Each method becomes a mangled top-level
-                // function: `TypeName__method_name`. The impl type's fields are
-                // passed as implicit leading parameters for `self`/`&self` methods.
+                // FLS §11: Inherent impl and trait impl. Each method becomes a
+                // mangled top-level function: `TypeName__method_name`.
+                // For trait impls (`impl Trait for Type`), the struct type is
+                // `impl_def.ty` and mangling is identical to inherent impls.
+                // FLS §13: Trait method implementations lower identically to
+                // inherent methods — static dispatch uses the same mangling.
                 let type_name = impl_def.ty.text(source);
                 for method in &impl_def.methods {
                     let method_name = method.name.text(source);
@@ -416,6 +419,9 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                 }
             }
             ItemKind::Struct(_) | ItemKind::Enum(_) => {} // already processed above
+            // FLS §13: Trait definitions are parsed but produce no codegen.
+            // Trait method implementations are emitted via `ItemKind::Impl`.
+            ItemKind::Trait(_) => {}
         }
     }
 

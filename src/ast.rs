@@ -97,7 +97,8 @@ pub struct Item {
 ///
 /// FLS §3: item kinds include functions, structs, enums, unions, traits,
 /// implementations, type aliases, constants, statics, use declarations,
-/// and extern blocks. `Fn`, `Struct`, `Enum`, and `Impl` are implemented here.
+/// and extern blocks. `Fn`, `Struct`, `Enum`, `Impl`, and `Trait` are
+/// implemented here.
 #[derive(Debug)]
 pub enum ItemKind {
     /// A function definition. FLS §9.
@@ -106,12 +107,17 @@ pub enum ItemKind {
     Struct(Box<StructDef>),
     /// An enum definition. FLS §15.
     Enum(Box<EnumDef>),
-    /// An inherent impl block. FLS §11.
+    /// An impl block (inherent or trait). FLS §11.
     ///
-    /// `impl TypeName { methods… }` — zero or more associated functions
-    /// defined on the named type. Only inherent impls (no trait bound) are
-    /// supported at this milestone.
+    /// `impl TypeName { methods… }` — inherent impl.
+    /// `impl TraitName for TypeName { methods… }` — trait impl.
     Impl(Box<ImplDef>),
+    /// A trait definition. FLS §13.
+    ///
+    /// `trait TraitName { fn method_sig(&self) -> Type; }` — defines a trait.
+    /// Trait definitions are parsed but not yet used for type checking.
+    /// They drive static dispatch via `impl Trait for Type`.
+    Trait(Box<TraitDef>),
 }
 
 // ── Functions ─────────────────────────────────────────────────────────────────
@@ -179,21 +185,57 @@ pub enum SelfKind {
     RefMut,
 }
 
-/// An inherent impl block.
+/// An impl block (inherent or trait).
 ///
-/// FLS §11: Implementations. `impl Type { methods }` defines methods on a
-/// named type. Only inherent impls (without a trait bound) are supported.
+/// FLS §11: Implementations. `impl Type { methods }` defines inherent methods
+/// on a named type. `impl Trait for Type { methods }` implements a trait.
 ///
 /// FLS §11 AMBIGUOUS: The spec allows `impl<T>` with generic parameters,
 /// but the interaction between generics and impl resolution is complex.
 /// Generic impls are future work.
 #[derive(Debug)]
 pub struct ImplDef {
-    /// The type being implemented.
+    /// The type being implemented (always the struct/enum name).
     pub ty: Span,
+    /// The trait being implemented, if any.
+    ///
+    /// `None` for inherent impls (`impl Foo { ... }`).
+    /// `Some(span)` for trait impls (`impl Bar for Foo { ... }`),
+    /// where the span refers to the trait name `Bar`.
+    ///
+    /// FLS §11.1: Trait implementations provide a concrete implementation
+    /// of a trait's associated items for a named type.
+    pub trait_name: Option<Span>,
     /// The methods defined in this impl block.
     pub methods: Vec<Box<FnDef>>,
     /// Span of the entire impl block.
+    pub span: Span,
+}
+
+/// A trait definition.
+///
+/// FLS §13: Traits. `trait Name { fn method_sig(&self) -> Type; }` declares
+/// a set of associated items that implementors must provide.
+///
+/// At this milestone, trait definitions are parsed and stored in the AST
+/// but are not used for type checking. They enable `impl Trait for Type`
+/// blocks to be parsed, and trait method calls resolve via static dispatch
+/// using the same `TypeName__method_name` mangling as inherent methods.
+///
+/// FLS §13 AMBIGUOUS: The FLS does not specify a required order between
+/// trait definition and its implementations within a crate; we assume the
+/// standard Rust rule (trait must be defined before use in type checking,
+/// but galvanic does not type-check at this milestone).
+#[derive(Debug)]
+pub struct TraitDef {
+    /// The trait name (span of the identifier token).
+    pub name: Span,
+    /// Method signatures declared in the trait body.
+    ///
+    /// Each `FnDef` has `body: None` (the body is provided by implementors).
+    /// FLS §13: A trait item may declare a method without a body.
+    pub methods: Vec<Box<FnDef>>,
+    /// Span of the entire trait definition.
     pub span: Span,
 }
 

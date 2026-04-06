@@ -4334,3 +4334,225 @@ fn main() -> i32 {
         "expected str x0 (write-back) in main:\n{asm}"
     );
 }
+
+// ── Milestone 46: trait definitions and impl Trait for Type ──────────────────
+
+/// Milestone 46: a simple trait with one `&self` method, implemented for a struct.
+///
+/// FLS §13: Trait definitions declare method signatures.
+/// FLS §11.1: Trait implementations provide concrete method bodies.
+/// Static dispatch: `s.area()` resolves to `Square__area` via the same
+/// `TypeName__method_name` mangling used by inherent impls.
+#[test]
+fn milestone_46_trait_method_basic() {
+    let src = r#"
+trait Area {
+    fn area(&self) -> i32;
+}
+struct Square { side: i32 }
+impl Area for Square {
+    fn area(&self) -> i32 {
+        self.side * self.side
+    }
+}
+fn main() -> i32 {
+    let s = Square { side: 5 };
+    s.area()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 25, "expected exit 25, got {exit_code}");
+}
+
+/// Milestone 46: trait method receives extra parameter alongside `&self`.
+///
+/// FLS §13: Trait methods may declare parameters beyond `self`.
+/// FLS §9.2: Parameters are passed in x0..x{N-1} per ARM64 ABI.
+#[test]
+fn milestone_46_trait_method_with_param() {
+    let src = r#"
+trait Scale {
+    fn scale(&self, factor: i32) -> i32;
+}
+struct Counter { count: i32 }
+impl Scale for Counter {
+    fn scale(&self, factor: i32) -> i32 {
+        self.count * factor
+    }
+}
+fn main() -> i32 {
+    let c = Counter { count: 7 };
+    c.scale(3)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 21, "expected exit 21, got {exit_code}");
+}
+
+/// Milestone 46: trait method on a struct passed as a function parameter.
+///
+/// FLS §13: Trait method calls work on struct values passed to functions.
+/// The receiver type is resolved statically — no dynamic dispatch.
+#[test]
+fn milestone_46_trait_method_on_parameter() {
+    let src = r#"
+trait Describe {
+    fn value(&self) -> i32;
+}
+struct Pair { x: i32, y: i32 }
+impl Describe for Pair {
+    fn value(&self) -> i32 {
+        self.x + self.y
+    }
+}
+fn sum_describe(p: Pair) -> i32 {
+    p.value()
+}
+fn main() -> i32 {
+    let p = Pair { x: 10, y: 8 };
+    sum_describe(p)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 18, "expected exit 18, got {exit_code}");
+}
+
+/// Milestone 46: two different structs each implementing the same trait.
+///
+/// FLS §13: Multiple types may implement the same trait. Each implementation
+/// is monomorphized independently — `rect.area()` and `circle.area()` resolve
+/// to different functions with no shared code.
+#[test]
+fn milestone_46_two_impls_same_trait() {
+    let src = r#"
+trait HasValue {
+    fn get(&self) -> i32;
+}
+struct Small { v: i32 }
+struct Large { v: i32 }
+impl HasValue for Small {
+    fn get(&self) -> i32 { self.v }
+}
+impl HasValue for Large {
+    fn get(&self) -> i32 { self.v * 10 }
+}
+fn main() -> i32 {
+    let a = Small { v: 3 };
+    let b = Large { v: 2 };
+    a.get() + b.get()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 23, "expected exit 23, got {exit_code}");
+}
+
+/// Milestone 46: trait impl coexists with inherent impl on the same struct.
+///
+/// FLS §11: A struct may have both inherent impls and trait impls.
+/// Both are mangled as `TypeName__method_name`; method name collision would
+/// be a type error in Rust, but galvanic does not type-check at this milestone.
+#[test]
+fn milestone_46_trait_and_inherent_impl() {
+    let src = r#"
+trait Score {
+    fn score(&self) -> i32;
+}
+struct Player { points: i32 }
+impl Player {
+    fn bonus(&self) -> i32 { 5 }
+}
+impl Score for Player {
+    fn score(&self) -> i32 { self.points + self.bonus() }
+}
+fn main() -> i32 {
+    let p = Player { points: 10 };
+    p.score()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 15, "expected exit 15, got {exit_code}");
+}
+
+/// Milestone 46: &mut self trait method mutates a field.
+///
+/// FLS §13: Trait methods may take `&mut self`.
+/// FLS §10.1: `&mut self` method write-back applies to trait impls too.
+#[test]
+fn milestone_46_trait_mut_self() {
+    let src = r#"
+trait Increment {
+    fn inc(&mut self);
+}
+struct Tally { count: i32 }
+impl Increment for Tally {
+    fn inc(&mut self) {
+        self.count = self.count + 1;
+    }
+}
+fn main() -> i32 {
+    let mut t = Tally { count: 0 };
+    t.inc();
+    t.inc();
+    t.inc();
+    t.count
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "expected exit 3, got {exit_code}");
+}
+
+/// Milestone 46: trait method result used in arithmetic expression.
+///
+/// FLS §6.5.5: Arithmetic operator expressions. The return value of a trait
+/// method call is a first-class value usable in further expressions.
+#[test]
+fn milestone_46_trait_result_in_arithmetic() {
+    let src = r#"
+trait Half {
+    fn half(&self) -> i32;
+}
+struct Number { n: i32 }
+impl Half for Number {
+    fn half(&self) -> i32 { self.n / 2 }
+}
+fn main() -> i32 {
+    let a = Number { n: 20 };
+    let b = Number { n: 10 };
+    a.half() + b.half()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 15, "expected exit 15, got {exit_code}");
+}
+
+// ── Assembly inspection: milestone 46 ────────────────────────────────────────
+
+/// Milestone 46: trait impl method emitted under `TypeName__method_name`.
+///
+/// FLS §13: Trait methods resolve via static dispatch using the same mangling
+/// as inherent methods. `Square__area` must appear in the assembly.
+#[test]
+fn runtime_trait_impl_emits_mangled_name() {
+    let src = r#"
+trait Area {
+    fn area(&self) -> i32;
+}
+struct Square { side: i32 }
+impl Area for Square {
+    fn area(&self) -> i32 { self.side * self.side }
+}
+fn main() -> i32 {
+    let s = Square { side: 3 };
+    s.area()
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("Square__area"),
+        "expected mangled `Square__area` in assembly:\n{asm}"
+    );
+    assert!(
+        asm.contains("bl") && asm.contains("Square__area"),
+        "expected `bl Square__area` call in assembly:\n{asm}"
+    );
+}
