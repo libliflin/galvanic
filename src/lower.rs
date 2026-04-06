@@ -980,6 +980,118 @@ impl<'src> LowerCtx<'src> {
                 Ok(IrValue::Unit)
             }
 
+            // FLS §6.5.8: Lazy boolean AND operator `&&`.
+            //
+            // Short-circuit semantics: the RHS is only evaluated if the LHS is true.
+            // If the LHS evaluates to false (0), the RHS is not evaluated and the
+            // result is false (0). If the LHS is true (1), the result is the RHS value.
+            //
+            // Equivalent to: if lhs { rhs } else { false }
+            //
+            // Lowering strategy (same phi-slot pattern as if/else):
+            //   1. Lower LHS → lhs_reg.
+            //   2. Allocate phi slot for the result.
+            //   3. CondBranch (cbz): if lhs_reg == 0 (false), jump to .Lfalse.
+            //   4. Lower RHS → rhs_reg. Store rhs_reg → phi slot. Branch to .Lend.
+            //   5. .Lfalse: store 0 → phi slot.
+            //   6. .Lend: load phi slot → result_reg. Return Reg(result_reg).
+            //
+            // FLS §6.5.8: "The right operand is only evaluated if the left operand
+            // is true." The CondBranch skips the RHS evaluation entirely.
+            //
+            // FLS §6.1.2:37–45: Even statically-known `true && x` emits a runtime
+            // `cbz` — no constant folding of the short-circuit condition.
+            //
+            // Cache-line note: the phi slot is one 8-byte stack entry, same as
+            // the if/else phi slot. The short-circuit adds one `cbz` (4 bytes) to
+            // the instruction stream.
+            ExprKind::Binary { op: BinOp::And, lhs, rhs } => {
+                let false_label = self.alloc_label();
+                let end_label = self.alloc_label();
+                // Allocate the phi slot before entering either branch.
+                let phi_slot = self.alloc_slot()?;
+
+                // Evaluate LHS. Booleans are represented as i32 (0 or 1).
+                let lhs_val = self.lower_expr(lhs, &IrTy::I32)?;
+                let lhs_reg = self.val_to_reg(lhs_val)?;
+
+                // Short-circuit: if LHS is false (0), skip RHS entirely.
+                self.instrs.push(Instr::CondBranch { reg: lhs_reg, label: false_label });
+
+                // ── LHS is true: evaluate RHS and use it as the result ────────────
+                let rhs_val = self.lower_expr(rhs, &IrTy::I32)?;
+                let rhs_reg = self.val_to_reg(rhs_val)?;
+                self.instrs.push(Instr::Store { src: rhs_reg, slot: phi_slot });
+                self.instrs.push(Instr::Branch(end_label));
+
+                // ── LHS was false: result = 0 ─────────────────────────────────────
+                self.instrs.push(Instr::Label(false_label));
+                let zero_reg = self.alloc_reg()?;
+                self.instrs.push(Instr::LoadImm(zero_reg, 0));
+                self.instrs.push(Instr::Store { src: zero_reg, slot: phi_slot });
+
+                // ── End: load and return result ───────────────────────────────────
+                self.instrs.push(Instr::Label(end_label));
+                let result_reg = self.alloc_reg()?;
+                self.instrs.push(Instr::Load { dst: result_reg, slot: phi_slot });
+                Ok(IrValue::Reg(result_reg))
+            }
+
+            // FLS §6.5.8: Lazy boolean OR operator `||`.
+            //
+            // Short-circuit semantics: the RHS is only evaluated if the LHS is false.
+            // If the LHS evaluates to true (non-zero), the RHS is not evaluated and
+            // the result is the LHS value (which is 1 for a boolean). If the LHS is
+            // false (0), the result is the RHS value.
+            //
+            // Equivalent to: if lhs { lhs } else { rhs }
+            // Simplified (since lhs is 0/1): if lhs { 1 } else { rhs }
+            //
+            // Lowering strategy (cbz branches to .Lrhs when LHS is false):
+            //   1. Lower LHS → lhs_reg.
+            //   2. Allocate phi slot for the result.
+            //   3. CondBranch (cbz): if lhs_reg == 0 (false), jump to .Lrhs.
+            //   4. Store lhs_reg → phi slot (lhs is 1). Branch to .Lend.
+            //   5. .Lrhs: Lower RHS → rhs_reg. Store rhs_reg → phi slot.
+            //   6. .Lend: load phi slot → result_reg. Return Reg(result_reg).
+            //
+            // FLS §6.5.8: "The right operand is only evaluated if the left operand
+            // is false." The CondBranch skips the RHS evaluation entirely when true.
+            //
+            // FLS §6.1.2:37–45: Even statically-known `false || x` emits a runtime
+            // `cbz` — no constant folding of the short-circuit condition.
+            //
+            // Cache-line note: identical phi-slot footprint to `&&` lowering.
+            ExprKind::Binary { op: BinOp::Or, lhs, rhs } => {
+                let rhs_label = self.alloc_label();
+                let end_label = self.alloc_label();
+                // Allocate the phi slot before entering either branch.
+                let phi_slot = self.alloc_slot()?;
+
+                // Evaluate LHS. Booleans are represented as i32 (0 or 1).
+                let lhs_val = self.lower_expr(lhs, &IrTy::I32)?;
+                let lhs_reg = self.val_to_reg(lhs_val)?;
+
+                // Short-circuit: if LHS is false (0), must evaluate RHS.
+                self.instrs.push(Instr::CondBranch { reg: lhs_reg, label: rhs_label });
+
+                // ── LHS is true: result = LHS (which is 1) ───────────────────────
+                self.instrs.push(Instr::Store { src: lhs_reg, slot: phi_slot });
+                self.instrs.push(Instr::Branch(end_label));
+
+                // ── LHS was false: evaluate RHS and use it as result ──────────────
+                self.instrs.push(Instr::Label(rhs_label));
+                let rhs_val = self.lower_expr(rhs, &IrTy::I32)?;
+                let rhs_reg = self.val_to_reg(rhs_val)?;
+                self.instrs.push(Instr::Store { src: rhs_reg, slot: phi_slot });
+
+                // ── End: load and return result ───────────────────────────────────
+                self.instrs.push(Instr::Label(end_label));
+                let result_reg = self.alloc_reg()?;
+                self.instrs.push(Instr::Load { dst: result_reg, slot: phi_slot });
+                Ok(IrValue::Reg(result_reg))
+            }
+
             // FLS §6.5.4: Unary negation `-operand` — arithmetic two's complement negation.
             //
             // Lowering:

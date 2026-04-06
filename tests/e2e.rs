@@ -927,6 +927,167 @@ fn runtime_rem_emits_sdiv_and_msub() {
     );
 }
 
+// ── Milestone 11: lazy boolean operators && and || ───────────────────────────
+//
+// FLS §6.5.8: Lazy boolean operator expressions. Both `&&` and `||` use
+// short-circuit evaluation: the RHS is only evaluated if the LHS does not
+// determine the result.
+//
+// - `&&`: if LHS is false (0), result is false without evaluating RHS.
+// - `||`: if LHS is true (non-zero), result is true without evaluating RHS.
+//
+// Lowering uses a phi slot and `CondBranch` (cbz), the same mechanism used
+// for if/else. The RHS evaluation is placed in the branch that is only reached
+// when the LHS does not short-circuit.
+//
+// FLS §6.1.2:37–45: Both the LHS evaluation and the short-circuit branch must
+// emit runtime instructions — no constant folding even when the LHS is known.
+
+/// Milestone 11: `true && true` → 1 (both sides true).
+///
+/// FLS §6.5.8: Lazy boolean AND — RHS is evaluated when LHS is true.
+/// FLS §2.4.7: `true` = 1, `false` = 0.
+#[test]
+fn milestone_11_and_both_true() {
+    let src = "fn main() -> i32 { if true && true { 1 } else { 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "expected 1 from `true && true`, got {exit_code}");
+}
+
+/// Milestone 11: `true && false` → 0 (LHS true, RHS false).
+///
+/// FLS §6.5.8: When LHS is true, RHS is evaluated and its value is the result.
+#[test]
+fn milestone_11_and_lhs_true_rhs_false() {
+    let src = "fn main() -> i32 { if true && false { 1 } else { 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 0, "expected 0 from `true && false`, got {exit_code}");
+}
+
+/// Milestone 11: `false && true` → 0 (LHS false short-circuits, RHS not evaluated).
+///
+/// FLS §6.5.8: "The right operand is only evaluated if the left operand is true."
+/// The branch to the false path skips RHS evaluation entirely.
+#[test]
+fn milestone_11_and_lhs_false_short_circuits() {
+    let src = "fn main() -> i32 { if false && true { 1 } else { 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 0, "expected 0 from `false && true` (short-circuit), got {exit_code}");
+}
+
+/// Milestone 11: comparison-based `&&` — `x > 0 && y > 0`.
+///
+/// Tests `&&` with runtime-computed boolean operands, not just literals.
+/// FLS §6.5.8: Both operands are lazy boolean expressions.
+/// FLS §6.5.3: Each comparison emits `cmp`+`cset` at runtime.
+#[test]
+fn milestone_11_and_with_comparisons() {
+    let src = "fn f(x: i32, y: i32) -> i32 { if x > 0 && y > 0 { 1 } else { 0 } }\nfn main() -> i32 { f(3, 4) }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "expected 1 from `3 > 0 && 4 > 0`, got {exit_code}");
+}
+
+/// Milestone 11: `&&` short-circuits when LHS comparison is false.
+///
+/// `f(-1, 99)` → LHS `x > 0` is false → short-circuit → result = 0.
+/// The RHS `y > 0` is not evaluated at all.
+///
+/// FLS §6.5.8: Short-circuit — RHS is skipped when LHS is false.
+#[test]
+fn milestone_11_and_short_circuits_on_false_lhs() {
+    let src = "fn f(x: i32, y: i32) -> i32 { if x > 0 && y > 0 { 1 } else { 0 } }\nfn main() -> i32 { f(-1, 99) }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 0, "expected 0 from `-1 > 0 && 99 > 0` (short-circuit), got {exit_code}");
+}
+
+/// Milestone 11: `false || true` → 1 (LHS false, RHS true evaluated).
+///
+/// FLS §6.5.8: Lazy boolean OR — RHS is evaluated when LHS is false.
+#[test]
+fn milestone_11_or_lhs_false_rhs_true() {
+    let src = "fn main() -> i32 { if false || true { 1 } else { 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "expected 1 from `false || true`, got {exit_code}");
+}
+
+/// Milestone 11: `true || false` → 1 (LHS true short-circuits, RHS not evaluated).
+///
+/// FLS §6.5.8: "The right operand is only evaluated if the left operand is false."
+#[test]
+fn milestone_11_or_lhs_true_short_circuits() {
+    let src = "fn main() -> i32 { if true || false { 1 } else { 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "expected 1 from `true || false` (short-circuit), got {exit_code}");
+}
+
+/// Milestone 11: `false || false` → 0 (both false).
+///
+/// FLS §6.5.8: When LHS is false, RHS is evaluated. Both false → result false.
+#[test]
+fn milestone_11_or_both_false() {
+    let src = "fn main() -> i32 { if false || false { 1 } else { 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 0, "expected 0 from `false || false`, got {exit_code}");
+}
+
+/// Milestone 11: comparison-based `||` short-circuits when LHS is true.
+///
+/// `f(5, -1)` → LHS `x > 0` is true → short-circuit → result = 1.
+/// The RHS `y > 0` is not evaluated.
+///
+/// FLS §6.5.8: Short-circuit — RHS is skipped when LHS is true.
+/// FLS §6.5.3: `x > 0` emits `cmp`+`cset` at runtime.
+#[test]
+fn milestone_11_or_short_circuits_on_true_lhs() {
+    let src = "fn f(x: i32, y: i32) -> i32 { if x > 0 || y > 0 { 1 } else { 0 } }\nfn main() -> i32 { f(5, -1) }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "expected 1 from `5 > 0 || -1 > 0` (short-circuit), got {exit_code}");
+}
+
+/// Assembly inspection: `&&` must emit `cbz` for the short-circuit branch.
+///
+/// FLS §6.5.8: The short-circuit is implemented by a conditional branch.
+/// FLS §6.1.2:37–45: The branch is a runtime instruction — not elided.
+#[test]
+fn runtime_and_emits_cbz_for_short_circuit() {
+    let asm = compile_to_asm("fn f(a: i32, b: i32) -> i32 { if a > 0 && b > 0 { 1 } else { 0 } }\nfn main() -> i32 { f(1, 1) }\n");
+    assert!(
+        asm.contains("cbz"),
+        "expected `cbz` instruction for `&&` short-circuit, got:\n{asm}"
+    );
+}
+
+/// Assembly inspection: `||` must emit `cbz` for the short-circuit branch.
+///
+/// FLS §6.5.8: The short-circuit is implemented by a conditional branch.
+/// FLS §6.1.2:37–45: The branch is a runtime instruction — not elided.
+#[test]
+fn runtime_or_emits_cbz_for_short_circuit() {
+    let asm = compile_to_asm("fn f(a: i32, b: i32) -> i32 { if a > 0 || b > 0 { 1 } else { 0 } }\nfn main() -> i32 { f(1, 1) }\n");
+    assert!(
+        asm.contains("cbz"),
+        "expected `cbz` instruction for `||` short-circuit, got:\n{asm}"
+    );
+}
+
 /// Assembly inspection: unary negation `-x` must emit a `neg` instruction.
 ///
 /// FLS §6.5.4: Negation operator expressions. The unary `-` applied to an
