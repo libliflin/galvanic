@@ -341,6 +341,58 @@ fn milestone_5_call_result_in_expr() {
     assert_eq!(exit_code, 10, "expected exit 10 from double(5), got {exit_code}");
 }
 
+// ── Milestone 6: mutable variables and assignment ────────────────────────────
+//
+// FLS §6.5.10: Assignment expressions update the value of a mutable place.
+// FLS §8.1: `let mut` bindings may be re-assigned after initialisation.
+// FLS §6.1.2:37–45: The assignment is a runtime `str` instruction — the
+// variable's stack slot is overwritten with the new value at runtime.
+//
+// These tests verify that assignment expressions work end-to-end:
+// the initial value (from the let binding) is overwritten by the assignment,
+// and the final path expression reads the updated value.
+
+/// Milestone 6: `let mut x = 0; x = 42; x` — assignment overwrites the initial value.
+///
+/// FLS §6.5.10: Assignment expression `x = 42` emits a runtime `str`.
+/// FLS §8.1: `let mut x = 0` initialises x to 0 on the stack.
+/// FLS §6.3: The tail expression `x` loads from x's stack slot (reads 42).
+#[test]
+fn milestone_6_mutable_assignment() {
+    let src = "fn main() -> i32 { let mut x = 0; x = 42; x }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 42, "expected exit 42 from `let mut x = 0; x = 42; x`, got {exit_code}");
+}
+
+/// Milestone 6 (variant): assignment in terms of the current value.
+///
+/// `let mut x = 10; x = x + 5; x` — the RHS reads x (10) then adds 5.
+/// FLS §6.5.10: The RHS of an assignment is evaluated before the store.
+/// FLS §6.5.5: Arithmetic on the loaded value runs at runtime.
+#[test]
+fn milestone_6_assignment_with_arithmetic() {
+    let src = "fn main() -> i32 { let mut x = 10; x = x + 5; x }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 15, "expected exit 15 from `let mut x = 10; x = x + 5; x`, got {exit_code}");
+}
+
+/// Milestone 6 (variant): two variables, assign one to the other.
+///
+/// FLS §6.5.10: The RHS of an assignment can be any expression.
+/// FLS §6.3: Reading one variable as the RHS of an assignment to another.
+#[test]
+fn milestone_6_assign_from_other_var() {
+    let src = "fn main() -> i32 { let mut x = 1; let y = 99; x = y; x }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 99, "expected exit 99 from `x = y; x`, got {exit_code}");
+}
+
 // ── Assembly inspection: runtime instruction verification ────────────────────
 //
 // FLS §6.1.2:37–45: Non-const code must emit runtime instructions.
@@ -444,6 +496,21 @@ fn runtime_if_emits_cbz() {
     assert!(
         asm.contains("str") && asm.contains("ldr"),
         "expected `str`/`ldr` for phi slot in if expression:\n{asm}"
+    );
+}
+
+/// `let mut x = 0; x = 42; x` emits two `str` instructions (one per store).
+///
+/// FLS §6.5.10: Assignment emits a runtime `str`, distinct from the let initializer.
+/// FLS §6.1.2:37–45: Both the let and the assignment must emit runtime stores —
+/// the compiler must not optimise away the initial store or the assignment.
+#[test]
+fn runtime_assignment_emits_two_stores() {
+    let asm = compile_to_asm("fn main() -> i32 { let mut x = 0; x = 42; x }\n");
+    let str_count = asm.matches("str").count();
+    assert!(
+        str_count >= 2,
+        "expected at least 2 `str` instructions (let init + assignment), found {str_count}:\n{asm}"
     );
 }
 
