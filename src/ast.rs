@@ -313,21 +313,33 @@ pub struct TraitDef {
     pub span: Span,
 }
 
+/// The binding pattern of a function parameter.
+///
+/// FLS §5.10.3, §9.2: Parameters may use irrefutable patterns. This
+/// implementation supports identifier patterns and flat tuple patterns.
+///
+/// FLS §9.2 AMBIGUOUS: the spec allows arbitrary irrefutable patterns in
+/// parameter position but does not enumerate them independently — the reader
+/// must cross-reference §5. Nested tuple patterns and struct patterns in
+/// parameter position are future work.
+#[derive(Debug, Clone)]
+pub enum ParamKind {
+    /// Simple `name: ty` or `mut name: ty` parameter. FLS §9.2, §5.1.
+    Ident(Span),
+    /// Tuple destructuring `(a, b, ...): (ty1, ty2, ...)`. FLS §5.10.3, §9.2.
+    ///
+    /// Each element is the span of the bound name or `_` (wildcard).
+    Tuple(Vec<Span>),
+}
+
 /// A function parameter.
 ///
 /// FLS §9.2: A function parameter yields a set of bindings that bind matched
 /// input values to names at the call site.
-///
-/// FLS §9.2 AMBIGUOUS: the spec allows arbitrary irrefutable patterns in
-/// parameter position (e.g., `(a, b): (i32, i32)`, `_: i32`). The extent
-/// of patterns valid in parameter position is not independently listed in §9
-/// — the reader must cross-reference §5 (Patterns) and infer which patterns
-/// are irrefutable. This implementation supports only `name: Type` and the
-/// `self` family; full pattern parameters are future work.
 #[derive(Debug)]
 pub struct Param {
-    /// The parameter name (simple identifier).
-    pub name: Span,
+    /// The parameter pattern (identifier or tuple destructuring).
+    pub kind: ParamKind,
     /// The declared type.
     pub ty: Ty,
     pub span: Span,
@@ -519,6 +531,12 @@ pub enum TyKind {
         mutable: bool,
         inner: Box<Ty>,
     },
+
+    /// A tuple type `(T1, T2, ...)`. FLS §4.4.
+    ///
+    /// FLS §4.4: A tuple type with N elements contains N components in order.
+    /// The unit type `()` is the zero-element tuple (represented as `TyKind::Unit`).
+    Tuple(Vec<Ty>),
 }
 
 // ── Blocks ────────────────────────────────────────────────────────────────────

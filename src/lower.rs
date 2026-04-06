@@ -999,7 +999,33 @@ fn lower_fn(
         }
     }
     for param in fn_def.params.iter() {
-        let param_name = param.name.text(source);
+        // FLS §5.10.3, §9.2: Tuple pattern parameter `(a, b): (i32, i32)`.
+        // Each element occupies one ARM64 register; spill each to its own slot.
+        //
+        // Cache-line note: N elements → N × 4-byte `str` spill instructions,
+        // same density as struct parameters.
+        if let crate::ast::ParamKind::Tuple(names) = &param.kind {
+            for name_span in names {
+                if reg_idx >= 8 {
+                    return Err(LowerError::Unsupported(
+                        "tuple parameter exceeds ARM64 register window (>8 total registers)".into(),
+                    ));
+                }
+                let name = name_span.text(source);
+                let slot = ctx.alloc_slot()?;
+                if name != "_" {
+                    ctx.locals.insert(name, slot);
+                }
+                ctx.instrs.push(Instr::Store { src: reg_idx as u8, slot });
+                reg_idx += 1;
+            }
+            continue;
+        }
+
+        let param_name = match &param.kind {
+            crate::ast::ParamKind::Ident(s) => s.text(source),
+            crate::ast::ParamKind::Tuple(_) => unreachable!(), // handled above
+        };
 
         // FLS §15: Enum type parameters — `fn f(o: Opt)`.
         // FLS §11 / §6.12.2: Struct type parameters — `fn f(s: S)`.
@@ -1373,6 +1399,11 @@ fn lower_ty(ty: &crate::ast::Ty, source: &str) -> Result<IrTy, LowerError> {
         // FLS §4.8: "A reference type is a kind of pointer type."
         // Cache-line note: references occupy one 8-byte register slot — same as i32/i64.
         TyKind::Ref { inner, .. } => lower_ty(inner, source),
+        // FLS §4.4: Tuple types — used only in parameter position for tuple patterns.
+        // A tuple type as a scalar return/local is not yet supported.
+        TyKind::Tuple(_) => Err(LowerError::Unsupported(
+            "tuple type in scalar context (use tuple pattern parameter instead)".into(),
+        )),
         _ => Err(LowerError::Unsupported("complex type".into())),
     }
 }
@@ -5950,6 +5981,36 @@ impl<'src> LowerCtx<'src> {
                         // one per leaf field of the outermost struct.
                         let struct_name = struct_name_span.text(self.source).to_owned();
                         self.push_struct_lit_arg_regs(arg, &struct_name, &mut arg_regs)?;
+                    } else if let ExprKind::Tuple(elements) = &arg.kind {
+                        // FLS §5.10.3, §6.10, §9.2: Tuple literal used directly as a
+                        // function argument — e.g., `sum_pair((3, 4))`.
+                        //
+                        // Each element evaluates to one register, matching the tuple
+                        // parameter calling convention in `lower_fn`: element 0 → x{i},
+                        // element 1 → x{i+1}, …
+                        //
+                        // FLS §6.1.2:37–45: All evaluations emit runtime instructions.
+                        // Cache-line note: N elements → N × 4-byte mov/ldr instructions.
+                        for elem in elements.iter() {
+                            let val = self.lower_expr(elem, &IrTy::I32)?;
+                            let reg = self.val_to_reg(val)?;
+                            arg_regs.push(reg);
+                        }
+                    } else if let ExprKind::Path(segs) = &arg.kind
+                        && segs.len() == 1
+                        && let Some(&base_slot) = self.locals.get(segs[0].text(self.source))
+                        && let Some(&n_elems) = self.local_tuple_lens.get(&base_slot)
+                    {
+                        // FLS §5.10.3, §9.2: Tuple variable used as a function argument.
+                        // Load each element from consecutive stack slots into registers,
+                        // matching the tuple parameter calling convention in `lower_fn`.
+                        //
+                        // FLS §6.1.2:37–45: All loads emit runtime instructions.
+                        for i in 0..n_elems {
+                            let reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst: reg, slot: base_slot + i as u8 });
+                            arg_regs.push(reg);
+                        }
                     } else {
                         let val = self.lower_expr(arg, &IrTy::I32)?;
                         let reg = self.val_to_reg(val)?;
