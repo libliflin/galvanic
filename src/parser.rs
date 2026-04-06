@@ -1414,6 +1414,38 @@ impl<'src> Parser<'src> {
         let start = self.current_span();
         self.expect(TokenKind::KwIf)?;
 
+        // FLS §6.17: if-let expression — `if let Pattern = Expr { Block } [else ...]`
+        if self.eat(TokenKind::KwLet) {
+            let pat = self.parse_pattern()?;
+            // The `=` separator between pattern and scrutinee.
+            self.expect(TokenKind::Eq)?;
+            let scrutinee = Box::new(self.parse_expr()?);
+            let then_block = Box::new(self.parse_block()?);
+
+            let else_expr = if self.eat(TokenKind::KwElse) {
+                if self.peek_kind() == TokenKind::KwIf {
+                    Some(Box::new(self.parse_if_expr()?))
+                } else {
+                    let block = self.parse_block()?;
+                    let span = block.span;
+                    Some(Box::new(Expr { kind: ExprKind::Block(Box::new(block)), span }))
+                }
+            } else {
+                None
+            };
+
+            let end = else_expr
+                .as_ref()
+                .map(|e| e.span)
+                .unwrap_or(then_block.span);
+
+            return Ok(Expr {
+                kind: ExprKind::IfLet { pat, scrutinee, then_block, else_expr },
+                span: start.to(end),
+            });
+        }
+
+        // FLS §6.17: regular if (or if-else) expression.
         let cond = Box::new(self.parse_expr()?);
         let then_block = Box::new(self.parse_block()?);
 
@@ -1771,7 +1803,7 @@ fn strip_int_suffix(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{EnumVariantKind, ExprKind, ItemKind, StmtKind, StructKind, TyKind, Visibility};
+    use crate::ast::{EnumVariantKind, ExprKind, ItemKind, Pat, StmtKind, StructKind, TyKind, Visibility};
     use crate::lexer::tokenize;
 
     /// Parse `src` into a SourceFile, panicking on error.
@@ -2051,6 +2083,47 @@ mod tests {
         };
         // The else branch is another If.
         assert!(matches!(else_e.kind, ExprKind::If { .. }));
+    }
+
+    #[test]
+    fn if_let_literal_pattern() {
+        // FLS §6.17: if-let with integer literal pattern.
+        let src = "fn f(x: i32) -> i32 { if let 42 = x { 1 } else { 0 } }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
+        assert!(
+            matches!(tail.kind, ExprKind::IfLet { .. }),
+            "expected IfLet expression"
+        );
+    }
+
+    #[test]
+    fn if_let_ident_pattern() {
+        // FLS §6.17 + §5.1.4: if-let with identifier pattern.
+        let src = "fn f(x: i32) -> i32 { if let n = x { n } else { 0 } }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
+        assert!(
+            matches!(tail.kind, ExprKind::IfLet { pat: Pat::Ident(_), .. }),
+            "expected IfLet with identifier pattern"
+        );
+    }
+
+    #[test]
+    fn if_let_no_else() {
+        // FLS §6.17: if-let without else branch (unit context, as tail expression).
+        let src = "fn f(x: i32) { if let 1 = x { } }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        // Parsed as a tail expression (no semicolon).
+        let e = body.tail.as_ref().expect("expected tail expression");
+        assert!(
+            matches!(e.kind, ExprKind::IfLet { else_expr: None, .. }),
+            "expected IfLet with no else"
+        );
     }
 
     #[test]

@@ -679,6 +679,38 @@ pub enum ExprKind {
         else_expr: Option<Box<Expr>>,
     },
 
+    /// An if-let expression. FLS §6.17.
+    ///
+    /// `if let Pattern = Scrutinee { ThenBlock } [else { ElseExpr }]`
+    ///
+    /// FLS §6.17: An if-let expression evaluates the scrutinee and tests it
+    /// against the pattern. If the pattern matches, the then block executes
+    /// with any pattern bindings in scope. If it does not match, the else
+    /// branch executes (if present).
+    ///
+    /// Lowering strategy: emit a pattern-match check (like a single match arm)
+    /// followed by a conditional branch to the else path. Pattern bindings are
+    /// installed in `locals` before the then block and removed after.
+    ///
+    /// FLS §6.17: "An if let expression is syntactic sugar for a match
+    /// expression with a single arm." Galvanic lowers it directly without
+    /// constructing a match node.
+    ///
+    /// Cache-line note: lowered to the same comparison chain as a 2-arm match.
+    IfLet {
+        /// The pattern to test the scrutinee against.
+        pat: Pat,
+        /// The value being matched.
+        scrutinee: Box<Expr>,
+        /// Executed when the pattern matches.
+        then_block: Box<Block>,
+        /// Executed when the pattern does not match (optional).
+        ///
+        /// `Some(expr)` for `else`/`else if let`. The expr is a `Block`,
+        /// an `If`, or another `IfLet` expression.
+        else_expr: Option<Box<Expr>>,
+    },
+
     /// A match expression. FLS §6.18.
     ///
     /// `match scrutinee { arm0, arm1, ... }`

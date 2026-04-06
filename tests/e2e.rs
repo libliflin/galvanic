@@ -2916,3 +2916,91 @@ fn runtime_match_guard_emits_cbz_for_guard_condition() {
     assert!(asm.contains("cmp") || asm.contains("cset"),
         "expected comparison instruction for guard n > 5");
 }
+
+// ── Milestone 36: if-let expressions (FLS §6.17) ─────────────────────────────
+
+/// Milestone 36: if-let with integer literal pattern — match taken.
+///
+/// FLS §6.17: An if-let expression tests the scrutinee against a pattern.
+/// If the pattern matches, the then block executes.
+#[test]
+fn milestone_36_if_let_literal_taken() {
+    let src = "fn main() -> i32 { let x = 42; if let 42 = x { 1 } else { 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected pattern 42 to match x=42, got {exit_code}");
+}
+
+/// Milestone 36: if-let with integer literal pattern — match not taken.
+///
+/// FLS §6.17: If the pattern does not match, the else branch executes.
+#[test]
+fn milestone_36_if_let_literal_not_taken() {
+    let src = "fn main() -> i32 { let x = 7; if let 42 = x { 1 } else { 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected pattern 42 not to match x=7, got {exit_code}");
+}
+
+/// Milestone 36: if-let with identifier pattern — always matches, binds value.
+///
+/// FLS §5.1.4 + §6.17: An identifier pattern always matches and binds the
+/// scrutinee to the given name within the then block.
+#[test]
+fn milestone_36_if_let_ident_binds_value() {
+    let src = "fn main() -> i32 { let x = 5; if let n = x { n + 1 } else { 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "expected n=5, n+1=6, got {exit_code}");
+}
+
+/// Milestone 36: if-let on a function parameter.
+///
+/// FLS §6.17: The scrutinee can be any expression, including a parameter.
+#[test]
+fn milestone_36_if_let_on_parameter() {
+    let src = "fn check(x: i32) -> i32 { if let 10 = x { 1 } else { 2 } }\nfn main() -> i32 { check(10) }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected pattern 10 to match parameter x=10, got {exit_code}");
+}
+
+/// Milestone 36: if-let with range pattern — taken.
+///
+/// FLS §5.1.9 + §6.17: Range patterns are valid in if-let position.
+#[test]
+fn milestone_36_if_let_range_taken() {
+    let src = "fn main() -> i32 { let x = 5; if let 1..=10 = x { 1 } else { 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected range 1..=10 to match x=5, got {exit_code}");
+}
+
+/// Milestone 36: if-let with range pattern — not taken.
+#[test]
+fn milestone_36_if_let_range_not_taken() {
+    let src = "fn main() -> i32 { let x = 15; if let 1..=10 = x { 1 } else { 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected range 1..=10 not to match x=15, got {exit_code}");
+}
+
+/// Milestone 36: if-let without else branch (unit context).
+///
+/// FLS §6.17: An if-let without an else branch has type `()`.
+/// Used as a statement here.
+#[test]
+fn milestone_36_if_let_no_else_unit() {
+    let src = "fn main() -> i32 { let mut r = 0; if let 3 = 3 { r = 7; } r }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected pattern 3=3 to match and set r=7, got {exit_code}");
+}
+
+/// Milestone 36: assembly inspection — if-let literal emits comparison and cbz.
+///
+/// FLS §6.17: Pattern check must emit runtime instructions.
+/// FLS §6.1.2:37–45: No constant folding of pattern checks.
+#[test]
+fn runtime_if_let_emits_comparison_and_cbz() {
+    let src = "fn main() -> i32 { let x = 5; if let 5 = x { 1 } else { 0 } }\n";
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("cmp") || asm.contains("cset"),
+        "expected comparison instruction for if-let pattern check"
+    );
+    assert!(asm.contains("cbz"), "expected cbz for if-let conditional branch");
+}
