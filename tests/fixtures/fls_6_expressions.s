@@ -991,6 +991,33 @@ match_tuple_return_example:
     add     sp, sp, #32             // FLS §8.1: restore stack frame
     ret
 
+    // fn struct_if_else_example — FLS §9
+    .global struct_if_else_example
+struct_if_else_example:
+    sub     sp, sp, #32             // FLS §8.1: frame for 4 slot(s)
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    str     x1, [sp, #8              ] // FLS §8.1: store slot 1
+    ldr     x0, [sp, #0              ] // FLS §8.1: load slot 0
+    ldr     x1, [sp, #8              ] // FLS §8.1: load slot 1
+    cmp     x0, x1               // FLS §6.5.3: compare (signed)
+    cset    x2, lt                    // FLS §6.5.3: x2 = (x0 < x1)
+    cbz     x2, .L47                    // FLS §6.17: branch if false
+    ldr     x3, [sp, #0              ] // FLS §8.1: load slot 0
+    str     x3, [sp, #16             ] // FLS §8.1: store slot 2
+    ldr     x4, [sp, #8              ] // FLS §8.1: load slot 1
+    str     x4, [sp, #24             ] // FLS §8.1: store slot 3
+    b       .L48                       // FLS §6.17: branch to end
+.L47:                              // FLS §6.17: branch target
+    ldr     x5, [sp, #8              ] // FLS §8.1: load slot 1
+    str     x5, [sp, #16             ] // FLS §8.1: store slot 2
+    ldr     x6, [sp, #0              ] // FLS §8.1: load slot 0
+    str     x6, [sp, #24             ] // FLS §8.1: store slot 3
+.L48:                              // FLS §6.17: branch target
+    ldr     x0, [sp, #16              ] // FLS §10.1: write-back field 0
+    ldr     x1, [sp, #24              ] // FLS §10.1: write-back field 1
+    add     sp, sp, #32             // FLS §8.1: restore stack frame
+    ret
+
     // ELF entry point — FLS §18.1
     .global _start
 _start:
