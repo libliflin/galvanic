@@ -3571,3 +3571,156 @@ fn main() -> i32 {
         "expected ≥2 str instructions for tuple variant construction (discriminant + field)\nasm:\n{asm}"
     );
 }
+
+// ── Milestone 42: named-field enum variants ───────────────────────────────────
+
+/// Milestone 42: basic named-field variant construction and match.
+///
+/// FLS §15.3: Named-field enum variants — `Variant { field: Type }`.
+/// FLS §6.11: Struct expressions apply to enum variants.
+/// FLS §5.3: Struct patterns match named-field variants by discriminant then fields.
+///
+/// Derived from FLS §15 examples (the spec describes named-field variant
+/// syntax but provides no concrete code example; this program is derived
+/// from the semantic description).
+#[test]
+fn milestone_42_named_variant_basic() {
+    let src = r#"
+enum Color { Black, Rgb { r: i32, g: i32, b: i32 } }
+fn main() -> i32 {
+    let c = Color::Rgb { r: 10, g: 20, b: 12 };
+    match c {
+        Color::Rgb { r, g, b } => r + g + b,
+        Color::Black => 0,
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+/// Milestone 42: discriminant field extraction — first field.
+///
+/// FLS §15.3: fields are stored in declaration order; `r` is at slot base+1.
+#[test]
+fn milestone_42_named_variant_first_field() {
+    let src = r#"
+enum Color { Black, Rgb { r: i32, g: i32, b: i32 } }
+fn main() -> i32 {
+    let c = Color::Rgb { r: 7, g: 0, b: 0 };
+    match c {
+        Color::Rgb { r, g, b } => r,
+        Color::Black => 99,
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected exit 7, got {exit_code}");
+}
+
+/// Milestone 42: fields given in a different order from declaration — still stores in declaration order.
+///
+/// FLS §6.11: Field initialisers in a struct expression may appear in any order;
+/// galvanic normalises to declaration order.
+#[test]
+fn milestone_42_named_variant_out_of_order_construction() {
+    let src = r#"
+enum Color { Black, Rgb { r: i32, g: i32, b: i32 } }
+fn main() -> i32 {
+    let c = Color::Rgb { b: 5, r: 3, g: 4 };
+    match c {
+        Color::Rgb { r, g, b } => r * 100 + g * 10 + b,
+        Color::Black => 0,
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 345, "expected exit 345, got {exit_code}");
+}
+
+/// Milestone 42: non-matching variant arm falls to wildcard.
+///
+/// FLS §6.18: Arms are checked in order; when the first arm's discriminant
+/// doesn't match, the wildcard arm is taken.
+#[test]
+fn milestone_42_named_variant_non_matching_arm() {
+    let src = r#"
+enum Shape { Circle { r: i32 }, Square { side: i32 } }
+fn main() -> i32 {
+    let s = Shape::Circle { r: 5 };
+    match s {
+        Shape::Square { side } => side,
+        Shape::Circle { r } => r,
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "expected exit 5, got {exit_code}");
+}
+
+/// Milestone 42: named variant passed as a function parameter.
+///
+/// FLS §9: enum values (including named-field variants) are passed in registers.
+/// FLS §6.1.2:37–45: runtime codegen — value is not known at compile time.
+#[test]
+fn milestone_42_named_variant_parameter() {
+    let src = r#"
+enum Point { Zero, Coord { x: i32, y: i32 } }
+fn sum(p: Point) -> i32 {
+    match p {
+        Point::Coord { x, y } => x + y,
+        Point::Zero => 0,
+    }
+}
+fn main() -> i32 {
+    let p = Point::Coord { x: 15, y: 27 };
+    sum(p)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+/// Milestone 42: wildcard sub-pattern ignores a named field.
+///
+/// FLS §5.1: Wildcard `_` matches any value without binding.
+/// FLS §5.3: Wildcard is valid in a struct pattern field position.
+#[test]
+fn milestone_42_named_variant_wildcard_field() {
+    let src = r#"
+enum Pair { Empty, Both { a: i32, b: i32 } }
+fn main() -> i32 {
+    let p = Pair::Both { a: 42, b: 99 };
+    match p {
+        Pair::Both { a, b: _ } => a,
+        Pair::Empty => 0,
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42, got {exit_code}");
+}
+
+/// Milestone 42: assembly inspection — named variant construction emits stores for discriminant + fields.
+///
+/// FLS §15.3 + §6.11: `Color::Rgb { r: 1, g: 2, b: 3 }` must store at least 4
+/// values (discriminant + 3 fields) via `str` instructions.
+#[test]
+fn runtime_named_variant_construction_emits_stores() {
+    let src = r#"
+enum Color { Black, Rgb { r: i32, g: i32, b: i32 } }
+fn main() -> i32 {
+    let c = Color::Rgb { r: 10, g: 20, b: 12 };
+    match c {
+        Color::Rgb { r, g, b } => r + g + b,
+        Color::Black => 0,
+    }
+}
+"#;
+    let asm = compile_to_asm(src);
+    let store_count = asm.lines().filter(|l| l.trim().starts_with("str")).count();
+    assert!(
+        store_count >= 4,
+        "expected ≥4 str instructions for named variant construction (discriminant + 3 fields)\nasm:\n{asm}"
+    );
+}

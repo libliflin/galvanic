@@ -30,12 +30,23 @@ use std::collections::HashMap;
 use crate::ast::{BinOp, Block, Expr, ExprKind, ItemKind, Pat, SourceFile, Stmt, StmtKind, StructKind, TyKind};
 use crate::ir::{IrBinOp, Instr, IrFn, IrTy, IrValue, Module};
 
-/// Enum variant registry: maps enum name → (variant name → (discriminant, field_count)).
+/// Enum variant registry: maps enum name → (variant name → (discriminant, field_names)).
 ///
 /// FLS §15: Enumerations. Each variant is assigned an integer discriminant
-/// starting at 0. `field_count` is 0 for unit variants and N for tuple
-/// variants with N positional fields. Named-field variants are future work.
-type EnumVariantInfo = (i32, usize);
+/// starting at 0.
+///
+/// `field_names` is the ordered list of field names:
+/// - Unit variants: empty `vec![]`.
+/// - Tuple variants: positional placeholders `vec![""; N]` (names unused).
+/// - Named-field variants: actual field names in declaration order.
+///
+/// `field_names.len()` is the field count for all variant kinds.
+/// Named variants use the field names to map construction / pattern fields to
+/// the correct stack slot (`base + 1 + declaration_index`).
+///
+/// Cache-line note: `Vec<String>` adds one heap pointer per variant entry.
+/// At this milestone the registry is build-time only and not on a hot path.
+type EnumVariantInfo = (i32, Vec<String>);
 type EnumDefs = HashMap<String, HashMap<String, EnumVariantInfo>>;
 
 // ── FLS citations added in this module ───────────────────────────────────────
@@ -127,6 +138,9 @@ fn expr_contains_call(expr: &Expr) -> bool {
         ExprKind::StructLit { fields, .. } => {
             fields.iter().any(|(_, v)| expr_contains_call(v))
         }
+        ExprKind::EnumVariantLit { fields, .. } => {
+            fields.iter().any(|(_, v)| expr_contains_call(v))
+        }
         ExprKind::FieldAccess { receiver, .. } => expr_contains_call(receiver),
         // Leaves: literals, paths, unit — none contain calls.
         _ => false,
@@ -198,6 +212,9 @@ fn expr_contains_break_with_value(expr: &Expr) -> bool {
         ExprKind::StructLit { fields, .. } => {
             fields.iter().any(|(_, v)| expr_contains_break_with_value(v))
         }
+        ExprKind::EnumVariantLit { fields, .. } => {
+            fields.iter().any(|(_, v)| expr_contains_break_with_value(v))
+        }
         ExprKind::FieldAccess { receiver, .. } => expr_contains_break_with_value(receiver),
         // Do NOT recurse into nested loops — their `break` belongs to them.
         ExprKind::Loop(_) | ExprKind::While { .. } | ExprKind::WhileLet { .. } | ExprKind::For { .. } => false,
@@ -256,9 +273,9 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                 }
             }
             ItemKind::Enum(e) => {
-                // FLS §15: Collect variants with auto-discriminants and field counts.
-                // Unit variants have field_count = 0; tuple variants have field_count = N.
-                // Named-field variants are not yet supported.
+                // FLS §15: Collect variants with auto-discriminants and field names.
+                // Unit variants: empty field list. Tuple variants: positional
+                // placeholder names. Named-field variants: actual declaration-order names.
                 let enum_name = e.name.text(source).to_owned();
                 let mut variants: HashMap<String, EnumVariantInfo> = HashMap::new();
                 for (discriminant, variant) in e.variants.iter().enumerate() {
@@ -266,15 +283,23 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                     let variant_name = variant.name.text(source).to_owned();
                     match &variant.kind {
                         EnumVariantKind::Unit => {
-                            variants.insert(variant_name, (discriminant as i32, 0));
+                            variants.insert(variant_name, (discriminant as i32, vec![]));
                         }
                         EnumVariantKind::Tuple(fields) => {
-                            variants.insert(variant_name, (discriminant as i32, fields.len()));
+                            // Positional placeholders — names unused; only count matters.
+                            variants.insert(
+                                variant_name,
+                                (discriminant as i32, vec!["".to_owned(); fields.len()]),
+                            );
                         }
-                        EnumVariantKind::Named(_) => {
-                            return Err(LowerError::Unsupported(
-                                "named-field enum variants not yet supported".into(),
-                            ));
+                        // FLS §15.3: Named-field variant. Store names in declaration order
+                        // so that construction and patterns can map name → slot index.
+                        EnumVariantKind::Named(fields) => {
+                            let names: Vec<String> = fields
+                                .iter()
+                                .map(|f| f.name.text(source).to_owned())
+                                .collect();
+                            variants.insert(variant_name, (discriminant as i32, names));
                         }
                     }
                 }
@@ -364,7 +389,7 @@ fn lower_fn(
         {
             let type_name = segs[0].text(source);
             if let Some(variants) = enum_defs.get(type_name) {
-                let max_fields = variants.values().map(|&(_, fc)| fc).max().unwrap_or(0);
+                let max_fields = variants.values().map(|(_, names)| names.len()).max().unwrap_or(0);
                 let regs_needed = 1 + max_fields;
                 if reg_idx + regs_needed > 8 {
                     return Err(LowerError::Unsupported(
@@ -649,7 +674,7 @@ impl<'src> LowerCtx<'src> {
                 self.enum_defs
                     .get(enum_name)
                     .and_then(|v| v.get(variant_name))
-                    .map(|&(disc, _)| disc)
+                    .map(|(disc, _)| *disc)
                     .ok_or_else(|| LowerError::Unsupported(format!(
                         "unknown enum variant `{enum_name}::{variant_name}` in pattern"
                     )))
@@ -789,6 +814,67 @@ impl<'src> LowerCtx<'src> {
                         return Ok(());
                 }
 
+                // FLS §15.3 + §6.11: Named-field enum variant construction.
+                //
+                // `let x = Color::Rgb { r: 255, g: 0, b: 0 }` — an `EnumVariantLit`
+                // expression. Layout: slot 0 = discriminant, slots 1..N = fields in
+                // declaration order (matching `EnumVariantInfo.1`).
+                //
+                // Fields in the literal may appear in any source order; they are
+                // stored in declaration order for stable slot indexing by patterns.
+                //
+                // FLS §6.1.2:37–45: All stores are runtime instructions.
+                // Cache-line note: N+1 consecutive slots; same layout as tuple variants.
+                if let Some(init_expr) = init.as_ref()
+                    && let ExprKind::EnumVariantLit { path, fields: lit_fields } = &init_expr.kind
+                    && path.len() == 2
+                {
+                    let enum_name = path[0].text(self.source);
+                    let variant_name = path[1].text(self.source);
+                    if let Some((discriminant, field_names)) = self.enum_defs
+                        .get(enum_name)
+                        .and_then(|v| v.get(variant_name))
+                        .cloned()
+                    {
+                        let field_count = field_names.len();
+                        if lit_fields.len() != field_count {
+                            return Err(LowerError::Unsupported(format!(
+                                "enum variant `{enum_name}::{variant_name}` expects {field_count} named fields, got {}",
+                                lit_fields.len()
+                            )));
+                        }
+                        // Allocate discriminant slot + one slot per field.
+                        let base_slot = self.alloc_slot()?;
+                        for _ in 0..field_count {
+                            self.alloc_slot()?;
+                        }
+                        self.locals.insert(var_name, base_slot);
+                        self.local_enum_types.insert(base_slot, enum_name.to_owned());
+                        // Store discriminant.
+                        let disc_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(disc_reg, discriminant));
+                        self.instrs.push(Instr::Store { src: disc_reg, slot: base_slot });
+                        // Store each field in declaration order.
+                        // FLS §6.11: Fields evaluated in source order but stored in
+                        // declaration order for layout stability.
+                        for (field_idx, field_name) in field_names.iter().enumerate() {
+                            let slot = base_slot + 1 + field_idx as u8;
+                            let field_init = lit_fields
+                                .iter()
+                                .find(|(f, _)| f.text(self.source) == field_name.as_str())
+                                .ok_or_else(|| {
+                                    LowerError::Unsupported(format!(
+                                        "missing field `{field_name}` in `{enum_name}::{variant_name}` literal"
+                                    ))
+                                })?;
+                            let val = self.lower_expr(&field_init.1, &IrTy::I32)?;
+                            let src = self.val_to_reg(val)?;
+                            self.instrs.push(Instr::Store { src, slot });
+                        }
+                        return Ok(());
+                    }
+                }
+
                 // FLS §15: Enum tuple variant construction — `let x = Enum::Variant(f0, f1, ...)`.
                 //
                 // A two-segment path callee in a call expression is an enum tuple variant
@@ -806,10 +892,12 @@ impl<'src> LowerCtx<'src> {
                 {
                     let enum_name = segs[0].text(self.source);
                     let variant_name = segs[1].text(self.source);
-                    if let Some(&(discriminant, field_count)) = self.enum_defs
+                    if let Some((discriminant, field_names)) = self.enum_defs
                         .get(enum_name)
                         .and_then(|v| v.get(variant_name))
+                        .cloned()
                     {
+                        let field_count = field_names.len();
                         if args.len() != field_count {
                             return Err(LowerError::Unsupported(format!(
                                 "enum variant `{enum_name}::{variant_name}` expects {field_count} fields, got {}",
@@ -857,15 +945,18 @@ impl<'src> LowerCtx<'src> {
                 {
                     let enum_name = segs[0].text(self.source);
                     let variant_name = segs[1].text(self.source);
-                    if let Some(&(discriminant, 0)) = self.enum_defs
+                    if let Some((discriminant, field_names)) = self.enum_defs
                         .get(enum_name)
                         .and_then(|v| v.get(variant_name))
+                        .cloned()
+                        .filter(|(_, names)| names.is_empty())
                     {
                         // Compute max field count across all variants of this enum.
                         let max_fields = self.enum_defs
                             .get(enum_name)
-                            .map(|v| v.values().map(|&(_, fc)| fc).max().unwrap_or(0))
+                            .map(|v| v.values().map(|(_, names)| names.len()).max().unwrap_or(0))
                             .unwrap_or(0);
+                        let _ = field_names; // unit variant has no fields
                         let base_slot = self.alloc_slot()?;
                         for _ in 0..max_fields {
                             self.alloc_slot()?; // Reserve field slots (uninitialized for unit variant).
@@ -1011,7 +1102,7 @@ impl<'src> LowerCtx<'src> {
                 let discriminant = self.enum_defs
                     .get(enum_name)
                     .and_then(|variants| variants.get(variant_name))
-                    .map(|&(disc, _)| disc)
+                    .map(|(disc, _)| *disc)
                     .ok_or_else(|| {
                         LowerError::Unsupported(format!(
                             "unknown path `{enum_name}::{variant_name}` (not an enum variant)"
@@ -1360,7 +1451,7 @@ impl<'src> LowerCtx<'src> {
                         let discriminant = self.enum_defs
                             .get(enum_name)
                             .and_then(|v| v.get(variant_name))
-                            .map(|&(disc, _)| disc)
+                            .map(|(disc, _)| *disc)
                             .ok_or_else(|| LowerError::Unsupported(format!(
                                 "unknown enum variant `{enum_name}::{variant_name}` in pattern"
                             )))?;
@@ -1492,6 +1583,12 @@ impl<'src> LowerCtx<'src> {
                     Pat::TupleStruct { .. } => {
                         return Err(LowerError::Unsupported(
                             "TupleStruct pattern in if-let not yet supported".into(),
+                        ));
+                    }
+                    // FLS §5.3 + §15.3: StructVariant pattern in if-let — future milestone.
+                    Pat::StructVariant { .. } => {
+                        return Err(LowerError::Unsupported(
+                            "StructVariant pattern in if-let not yet supported".into(),
                         ));
                     }
                 }
@@ -1875,7 +1972,7 @@ impl<'src> LowerCtx<'src> {
                                         self.enum_defs
                                             .get(enum_name)
                                             .and_then(|v| v.get(variant_name))
-                                            .map(|&(disc, _)| disc)
+                                            .map(|(disc, _)| *disc)
                                             .ok_or_else(|| LowerError::Unsupported(format!(
                                                 "unknown enum variant `{enum_name}::{variant_name}` in match pattern"
                                             )))?
@@ -1920,7 +2017,7 @@ impl<'src> LowerCtx<'src> {
                                     let discriminant = self.enum_defs
                                         .get(enum_name)
                                         .and_then(|v| v.get(variant_name))
-                                        .map(|&(disc, _)| disc)
+                                        .map(|(disc, _)| *disc)
                                         .ok_or_else(|| LowerError::Unsupported(format!(
                                             "unknown enum variant `{enum_name}::{variant_name}`"
                                         )))?;
@@ -1970,6 +2067,85 @@ impl<'src> LowerCtx<'src> {
                                     self.instrs.push(Instr::Store { src: body_reg, slot: phi_slot });
                                     self.instrs.push(Instr::Branch(exit_label));
                                     for name in &bound { self.locals.remove(*name); }
+                                    self.instrs.push(Instr::Label(next_label));
+                                    continue;
+                                }
+                                // FLS §5.3 + §15.3: Named-field enum variant pattern (value-returning match).
+                                //
+                                // `Enum::Variant { field, … }` matches by discriminant then binds
+                                // named fields. Fields are mapped to slots by declaration order
+                                // (`EnumVariantInfo.1`), not by source order in the pattern.
+                                //
+                                // FLS §6.1.2:37–45: All instructions are runtime.
+                                // Cache-line note: ~5 + 2×N instructions per arm.
+                                Pat::StructVariant { path: segs, fields: pat_fields } => {
+                                    if segs.len() != 2 {
+                                        return Err(LowerError::Unsupported(
+                                            "struct variant pattern path must have two segments".into(),
+                                        ));
+                                    }
+                                    let enum_name = segs[0].text(self.source);
+                                    let variant_name = segs[1].text(self.source);
+                                    let (discriminant, field_names) = self.enum_defs
+                                        .get(enum_name)
+                                        .and_then(|v| v.get(variant_name))
+                                        .cloned()
+                                        .ok_or_else(|| LowerError::Unsupported(format!(
+                                            "unknown enum variant `{enum_name}::{variant_name}`"
+                                        )))?;
+                                    let base = enum_base_slot.ok_or_else(|| {
+                                        LowerError::Unsupported(
+                                            "StructVariant pattern requires enum variable scrutinee".into(),
+                                        )
+                                    })?;
+                                    // Discriminant check.
+                                    let s_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                                    let p_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::LoadImm(p_reg, discriminant));
+                                    let cmp_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::BinOp {
+                                        op: IrBinOp::Eq,
+                                        dst: cmp_reg,
+                                        lhs: s_reg,
+                                        rhs: p_reg,
+                                    });
+                                    self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
+                                    // Install named field bindings by declaration order.
+                                    let mut bound_sv: Vec<&str> = Vec::new();
+                                    for (fname_span, fp) in pat_fields.iter() {
+                                        let fname = fname_span.text(self.source);
+                                        let field_idx = field_names.iter().position(|n| n == fname)
+                                            .ok_or_else(|| LowerError::Unsupported(format!(
+                                                "enum variant `{enum_name}::{variant_name}` has no field `{fname}`"
+                                            )))?;
+                                        match fp {
+                                            Pat::Ident(bind_span) => {
+                                                let bind_name = bind_span.text(self.source);
+                                                let fslot = base + 1 + field_idx as u8;
+                                                let bslot = self.alloc_slot()?;
+                                                let breg = self.alloc_reg()?;
+                                                self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                                self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                                self.locals.insert(bind_name, bslot);
+                                                bound_sv.push(bind_name);
+                                            }
+                                            Pat::Wildcard => {} // ignore field
+                                            _ => return Err(LowerError::Unsupported(
+                                                "only ident/wildcard sub-patterns in StructVariant fields".into(),
+                                            )),
+                                        }
+                                    }
+                                    if let Some(guard) = &arm.guard {
+                                        let gv = self.lower_expr(guard, &IrTy::Bool)?;
+                                        let gr = self.val_to_reg(gv)?;
+                                        self.instrs.push(Instr::CondBranch { reg: gr, label: next_label });
+                                    }
+                                    let body_val = self.lower_expr(&arm.body, ret_ty)?;
+                                    let body_reg = self.val_to_reg(body_val)?;
+                                    self.instrs.push(Instr::Store { src: body_reg, slot: phi_slot });
+                                    self.instrs.push(Instr::Branch(exit_label));
+                                    for name in &bound_sv { self.locals.remove(*name); }
                                     self.instrs.push(Instr::Label(next_label));
                                     continue;
                                 }
@@ -2068,6 +2244,36 @@ impl<'src> LowerCtx<'src> {
                                         self.instrs.push(Instr::Store { src: breg, slot: bslot });
                                         self.locals.insert(fname, bslot);
                                         names.push(fname);
+                                    }
+                                }
+                                names
+                            }
+                            // FLS §5.3 + §15.3: Named-field variant default arm.
+                            Pat::StructVariant { path: segs, fields: pat_fields } if segs.len() == 2 => {
+                                let enum_name = segs[0].text(self.source);
+                                let variant_name = segs[1].text(self.source);
+                                let field_names = self.enum_defs
+                                    .get(enum_name)
+                                    .and_then(|v| v.get(variant_name))
+                                    .map(|(_, names)| names.clone())
+                                    .unwrap_or_default();
+                                let base = enum_base_slot.ok_or_else(|| LowerError::Unsupported(
+                                    "StructVariant default arm requires enum variable scrutinee".into(),
+                                ))?;
+                                let mut names: Vec<&str> = Vec::new();
+                                for (fname_span, fp) in pat_fields.iter() {
+                                    let fname = fname_span.text(self.source);
+                                    if let Pat::Ident(bind_span) = fp {
+                                        let bind_name = bind_span.text(self.source);
+                                        if let Some(idx) = field_names.iter().position(|n| n == fname) {
+                                            let fslot = base + 1 + idx as u8;
+                                            let bslot = self.alloc_slot()?;
+                                            let breg = self.alloc_reg()?;
+                                            self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                            self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                            self.locals.insert(bind_name, bslot);
+                                            names.push(bind_name);
+                                        }
                                     }
                                 }
                                 names
@@ -2257,7 +2463,7 @@ impl<'src> LowerCtx<'src> {
                                         self.enum_defs
                                             .get(enum_name)
                                             .and_then(|v| v.get(variant_name))
-                                            .map(|&(disc, _)| disc)
+                                            .map(|(disc, _)| *disc)
                                             .ok_or_else(|| LowerError::Unsupported(format!(
                                                 "unknown enum variant `{enum_name}::{variant_name}` in match pattern"
                                             )))?
@@ -2294,7 +2500,7 @@ impl<'src> LowerCtx<'src> {
                                     let discriminant = self.enum_defs
                                         .get(enum_name)
                                         .and_then(|v| v.get(variant_name))
-                                        .map(|&(disc, _)| disc)
+                                        .map(|(disc, _)| *disc)
                                         .ok_or_else(|| LowerError::Unsupported(format!(
                                             "unknown enum variant `{enum_name}::{variant_name}`"
                                         )))?;
@@ -2339,6 +2545,72 @@ impl<'src> LowerCtx<'src> {
                                     self.lower_expr(&arm.body, &IrTy::Unit)?;
                                     self.instrs.push(Instr::Branch(exit_label));
                                     for name in &bound { self.locals.remove(*name); }
+                                    self.instrs.push(Instr::Label(next_label));
+                                    continue;
+                                }
+                                // FLS §5.3 + §15.3: Named-field variant pattern (unit-return match).
+                                Pat::StructVariant { path: segs, fields: pat_fields } => {
+                                    if segs.len() != 2 {
+                                        return Err(LowerError::Unsupported(
+                                            "struct variant pattern path must have two segments".into(),
+                                        ));
+                                    }
+                                    let enum_name = segs[0].text(self.source);
+                                    let variant_name = segs[1].text(self.source);
+                                    let (discriminant, field_names) = self.enum_defs
+                                        .get(enum_name)
+                                        .and_then(|v| v.get(variant_name))
+                                        .cloned()
+                                        .ok_or_else(|| LowerError::Unsupported(format!(
+                                            "unknown enum variant `{enum_name}::{variant_name}`"
+                                        )))?;
+                                    let base = enum_base_slot.ok_or_else(|| LowerError::Unsupported(
+                                        "StructVariant pattern requires enum variable scrutinee".into(),
+                                    ))?;
+                                    let s_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                                    let p_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::LoadImm(p_reg, discriminant));
+                                    let cmp_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::BinOp {
+                                        op: IrBinOp::Eq,
+                                        dst: cmp_reg,
+                                        lhs: s_reg,
+                                        rhs: p_reg,
+                                    });
+                                    self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
+                                    let mut bound_sv: Vec<&str> = Vec::new();
+                                    for (fname_span, fp) in pat_fields.iter() {
+                                        let fname = fname_span.text(self.source);
+                                        let field_idx = field_names.iter().position(|n| n == fname)
+                                            .ok_or_else(|| LowerError::Unsupported(format!(
+                                                "enum variant `{enum_name}::{variant_name}` has no field `{fname}`"
+                                            )))?;
+                                        match fp {
+                                            Pat::Ident(bind_span) => {
+                                                let bind_name = bind_span.text(self.source);
+                                                let fslot = base + 1 + field_idx as u8;
+                                                let bslot = self.alloc_slot()?;
+                                                let breg = self.alloc_reg()?;
+                                                self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                                self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                                self.locals.insert(bind_name, bslot);
+                                                bound_sv.push(bind_name);
+                                            }
+                                            Pat::Wildcard => {}
+                                            _ => return Err(LowerError::Unsupported(
+                                                "only ident/wildcard sub-patterns in StructVariant fields".into(),
+                                            )),
+                                        }
+                                    }
+                                    if let Some(guard) = &arm.guard {
+                                        let gv = self.lower_expr(guard, &IrTy::Bool)?;
+                                        let gr = self.val_to_reg(gv)?;
+                                        self.instrs.push(Instr::CondBranch { reg: gr, label: next_label });
+                                    }
+                                    self.lower_expr(&arm.body, &IrTy::Unit)?;
+                                    self.instrs.push(Instr::Branch(exit_label));
+                                    for name in &bound_sv { self.locals.remove(*name); }
                                     self.instrs.push(Instr::Label(next_label));
                                     continue;
                                 }
@@ -2418,6 +2690,36 @@ impl<'src> LowerCtx<'src> {
                                         self.instrs.push(Instr::Store { src: breg, slot: bslot });
                                         self.locals.insert(fname, bslot);
                                         names.push(fname);
+                                    }
+                                }
+                                names
+                            }
+                            // FLS §5.3 + §15.3: Named-field variant default arm (unit-return match).
+                            Pat::StructVariant { path: segs, fields: pat_fields } if segs.len() == 2 => {
+                                let enum_name = segs[0].text(self.source);
+                                let variant_name = segs[1].text(self.source);
+                                let field_names = self.enum_defs
+                                    .get(enum_name)
+                                    .and_then(|v| v.get(variant_name))
+                                    .map(|(_, names)| names.clone())
+                                    .unwrap_or_default();
+                                let base = enum_base_slot.ok_or_else(|| LowerError::Unsupported(
+                                    "StructVariant default arm requires enum variable scrutinee".into(),
+                                ))?;
+                                let mut names: Vec<&str> = Vec::new();
+                                for (fname_span, fp) in pat_fields.iter() {
+                                    let fname = fname_span.text(self.source);
+                                    if let Pat::Ident(bind_span) = fp {
+                                        let bind_name = bind_span.text(self.source);
+                                        if let Some(idx) = field_names.iter().position(|n| n == fname) {
+                                            let fslot = base + 1 + idx as u8;
+                                            let bslot = self.alloc_slot()?;
+                                            let breg = self.alloc_reg()?;
+                                            self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                            self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                            self.locals.insert(bind_name, bslot);
+                                            names.push(bind_name);
+                                        }
                                     }
                                 }
                                 names
@@ -2504,7 +2806,7 @@ impl<'src> LowerCtx<'src> {
                                 let en_name = en.clone();
                                 let max_fields = self.enum_defs
                                     .get(en_name.as_str())
-                                    .map(|v| v.values().map(|&(_, fc)| fc).max().unwrap_or(0))
+                                    .map(|v| v.values().map(|(_, names)| names.len()).max().unwrap_or(0))
                                     .unwrap_or(0);
                                 Some((base_slot, max_fields))
                             } else {
@@ -3065,7 +3367,7 @@ impl<'src> LowerCtx<'src> {
                             self.enum_defs
                                 .get(enum_name)
                                 .and_then(|v| v.get(variant_name))
-                                .map(|&(disc, _)| disc)
+                                .map(|(disc, _)| *disc)
                                 .ok_or_else(|| LowerError::Unsupported(format!(
                                     "unknown enum variant `{enum_name}::{variant_name}` in while-let pattern"
                                 )))?
@@ -3091,6 +3393,12 @@ impl<'src> LowerCtx<'src> {
                     Pat::TupleStruct { .. } => {
                         return Err(LowerError::Unsupported(
                             "TupleStruct pattern in while-let not yet supported".into(),
+                        ));
+                    }
+                    // FLS §5.3 + §15.3: StructVariant pattern in while-let — future milestone.
+                    Pat::StructVariant { .. } => {
+                        return Err(LowerError::Unsupported(
+                            "StructVariant pattern in while-let not yet supported".into(),
                         ));
                     }
                 }

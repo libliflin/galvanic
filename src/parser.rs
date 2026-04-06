@@ -1363,6 +1363,43 @@ impl<'src> Parser<'src> {
                     return self.parse_struct_lit(segments[0]);
                 }
 
+                // FLS §6.11 + §15.3: Named-field enum variant construction.
+                //
+                // `Enum::Variant { field: expr, … }` — a two-segment path followed
+                // by a brace-delimited field list. Disambiguated from a block by
+                // requiring `Ident :` or `}` after `{`.
+                //
+                // FLS §6.11: Struct expressions apply to enum variants with named
+                // fields. `restrict_struct_lit` suppresses this inside if/while/for
+                // conditions (same restriction as plain struct literals).
+                if segments.len() == 2
+                    && !self.restrict_struct_lit
+                    && self.peek_kind() == TokenKind::OpenBrace
+                    && (self.peek_nth(1) == TokenKind::CloseBrace
+                        || (self.peek_nth(1) == TokenKind::Ident
+                            && self.peek_nth(2) == TokenKind::Colon))
+                {
+                    let path = segments;
+                    let path_start = path[0];
+                    self.advance(); // eat `{`
+                    let mut fields: Vec<(crate::ast::Span, Box<crate::ast::Expr>)> = Vec::new();
+                    while self.peek_kind() != TokenKind::CloseBrace {
+                        let field_name = self.expect(TokenKind::Ident)?;
+                        self.expect(TokenKind::Colon)?;
+                        let val = self.parse_expr()?;
+                        fields.push((field_name, Box::new(val)));
+                        if !self.eat(TokenKind::Comma) {
+                            break;
+                        }
+                    }
+                    let end_span = self.current_span();
+                    self.expect(TokenKind::CloseBrace)?;
+                    return Ok(crate::ast::Expr {
+                        kind: crate::ast::ExprKind::EnumVariantLit { path, fields },
+                        span: path_start.to(end_span),
+                    });
+                }
+
                 let path_end = *segments.last().unwrap();
                 Ok(Expr {
                     kind: ExprKind::Path(segments),
@@ -1722,6 +1759,34 @@ impl<'src> Parser<'src> {
                         }
                         self.expect(TokenKind::CloseParen)?;
                         return Ok(Pat::TupleStruct { path: segments, fields });
+                    }
+                    // FLS §5.3: Named-field struct/variant pattern — `Enum::Variant { field, … }`.
+                    // A two-segment path followed by `{` with `Ident` or `}` inside.
+                    // Shorthand `{ field }` is treated as `{ field: field }`.
+                    if segments.len() == 2
+                        && self.peek_kind() == TokenKind::OpenBrace
+                        && (self.peek_nth(1) == TokenKind::CloseBrace
+                            || self.peek_nth(1) == TokenKind::Ident)
+                    {
+                        self.advance(); // consume `{`
+                        let mut pat_fields: Vec<(crate::ast::Span, Pat)> = Vec::new();
+                        while self.peek_kind() != TokenKind::CloseBrace {
+                            let field_name = self.expect(TokenKind::Ident)?;
+                            // Explicit `field: pat` form.
+                            let field_pat = if self.peek_kind() == TokenKind::Colon {
+                                self.advance(); // consume `:`
+                                self.parse_single_pattern()?
+                            } else {
+                                // Shorthand `{ field }` — binds field to an ident pattern of the same name.
+                                Pat::Ident(field_name)
+                            };
+                            pat_fields.push((field_name, field_pat));
+                            if !self.eat(TokenKind::Comma) {
+                                break;
+                            }
+                        }
+                        self.expect(TokenKind::CloseBrace)?;
+                        return Ok(Pat::StructVariant { path: segments, fields: pat_fields });
                     }
                     Ok(Pat::Path(segments))
                 } else {
