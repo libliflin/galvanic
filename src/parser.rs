@@ -1114,19 +1114,10 @@ impl<'src> Parser<'src> {
                         let field_name = self.expect(TokenKind::Ident)?;
                         let field_pat = if self.peek_kind() == TokenKind::Colon {
                             self.advance(); // consume `:`
-                            // Only ident and wildcard sub-patterns for now.
-                            match self.peek_kind() {
-                                TokenKind::Underscore => {
-                                    self.advance();
-                                    Pat::Wildcard
-                                }
-                                TokenKind::Ident => {
-                                    let s = self.current_span();
-                                    self.advance();
-                                    Pat::Ident(s)
-                                }
-                                _ => Pat::Wildcard,
-                            }
+                            // Recursive sub-pattern: supports nested struct/tuple
+                            // patterns after `:` (FLS §5.10.2). e.g.,
+                            // `let Outer { x, inner: Inner { a } } = ...;`
+                            self.parse_let_pattern()?
                         } else {
                             // Shorthand `{ field }` — bind as `{ field: field }`.
                             Pat::Ident(field_name)
