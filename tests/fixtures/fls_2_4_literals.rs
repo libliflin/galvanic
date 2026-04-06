@@ -40,4 +40,15 @@ fn main() {
     let _s: u8 = b'\n';
     let _t: u8 = b'\t';
     let _u: u8 = b'\\';
+
+    // FLS §2.4.6 — String literals
+    // A string literal has type `&str`.  The FLS does not provide standalone
+    // example programs for `.len()`; these are derived from the section's
+    // semantic description (§2.4.6: "a sequence of Unicode characters").
+    // Galvanic materialises the UTF-8 byte length as a runtime immediate.
+    let _v = "hello";           // 5 bytes
+    let _w: &str = "world!";    // 6 bytes
+    let _x = "";                // 0 bytes
+    let _y = "a\nb";            // 3 bytes (\n is 1 byte)
+    let _z = "a\tb";            // 3 bytes (\t is 1 byte)
 }

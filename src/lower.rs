@@ -1729,6 +1729,102 @@ fn parse_char_value(text: &str) -> Result<u32, LowerError> {
     }
 }
 
+/// Compute the UTF-8 byte length of a string literal from its source text.
+///
+/// FLS §2.4.6: String literals are enclosed in double quotes.  Raw string
+/// literals are enclosed in `r"..."` or `r#"..."#` (with matching hashes).
+/// Escape sequences count as the number of bytes they produce, not the number
+/// of source characters they occupy.
+///
+/// Supported escape sequences (FLS §2.4.6.1):
+///   `\n` → 1 byte (0x0A)   `\r` → 1 byte (0x0D)   `\t` → 1 byte (0x09)
+///   `\\` → 1 byte (0x5C)   `\"` → 1 byte (0x22)   `\0` → 1 byte (0x00)
+///   `\xNN` → 1 byte        `\u{NNNNNN}` → 1–4 UTF-8 bytes
+///   `\<newline>` → 0 bytes (line-continuation, trims following whitespace)
+///
+/// Raw string literals contain no escape sequences; each source char is
+/// counted by its UTF-8 byte length.
+fn parse_str_byte_len(text: &str) -> Result<usize, LowerError> {
+    // Strip raw-string prefix if present: `r"..."` or `r##"..."##`.
+    // Count the number of `#` characters (0–255).
+    if let Some(rest) = text.strip_prefix('r') {
+        let hashes = rest.bytes().take_while(|&b| b == b'#').count();
+        let inner_start = 1 + hashes; // skip opening '"'
+        let inner_end = rest.len() - 1 - hashes; // strip closing '"' + hashes
+        let inner = rest.get(inner_start..inner_end).ok_or_else(|| {
+            LowerError::Unsupported(format!("malformed raw string literal: {text}"))
+        })?;
+        // Raw string: no escape sequences.  Count UTF-8 bytes directly.
+        return Ok(inner.len());
+    }
+
+    // Regular string literal: `"..."`.
+    let inner = text
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .ok_or_else(|| {
+            LowerError::Unsupported(format!("malformed string literal: {text}"))
+        })?;
+
+    let mut bytes = 0usize;
+    let mut chars = inner.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            bytes += ch.len_utf8();
+            continue;
+        }
+        match chars.next() {
+            Some('n')  => bytes += 1,  // \n → 0x0A
+            Some('r')  => bytes += 1,  // \r → 0x0D
+            Some('t')  => bytes += 1,  // \t → 0x09
+            Some('\\') => bytes += 1,  // \\ → 0x5C
+            Some('"')  => bytes += 1,  // \" → 0x22
+            Some('0')  => bytes += 1,  // \0 → 0x00
+            Some('x')  => {
+                // \xNN — always 1 byte (ASCII, validated elsewhere)
+                chars.next(); // skip first hex digit
+                chars.next(); // skip second hex digit
+                bytes += 1;
+            }
+            Some('u') => {
+                // \u{NNNNNN} — skip until closing '}'
+                let mut code_point = 0u32;
+                // consume '{'
+                chars.next();
+                for ch2 in chars.by_ref() {
+                    if ch2 == '}' { break; }
+                    code_point = code_point * 16
+                        + ch2.to_digit(16).unwrap_or(0);
+                }
+                // Count UTF-8 bytes for the encoded code point.
+                if let Some(c) = char::from_u32(code_point) {
+                    bytes += c.len_utf8();
+                } else {
+                    bytes += 3; // replacement character (3 bytes) as fallback
+                }
+            }
+            Some('\n') => {
+                // Line-continuation: consume leading whitespace on next line.
+                while chars.peek().is_some_and(|c| c.is_whitespace()) {
+                    chars.next();
+                }
+                // Contributes 0 bytes to the string.
+            }
+            Some(other) => {
+                return Err(LowerError::Unsupported(format!(
+                    "unknown escape \\{other} in string literal: {text}"
+                )));
+            }
+            None => {
+                return Err(LowerError::Unsupported(format!(
+                    "unterminated escape in string literal: {text}"
+                )));
+            }
+        }
+    }
+    Ok(bytes)
+}
+
 fn lower_ty(ty: &crate::ast::Ty, source: &str) -> Result<IrTy, LowerError> {
     match &ty.kind {
         TyKind::Unit => Ok(IrTy::Unit),
@@ -1758,6 +1854,10 @@ fn lower_ty(ty: &crate::ast::Ty, source: &str) -> Result<IrTy, LowerError> {
                 // for bool). The char type is described in §2.4.5 (character
                 // literals) rather than in its own type section.
                 "char" => Ok(IrTy::U32),
+                // FLS §4.14 / §2.4.6: The unsized type `str` (as the inner type of `&str`).
+                // Galvanic materialises `&str` values as their byte length (an i32 immediate)
+                // at this milestone.  The pointer half is deferred.
+                "str" => Ok(IrTy::I32),
                 name => Err(LowerError::Unsupported(format!("type `{name}`"))),
             }
         }
@@ -2033,6 +2133,20 @@ struct LowerCtx<'src> {
     ///
     /// Cache-line note: a function pointer occupies one stack slot — same as i32.
     local_fn_ptr_slots: std::collections::HashSet<u8>,
+
+    /// Stack slots that hold a `&str` value.
+    ///
+    /// FLS §2.4.6: String literals have type `&str`. At this milestone galvanic
+    /// materialises only the byte length (a compile-time constant), so the slot
+    /// stores an `i32` equal to the UTF-8 byte count of the literal.  The string
+    /// pointer (for indexing, slicing, or display) is deferred to a future milestone.
+    ///
+    /// When `let s = "hello"` is lowered, slot N is stored in this set.  A
+    /// subsequent `.len()` call on `s` loads slot N rather than dispatching to
+    /// a struct/enum method table.
+    ///
+    /// Cache-line note: same slot footprint as a scalar `i32` — no extra cost.
+    local_str_slots: std::collections::HashSet<u8>,
 
     /// Captured outer-scope slots for each closure fn-pointer slot.
     ///
@@ -2368,6 +2482,7 @@ impl<'src> LowerCtx<'src> {
             local_tuple_lens: HashMap::new(),
             local_tuple_struct_types: HashMap::new(),
             local_fn_ptr_slots: std::collections::HashSet::new(),
+            local_str_slots: std::collections::HashSet::new(),
             local_capture_args: HashMap::new(),
             last_closure_captures: None,
         }
@@ -5031,6 +5146,12 @@ impl<'src> LowerCtx<'src> {
                             self.local_capture_args.insert(slot, cap_slots);
                         }
                     }
+                    // FLS §2.4.6: String literal stored in a let binding —
+                    // mark the slot so that `.len()` can load the byte-length
+                    // value without dispatching to the struct/enum method table.
+                    if matches!(init_expr.kind, ExprKind::LitStr) {
+                        self.local_str_slots.insert(slot);
+                    }
                 }
                 // Bring the new binding into scope only after the initializer
                 // has been fully evaluated. FLS §8.1: uninitialized let
@@ -5148,6 +5269,29 @@ impl<'src> LowerCtx<'src> {
                 // which is well below i32::MAX = 2,147,483,647).
                 // Byte values (0–255) also fit trivially.
                 self.instrs.push(Instr::LoadImm(r, code_point as i32));
+                Ok(IrValue::Reg(r))
+            }
+
+            // FLS §2.4.6: String literal — materialize the UTF-8 byte length as a
+            // runtime immediate.
+            //
+            // At this milestone galvanic materialises the *length* half of the `&str`
+            // fat pointer.  The pointer half (a `.rodata` address) is deferred to a
+            // future milestone when string indexing or display is needed.
+            //
+            // FLS §2.4.6: "A string literal is a sequence of Unicode characters …
+            // its type is `&str`."
+            // FLS §6.1.2:37–45: Even a literal emits a runtime `mov` — no
+            // constant folding across this boundary.
+            //
+            // Cache-line note: one `mov` instruction = 4 bytes (half a cache slot).
+            // String literal length fits in i32 (max realistic string is far below
+            // 2 GiB, the i32::MAX byte limit).
+            ExprKind::LitStr => {
+                let text = expr.span.text(self.source);
+                let byte_len = parse_str_byte_len(text)?;
+                let r = self.alloc_reg()?;
+                self.instrs.push(Instr::LoadImm(r, byte_len as i32));
                 Ok(IrValue::Reg(r))
             }
 
@@ -9477,6 +9621,43 @@ impl<'src> LowerCtx<'src> {
             // each). For a 2-field struct this is 8 bytes — fits in one cache line
             // alongside the `bl` instruction.
             ExprKind::MethodCall { receiver, method, args } => {
+                // ── &str built-in method dispatch (FLS §2.4.6) ──────────────
+                //
+                // `&str` is not a user-defined struct/enum, so it does not go
+                // through the mangled-name table.  Handle `.len()` specially
+                // before the struct/enum dispatch path.
+                //
+                // Case A: receiver is a string literal expression → length is
+                //         a compile-time constant.
+                // Case B: receiver is a path to a `local_str_slots` variable →
+                //         load the slot that holds the byte-length value.
+                //
+                // Both cases require no explicit arguments (FLS §6.12.2 —
+                // `len` takes `&self` only).
+                let method_name = method.text(self.source);
+                if method_name == "len" && args.is_empty() {
+                    // Case A: `"hello".len()` — literal receiver.
+                    if let ExprKind::LitStr = &receiver.kind {
+                        let text = receiver.span.text(self.source);
+                        let byte_len = parse_str_byte_len(text)?;
+                        let r = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(r, byte_len as i32));
+                        return Ok(IrValue::Reg(r));
+                    }
+                    // Case B: `s.len()` where `s` is a known `&str` variable.
+                    if let ExprKind::Path(segs) = &receiver.kind
+                        && segs.len() == 1
+                    {
+                        let var_name = segs[0].text(self.source);
+                        if let Some(&slot) = self.locals.get(var_name)
+                            && self.local_str_slots.contains(&slot) {
+                                let r = self.alloc_reg()?;
+                                self.instrs.push(Instr::Load { dst: r, slot });
+                                return Ok(IrValue::Reg(r));
+                            }
+                    }
+                }
+
                 // Resolve the receiver to a struct or enum variable's base slot and type.
                 //
                 // FLS §6.12.2: Method call expressions — `receiver.method(args)`.
@@ -9514,7 +9695,7 @@ impl<'src> LowerCtx<'src> {
                 };
 
                 // Build mangled function name: TypeName__method_name.
-                let method_name = method.text(self.source);
+                // (`method_name` was already computed above for &str early return.)
                 let mangled = format!("{recv_type_name}__{method_name}");
 
                 // Load receiver fields into registers to pass as leading arguments.
