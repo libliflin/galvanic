@@ -549,50 +549,89 @@ fn lower_fn(
     // (discriminant + field registers).
     let mut reg_idx: usize = 0;
 
-    // FLS §10.1: If this is a method with a self parameter, spill the struct
-    // fields from leading registers and register `self` as a struct variable.
+    // FLS §10.1: If this is a method with a self parameter, spill the self
+    // value from leading registers.
+    //
+    // For struct self: each field arrives in a separate register (x0..x{N-1}).
+    // For enum self: the discriminant arrives in x0, then field registers follow
+    // (x1..x{max_fields}), matching the enum-parameter calling convention.
     //
     // `&self` and `self` are lowered identically at this milestone: the
     // caller passes each field as an individual integer register argument
     // (a value copy). The method body can read but not mutate the original.
     //
-    // ARM64 ABI: fields arrive in x0..x{N-1}; each is spilled to a stack
-    // slot so that `self.field` resolves via the existing field-access path.
+    // FLS §10.1, §11, §15: impl blocks are legal for both struct and enum types.
     //
     // Cache-line note: N field spills = N `str` instructions (4 bytes each).
     if let Some(type_name) = impl_type {
-        let field_names = struct_defs.get(type_name).ok_or_else(|| {
-            LowerError::Unsupported(format!(
-                "impl for unknown struct type `{type_name}`"
-            ))
-        })?;
-        let n_fields = field_names.len();
-        if n_fields > 0 {
-            if reg_idx + n_fields > 8 {
+        if let Some(field_names) = struct_defs.get(type_name) {
+            // Struct self parameter: one register per field.
+            let n_fields = field_names.len();
+            if n_fields > 0 {
+                if reg_idx + n_fields > 8 {
+                    return Err(LowerError::Unsupported(
+                        "self fields exceed ARM64 register window".into(),
+                    ));
+                }
+                let base_slot = ctx.alloc_slot()?;
+                for _ in 1..n_fields {
+                    ctx.alloc_slot()?;
+                }
+                for fi in 0..n_fields {
+                    ctx.instrs.push(Instr::Store {
+                        src: (reg_idx + fi) as u8,
+                        slot: base_slot + fi as u8,
+                    });
+                }
+                // Register `self` as a struct variable pointing to base_slot.
+                // `self` is a keyword but &'static str coerces to &'src str.
+                ctx.locals.insert("self", base_slot);
+                ctx.local_struct_types.insert(base_slot, type_name.to_owned());
+                reg_idx += n_fields;
+            } else {
+                // Unit struct: no fields to pass. Register `self` with a dummy slot.
+                let base_slot = ctx.alloc_slot()?;
+                ctx.locals.insert("self", base_slot);
+                ctx.local_struct_types.insert(base_slot, type_name.to_owned());
+            }
+        } else if let Some(variants) = enum_defs.get(type_name) {
+            // Enum self parameter: discriminant + up to max_fields registers.
+            //
+            // FLS §15: Enum values carry a discriminant (tag) and variant-specific
+            // fields. The calling convention mirrors enum parameter passing:
+            // x{reg_idx} = discriminant, x{reg_idx+1}..x{reg_idx+max_fields} = fields.
+            //
+            // FLS §6.1.2:37–45: All spills are runtime store instructions.
+            // Cache-line note: (1 + max_fields) × 4-byte `str` per enum self spill.
+            let max_fields = variants.values().map(|(_, names)| names.len()).max().unwrap_or(0);
+            let regs_needed = 1 + max_fields;
+            if reg_idx + regs_needed > 8 {
                 return Err(LowerError::Unsupported(
-                    "self fields exceed ARM64 register window".into(),
+                    "enum self exceeds ARM64 register window".into(),
                 ));
             }
             let base_slot = ctx.alloc_slot()?;
-            for _ in 1..n_fields {
+            for _ in 0..max_fields {
                 ctx.alloc_slot()?;
             }
-            for fi in 0..n_fields {
+            // Spill discriminant.
+            ctx.instrs.push(Instr::Store { src: reg_idx as u8, slot: base_slot });
+            // Spill field registers.
+            for fi in 0..max_fields {
                 ctx.instrs.push(Instr::Store {
-                    src: (reg_idx + fi) as u8,
-                    slot: base_slot + fi as u8,
+                    src: (reg_idx + fi + 1) as u8,
+                    slot: base_slot + 1 + fi as u8,
                 });
             }
-            // Register `self` as a struct variable pointing to base_slot.
-            // `self` is a keyword but &'static str coerces to &'src str.
+            // Register `self` as an enum variable so match expressions on `self`
+            // use the discriminant-based dispatch path.
             ctx.locals.insert("self", base_slot);
-            ctx.local_struct_types.insert(base_slot, type_name.to_owned());
-            reg_idx += n_fields;
+            ctx.local_enum_types.insert(base_slot, type_name.to_owned());
+            reg_idx += regs_needed;
         } else {
-            // Unit struct: no fields to pass. Register `self` with a dummy slot.
-            let base_slot = ctx.alloc_slot()?;
-            ctx.locals.insert("self", base_slot);
-            ctx.local_struct_types.insert(base_slot, type_name.to_owned());
+            return Err(LowerError::Unsupported(format!(
+                "impl for unknown type `{type_name}`"
+            )));
         }
     }
     for param in fn_def.params.iter() {
@@ -714,6 +753,11 @@ fn lower_fn(
         // Determine the number of self fields. The impl_type is guaranteed Some
         // when self_kind is Some (enforced by the parser / call site).
         let type_name = impl_type.expect("impl_type must be set when self_kind is RefMut");
+        if enum_defs.contains_key(type_name) {
+            return Err(LowerError::Unsupported(
+                "&mut self methods on enum types not yet supported".into(),
+            ));
+        }
         let n_fields = struct_defs.get(type_name).map(|f| f.len() as u8).unwrap_or(0);
         // Run the body (statements + tail), discarding the unit tail value.
         // Fields in the method's local slots will have been updated by body code.
@@ -4863,8 +4907,11 @@ impl<'src> LowerCtx<'src> {
             // each). For a 2-field struct this is 8 bytes — fits in one cache line
             // alongside the `bl` instruction.
             ExprKind::MethodCall { receiver, method, args } => {
-                // Resolve the receiver to a struct variable's base slot and type.
-                let (recv_base_slot, struct_type_name) = match &receiver.kind {
+                // Resolve the receiver to a struct or enum variable's base slot and type.
+                //
+                // FLS §6.12.2: Method call expressions — `receiver.method(args)`.
+                // FLS §10.1, §11: Methods may be defined on both struct and enum types.
+                let (recv_base_slot, recv_type_name) = match &receiver.kind {
                     ExprKind::Path(segs) if segs.len() == 1 => {
                         let var_name = segs[0].text(self.source);
                         let base_slot =
@@ -4873,13 +4920,15 @@ impl<'src> LowerCtx<'src> {
                                     "undefined variable `{var_name}` in method call"
                                 ))
                             })?;
+                        // Check both struct and enum type registries.
                         let type_name = self
                             .local_struct_types
                             .get(&base_slot)
+                            .or_else(|| self.local_enum_types.get(&base_slot))
                             .ok_or_else(|| {
                                 LowerError::Unsupported(format!(
-                                    "variable `{var_name}` is not a struct; method calls on \
-                                     non-struct types are not yet supported"
+                                    "variable `{var_name}` is not a struct or enum; \
+                                     method calls on primitive types are not yet supported"
                                 ))
                             })?
                             .clone();
@@ -4894,30 +4943,53 @@ impl<'src> LowerCtx<'src> {
 
                 // Build mangled function name: TypeName__method_name.
                 let method_name = method.text(self.source);
-                let mangled = format!("{struct_type_name}__{method_name}");
+                let mangled = format!("{recv_type_name}__{method_name}");
 
-                // Load each struct field into a register to pass as leading args.
+                // Load receiver fields into registers to pass as leading arguments.
                 //
-                // FLS §10.1: `self` fields are passed in declaration order.
-                // Field 0 → x0, field 1 → x1, etc., matching the method's
-                // parameter-spill order in lower_fn.
-                let field_names = self
-                    .struct_defs
-                    .get(struct_type_name.as_str())
-                    .ok_or_else(|| {
-                        LowerError::Unsupported(format!(
-                            "unknown struct type `{struct_type_name}` in method call"
-                        ))
-                    })?;
-                let n_fields = field_names.len();
+                // For struct receivers: one register per field (field 0 → x0, ...).
+                // For enum receivers: discriminant in x0, then field registers x1..x{max_fields}.
+                //
+                // FLS §10.1: `self` is passed by value in declaration order, matching
+                // the parameter-spill order in lower_fn.
+                // FLS §6.1.2:37–45: All loads are runtime instructions.
+                // Cache-line note: N loads = N × 4-byte `ldr` instructions.
+                let mut arg_regs: Vec<u8> = Vec::with_capacity(8);
+                let n_self_regs: usize;
 
-                let mut arg_regs: Vec<u8> = Vec::with_capacity(n_fields + args.len());
-
-                for fi in 0..n_fields {
-                    let slot = recv_base_slot + fi as u8;
-                    let reg = self.alloc_reg()?;
-                    self.instrs.push(Instr::Load { dst: reg, slot });
-                    arg_regs.push(reg);
+                if let Some(field_names) = self.struct_defs.get(recv_type_name.as_str()).cloned() {
+                    // Struct receiver: load each field.
+                    let n_fields = field_names.len();
+                    n_self_regs = n_fields;
+                    for fi in 0..n_fields {
+                        let slot = recv_base_slot + fi as u8;
+                        let reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: reg, slot });
+                        arg_regs.push(reg);
+                    }
+                } else if let Some(variants) = self.enum_defs.get(recv_type_name.as_str()).cloned() {
+                    // Enum receiver: load discriminant then field registers.
+                    //
+                    // FLS §15: Enum calling convention — discriminant first, fields follow.
+                    // FLS §10.1: `&mut self` on enums not yet supported (value semantics
+                    // for mutation would require write-back of discriminant + all fields).
+                    let max_fields = variants.values().map(|(_, names)| names.len()).max().unwrap_or(0);
+                    n_self_regs = 1 + max_fields;
+                    // Load discriminant.
+                    let disc_reg = self.alloc_reg()?;
+                    self.instrs.push(Instr::Load { dst: disc_reg, slot: recv_base_slot });
+                    arg_regs.push(disc_reg);
+                    // Load field registers.
+                    for fi in 0..max_fields {
+                        let slot = recv_base_slot + 1 + fi as u8;
+                        let reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: reg, slot });
+                        arg_regs.push(reg);
+                    }
+                } else {
+                    return Err(LowerError::Unsupported(format!(
+                        "unknown type `{recv_type_name}` in method call"
+                    )));
                 }
 
                 // Lower explicit arguments (left-to-right, FLS §6.4:14).
@@ -4934,8 +5006,9 @@ impl<'src> LowerCtx<'src> {
                 }
 
                 // FLS §10.1: Check whether this is a `&mut self` method.
-                // If so, emit `CallMut` which writes modified fields back to the
-                // caller's struct slots after the `bl`. Otherwise use a plain `Call`.
+                // For struct receivers: emit `CallMut` which writes modified fields
+                // back to the caller's struct slots after the `bl`.
+                // For enum receivers: `&mut self` is not yet supported.
                 //
                 // FLS §6.12.2: Method call expressions are dispatched to the
                 // mangled function `TypeName__method_name`.
@@ -4944,7 +5017,7 @@ impl<'src> LowerCtx<'src> {
 
                 self.has_calls = true;
                 if is_mut_self {
-                    // `&mut self` call: write back x0..x{N-1} to struct slots.
+                    // `&mut self` call: write back x0..x{n_self_regs-1} to receiver slots.
                     // The callee emits `RetFields`, placing modified field values
                     // in x0..x{N-1} before returning. We store them back here.
                     //
@@ -4957,7 +5030,7 @@ impl<'src> LowerCtx<'src> {
                         name: mangled,
                         args: arg_regs,
                         write_back_slot: recv_base_slot,
-                        n_fields: n_fields as u8,
+                        n_fields: n_self_regs as u8,
                     });
                     Ok(IrValue::Unit)
                 } else {
