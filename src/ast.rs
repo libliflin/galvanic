@@ -564,6 +564,30 @@ pub enum ExprKind {
         fields: Vec<(Span, Box<Expr>)>,
     },
 
+    /// A named-field enum variant construction expression. FLS §6.11 + §15.
+    ///
+    /// Example: `Color::Rgb { r: 255, g: 0, b: 0 }`
+    ///
+    /// FLS §6.11: Struct expressions also apply to enum variants with named
+    /// fields. The two-segment path identifies the variant; fields are given
+    /// by name and may appear in any order.
+    ///
+    /// FLS §15.3: Named-field enum variants (`Variant { field: Type }`).
+    ///
+    /// FLS §6.11 AMBIGUOUS: The spec does not state whether the shorthand
+    /// form (`Color::Rgb { r, g, b }` with implicit `r: r`) is a struct
+    /// expression or separate syntax. Galvanic only supports the explicit
+    /// `field: expr` form at this milestone.
+    ///
+    /// Cache-line note: shares layout with `StructLit`; the extra `Vec<Span>`
+    /// for the two-segment path adds one pointer (8 bytes) per construction site.
+    EnumVariantLit {
+        /// Two-segment path: `[enum_name, variant_name]`.
+        path: Vec<Span>,
+        /// Field initialisers in source order: (field_name, value).
+        fields: Vec<(Span, Box<Expr>)>,
+    },
+
     /// A field access expression. FLS §6.13.
     ///
     /// Example: `point.x`
@@ -910,6 +934,27 @@ pub enum Pat {
         path: Vec<Span>,
         /// Positional field patterns.
         fields: Vec<Pat>,
+    },
+
+    /// Named-field struct/variant pattern: `Enum::Variant { field, ... }`.
+    ///
+    /// FLS §5.3: Struct patterns. A named-field enum variant pattern matches
+    /// by discriminant and optionally binds named fields.
+    ///
+    /// Example: `match c { Color::Rgb { r, g, b } => r + g + b, _ => 0 }`
+    ///
+    /// The shorthand form `{ field }` is sugar for `{ field: field }` (an
+    /// identifier pattern binding `field` from the variant's field of the
+    /// same name). The `_` wildcard (`{ field: _ }` or `{ .. }`) is future work.
+    ///
+    /// Cache-line note: each field binding lowers to ~2 instructions (ldr +
+    /// str); N field bindings cost ~2N instructions (8N bytes) per arm.
+    StructVariant {
+        /// Two-segment path: `[enum_name, variant_name]`.
+        path: Vec<Span>,
+        /// Field patterns: `(field_name_span, pattern)` in source order.
+        /// The shorthand `{ x }` is represented as `(x_span, Pat::Ident(x_span))`.
+        fields: Vec<(Span, Pat)>,
     },
 }
 
