@@ -6056,3 +6056,162 @@ fn runtime_tuple_struct_emits_stores_and_loads() {
         "expected `ldr` for tuple struct field loads in assembly:\n{asm}"
     );
 }
+
+// ── Milestone 55: impl blocks on tuple structs ────────────────────────────────
+
+/// Milestone 55: `&self` method on a one-field tuple struct.
+///
+/// FLS §14.2: Tuple struct types. FLS §10.1: Associated items.
+/// FLS §6.12.2: Method call expressions.
+#[test]
+fn milestone_55_method_first_field() {
+    let src = r#"
+struct Wrap(i32);
+impl Wrap {
+    fn val(&self) -> i32 { self.0 }
+}
+fn main() -> i32 {
+    let w = Wrap(7);
+    w.val()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected exit 7, got {exit_code}");
+}
+
+/// Milestone 55: `&self` method on a two-field tuple struct returning sum.
+///
+/// FLS §14.2, §10.1, §6.5.5: Tuple struct field arithmetic inside a method.
+#[test]
+fn milestone_55_method_returns_field_sum() {
+    let src = r#"
+struct Point(i32, i32);
+impl Point {
+    fn sum(&self) -> i32 { self.0 + self.1 }
+}
+fn main() -> i32 {
+    let p = Point(3, 4);
+    p.sum()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected exit 7, got {exit_code}");
+}
+
+/// Milestone 55: `&self` method returns second field.
+///
+/// FLS §14.2, §10.1: Second field indexed at slot base + 1.
+#[test]
+fn milestone_55_method_second_field() {
+    let src = r#"
+struct Point(i32, i32);
+impl Point {
+    fn y(&self) -> i32 { self.1 }
+}
+fn main() -> i32 {
+    let p = Point(10, 5);
+    p.y()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "expected exit 5, got {exit_code}");
+}
+
+/// Milestone 55: `&self` method with an extra parameter.
+///
+/// FLS §14.2, §10.1, §9: Extra parameters follow self fields in registers.
+#[test]
+fn milestone_55_method_with_extra_param() {
+    let src = r#"
+struct Wrap(i32);
+impl Wrap {
+    fn add(&self, n: i32) -> i32 { self.0 + n }
+}
+fn main() -> i32 {
+    let w = Wrap(3);
+    w.add(4)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected exit 7, got {exit_code}");
+}
+
+/// Milestone 55: method called on a tuple struct parameter passed to a function.
+///
+/// FLS §14.2, §10.1: Method dispatch works on tuple struct passed as value.
+#[test]
+fn milestone_55_method_on_parameter() {
+    let src = r#"
+struct Wrap(i32);
+impl Wrap {
+    fn val(&self) -> i32 { self.0 }
+}
+fn extract(w: Wrap) -> i32 { w.val() }
+fn main() -> i32 {
+    let w = Wrap(9);
+    extract(w)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 9, "expected exit 9, got {exit_code}");
+}
+
+/// Milestone 55: method result used in arithmetic.
+///
+/// FLS §14.2, §10.1, §6.5.5: Method return value participates in an expression.
+#[test]
+fn milestone_55_method_result_in_arithmetic() {
+    let src = r#"
+struct Wrap(i32);
+impl Wrap {
+    fn val(&self) -> i32 { self.0 }
+}
+fn main() -> i32 {
+    let w = Wrap(3);
+    w.val() * 2 + 1
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected exit 7, got {exit_code}");
+}
+
+/// Milestone 55: multiple methods on the same tuple struct.
+///
+/// FLS §14.2, §10.1, §11: Multiple methods in one impl block, each mangled
+/// separately (`Point__x`, `Point__y`).
+#[test]
+fn milestone_55_multiple_methods() {
+    let src = r#"
+struct Point(i32, i32);
+impl Point {
+    fn x(&self) -> i32 { self.0 }
+    fn y(&self) -> i32 { self.1 }
+}
+fn main() -> i32 {
+    let p = Point(2, 5);
+    p.x() + p.y()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected exit 7, got {exit_code}");
+}
+
+// ── Assembly inspection: milestone 55 ────────────────────────────────────────
+
+/// Milestone 55: method on a tuple struct emits a `bl` to the mangled name.
+///
+/// FLS §14.2, §10.1: `impl Wrap` methods compile to `Wrap__method_name`.
+/// FLS §6.1.2:37–45: The call is a runtime instruction.
+#[test]
+fn runtime_tuple_struct_method_emits_bl_mangled_name() {
+    let src = "struct Wrap(i32);\nimpl Wrap { fn val(&self) -> i32 { self.0 } }\nfn main() -> i32 { let w = Wrap(7); w.val() }\n";
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("Wrap__val"),
+        "expected mangled name `Wrap__val` in assembly:\n{asm}"
+    );
+    assert!(
+        asm.contains("bl"),
+        "expected `bl` instruction for method call in assembly:\n{asm}"
+    );
+}
