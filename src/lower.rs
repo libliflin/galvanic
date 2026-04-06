@@ -259,6 +259,9 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     // stack slot. A struct with N fields occupies N consecutive slots.
     let mut struct_defs: HashMap<String, Vec<String>> = HashMap::new();
     let mut enum_defs: EnumDefs = HashMap::new();
+    // FLS §14.2: Tuple struct field counts. Maps struct name → field count.
+    // Used to recognize constructor calls `Point(a, b)` during let-binding lowering.
+    let mut tuple_struct_defs: HashMap<String, usize> = HashMap::new();
 
     for item in &src.items {
         match &item.kind {
@@ -275,12 +278,11 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                     StructKind::Unit => {
                         struct_defs.insert(struct_name, vec![]);
                     }
-                    StructKind::Tuple(_) => {
-                        // Tuple structs use positional .0/.1 access — deferred.
-                        // FLS §14.2: Tuple struct fields are accessed by index.
-                        return Err(LowerError::Unsupported(
-                            "tuple struct items not yet supported".into(),
-                        ));
+                    StructKind::Tuple(fields) => {
+                        // FLS §14.2: Tuple struct. Record field count so that
+                        // constructor calls `Point(a, b)` can allocate the right
+                        // number of consecutive stack slots.
+                        tuple_struct_defs.insert(struct_name, fields.len());
                     }
                 }
             }
@@ -411,7 +413,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     for item in &src.items {
         match &item.kind {
             ItemKind::Fn(fn_def) => {
-                let (ir_fn, next_label) = lower_fn(fn_def, source, &struct_defs, &enum_defs, &method_self_kinds, &struct_return_fns, &enum_return_fns, None, label_base)?;
+                let (ir_fn, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &enum_defs, &method_self_kinds, &struct_return_fns, &enum_return_fns, None, label_base)?;
                 label_base = next_label;
                 fns.push(ir_fn);
             }
@@ -440,6 +442,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         method,
                         source,
                         &struct_defs,
+                        &tuple_struct_defs,
                         &enum_defs,
                         &method_self_kinds,
                         &struct_return_fns,
@@ -497,6 +500,7 @@ fn lower_fn(
     fn_def: &crate::ast::FnDef,
     source: &str,
     struct_defs: &HashMap<String, Vec<String>>,
+    tuple_struct_defs: &HashMap<String, usize>,
     enum_defs: &EnumDefs,
     method_self_kinds: &HashMap<String, SelfKind>,
     struct_return_fns: &HashMap<String, String>,
@@ -563,7 +567,7 @@ fn lower_fn(
         Some(block) => block,
     };
 
-    let mut ctx = LowerCtx::new(source, ret_ty, struct_defs, enum_defs, method_self_kinds, struct_return_fns, enum_return_fns, start_label);
+    let mut ctx = LowerCtx::new(source, ret_ty, struct_defs, tuple_struct_defs, enum_defs, method_self_kinds, struct_return_fns, enum_return_fns, start_label);
 
     // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
     // to stack slots. Each parameter slot is allocated in parameter order
@@ -1054,6 +1058,18 @@ struct LowerCtx<'src> {
     /// struct's base slot. Field `i` is at `base_slot + i`, each slot 8 bytes.
     struct_defs: &'src HashMap<String, Vec<String>>,
 
+    /// Tuple struct definitions: maps struct name → field count.
+    ///
+    /// FLS §14.2: Tuple struct items. When `let p = Point(a, b)` is lowered
+    /// and `Point` is a known tuple struct, N consecutive stack slots are
+    /// allocated and the base slot is registered in `local_tuple_lens`.
+    /// Subsequent `.0`, `.1` field accesses use the existing tuple field
+    /// access path (FLS §6.10).
+    ///
+    /// Cache-line note: same layout as anonymous tuples — N consecutive
+    /// 8-byte slots, with `.i` at `base_slot + i`.
+    tuple_struct_defs: &'src HashMap<String, usize>,
+
     /// Enum type definitions: maps enum name → (variant name → discriminant).
     ///
     /// FLS §15: Enumerations. Unit variants are assigned integer discriminants
@@ -1140,6 +1156,7 @@ impl<'src> LowerCtx<'src> {
         source: &'src str,
         fn_ret_ty: IrTy,
         struct_defs: &'src HashMap<String, Vec<String>>,
+        tuple_struct_defs: &'src HashMap<String, usize>,
         enum_defs: &'src EnumDefs,
         method_self_kinds: &'src HashMap<String, SelfKind>,
         struct_return_fns: &'src HashMap<String, String>,
@@ -1157,6 +1174,7 @@ impl<'src> LowerCtx<'src> {
             loop_stack: Vec::new(),
             fn_ret_ty,
             struct_defs,
+            tuple_struct_defs,
             enum_defs,
             method_self_kinds,
             struct_return_fns,
@@ -1868,6 +1886,42 @@ impl<'src> LowerCtx<'src> {
                         self.instrs.push(Instr::Store { src, slot: base_slot + i as u8 });
                     }
                     return Ok(());
+                }
+
+                // FLS §14.2: Tuple struct constructor `let p = Point(a, b)`.
+                //
+                // A tuple struct constructor is syntactically a call expression
+                // with a single-segment callee path that names a known tuple struct.
+                // Lower it like a tuple literal: allocate N consecutive stack slots
+                // and store each argument value in order.
+                //
+                // The base slot is registered in `local_tuple_lens` so that
+                // subsequent `.0`, `.1` field access expressions (FLS §6.10) resolve
+                // to `base_slot + index`, reusing the existing tuple field access path.
+                //
+                // FLS §6.1.2:37–45: All stores are runtime instructions — no const folding.
+                // Cache-line note: N stores per construction, identical to a tuple literal.
+                if let Some(init_expr) = init.as_ref()
+                    && let ExprKind::Call { callee, args } = &init_expr.kind
+                    && let ExprKind::Path(segs) = &callee.kind
+                    && segs.len() == 1
+                {
+                    let ctor_name = segs[0].text(self.source);
+                    if let Some(&n) = self.tuple_struct_defs.get(ctor_name) {
+                        let base_slot = self.alloc_slot()?;
+                        for _ in 1..n {
+                            self.alloc_slot()?;
+                        }
+                        self.locals.insert(var_name, base_slot);
+                        self.local_tuple_lens.insert(base_slot, n);
+                        // FLS §6.4:14 / §6.10: Arguments evaluated left-to-right.
+                        for (i, arg_expr) in args.iter().enumerate() {
+                            let val = self.lower_expr(arg_expr, &IrTy::I32)?;
+                            let src = self.val_to_reg(val)?;
+                            self.instrs.push(Instr::Store { src, slot: base_slot + i as u8 });
+                        }
+                        return Ok(());
+                    }
                 }
 
                 // Normal (non-struct) let binding.

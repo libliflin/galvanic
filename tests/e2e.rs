@@ -5916,3 +5916,143 @@ fn runtime_struct_match_emits_ldr_without_discriminant_check() {
         "expected `add` for field arithmetic in assembly:\n{asm}"
     );
 }
+
+// ── Milestone 54: Tuple structs compile to runtime ARM64 ──────────────────────
+
+/// Milestone 54: simple tuple struct — first field access.
+///
+/// FLS §14.2: Tuple structs have positional fields accessed via `.0`, `.1`.
+/// FLS §6.10: Tuple field access expressions.
+#[test]
+fn milestone_54_tuple_struct_first_field() {
+    let src = r#"
+struct Point(i32, i32);
+fn main() -> i32 {
+    let p = Point(7, 3);
+    p.0
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected exit 7, got {exit_code}");
+}
+
+/// Milestone 54: tuple struct — second field access.
+///
+/// FLS §14.2, §6.10: Second positional field at slot base_slot + 1.
+#[test]
+fn milestone_54_tuple_struct_second_field() {
+    let src = r#"
+struct Point(i32, i32);
+fn main() -> i32 {
+    let p = Point(3, 9);
+    p.1
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 9, "expected exit 9, got {exit_code}");
+}
+
+/// Milestone 54: tuple struct — sum of both fields.
+///
+/// FLS §14.2, §6.10: Both fields accessible and usable in arithmetic.
+#[test]
+fn milestone_54_tuple_struct_field_sum() {
+    let src = r#"
+struct Pair(i32, i32);
+fn main() -> i32 {
+    let p = Pair(4, 6);
+    p.0 + p.1
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "expected exit 10, got {exit_code}");
+}
+
+/// Milestone 54: tuple struct — fields from parameters.
+///
+/// FLS §14.2: Constructor arguments may be any expression including parameters.
+#[test]
+fn milestone_54_tuple_struct_from_params() {
+    let src = r#"
+struct Pair(i32, i32);
+fn make(a: i32, b: i32) -> i32 {
+    let p = Pair(a, b);
+    p.0 - p.1
+}
+fn main() -> i32 {
+    make(10, 3)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected exit 7, got {exit_code}");
+}
+
+/// Milestone 54: tuple struct — three fields.
+///
+/// FLS §14.2: Tuple structs may have any number of positional fields.
+#[test]
+fn milestone_54_tuple_struct_three_fields_middle() {
+    let src = r#"
+struct Triple(i32, i32, i32);
+fn main() -> i32 {
+    let t = Triple(1, 5, 9);
+    t.1
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "expected exit 5, got {exit_code}");
+}
+
+/// Milestone 54: tuple struct — field used in if-else.
+///
+/// FLS §14.2, §6.17: Tuple struct field access as condition operand.
+#[test]
+fn milestone_54_tuple_struct_field_in_if() {
+    let src = r#"
+struct Wrap(i32);
+fn main() -> i32 {
+    let w = Wrap(3);
+    if w.0 > 0 { 1 } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected exit 1, got {exit_code}");
+}
+
+/// Milestone 54: tuple struct — passed to function.
+///
+/// FLS §14.2, §6.12.1: Tuple struct fields passed as function arguments.
+#[test]
+fn milestone_54_tuple_struct_field_passed_to_fn() {
+    let src = r#"
+struct Wrap(i32);
+fn inc(n: i32) -> i32 { n + 1 }
+fn main() -> i32 {
+    let w = Wrap(6);
+    inc(w.0)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected exit 7, got {exit_code}");
+}
+
+// ── Assembly inspection: milestone 54 ────────────────────────────────────────
+
+/// Milestone 54: tuple struct construction emits str instructions and field
+/// access emits ldr (same as anonymous tuple lowering).
+///
+/// FLS §14.2: Tuple struct fields occupy consecutive stack slots.
+/// FLS §6.1.2:37–45: All stores and loads are runtime instructions.
+#[test]
+fn runtime_tuple_struct_emits_stores_and_loads() {
+    let src = "struct Point(i32, i32);\nfn main() -> i32 { let p = Point(3, 4); p.0 + p.1 }\n";
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("str"),
+        "expected `str` for tuple struct field stores in assembly:\n{asm}"
+    );
+    assert!(
+        asm.contains("ldr"),
+        "expected `ldr` for tuple struct field loads in assembly:\n{asm}"
+    );
+}

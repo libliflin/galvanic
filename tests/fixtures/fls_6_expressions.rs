@@ -403,3 +403,26 @@ fn array_store_example() -> i32 {
     a[2] = 30;               // FLS §6.5.10 + §6.9: store to third element
     a[0] + a[1] + a[2]       // FLS §6.9: load all three — result is 60
 }
+
+// ── FLS §14.2 + §6.10 — Tuple struct construction and field access ────────────
+//
+// FLS §14.2: "A tuple struct is a struct with positional fields."
+// Tuple structs are constructed with call-like syntax: `Point(a, b)`.
+// Fields are accessed via integer indices: `.0`, `.1`.
+//
+// FLS §6.10: "A tuple expression is a parenthesized list of expressions."
+// Tuple struct fields use the same positional-index access mechanism as
+// anonymous tuples (FLS §6.13 for field access; §6.10 for the index syntax).
+//
+// Note: The FLS §14.2 entry describes tuple struct syntax but does not provide
+// a self-contained runnable example. This function is derived from the
+// combined semantics of §14.2 (struct item definition) and §6.10 (field access).
+//
+// Cache-line note: same slot layout as anonymous tuples — N consecutive
+// 8-byte slots, field `.i` at `base_slot + i`.
+struct Pair(i32, i32);
+
+fn tuple_struct_example() -> i32 {
+    let p = Pair(3, 7);  // FLS §14.2: constructor call syntax
+    p.0 + p.1            // FLS §6.10: positional field access (3 + 7 = 10)
+}
