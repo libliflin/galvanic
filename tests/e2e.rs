@@ -2535,3 +2535,114 @@ fn runtime_or_pattern_emits_orr_accumulation() {
     // Must still emit a conditional branch.
     assert!(asm.contains("cbz"), "expected cbz for arm skip branch");
 }
+
+// ── Milestone 33: identifier patterns in match bind the scrutinee ────────────
+//
+// FLS §5.1.4: An identifier pattern matches any value and binds it to a name
+// available in the arm body.
+//
+// Example: `match x { 0 => 0, n => n * 2 }` — `n` binds the scrutinee value
+// in the second arm, making it accessible as a local via a path expression.
+//
+// Lowering strategy:
+//   1. Identifier pattern always matches (no conditional branch).
+//   2. Load scrutinee from its spill slot into a new binding slot.
+//   3. Insert name → slot into `locals` before lowering arm body.
+//   4. Remove binding after body to avoid cross-arm pollution.
+//
+// FLS §6.1.2:37–45: The ldr/str pair for the binding emits at runtime —
+// not optimised away even for statically-known scrutinees.
+
+/// Milestone 33: identifier pattern as the only arm — binds and returns value.
+///
+/// `match x { n => n }` — `n` binds the scrutinee and the body returns it.
+/// FLS §5.1.4: Identifier pattern matches any value.
+#[test]
+fn milestone_33_ident_pattern_only_arm() {
+    let src = "fn main() -> i32 { let x = 7; match x { n => n } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected exit 7 from match {{ n => n }}, got {exit_code}");
+}
+
+/// Milestone 33: identifier pattern as catch-all after literal arm.
+///
+/// `match x { 0 => 0, n => n * 2 }` — `n` matches anything non-zero and
+/// doubles it. FLS §5.1.4 + FLS §6.5.5.
+#[test]
+fn milestone_33_ident_pattern_catch_all() {
+    let src = "\
+fn double_if_nonzero(x: i32) -> i32 {
+    match x {
+        0 => 0,
+        n => n * 2,
+    }
+}
+fn main() -> i32 { double_if_nonzero(5) }
+";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "expected exit 10 from double_if_nonzero(5), got {exit_code}");
+}
+
+/// Milestone 33: identifier pattern catch-all at zero.
+///
+/// FLS §5.1.4: Arms are tested in order. `0 => 0` fires before `n => n * 2`.
+#[test]
+fn milestone_33_ident_pattern_zero_arm_taken() {
+    let src = "\
+fn double_if_nonzero(x: i32) -> i32 {
+    match x {
+        0 => 0,
+        n => n * 2,
+    }
+}
+fn main() -> i32 { double_if_nonzero(0) }
+";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected exit 0 from double_if_nonzero(0), got {exit_code}");
+}
+
+/// Milestone 33: identifier pattern with arithmetic on bound value.
+///
+/// `match x { n => n + 3 }` — the binding is used in an expression.
+/// FLS §5.1.4 + FLS §6.3 (path expression resolves `n` to the binding slot).
+#[test]
+fn milestone_33_ident_pattern_arithmetic() {
+    let src = "fn main() -> i32 { let x = 4; match x { n => n + 3 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected exit 7 from match {{ n => n + 3 }}, got {exit_code}");
+}
+
+/// Milestone 33: identifier pattern on a function parameter.
+///
+/// FLS §5.1.4 + FLS §9: The scrutinee may be any expression — here a param.
+#[test]
+fn milestone_33_ident_pattern_on_parameter() {
+    let src = "\
+fn classify(x: i32) -> i32 {
+    match x {
+        0 => 100,
+        n => n,
+    }
+}
+fn main() -> i32 { classify(42) }
+";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected exit 42 from classify(42), got {exit_code}");
+}
+
+/// Milestone 33: assembly inspection — identifier pattern emits ldr+str binding.
+///
+/// FLS §5.1.4: The binding requires a runtime ldr (load scrutinee) + str (store
+/// to binding slot) pair. This is NOT optimised away even when the scrutinee is
+/// a constant — the spec requires runtime semantics (FLS §6.1.2:37–45).
+#[test]
+fn runtime_ident_pattern_emits_ldr_str_binding() {
+    let src = "fn main() -> i32 { let x = 5; match x { n => n * 2 } }\n";
+    let asm = compile_to_asm(src);
+    // Must load the scrutinee from its spill slot.
+    assert!(asm.contains("ldr"), "expected ldr for scrutinee load in ident pattern");
+    // Must store the value into the binding slot.
+    assert!(asm.contains("str"), "expected str for binding slot write in ident pattern");
+    // Must emit mul for the `n * 2` body expression.
+    assert!(asm.contains("mul"), "expected mul for n * 2 in arm body");
+}

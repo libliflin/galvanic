@@ -861,6 +861,7 @@ impl<'src> LowerCtx<'src> {
             }
 
             // FLS §6.18: Match expression.
+            // FLS §5.1.4: Identifier patterns — bind scrutinee to a name.
             //
             // `match scrutinee { pat0 => body0, ..., default => bodyN }`
             //
@@ -905,7 +906,10 @@ impl<'src> LowerCtx<'src> {
                 let has_bool_pat = |pat: &Pat| -> bool {
                     match pat {
                         Pat::LitBool(_) => true,
+                        // FLS §5.1.11: OR patterns can contain bool literal alternatives.
                         Pat::Or(alts) => alts.iter().any(|p| matches!(p, Pat::LitBool(_))),
+                        // FLS §5.1.4: Identifier patterns are type-agnostic; they
+                        // don't determine the scrutinee type on their own.
                         _ => false,
                     }
                 };
@@ -943,6 +947,31 @@ impl<'src> LowerCtx<'src> {
                                     self.instrs.push(Instr::Label(next_label));
                                     continue;
                                 }
+                                // FLS §5.1.4: Identifier pattern in non-last position —
+                                // always matches (like Wildcard) and binds scrutinee to name.
+                                //
+                                // Load scrutinee into a new slot keyed by the identifier name.
+                                // The arm body accesses it via a normal path expression (Load).
+                                // The binding is removed after the arm to avoid leaking into
+                                // subsequent arms (correct scoping per FLS §5.1.4).
+                                //
+                                // FLS §6.1.2:37–45: The ldr/str pair emits at runtime.
+                                // Cache-line note: 2 instructions (ldr + str = 8 bytes).
+                                Pat::Ident(span) => {
+                                    let name = span.text(self.source);
+                                    let bind_slot = self.alloc_slot()?;
+                                    let bind_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::Load { dst: bind_reg, slot: scrut_slot });
+                                    self.instrs.push(Instr::Store { src: bind_reg, slot: bind_slot });
+                                    self.locals.insert(name, bind_slot);
+                                    let body_val = self.lower_expr(&arm.body, ret_ty)?;
+                                    self.locals.remove(name);
+                                    let body_reg = self.val_to_reg(body_val)?;
+                                    self.instrs.push(Instr::Store { src: body_reg, slot: phi_slot });
+                                    self.instrs.push(Instr::Branch(exit_label));
+                                    self.instrs.push(Instr::Label(next_label));
+                                    continue;
+                                }
                                 // FLS §5.1.11: OR pattern — accumulate equality results.
                                 //
                                 // Strategy: matched_reg starts at 0; for each alternative,
@@ -968,6 +997,14 @@ impl<'src> LowerCtx<'src> {
                                             Pat::Or(_) => {
                                                 return Err(LowerError::Unsupported(
                                                     "nested OR patterns".into(),
+                                                ));
+                                            }
+                                            // FLS §5.1.4: Identifier patterns inside OR are
+                                            // not yet supported (binding semantics are complex
+                                            // when combined with OR alternatives).
+                                            Pat::Ident(_) => {
+                                                return Err(LowerError::Unsupported(
+                                                    "identifier pattern inside OR pattern".into(),
                                                 ));
                                             }
                                             _ => {
@@ -1046,7 +1083,24 @@ impl<'src> LowerCtx<'src> {
                         }
 
                         // Default arm — unconditional.
+                        // FLS §5.1.4: If the default arm has an identifier pattern,
+                        // bind the scrutinee to the name before lowering the body.
+                        let default_binding = match &default_arm[0].pat {
+                            Pat::Ident(span) => {
+                                let name = span.text(self.source);
+                                let bind_slot = self.alloc_slot()?;
+                                let bind_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::Load { dst: bind_reg, slot: scrut_slot });
+                                self.instrs.push(Instr::Store { src: bind_reg, slot: bind_slot });
+                                self.locals.insert(name, bind_slot);
+                                Some(name)
+                            }
+                            _ => None,
+                        };
                         let body_val = self.lower_expr(&default_arm[0].body, ret_ty)?;
+                        if let Some(name) = default_binding {
+                            self.locals.remove(name);
+                        }
                         let body_reg = self.val_to_reg(body_val)?;
                         self.instrs.push(Instr::Store { src: body_reg, slot: phi_slot });
 
@@ -1067,6 +1121,20 @@ impl<'src> LowerCtx<'src> {
                                     self.instrs.push(Instr::Label(next_label));
                                     continue;
                                 }
+                                // FLS §5.1.4: Identifier pattern — always matches, binds name.
+                                Pat::Ident(span) => {
+                                    let name = span.text(self.source);
+                                    let bind_slot = self.alloc_slot()?;
+                                    let bind_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::Load { dst: bind_reg, slot: scrut_slot });
+                                    self.instrs.push(Instr::Store { src: bind_reg, slot: bind_slot });
+                                    self.locals.insert(name, bind_slot);
+                                    self.lower_expr(&arm.body, &IrTy::Unit)?;
+                                    self.locals.remove(name);
+                                    self.instrs.push(Instr::Branch(exit_label));
+                                    self.instrs.push(Instr::Label(next_label));
+                                    continue;
+                                }
                                 // FLS §5.1.11: OR pattern — same accumulation strategy as
                                 // the I32|Bool branch above, but for unit-result arms.
                                 Pat::Or(alts) => {
@@ -1081,6 +1149,11 @@ impl<'src> LowerCtx<'src> {
                                             Pat::Or(_) => {
                                                 return Err(LowerError::Unsupported(
                                                     "nested OR patterns".into(),
+                                                ));
+                                            }
+                                            Pat::Ident(_) => {
+                                                return Err(LowerError::Unsupported(
+                                                    "identifier pattern inside OR pattern".into(),
                                                 ));
                                             }
                                             _ => {
@@ -1149,7 +1222,24 @@ impl<'src> LowerCtx<'src> {
                             self.instrs.push(Instr::Label(next_label));
                         }
 
+                        // Default arm — unconditional.
+                        // FLS §5.1.4: If the default arm has an identifier pattern, bind.
+                        let default_binding_unit = match &default_arm[0].pat {
+                            Pat::Ident(span) => {
+                                let name = span.text(self.source);
+                                let bind_slot = self.alloc_slot()?;
+                                let bind_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::Load { dst: bind_reg, slot: scrut_slot });
+                                self.instrs.push(Instr::Store { src: bind_reg, slot: bind_slot });
+                                self.locals.insert(name, bind_slot);
+                                Some(name)
+                            }
+                            _ => None,
+                        };
                         self.lower_expr(&default_arm[0].body, &IrTy::Unit)?;
+                        if let Some(name) = default_binding_unit {
+                            self.locals.remove(name);
+                        }
                         self.instrs.push(Instr::Label(exit_label));
                         Ok(IrValue::Unit)
                     }

@@ -604,6 +604,34 @@ match_negative_pattern:
     add     sp, sp, #32             // FLS §8.1: restore stack frame
     ret
 
+    // fn match_ident_pattern — FLS §9
+    .global match_ident_pattern
+match_ident_pattern:
+    sub     sp, sp, #32             // FLS §8.1: frame for 4 slot(s)
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    ldr     x0, [sp, #0              ] // FLS §8.1: load slot 0
+    str     x0, [sp, #8              ] // FLS §8.1: store slot 1
+    ldr     x1, [sp, #8              ] // FLS §8.1: load slot 1
+    mov     x2, #0                   // FLS §2.4.4.1: load imm 0
+    cmp     x1, x2               // FLS §6.5.3: compare (signed)
+    cset    x3, eq                    // FLS §6.5.3: x3 = (x1 == x2)
+    cbz     x3, .L1                     // FLS §6.17: branch if false
+    mov     x4, #0                   // FLS §2.4.4.1: load imm 0
+    str     x4, [sp, #16             ] // FLS §8.1: store slot 2
+    b       .L0                        // FLS §6.17: branch to end
+.L1:                              // FLS §6.17: branch target
+    ldr     x5, [sp, #8              ] // FLS §8.1: load slot 1
+    str     x5, [sp, #24             ] // FLS §8.1: store slot 3
+    ldr     x6, [sp, #24             ] // FLS §8.1: load slot 3
+    mov     x7, #2                   // FLS §2.4.4.1: load imm 2
+    mul     x8, x6, x7          // FLS §6.5.5: mul
+    str     x8, [sp, #16             ] // FLS §8.1: store slot 2
+.L0:                              // FLS §6.17: branch target
+    ldr     x9, [sp, #16             ] // FLS §8.1: load slot 2
+    mov     x0, x9              // FLS §6.19: return reg 9 → x0
+    add     sp, sp, #32             // FLS §8.1: restore stack frame
+    ret
+
     // ELF entry point — FLS §18.1
     .global _start
 _start:

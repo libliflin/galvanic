@@ -723,12 +723,26 @@ pub struct MatchArm {
 /// tuple, enum, and binding patterns are future work.
 ///
 /// FLS §5.1: Wildcard pattern `_` — matches any value without binding.
+/// FLS §5.1.4: Identifier patterns — bind the matched value to a name.
 /// FLS §5.2: Literal patterns — integer and boolean literals.
 /// FLS §5.1.11: Or patterns — `p0 | p1 | ...`.
 #[derive(Debug, Clone)]
 pub enum Pat {
     /// Wildcard pattern `_`. Matches any value. FLS §5.1.
     Wildcard,
+    /// Identifier pattern: matches any value and binds it to a name.
+    ///
+    /// FLS §5.1.4: "An identifier pattern matches any value and optionally
+    /// binds it to the identifier." The `Span` points to the identifier token
+    /// in the source text; call `span.text(source)` to recover the name.
+    ///
+    /// Example: `match x { 0 => 0, n => n * 2 }` — `n` is an identifier
+    /// pattern in the second arm. It always matches and binds `x` to `n`,
+    /// making `n` available in the arm body.
+    ///
+    /// Cache-line note: lowering emits 2 instructions (ldr scrut + str to
+    /// binding slot = 8 bytes) to install the binding before the arm body.
+    Ident(Span),
     /// Non-negative integer literal pattern. FLS §5.2.
     LitInt(u128),
     /// Negative integer literal pattern `-n`. FLS §5.2.
