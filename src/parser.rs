@@ -78,13 +78,26 @@ struct Parser<'src> {
     /// in-bounds: `self.tokens[cursor]` is valid for any `cursor` in
     /// `0..tokens.len()`.
     cursor: usize,
+    /// When `true`, struct literal expressions (`Name { field: expr }`) are
+    /// not parsed even if the lookahead suggests one.
+    ///
+    /// Set to `true` before parsing the condition of an `if`, `while`, or
+    /// `for` expression to resolve the `if foo { }` ambiguity: without this
+    /// flag, `foo {` would be parsed as the start of a struct literal instead
+    /// of a variable name followed by a block body.
+    ///
+    /// FLS §6.17 AMBIGUOUS: The FLS does not explicitly describe this
+    /// restriction; it follows from the Rust reference grammar rule that
+    /// struct expressions are not allowed in expression-without-struct-literal
+    /// positions (e.g., `if`/`while`/`for` conditions).
+    restrict_struct_lit: bool,
 }
 
 impl<'src> Parser<'src> {
     fn new(tokens: &'src [Token], src: &'src str) -> Self {
         // Guard: we require at least one token (the Eof sentinel).
         assert!(!tokens.is_empty(), "token slice must contain at least Eof");
-        Parser { tokens, src, cursor: 0 }
+        Parser { tokens, src, cursor: 0, restrict_struct_lit: false }
     }
 
     // ── Low-level token access ────────────────────────────────────────────────
@@ -96,6 +109,12 @@ impl<'src> Parser<'src> {
 
     fn peek_kind(&self) -> TokenKind {
         self.current().kind
+    }
+
+    /// Peek at the token `n` positions ahead of the cursor without consuming.
+    /// Returns `TokenKind::Eof` if the index is out of bounds.
+    fn peek_nth(&self, n: usize) -> TokenKind {
+        self.tokens.get(self.cursor + n).map(|t| t.kind).unwrap_or(TokenKind::Eof)
     }
 
     /// Advance past the current token and return it.
@@ -484,6 +503,46 @@ impl<'src> Parser<'src> {
         }
 
         Ok(fields)
+    }
+
+    /// Parse a struct literal expression `Name { field: expr, … }`.
+    ///
+    /// Called from `parse_primary` after the struct name (a single identifier)
+    /// has already been consumed and the lookahead confirms `{ Ident :` or `{}`.
+    ///
+    /// FLS §6.11: Struct expressions.
+    fn parse_struct_lit(&mut self, name: Span) -> Result<Expr, ParseError> {
+        let start = name;
+        self.expect(TokenKind::OpenBrace)?; // eat `{`
+
+        let mut fields = Vec::new();
+
+        while self.peek_kind() != TokenKind::CloseBrace
+            && self.peek_kind() != TokenKind::Eof
+        {
+            if self.peek_kind() != TokenKind::Ident {
+                return Err(self.error(format!(
+                    "expected field name in struct literal, found {:?}",
+                    self.peek_kind()
+                )));
+            }
+            let field_name = self.current_span();
+            self.advance();
+            self.expect(TokenKind::Colon)?;
+            let value = self.parse_expr()?;
+            fields.push((field_name, Box::new(value)));
+
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+        }
+
+        let end = self.current_span();
+        self.expect(TokenKind::CloseBrace)?;
+        Ok(Expr {
+            kind: ExprKind::StructLit { name, fields },
+            span: start.to(end),
+        })
     }
 
     /// Parse the parameter list between the `(` and `)`.
@@ -1267,7 +1326,7 @@ impl<'src> Parser<'src> {
                 Ok(Expr { kind: ExprKind::LitBool(false), span: start })
             }
 
-            // Path expression or function call — FLS §6.2, §6.3.1
+            // Path expression, function call, or struct literal — FLS §6.2, §6.3.1, §6.11
             TokenKind::Ident => {
                 let mut segments = vec![self.current_span()];
                 self.advance();
@@ -1281,6 +1340,27 @@ impl<'src> Parser<'src> {
                     } else {
                         return Err(self.error("expected identifier after `::`"));
                     }
+                }
+
+                // FLS §6.11: Struct literal — `Name { field: expr, … }`.
+                //
+                // Attempt struct literal only when:
+                // 1. The path is a single identifier (multi-segment paths are
+                //    not yet supported as struct literal heads).
+                // 2. The next token is `{`.
+                // 3. The token after `{` is either `}` (empty struct) or
+                //    `Ident :` (named field — distinguishes from a block with
+                //    a plain expression statement like `{ foo }`).
+                // 4. `restrict_struct_lit` is false (not inside an
+                //    `if`/`while`/`for` condition).
+                if segments.len() == 1
+                    && !self.restrict_struct_lit
+                    && self.peek_kind() == TokenKind::OpenBrace
+                    && (self.peek_nth(1) == TokenKind::CloseBrace
+                        || (self.peek_nth(1) == TokenKind::Ident
+                            && self.peek_nth(2) == TokenKind::Colon))
+                {
+                    return self.parse_struct_lit(segments[0]);
                 }
 
                 let path_end = *segments.last().unwrap();
@@ -1427,7 +1507,12 @@ impl<'src> Parser<'src> {
             let pat = self.parse_pattern()?;
             // The `=` separator between pattern and scrutinee.
             self.expect(TokenKind::Eq)?;
-            let scrutinee = Box::new(self.parse_expr()?);
+            // Restrict struct literals in scrutinee to avoid `if let P = Foo { }` ambiguity.
+            let prev_restrict = self.restrict_struct_lit;
+            self.restrict_struct_lit = true;
+            let scrutinee_result = self.parse_expr();
+            self.restrict_struct_lit = prev_restrict;
+            let scrutinee = Box::new(scrutinee_result?);
             let then_block = Box::new(self.parse_block()?);
 
             let else_expr = if self.eat(TokenKind::KwElse) {
@@ -1454,7 +1539,12 @@ impl<'src> Parser<'src> {
         }
 
         // FLS §6.17: regular if (or if-else) expression.
-        let cond = Box::new(self.parse_expr()?);
+        // Restrict struct literals in condition to avoid `if Foo { }` ambiguity.
+        let prev_restrict = self.restrict_struct_lit;
+        self.restrict_struct_lit = true;
+        let cond_result = self.parse_expr();
+        self.restrict_struct_lit = prev_restrict;
+        let cond = Box::new(cond_result?);
         let then_block = Box::new(self.parse_block()?);
 
         let else_expr = if self.eat(TokenKind::KwElse) {
@@ -1719,14 +1809,24 @@ impl<'src> Parser<'src> {
         if self.eat(TokenKind::KwLet) {
             let pat = self.parse_pattern()?;
             self.expect(TokenKind::Eq)?;
-            let scrutinee = Box::new(self.parse_expr()?);
+            // Restrict struct literals in scrutinee to avoid `while let P = Foo { }` ambiguity.
+            let prev_restrict = self.restrict_struct_lit;
+            self.restrict_struct_lit = true;
+            let scrutinee_result = self.parse_expr();
+            self.restrict_struct_lit = prev_restrict;
+            let scrutinee = Box::new(scrutinee_result?);
             let body = Box::new(self.parse_block()?);
             let span = start.to(body.span);
             return Ok(Expr { kind: ExprKind::WhileLet { pat, scrutinee, body }, span });
         }
 
         // FLS §6.15.3: regular while expression.
-        let cond = Box::new(self.parse_expr()?);
+        // Restrict struct literals in condition to avoid `while Foo { }` ambiguity.
+        let prev_restrict = self.restrict_struct_lit;
+        self.restrict_struct_lit = true;
+        let cond_result = self.parse_expr();
+        self.restrict_struct_lit = prev_restrict;
+        let cond = Box::new(cond_result?);
         let body = Box::new(self.parse_block()?);
         let span = start.to(body.span);
         Ok(Expr { kind: ExprKind::While { cond, body }, span })
@@ -1758,7 +1858,13 @@ impl<'src> Parser<'src> {
         self.advance();
 
         self.expect(TokenKind::KwIn)?;
-        let iter = Box::new(self.parse_expr()?);
+        // Restrict struct literals in the iterable expression to avoid
+        // `for x in Foo { }` ambiguity.
+        let prev_restrict = self.restrict_struct_lit;
+        self.restrict_struct_lit = true;
+        let iter_result = self.parse_expr();
+        self.restrict_struct_lit = prev_restrict;
+        let iter = Box::new(iter_result?);
         let body = Box::new(self.parse_block()?);
         let span = start.to(body.span);
         Ok(Expr { kind: ExprKind::For { pat, iter, body }, span })

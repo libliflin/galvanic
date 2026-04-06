@@ -544,11 +544,31 @@ pub enum ExprKind {
         args: Vec<Expr>,
     },
 
-    /// A field access expression. FLS §6.3.3.
+    /// A struct literal expression. FLS §6.11.
+    ///
+    /// Example: `Point { x: 1, y: 2 }`
+    ///
+    /// FLS §6.11: A struct expression constructs an instance of a struct type.
+    /// Each field must be initialised exactly once. The order of field initialisers
+    /// in the source need not match the declaration order; galvanic normalises to
+    /// declaration order during lowering.
+    ///
+    /// FLS §6.11 AMBIGUOUS: The spec does not specify whether shorthand field
+    /// initialisation (`Point { x, y }`) is part of the struct expression or a
+    /// separate syntactic form. Galvanic only supports the explicit `field: expr`
+    /// form at this milestone.
+    StructLit {
+        /// The struct type name (single identifier).
+        name: Span,
+        /// The field initialisers in source order: (field_name, value).
+        fields: Vec<(Span, Box<Expr>)>,
+    },
+
+    /// A field access expression. FLS §6.13.
     ///
     /// Example: `point.x`
     ///
-    /// FLS §6.3.3: A field access expression evaluates the receiver operand
+    /// FLS §6.13: A field access expression evaluates the receiver operand
     /// and then accesses one of its fields.
     FieldAccess {
         /// The receiver expression.
