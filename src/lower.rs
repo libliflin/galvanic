@@ -329,12 +329,18 @@ impl<'src> LowerCtx<'src> {
                 Ok(())
             }
 
-            // Expression statements — evaluate and discard.
-            // Not yet supported at this milestone.
-            StmtKind::Expr(_) => {
-                Err(LowerError::Unsupported(
-                    "expression statements (assignment, calls, etc.) not yet implemented".into(),
-                ))
+            // FLS §8.2: Expression statement — evaluate for side effects, discard value.
+            //
+            // Assignment and call expressions are the primary expression statements
+            // at this milestone. `lower_expr` is called with `IrTy::Unit` as the
+            // type hint; assignment and call handlers ignore `ret_ty`, so this is
+            // safe. Unsupported expression kinds will propagate their own errors.
+            //
+            // FLS §6.1.2:37–45: The expression executes at runtime; its result
+            // (if any) is discarded.
+            StmtKind::Expr(expr) => {
+                self.lower_expr(expr, &IrTy::Unit)?;
+                Ok(())
             }
 
             // FLS §8.2: Empty statements are no-ops.
@@ -574,6 +580,52 @@ impl<'src> LowerCtx<'src> {
                 self.instrs.push(Instr::Call { dst, name: fn_name, args: arg_regs });
 
                 Ok(IrValue::Reg(dst))
+            }
+
+            // FLS §6.5.10: Assignment expression `place = value`.
+            //
+            // The LHS must be a local variable path (a place expression). The
+            // RHS is evaluated at runtime and stored to the variable's stack
+            // slot, updating its value in place for subsequent reads.
+            //
+            // FLS §6.5.10: "The type of an assignment expression is the unit
+            // type ()."
+            // FLS §6.1.2:37–45: The store is a runtime instruction; no
+            // compile-time constant folding of the RHS is permitted.
+            // FLS §14.1 AMBIGUOUS: The spec does not enumerate valid place
+            // expressions for assignment; we restrict to simple variable paths.
+            //
+            // Cache-line note: the emitted `str` is 4 bytes — same footprint
+            // as the `str` emitted by a let-binding initializer.
+            ExprKind::Binary { op: BinOp::Assign, lhs, rhs } => {
+                // Resolve the LHS to a stack slot (must be a declared local).
+                let slot = match &lhs.kind {
+                    ExprKind::Path(segments) if segments.len() == 1 => {
+                        let var_name = segments[0].text(self.source);
+                        self.locals.get(var_name).copied().ok_or_else(|| {
+                            LowerError::Unsupported(format!(
+                                "assignment to undefined variable `{var_name}`"
+                            ))
+                        })?
+                    }
+                    _ => {
+                        return Err(LowerError::Unsupported(
+                            "assignment to non-variable place expression not yet supported".into(),
+                        ));
+                    }
+                };
+
+                // Lower RHS as i32 — all current locals are i32.
+                // FLS §8.1 AMBIGUOUS: The spec does not describe how type
+                // inference constrains the RHS type at the assignment site
+                // when no annotation is present. We assume i32 to match the
+                // existing let-binding convention.
+                let rhs_val = self.lower_expr(rhs, &IrTy::I32)?;
+                let src = self.val_to_reg(rhs_val)?;
+                self.instrs.push(Instr::Store { src, slot });
+
+                // FLS §6.5.10: assignment expressions have type `()`.
+                Ok(IrValue::Unit)
             }
 
             // Anything else: not yet supported as runtime codegen.
