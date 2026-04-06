@@ -724,6 +724,7 @@ pub struct MatchArm {
 ///
 /// FLS §5.1: Wildcard pattern `_` — matches any value without binding.
 /// FLS §5.2: Literal patterns — integer and boolean literals.
+/// FLS §5.1.11: Or patterns — `p0 | p1 | ...`.
 #[derive(Debug, Clone)]
 pub enum Pat {
     /// Wildcard pattern `_`. Matches any value. FLS §5.1.
@@ -741,6 +742,16 @@ pub enum Pat {
     NegLitInt(u128),
     /// Boolean literal pattern `true` / `false`. FLS §5.2.
     LitBool(bool),
+    /// OR pattern `p0 | p1 | ...`. Matches if any alternative matches.
+    ///
+    /// FLS §5.1.11: Or patterns. The alternatives are tested left-to-right;
+    /// the first matching alternative causes the arm to match.
+    ///
+    /// Example: `match x { 0 | 1 => "small", _ => "large" }`.
+    ///
+    /// Cache-line note: each alternative adds ~3 instructions (mov + cmp + orr),
+    /// so 5 alternatives fit in a 64-byte instruction cache line.
+    Or(Vec<Pat>),
 }
 
 // ── Operators ─────────────────────────────────────────────────────────────────

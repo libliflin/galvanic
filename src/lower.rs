@@ -900,8 +900,16 @@ impl<'src> LowerCtx<'src> {
                 // Lower the scrutinee and spill to a stack slot.
                 // The scrutinee may be i32 or bool; both use integer registers.
                 // We infer the scrutinee type from context: use i32 by default,
-                // and use bool if any arm has a bool literal pattern.
-                let scrut_ty = if arms.iter().any(|a| matches!(a.pat, Pat::LitBool(_))) {
+                // and use bool if any arm has a bool literal pattern (including
+                // bool literals inside OR patterns, FLS §5.1.11).
+                let has_bool_pat = |pat: &Pat| -> bool {
+                    match pat {
+                        Pat::LitBool(_) => true,
+                        Pat::Or(alts) => alts.iter().any(|p| matches!(p, Pat::LitBool(_))),
+                        _ => false,
+                    }
+                };
+                let scrut_ty = if arms.iter().any(|a| has_bool_pat(&a.pat)) {
                     IrTy::Bool
                 } else {
                     IrTy::I32
@@ -924,17 +932,7 @@ impl<'src> LowerCtx<'src> {
                         for arm in checked_arms {
                             let next_label = self.alloc_label();
 
-                            // Load scrutinee from stack slot (safe across arm boundaries).
-                            let s_reg = self.alloc_reg()?;
-                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
-
-                            // Materialize the pattern value.
-                            let pat_reg = self.alloc_reg()?;
-                            let pat_imm = match &arm.pat {
-                                Pat::LitInt(n) => *n as i32,
-                                // FLS §5.2: Negative literal pattern — negate the absolute value.
-                                Pat::NegLitInt(n) => -(*n as i32),
-                                Pat::LitBool(b) => *b as i32,
+                            match &arm.pat {
                                 Pat::Wildcard => {
                                     // Wildcard in non-last position — treat as unconditional.
                                     // Lower body, store to phi, branch to exit.
@@ -945,22 +943,100 @@ impl<'src> LowerCtx<'src> {
                                     self.instrs.push(Instr::Label(next_label));
                                     continue;
                                 }
-                            };
-                            self.instrs.push(Instr::LoadImm(pat_reg, pat_imm));
+                                // FLS §5.1.11: OR pattern — accumulate equality results.
+                                //
+                                // Strategy: matched_reg starts at 0; for each alternative,
+                                // load scrutinee, compare with pattern value, OR the 0/1
+                                // equality result into matched_reg. After all alternatives,
+                                // cbz matched_reg → next_label (arm not taken).
+                                //
+                                // FLS §6.1.2:37–45: All comparisons emit runtime instructions.
+                                //
+                                // Cache-line note: each alternative adds ~4 instructions
+                                // (ldr + mov + cmp/cset + orr = 16 bytes), so 4 alternatives
+                                // fit in a 64-byte instruction cache line.
+                                Pat::Or(alts) => {
+                                    let matched_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::LoadImm(matched_reg, 0));
+                                    for alt in alts {
+                                        match alt {
+                                            Pat::Wildcard => {
+                                                // Wildcard inside OR — always matches.
+                                                self.instrs.push(Instr::LoadImm(matched_reg, 1));
+                                                break;
+                                            }
+                                            Pat::Or(_) => {
+                                                return Err(LowerError::Unsupported(
+                                                    "nested OR patterns".into(),
+                                                ));
+                                            }
+                                            _ => {
+                                                let alt_imm = match alt {
+                                                    Pat::LitInt(n) => *n as i32,
+                                                    Pat::NegLitInt(n) => -(*n as i32),
+                                                    Pat::LitBool(b) => *b as i32,
+                                                    _ => unreachable!(),
+                                                };
+                                                let si_reg = self.alloc_reg()?;
+                                                self.instrs.push(Instr::Load {
+                                                    dst: si_reg,
+                                                    slot: scrut_slot,
+                                                });
+                                                let alt_reg = self.alloc_reg()?;
+                                                self.instrs.push(Instr::LoadImm(alt_reg, alt_imm));
+                                                let eq_reg = self.alloc_reg()?;
+                                                self.instrs.push(Instr::BinOp {
+                                                    op: IrBinOp::Eq,
+                                                    dst: eq_reg,
+                                                    lhs: si_reg,
+                                                    rhs: alt_reg,
+                                                });
+                                                self.instrs.push(Instr::BinOp {
+                                                    op: IrBinOp::BitOr,
+                                                    dst: matched_reg,
+                                                    lhs: matched_reg,
+                                                    rhs: eq_reg,
+                                                });
+                                            }
+                                        }
+                                    }
+                                    // cbz: skip arm if no alternative matched.
+                                    self.instrs.push(Instr::CondBranch {
+                                        reg: matched_reg,
+                                        label: next_label,
+                                    });
+                                }
+                                _ => {
+                                    // Single literal pattern: load scrutinee, compare, cbz.
+                                    let s_reg = self.alloc_reg()?;
+                                    self.instrs
+                                        .push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                                    let pat_imm = match &arm.pat {
+                                        Pat::LitInt(n) => *n as i32,
+                                        // FLS §5.2: Negative literal pattern.
+                                        Pat::NegLitInt(n) => -(*n as i32),
+                                        Pat::LitBool(b) => *b as i32,
+                                        _ => unreachable!(),
+                                    };
+                                    let pat_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::LoadImm(pat_reg, pat_imm));
+                                    // Compare scrutinee == pattern → 1 if equal, 0 if not.
+                                    let cmp_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::BinOp {
+                                        op: IrBinOp::Eq,
+                                        dst: cmp_reg,
+                                        lhs: s_reg,
+                                        rhs: pat_reg,
+                                    });
+                                    // cbz: skip this arm if condition is 0 (not equal).
+                                    self.instrs.push(Instr::CondBranch {
+                                        reg: cmp_reg,
+                                        label: next_label,
+                                    });
+                                }
+                            }
 
-                            // Compare scrutinee == pattern → 1 if equal, 0 if not.
-                            let cmp_reg = self.alloc_reg()?;
-                            self.instrs.push(Instr::BinOp {
-                                op: IrBinOp::Eq,
-                                dst: cmp_reg,
-                                lhs: s_reg,
-                                rhs: pat_reg,
-                            });
-
-                            // cbz: skip this arm if condition is 0 (not equal).
-                            self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
-
-                            // Arm body.
+                            // Arm body (reached when any pattern check matched).
                             let body_val = self.lower_expr(&arm.body, ret_ty)?;
                             let body_reg = self.val_to_reg(body_val)?;
                             self.instrs.push(Instr::Store { src: body_reg, slot: phi_slot });
@@ -984,32 +1060,89 @@ impl<'src> LowerCtx<'src> {
                         for arm in checked_arms {
                             let next_label = self.alloc_label();
 
-                            let s_reg = self.alloc_reg()?;
-                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
-
-                            let pat_reg = self.alloc_reg()?;
-                            let pat_imm = match &arm.pat {
-                                Pat::LitInt(n) => *n as i32,
-                                // FLS §5.2: Negative literal pattern — negate the absolute value.
-                                Pat::NegLitInt(n) => -(*n as i32),
-                                Pat::LitBool(b) => *b as i32,
+                            match &arm.pat {
                                 Pat::Wildcard => {
                                     self.lower_expr(&arm.body, &IrTy::Unit)?;
                                     self.instrs.push(Instr::Branch(exit_label));
                                     self.instrs.push(Instr::Label(next_label));
                                     continue;
                                 }
-                            };
-                            self.instrs.push(Instr::LoadImm(pat_reg, pat_imm));
-
-                            let cmp_reg = self.alloc_reg()?;
-                            self.instrs.push(Instr::BinOp {
-                                op: IrBinOp::Eq,
-                                dst: cmp_reg,
-                                lhs: s_reg,
-                                rhs: pat_reg,
-                            });
-                            self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
+                                // FLS §5.1.11: OR pattern — same accumulation strategy as
+                                // the I32|Bool branch above, but for unit-result arms.
+                                Pat::Or(alts) => {
+                                    let matched_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::LoadImm(matched_reg, 0));
+                                    for alt in alts {
+                                        match alt {
+                                            Pat::Wildcard => {
+                                                self.instrs.push(Instr::LoadImm(matched_reg, 1));
+                                                break;
+                                            }
+                                            Pat::Or(_) => {
+                                                return Err(LowerError::Unsupported(
+                                                    "nested OR patterns".into(),
+                                                ));
+                                            }
+                                            _ => {
+                                                let alt_imm = match alt {
+                                                    Pat::LitInt(n) => *n as i32,
+                                                    Pat::NegLitInt(n) => -(*n as i32),
+                                                    Pat::LitBool(b) => *b as i32,
+                                                    _ => unreachable!(),
+                                                };
+                                                let si_reg = self.alloc_reg()?;
+                                                self.instrs.push(Instr::Load {
+                                                    dst: si_reg,
+                                                    slot: scrut_slot,
+                                                });
+                                                let alt_reg = self.alloc_reg()?;
+                                                self.instrs.push(Instr::LoadImm(alt_reg, alt_imm));
+                                                let eq_reg = self.alloc_reg()?;
+                                                self.instrs.push(Instr::BinOp {
+                                                    op: IrBinOp::Eq,
+                                                    dst: eq_reg,
+                                                    lhs: si_reg,
+                                                    rhs: alt_reg,
+                                                });
+                                                self.instrs.push(Instr::BinOp {
+                                                    op: IrBinOp::BitOr,
+                                                    dst: matched_reg,
+                                                    lhs: matched_reg,
+                                                    rhs: eq_reg,
+                                                });
+                                            }
+                                        }
+                                    }
+                                    self.instrs.push(Instr::CondBranch {
+                                        reg: matched_reg,
+                                        label: next_label,
+                                    });
+                                }
+                                _ => {
+                                    let s_reg = self.alloc_reg()?;
+                                    self.instrs
+                                        .push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                                    let pat_imm = match &arm.pat {
+                                        Pat::LitInt(n) => *n as i32,
+                                        Pat::NegLitInt(n) => -(*n as i32),
+                                        Pat::LitBool(b) => *b as i32,
+                                        _ => unreachable!(),
+                                    };
+                                    let pat_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::LoadImm(pat_reg, pat_imm));
+                                    let cmp_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::BinOp {
+                                        op: IrBinOp::Eq,
+                                        dst: cmp_reg,
+                                        lhs: s_reg,
+                                        rhs: pat_reg,
+                                    });
+                                    self.instrs.push(Instr::CondBranch {
+                                        reg: cmp_reg,
+                                        label: next_label,
+                                    });
+                                }
+                            }
 
                             self.lower_expr(&arm.body, &IrTy::Unit)?;
                             self.instrs.push(Instr::Branch(exit_label));
