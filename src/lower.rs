@@ -27,7 +27,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{BinOp, Block, Expr, ExprKind, ItemKind, Pat, SourceFile, Stmt, StmtKind, StructKind, TyKind};
+use crate::ast::{BinOp, Block, Expr, ExprKind, ItemKind, Pat, SelfKind, SourceFile, Stmt, StmtKind, StructKind, TyKind};
 use crate::ir::{IrBinOp, Instr, IrFn, IrTy, IrValue, Module};
 
 /// Enum variant registry: maps enum name → (variant name → (discriminant, field_names)).
@@ -313,12 +313,34 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         }
     }
 
+    // Build method self-kind registry: mangled name → SelfKind.
+    //
+    // FLS §10.1: `&mut self` methods must propagate mutations back to the caller.
+    // At the call site we need to know whether a method is `&mut self` so we
+    // can emit `CallMut` (write-back) instead of a plain `Call`.
+    //
+    // Cache-line note: this HashMap is populated once at compile time and
+    // read during method-call lowering. It is not on any hot runtime path.
+    let mut method_self_kinds: HashMap<String, SelfKind> = HashMap::new();
+    for item in &src.items {
+        if let ItemKind::Impl(impl_def) = &item.kind {
+            let type_name = impl_def.ty.text(source);
+            for method in &impl_def.methods {
+                if let Some(kind) = method.self_param {
+                    let method_name = method.name.text(source);
+                    let mangled = format!("{type_name}__{method_name}");
+                    method_self_kinds.insert(mangled, kind);
+                }
+            }
+        }
+    }
+
     // Second pass: lower function items.
     let mut fns = Vec::new();
     for item in &src.items {
         match &item.kind {
             ItemKind::Fn(fn_def) => {
-                fns.push(lower_fn(fn_def, source, &struct_defs, &enum_defs, None, None)?);
+                fns.push(lower_fn(fn_def, source, &struct_defs, &enum_defs, &method_self_kinds, None)?);
             }
             ItemKind::Impl(impl_def) => {
                 // FLS §11: Inherent impl. Each method becomes a mangled top-level
@@ -328,13 +350,18 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                 for method in &impl_def.methods {
                     let method_name = method.name.text(source);
                     let mangled = format!("{type_name}__{method_name}");
+                    let mctx = method.self_param.map(|kind| MethodCtx {
+                        impl_type: type_name,
+                        mangled_name: &mangled,
+                        self_kind: kind,
+                    });
                     fns.push(lower_fn(
                         method,
                         source,
                         &struct_defs,
                         &enum_defs,
-                        method.self_param.map(|_| type_name),
-                        Some(&mangled),
+                        &method_self_kinds,
+                        mctx,
                     )?);
                 }
             }
@@ -347,23 +374,26 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
 
 // ── Function lowering ────────────────────────────────────────────────────────
 
-/// Lower a single function definition to an `IrFn`.
+/// Context passed to `lower_fn` for method lowering.
 ///
-/// FLS §9: Functions.
-/// FLS §6.12.1: Functions with parameters receive arguments in x0–x{n-1}
-/// per the ARM64 ABI. We spill each parameter to a stack slot so that
-/// path expressions can reference them via `Load` — reusing the same
-/// infrastructure as let-binding locals.
+/// Bundles the parameters that distinguish a method from a free function.
+/// FLS §10.1: Methods have a `self` parameter and a mangled name.
+struct MethodCtx<'a> {
+    /// Struct type name this method belongs to (for self-field spilling).
+    impl_type: &'a str,
+    /// Mangled function name (`TypeName__method_name`).
+    mangled_name: &'a str,
+    /// How `self` is received (value, shared ref, mutable ref).
+    self_kind: SelfKind,
+}
+
 /// Lower a single function (or method) definition to an `IrFn`.
 ///
 /// FLS §9: Functions. FLS §10.1: Methods.
 ///
-/// - `impl_type`: if `Some(type_name)`, this function is a method of that
-///   struct type and has a `self`/`&self` self-parameter. The struct's fields
-///   are spilled from leading registers before any explicit parameters.
-/// - `override_name`: if `Some(name)`, use this instead of `fn_def.name` as
-///   the function name in the emitted IR. Used for name-mangling methods to
-///   `TypeName__method_name`.
+/// - `method`: if `Some`, this function is a method of the named struct type.
+///   The struct's fields are spilled from leading registers before any explicit
+///   parameters, and the function is emitted under the mangled name.
 ///
 /// FLS §6.12.1: Functions with parameters receive arguments in x0–x{n-1}
 /// per the ARM64 ABI. We spill each parameter to a stack slot so that
@@ -374,9 +404,12 @@ fn lower_fn(
     source: &str,
     struct_defs: &HashMap<String, Vec<String>>,
     enum_defs: &EnumDefs,
-    impl_type: Option<&str>,
-    override_name: Option<&str>,
+    method_self_kinds: &HashMap<String, SelfKind>,
+    method: Option<MethodCtx<'_>>,
 ) -> Result<IrFn, LowerError> {
+    let impl_type = method.as_ref().map(|m| m.impl_type);
+    let override_name = method.as_ref().map(|m| m.mangled_name);
+    let self_kind = method.as_ref().map(|m| m.self_kind);
     let name = override_name
         .map(|s| s.to_owned())
         .unwrap_or_else(|| fn_def.name.text(source).to_owned());
@@ -396,7 +429,7 @@ fn lower_fn(
         Some(block) => block,
     };
 
-    let mut ctx = LowerCtx::new(source, ret_ty, struct_defs, enum_defs);
+    let mut ctx = LowerCtx::new(source, ret_ty, struct_defs, enum_defs, method_self_kinds);
 
     // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
     // to stack slots. Each parameter slot is allocated in parameter order
@@ -559,7 +592,36 @@ fn lower_fn(
         reg_idx += 1;
     }
 
-    ctx.lower_block(body, &ret_ty)?;
+    // FLS §10.1: For `&mut self` methods with unit return type, emit `RetFields`
+    // instead of `Ret(Unit)`. This writes modified self fields back to the caller
+    // via x0..x{N-1} on return. The caller uses `CallMut` to store them back.
+    //
+    // Limitation: early `return` expressions inside the body still emit `Ret(Unit)`,
+    // bypassing the write-back. Only methods that terminate via their tail expression
+    // are fully correct at this milestone.
+    //
+    // FLS §10.1 AMBIGUOUS: The spec does not define the calling convention for
+    // `&mut self` in terms of register passing. Galvanic uses a value-copy convention
+    // (fields passed as registers, written back on return) for simplicity.
+    if self_kind == Some(SelfKind::RefMut) {
+        if ret_ty != IrTy::Unit {
+            return Err(LowerError::Unsupported(
+                "&mut self methods with non-unit return type not yet supported".into(),
+            ));
+        }
+        // Determine the number of self fields. The impl_type is guaranteed Some
+        // when self_kind is Some (enforced by the parser / call site).
+        let type_name = impl_type.expect("impl_type must be set when self_kind is RefMut");
+        let n_fields = struct_defs.get(type_name).map(|f| f.len() as u8).unwrap_or(0);
+        // Run the body (statements + tail), discarding the unit tail value.
+        // Fields in the method's local slots will have been updated by body code.
+        ctx.lower_block_to_value(body, &ret_ty)?;
+        // Emit RetFields: loads each field from slot 0..n_fields-1 into x0..x{N-1}
+        // then performs the normal epilogue.
+        ctx.instrs.push(Instr::RetFields { base_slot: 0, n_fields });
+    } else {
+        ctx.lower_block(body, &ret_ty)?;
+    }
 
     let body_instrs = ctx.instrs;
     let stack_slots = ctx.next_slot;
@@ -707,6 +769,16 @@ struct LowerCtx<'src> {
     /// 8-byte stack slot — identical to any other i32 local.
     enum_defs: &'src EnumDefs,
 
+    /// Method self-kind registry: maps mangled method name → SelfKind.
+    ///
+    /// FLS §10.1: `&mut self` methods use a different calling convention
+    /// (write-back via `CallMut`) than `&self` or `self` methods (`Call`).
+    /// At the call site, this registry is consulted to select the right
+    /// instruction.
+    ///
+    /// Cache-line note: read-only during lowering; not on any hot path.
+    method_self_kinds: &'src HashMap<String, SelfKind>,
+
     /// Maps a struct variable's base stack slot to its struct type name.
     ///
     /// FLS §6.13: Field access expressions need the struct type to compute
@@ -730,6 +802,7 @@ impl<'src> LowerCtx<'src> {
         fn_ret_ty: IrTy,
         struct_defs: &'src HashMap<String, Vec<String>>,
         enum_defs: &'src EnumDefs,
+        method_self_kinds: &'src HashMap<String, SelfKind>,
     ) -> Self {
         LowerCtx {
             source,
@@ -743,6 +816,7 @@ impl<'src> LowerCtx<'src> {
             fn_ret_ty,
             struct_defs,
             enum_defs,
+            method_self_kinds,
             local_struct_types: HashMap::new(),
             local_enum_types: HashMap::new(),
         }
@@ -3138,6 +3212,13 @@ impl<'src> LowerCtx<'src> {
             // often land in the same 64-byte cache line.
             ExprKind::CompoundAssign { op, target, value } => {
                 // Resolve target to a stack slot.
+                //
+                // FLS §6.5.11: Supports two place expression forms on the LHS:
+                //   1. Simple variable path (`x += 1`)
+                //   2. Struct field access (`self.n += 1`) — FLS §6.13
+                //
+                // FLS §10.1: `&mut self` field mutations via `self.n += 1` use
+                // this field-access path to locate the field's stack slot.
                 let slot = match &target.kind {
                     ExprKind::Path(segments) if segments.len() == 1 => {
                         let var_name = segments[0].text(self.source);
@@ -3146,6 +3227,47 @@ impl<'src> LowerCtx<'src> {
                                 "compound assignment to undefined variable `{var_name}`"
                             ))
                         })?
+                    }
+                    ExprKind::FieldAccess { receiver, field } => {
+                        // Resolve receiver variable to base slot and struct type.
+                        let (base_slot, struct_type_name) = match &receiver.kind {
+                            ExprKind::Path(segs) if segs.len() == 1 => {
+                                let var_name = segs[0].text(self.source);
+                                let base_slot = self.locals.get(var_name).copied().ok_or_else(|| {
+                                    LowerError::Unsupported(format!(
+                                        "undefined variable `{var_name}` in compound field assignment"
+                                    ))
+                                })?;
+                                let type_name = self
+                                    .local_struct_types
+                                    .get(&base_slot)
+                                    .ok_or_else(|| {
+                                        LowerError::Unsupported(format!(
+                                            "variable `{var_name}` is not a struct in compound field assignment"
+                                        ))
+                                    })?
+                                    .clone();
+                                (base_slot, type_name)
+                            }
+                            _ => {
+                                return Err(LowerError::Unsupported(
+                                    "compound field assignment on non-variable receiver not yet supported".into(),
+                                ));
+                            }
+                        };
+                        // Compute slot: base + field_index.
+                        let field_name = field.text(self.source);
+                        let field_names = self.struct_defs.get(&struct_type_name).ok_or_else(|| {
+                            LowerError::Unsupported(format!(
+                                "unknown struct type `{struct_type_name}` in compound field assignment"
+                            ))
+                        })?;
+                        let field_idx = field_names.iter().position(|n| n == field_name).ok_or_else(|| {
+                            LowerError::Unsupported(format!(
+                                "no field `{field_name}` in struct `{struct_type_name}`"
+                            ))
+                        })?;
+                        base_slot + field_idx as u8
                     }
                     _ => {
                         return Err(LowerError::Unsupported(
@@ -4301,10 +4423,38 @@ impl<'src> LowerCtx<'src> {
                     ));
                 }
 
-                let dst = self.alloc_reg()?;
+                // FLS §10.1: Check whether this is a `&mut self` method.
+                // If so, emit `CallMut` which writes modified fields back to the
+                // caller's struct slots after the `bl`. Otherwise use a plain `Call`.
+                //
+                // FLS §6.12.2: Method call expressions are dispatched to the
+                // mangled function `TypeName__method_name`.
+                let is_mut_self = self.method_self_kinds.get(&mangled)
+                    == Some(&SelfKind::RefMut);
+
                 self.has_calls = true;
-                self.instrs.push(Instr::Call { dst, name: mangled, args: arg_regs });
-                Ok(IrValue::Reg(dst))
+                if is_mut_self {
+                    // `&mut self` call: write back x0..x{N-1} to struct slots.
+                    // The callee emits `RetFields`, placing modified field values
+                    // in x0..x{N-1} before returning. We store them back here.
+                    //
+                    // Return type of a `&mut self` method is unit — the call
+                    // expression itself evaluates to `()`.
+                    //
+                    // Cache-line note: N write-back stores = N × 4-byte `str`.
+                    // For a 2-field struct: 8 bytes — fits in half a cache line.
+                    self.instrs.push(Instr::CallMut {
+                        name: mangled,
+                        args: arg_regs,
+                        write_back_slot: recv_base_slot,
+                        n_fields: n_fields as u8,
+                    });
+                    Ok(IrValue::Unit)
+                } else {
+                    let dst = self.alloc_reg()?;
+                    self.instrs.push(Instr::Call { dst, name: mangled, args: arg_regs });
+                    Ok(IrValue::Reg(dst))
+                }
             }
 
             // Anything else: not yet supported as runtime codegen.

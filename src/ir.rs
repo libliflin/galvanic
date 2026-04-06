@@ -368,6 +368,71 @@ pub enum Instr {
         /// `args[i]` holds the value to place in `x{i}` before the call.
         args: Vec<u8>,
     },
+
+    /// Return from a `&mut self` method, writing modified fields back to the caller.
+    ///
+    /// `RetFields { base_slot, n_fields }` emits:
+    ///   `ldr x0, [sp, #{base_slot*8}]`
+    ///   `ldr x1, [sp, #{(base_slot+1)*8}]`
+    ///   ... (one per field)
+    ///   epilogue (sp restore if frame_size > 0, lr restore if saves_lr)
+    ///   `ret`
+    ///
+    /// This instruction is emitted by `lower_fn` for `&mut self` methods with
+    /// unit return type. The caller uses `CallMut` to read x0..x{N-1} back
+    /// into the struct's stack slots after the `bl`.
+    ///
+    /// FLS §10.1: `&mut self` methods must propagate mutations to the caller.
+    /// ARM64 ABI: small aggregates returned in x0..x{N-1}.
+    ///
+    /// Limitation: early `return` inside a `&mut self` method body bypasses
+    /// this write-back. Only methods that terminate via their tail expression
+    /// are fully supported at this milestone.
+    ///
+    /// Cache-line note: N field loads emit N × 4-byte `ldr` instructions.
+    /// For a 1-field struct this is 4 bytes (fits in any cache line slot);
+    /// for an 8-field struct this is 32 bytes (half a cache line).
+    RetFields {
+        /// Stack slot of the first self field. Always 0 for methods, since
+        /// self fields are spilled first in `lower_fn`.
+        base_slot: u8,
+        /// Number of struct fields to write back. 0 for unit structs (acts
+        /// like a plain `Ret(Unit)`).
+        n_fields: u8,
+    },
+
+    /// Call a `&mut self` method and write modified fields back to the caller's struct.
+    ///
+    /// `CallMut { name, args, write_back_slot, n_fields }` emits:
+    ///   `mov x{i}, x{args[i]}` (for each arg not already in the right register)
+    ///   `bl {name}`
+    ///   `str x0, [sp, #{write_back_slot*8}]`
+    ///   `str x1, [sp, #{(write_back_slot+1)*8}]`
+    ///   ... (one per field, since the callee returned them in x0..x{N-1})
+    ///
+    /// After the `bl`, x0..x{N-1} hold the method's modified field values
+    /// (returned via `RetFields`). They are immediately written back to the
+    /// caller's struct stack slots so that subsequent field reads see the
+    /// updated values.
+    ///
+    /// FLS §6.12.2: Method call expressions.
+    /// FLS §10.1: `&mut self` mutation must be visible to the caller.
+    ///
+    /// Cache-line note: N field stores emit N × 4-byte `str` instructions
+    /// after the `bl`. Paired with the `ldr` sequence in `RetFields` on the
+    /// callee side, each mutation costs 2N + 1 extra instructions (N loads,
+    /// N stores, 1 bl) beyond a value-copy call.
+    CallMut {
+        /// Name of the `&mut self` method to call (mangled).
+        name: String,
+        /// Argument registers in call order: struct fields first (x0..x{N-1}),
+        /// then any explicit arguments.
+        args: Vec<u8>,
+        /// Base stack slot of the receiver struct in the caller's frame.
+        write_back_slot: u8,
+        /// Number of struct fields to write back (same as struct field count).
+        n_fields: u8,
+    },
 }
 
 // ── Values ────────────────────────────────────────────────────────────────────
