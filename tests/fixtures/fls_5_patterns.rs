@@ -58,6 +58,26 @@ fn classify_with_guard(x: i32) -> i32 {
     }
 }
 
+// FLS §6.17: if-let expression — `if let Pattern = Expr { Block } [else Block]`.
+// FLS §6.17: "An if let expression is syntactic sugar for a match expression
+// with a single arm."
+// Note: The FLS does not provide a concrete code example; this is derived
+// from the semantic description of IfLetExpression.
+fn check_exact(x: i32) -> i32 {
+    // FLS §6.17 + §5.2: Integer literal pattern in if-let.
+    if let 42 = x { 1 } else { 0 }
+}
+
+// FLS §6.17 + §5.1.9: Range pattern in if-let.
+fn check_range(x: i32) -> i32 {
+    if let 1..=10 = x { 1 } else { 0 }
+}
+
+// FLS §6.17 + §5.1.4: Identifier pattern in if-let — always matches, binds value.
+fn bind_and_use(x: i32) -> i32 {
+    if let n = x { n + 1 } else { 0 }
+}
+
 fn main() -> i32 {
     // FLS §5.1.9: inclusive range — value 2 in [1,3] → 1.
     let a = range_inclusive(2);
@@ -67,6 +87,12 @@ fn main() -> i32 {
     let c = range_negative(-3);
     // FLS §6.18: guard — positive value 5 → 1.
     let d = classify_with_guard(5);
-    // a=1, b=2, c=1, d=1 → sum=5; exit 5 to signal correct execution.
-    a + b + c + d
+    // FLS §6.17: if-let literal — 42 matches 42 → 1.
+    let e = check_exact(42);
+    // FLS §6.17: if-let range — 5 in [1,10] → 1.
+    let f = check_range(5);
+    // FLS §6.17: if-let ident — bind 3 to n, return n+1=4.
+    let g = bind_and_use(3);
+    // a=1, b=2, c=1, d=1, e=1, f=1, g=4 → sum=11; exit 11 to signal correct execution.
+    a + b + c + d + e + f + g
 }

@@ -503,6 +503,11 @@ impl<'src> Parser<'src> {
         {
             let start = self.current_span();
 
+            // FLS §9.2: Parameters may be prefixed with `mut` to make the
+            // binding mutable within the function body. The `mut` is not
+            // part of the name — consume and discard it.
+            self.eat(TokenKind::KwMut);
+
             if self.peek_kind() != TokenKind::Ident {
                 return Err(self.error(format!(
                     "expected parameter name (identifier), found {:?}",
@@ -679,9 +684,12 @@ impl<'src> Parser<'src> {
             expr.kind,
             ExprKind::Block(_)
                 | ExprKind::If { .. }
+                | ExprKind::IfLet { .. }
                 | ExprKind::Loop(_)
                 | ExprKind::While { .. }
+                | ExprKind::WhileLet { .. }
                 | ExprKind::For { .. }
+                | ExprKind::Match { .. }
         );
 
         if is_expr_with_block && self.peek_kind() != TokenKind::CloseBrace {
@@ -1414,6 +1422,38 @@ impl<'src> Parser<'src> {
         let start = self.current_span();
         self.expect(TokenKind::KwIf)?;
 
+        // FLS §6.17: if-let expression — `if let Pattern = Expr { Block } [else ...]`
+        if self.eat(TokenKind::KwLet) {
+            let pat = self.parse_pattern()?;
+            // The `=` separator between pattern and scrutinee.
+            self.expect(TokenKind::Eq)?;
+            let scrutinee = Box::new(self.parse_expr()?);
+            let then_block = Box::new(self.parse_block()?);
+
+            let else_expr = if self.eat(TokenKind::KwElse) {
+                if self.peek_kind() == TokenKind::KwIf {
+                    Some(Box::new(self.parse_if_expr()?))
+                } else {
+                    let block = self.parse_block()?;
+                    let span = block.span;
+                    Some(Box::new(Expr { kind: ExprKind::Block(Box::new(block)), span }))
+                }
+            } else {
+                None
+            };
+
+            let end = else_expr
+                .as_ref()
+                .map(|e| e.span)
+                .unwrap_or(then_block.span);
+
+            return Ok(Expr {
+                kind: ExprKind::IfLet { pat, scrutinee, then_block, else_expr },
+                span: start.to(end),
+            });
+        }
+
+        // FLS §6.17: regular if (or if-else) expression.
         let cond = Box::new(self.parse_expr()?);
         let then_block = Box::new(self.parse_block()?);
 
@@ -1674,6 +1714,18 @@ impl<'src> Parser<'src> {
     fn parse_while_expr(&mut self) -> Result<Expr, ParseError> {
         let start = self.current_span();
         self.expect(TokenKind::KwWhile)?;
+
+        // FLS §6.15.4: while-let expression — `while let Pattern = Expr { body }`
+        if self.eat(TokenKind::KwLet) {
+            let pat = self.parse_pattern()?;
+            self.expect(TokenKind::Eq)?;
+            let scrutinee = Box::new(self.parse_expr()?);
+            let body = Box::new(self.parse_block()?);
+            let span = start.to(body.span);
+            return Ok(Expr { kind: ExprKind::WhileLet { pat, scrutinee, body }, span });
+        }
+
+        // FLS §6.15.3: regular while expression.
         let cond = Box::new(self.parse_expr()?);
         let body = Box::new(self.parse_block()?);
         let span = start.to(body.span);
@@ -1771,7 +1823,7 @@ fn strip_int_suffix(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{EnumVariantKind, ExprKind, ItemKind, StmtKind, StructKind, TyKind, Visibility};
+    use crate::ast::{EnumVariantKind, ExprKind, ItemKind, Pat, StmtKind, StructKind, TyKind, Visibility};
     use crate::lexer::tokenize;
 
     /// Parse `src` into a SourceFile, panicking on error.
@@ -1832,6 +1884,16 @@ mod tests {
         assert_eq!(f.params.len(), 2);
         assert_eq!(f.params[0].name.text(src), "a");
         assert_eq!(f.params[1].name.text(src), "b");
+    }
+
+    #[test]
+    fn fn_mut_param() {
+        // FLS §9.2: parameters may be prefixed with `mut`.
+        let src = "fn f(mut x: i32) -> i32 { x }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        assert_eq!(f.params.len(), 1);
+        assert_eq!(f.params[0].name.text(src), "x");
     }
 
     #[test]
@@ -2051,6 +2113,47 @@ mod tests {
         };
         // The else branch is another If.
         assert!(matches!(else_e.kind, ExprKind::If { .. }));
+    }
+
+    #[test]
+    fn if_let_literal_pattern() {
+        // FLS §6.17: if-let with integer literal pattern.
+        let src = "fn f(x: i32) -> i32 { if let 42 = x { 1 } else { 0 } }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
+        assert!(
+            matches!(tail.kind, ExprKind::IfLet { .. }),
+            "expected IfLet expression"
+        );
+    }
+
+    #[test]
+    fn if_let_ident_pattern() {
+        // FLS §6.17 + §5.1.4: if-let with identifier pattern.
+        let src = "fn f(x: i32) -> i32 { if let n = x { n } else { 0 } }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let tail = f.body.as_ref().unwrap().tail.as_ref().unwrap();
+        assert!(
+            matches!(tail.kind, ExprKind::IfLet { pat: Pat::Ident(_), .. }),
+            "expected IfLet with identifier pattern"
+        );
+    }
+
+    #[test]
+    fn if_let_no_else() {
+        // FLS §6.17: if-let without else branch (unit context, as tail expression).
+        let src = "fn f(x: i32) { if let 1 = x { } }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        // Parsed as a tail expression (no semicolon).
+        let e = body.tail.as_ref().expect("expected tail expression");
+        assert!(
+            matches!(e.kind, ExprKind::IfLet { else_expr: None, .. }),
+            "expected IfLet with no else"
+        );
     }
 
     #[test]
@@ -3072,6 +3175,50 @@ mod tests {
             panic!("expected expr stmt");
         };
         assert!(matches!(while_expr.kind, ExprKind::While { .. }));
+    }
+
+    #[test]
+    fn while_let_literal_pattern() {
+        // FLS §6.15.4: `while let Pat = expr { body }` — loops while pattern matches.
+        let src = "fn f() { while let 1 = x {} }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        let tail = body.tail.as_ref().expect("expected while-let as tail");
+        assert!(
+            matches!(tail.kind, ExprKind::WhileLet { pat: Pat::LitInt(1), .. }),
+            "expected WhileLet with LitInt(1) pattern, got {:?}",
+            tail.kind
+        );
+    }
+
+    #[test]
+    fn while_let_ident_pattern() {
+        // FLS §6.15.4 + §5.1.4: `while let v = expr { body }` — identifier pattern.
+        let src = "fn f() { while let v = next() {} }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        let tail = body.tail.as_ref().expect("expected while-let as tail");
+        assert!(
+            matches!(tail.kind, ExprKind::WhileLet { pat: Pat::Ident(_), .. }),
+            "expected WhileLet with Ident pattern"
+        );
+    }
+
+    #[test]
+    fn while_let_as_stmt() {
+        // FLS §6.15.4: while-let (expression-with-block) in statement position
+        // does not require a trailing semicolon.
+        let src = "fn f() { while let 0 = x {} let y = 1; }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        assert_eq!(body.stmts.len(), 2);
+        let StmtKind::Expr(ref wl_expr) = body.stmts[0].kind else {
+            panic!("expected expr stmt");
+        };
+        assert!(matches!(wl_expr.kind, ExprKind::WhileLet { .. }));
     }
 
     #[test]
