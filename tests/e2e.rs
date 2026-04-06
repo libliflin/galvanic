@@ -1418,3 +1418,75 @@ fn runtime_compound_add_emits_ldr_add_str() {
         "expected at least 2 `str` instructions (let init + compound assign), found {str_count}:\n{asm}"
     );
 }
+
+// ── Milestone 14: unary bitwise NOT ──────────────────────────────────────────
+//
+// FLS §6.5.4: Negation operator expressions. The unary `!` applied to an
+// integer value produces its bitwise complement. For `i32`, `!n` = `-(n+1)`.
+//
+// ARM64: `mvn x{dst}, x{src}` (ORN xD, xzr, xS) — complement all bits.
+//
+// FLS §6.1.2:37–45: Even `!5` in a non-const function must emit a runtime
+// `mvn` instruction — no compile-time folding to the complemented immediate.
+//
+// Note: In Rust, `!` on integers is bitwise NOT (not logical NOT). The exit
+// code is taken mod 256 by the OS; `!0_i32` = -1 = 0xFF…FF, so the process
+// exits with code 255. We test with small operands where the result is
+// non-negative and unambiguous.
+
+/// Milestone 14: `fn main() -> i32 { !0 }` → bitwise NOT of 0 = -1 → exit 255 (mod 256).
+///
+/// FLS §6.5.4: Bitwise NOT on integer. `!0_i32` = -1 = 0xFFFFFFFF.
+/// The OS truncates the exit code to 8 bits: 255.
+#[test]
+fn milestone_14_not_zero() {
+    let Some(exit_code) = compile_and_run("fn main() -> i32 { !0 }\n") else {
+        return;
+    };
+    assert_eq!(exit_code, 255, "expected exit 255 from `!0` (bitwise NOT, 8-bit truncation), got {exit_code}");
+}
+
+/// Milestone 14: `fn main() -> i32 { !!5 }` → double NOT restores original value → exit 5.
+///
+/// FLS §6.5.4: `!(!5)` = `!(-6)` = 5. Double complement is identity for integers.
+/// FLS §6.1.2:37–45: Both `mvn` instructions must be emitted at runtime.
+#[test]
+fn milestone_14_double_not() {
+    let Some(exit_code) = compile_and_run("fn main() -> i32 { !!5 }\n") else {
+        return;
+    };
+    assert_eq!(exit_code, 5, "expected exit 5 from `!!5` (double bitwise NOT), got {exit_code}");
+}
+
+/// Milestone 14: `!` in a function parameter — confirms runtime codegen path.
+///
+/// `fn not(x: i32) -> i32 { !x }` with `x = 0` → 255 (exit code mod 256).
+/// FLS §6.5.4: `!` on an unknown-at-compile-time value must emit `mvn`.
+/// FLS §6.1.2:37–45: Can't constant-fold when the operand is a function parameter.
+#[test]
+fn milestone_14_not_parameter() {
+    let src = "fn not(x: i32) -> i32 { !x }\nfn main() -> i32 { not(0) }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 255, "expected exit 255 from `not(0)` = `!0`, got {exit_code}");
+}
+
+/// Assembly inspection: `!5` must emit `mvn` (not constant-fold to -6).
+///
+/// FLS §6.5.4: Bitwise NOT on integer.
+/// FLS §6.1.2:37–45: Non-const `!operand` must emit a runtime instruction.
+/// ARM64: `mvn x{dst}, x{src}` is the bitwise complement instruction.
+#[test]
+fn runtime_not_emits_mvn_instruction() {
+    let asm = compile_to_asm("fn main() -> i32 { !5 }\n");
+    assert!(
+        asm.contains("mvn"),
+        "expected `mvn` instruction for `!5` (bitwise NOT), got:\n{asm}"
+    );
+    // Must NOT constant-fold !5 = -6 into an immediate.
+    assert!(
+        !asm.contains("mov     x0, #-6"),
+        "assembly must not constant-fold `!5` to #-6:\n{asm}"
+    );
+}

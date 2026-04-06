@@ -1216,6 +1216,26 @@ impl<'src> LowerCtx<'src> {
                 Ok(IrValue::Reg(dst))
             }
 
+            // FLS §6.5.4: Bitwise NOT `!operand` — complement all bits.
+            //
+            // Lowering:
+            //   1. Lower the operand to a register.
+            //   2. Emit `Instr::Not { dst, src }` → `mvn x{dst}, x{src}` on ARM64.
+            //
+            // FLS §6.1.2:37–45: Even `!5` in a non-const context emits a runtime `mvn`
+            // instruction — no compile-time folding to a complemented immediate.
+            //
+            // FLS §6.5.4: "The type of a negation expression is the type of the operand."
+            //
+            // Cache-line note: `mvn` is 4 bytes (alias for `orn xD, xzr, xS`).
+            ExprKind::Unary { op: crate::ast::UnaryOp::Not, operand } => {
+                let val = self.lower_expr(operand, &IrTy::I32)?;
+                let src = self.val_to_reg(val)?;
+                let dst = self.alloc_reg()?;
+                self.instrs.push(Instr::Not { dst, src });
+                Ok(IrValue::Reg(dst))
+            }
+
             // Anything else: not yet supported as runtime codegen.
             _ => Err(LowerError::Unsupported(
                 "expression kind in non-const context (runtime codegen not yet implemented)".into(),
