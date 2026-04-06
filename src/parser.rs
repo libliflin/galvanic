@@ -828,6 +828,49 @@ impl<'src> Parser<'src> {
     /// FLS §9.2 NOTE: Full patterns (struct, tuple, `_`) in parameter
     /// position are not yet handled. `self`, `mut self`, `&self`, and
     /// `&mut self` are also not yet supported.
+    /// Parse the element patterns inside a tuple parameter pattern, called after
+    /// consuming the opening `(`. Handles flat bindings (`a`, `_`) and
+    /// arbitrarily nested tuple patterns (`(a, (b, c))`). Consumes up to and
+    /// including the closing `)`.
+    ///
+    /// Returns `Vec<Pat>` where each element is `Pat::Ident`, `Pat::Wildcard`,
+    /// or `Pat::Tuple` (for nested tuples).
+    ///
+    /// FLS §5.10.3, §9.2: Tuple patterns in parameter position may nest
+    /// arbitrarily. Each leaf binding corresponds to one ARM64 register.
+    fn parse_tuple_param_inner_pats(&mut self) -> Result<Vec<Pat>, ParseError> {
+        let mut pats = Vec::new();
+        loop {
+            if self.peek_kind() == TokenKind::CloseParen {
+                break;
+            }
+            let pat = if self.peek_kind() == TokenKind::OpenParen {
+                // Nested tuple pattern: recurse.
+                self.advance(); // consume `(`
+                let inner = self.parse_tuple_param_inner_pats()?;
+                Pat::Tuple(inner)
+            } else if self.peek_kind() == TokenKind::Underscore {
+                self.advance();
+                Pat::Wildcard
+            } else if self.peek_kind() == TokenKind::Ident {
+                let s = self.current_span();
+                self.advance();
+                Pat::Ident(s)
+            } else {
+                return Err(self.error(format!(
+                    "expected identifier, `_`, or `(` in tuple parameter pattern, found {:?}",
+                    self.peek_kind()
+                )));
+            };
+            pats.push(pat);
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(TokenKind::CloseParen)?;
+        Ok(pats)
+    }
+
     fn parse_params(&mut self) -> Result<Vec<Param>, ParseError> {
         let mut params = Vec::new();
 
@@ -843,29 +886,11 @@ impl<'src> Parser<'src> {
 
             // FLS §5.10.3, §9.2: Tuple pattern in parameter position
             // `(a, b, ...): (T1, T2, ...)`.
+            // Supports nested tuple patterns: `(a, (b, c)): (T1, (T2, T3))`.
             let kind = if self.peek_kind() == TokenKind::OpenParen {
                 self.advance(); // consume `(`
-                let mut names: Vec<Span> = Vec::new();
-                loop {
-                    // Each element is an identifier or `_`.
-                    if matches!(self.peek_kind(), TokenKind::Underscore | TokenKind::Ident) {
-                        names.push(self.current_span());
-                        self.advance();
-                    } else {
-                        return Err(self.error(format!(
-                            "expected identifier or `_` in tuple parameter pattern, found {:?}",
-                            self.peek_kind()
-                        )));
-                    }
-                    if !self.eat(TokenKind::Comma) {
-                        break;
-                    }
-                    if self.peek_kind() == TokenKind::CloseParen {
-                        break;
-                    }
-                }
-                self.expect(TokenKind::CloseParen)?;
-                ParamKind::Tuple(names)
+                let pats = self.parse_tuple_param_inner_pats()?;
+                ParamKind::Tuple(pats)
             } else if self.peek_kind() == TokenKind::Ident
                 && self.peek_nth(1) == TokenKind::OpenParen
             {

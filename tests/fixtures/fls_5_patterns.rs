@@ -211,6 +211,24 @@ fn scaled_diff(Scale(a, b): Scale) -> i32 {
     a - b
 }
 
+// FLS §5.10.3, §9.2: Nested tuple pattern in parameter position.
+// `(a, (b, c)): (i32, (i32, i32))` — three leaves arrive in x0, x1, x2
+// and bind to `a`, `b`, `c` respectively.
+//
+// FLS §5.10.3: "A tuple pattern is a pattern that matches a tuple which
+// satisfies all criteria defined by its subpatterns." Sub-patterns may
+// themselves be tuple patterns. FLS §9.2: Irrefutable patterns (including
+// nested tuple patterns) are valid in parameter position.
+//
+// FLS §9.2 AMBIGUOUS: The spec does not provide a concrete code example
+// for nested tuple patterns in parameter position; this is derived from
+// the recursive sub-pattern grammar in §5.10.3 and the parameter grammar
+// in §9.2.
+fn nested_param_sum((a, (b, c)): (i32, (i32, i32))) -> i32 {
+    // FLS §5.10.3: `a`, `b`, `c` are bound from consecutive incoming registers.
+    a + b + c
+}
+
 fn main() -> i32 {
     // FLS §5.1.9: inclusive range — value 2 in [1,3] → 1.
     let a = range_inclusive(2);
@@ -251,6 +269,8 @@ fn main() -> i32 {
     // FLS §5.10.4, §9.2: tuple struct pattern param — scaled_diff(Scale(3,1)) = 2.
     let sc = Scale(3, 1);
     let r3 = scaled_diff(sc);
-    // a=1, b=2, c=1, d=1, e=1, f=1, g=4, h=2, i=3, j=0, k=2, m=3, n2=1, n3=1, q=7, r2=12, r3=2 → sum=44
-    a + b + c + d + e + f + g + h + i + j + k + m + n2 + n3 + q + r2 + r3
+    // FLS §5.10.3, §9.2: nested tuple pattern param — nested_param_sum((1,(2,3))) = 6.
+    let r4 = nested_param_sum((1, (2, 3)));
+    // a=1, b=2, c=1, d=1, e=1, f=1, g=4, h=2, i=3, j=0, k=2, m=3, n2=1, n3=1, q=7, r2=12, r3=2, r4=6 → sum=50
+    a + b + c + d + e + f + g + h + i + j + k + m + n2 + n3 + q + r2 + r3 + r4
 }
