@@ -1709,6 +1709,20 @@ impl<'src> Parser<'src> {
                         let seg = self.advance();
                         segments.push(Self::span_of(&seg));
                     }
+                    // FLS §5.4: Tuple struct/variant pattern — `Enum::Variant(p, …)`.
+                    // After the path segments, if `(` follows, parse field patterns.
+                    if self.peek_kind() == TokenKind::OpenParen {
+                        self.advance(); // consume `(`
+                        let mut fields = Vec::new();
+                        while self.peek_kind() != TokenKind::CloseParen {
+                            fields.push(self.parse_single_pattern()?);
+                            if !self.eat(TokenKind::Comma) {
+                                break;
+                            }
+                        }
+                        self.expect(TokenKind::CloseParen)?;
+                        return Ok(Pat::TupleStruct { path: segments, fields });
+                    }
                     Ok(Pat::Path(segments))
                 } else {
                     Ok(Pat::Ident(first_span))
@@ -3727,5 +3741,73 @@ mod tests {
         assert!(arms[0].guard.is_none());
         assert!(arms[1].guard.is_none());
         assert!(matches!(arms[0].pat, Pat::LitInt(0)));
+    }
+
+    /// FLS §5.4 + §15: Tuple struct/variant pattern with one field.
+    ///
+    /// `Opt::Some(v)` parses as `Pat::TupleStruct { path: ["Opt","Some"], fields: [Ident("v")] }`.
+    #[test]
+    fn tuple_struct_pattern_one_field() {
+        let src = "fn f(x: i32) -> i32 { match x { Opt::Some(v) => 1, _ => 0, } }";
+        let tokens = crate::lexer::tokenize(src).unwrap();
+        let sf = parse(&tokens, src).unwrap();
+        let ItemKind::Fn(f) = &sf.items[0].kind else { panic!() };
+        let body = f.body.as_ref().expect("no body");
+        let Some(tail) = body.tail.as_ref() else { panic!() };
+        let ExprKind::Match { arms, .. } = &tail.kind else { panic!() };
+        match &arms[0].pat {
+            Pat::TupleStruct { path, fields } => {
+                assert_eq!(path[0].text(src), "Opt");
+                assert_eq!(path[1].text(src), "Some");
+                assert_eq!(fields.len(), 1);
+                assert!(matches!(&fields[0], Pat::Ident(_)));
+            }
+            other => panic!("expected TupleStruct pattern, got {other:?}"),
+        }
+    }
+
+    /// FLS §5.4 + §15: Tuple struct/variant pattern with wildcard field.
+    ///
+    /// `Opt::Some(_)` — the `_` field is a wildcard, not an identifier.
+    #[test]
+    fn tuple_struct_pattern_wildcard_field() {
+        let src = "fn f(x: i32) -> i32 { match x { Opt::Some(_) => 1, _ => 0, } }";
+        let tokens = crate::lexer::tokenize(src).unwrap();
+        let sf = parse(&tokens, src).unwrap();
+        let ItemKind::Fn(f) = &sf.items[0].kind else { panic!() };
+        let body = f.body.as_ref().expect("no body");
+        let Some(tail) = body.tail.as_ref() else { panic!() };
+        let ExprKind::Match { arms, .. } = &tail.kind else { panic!() };
+        match &arms[0].pat {
+            Pat::TupleStruct { path, fields } => {
+                assert_eq!(path[1].text(src), "Some");
+                assert_eq!(fields.len(), 1);
+                assert!(matches!(&fields[0], Pat::Wildcard));
+            }
+            other => panic!("expected TupleStruct pattern, got {other:?}"),
+        }
+    }
+
+    /// FLS §5.4 + §15: Tuple struct/variant pattern with two fields.
+    ///
+    /// `Pair::Two(a, b)` — two identifier bindings.
+    #[test]
+    fn tuple_struct_pattern_two_fields() {
+        let src = "fn f(x: i32) -> i32 { match x { Pair::Two(a, b) => 1, _ => 0, } }";
+        let tokens = crate::lexer::tokenize(src).unwrap();
+        let sf = parse(&tokens, src).unwrap();
+        let ItemKind::Fn(f) = &sf.items[0].kind else { panic!() };
+        let body = f.body.as_ref().expect("no body");
+        let Some(tail) = body.tail.as_ref() else { panic!() };
+        let ExprKind::Match { arms, .. } = &tail.kind else { panic!() };
+        match &arms[0].pat {
+            Pat::TupleStruct { path, fields } => {
+                assert_eq!(path[1].text(src), "Two");
+                assert_eq!(fields.len(), 2);
+                assert!(matches!(&fields[0], Pat::Ident(_)));
+                assert!(matches!(&fields[1], Pat::Ident(_)));
+            }
+            other => panic!("expected TupleStruct pattern, got {other:?}"),
+        }
     }
 }

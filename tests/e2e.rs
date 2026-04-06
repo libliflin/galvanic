@@ -3397,3 +3397,177 @@ fn runtime_enum_match_emits_comparison() {
     });
     assert!(has_comparison, "expected cmp/cset instruction for enum match\nasm:\n{asm}");
 }
+
+// ── Milestone 41: enum tuple variants compile to runtime ARM64 ────────────────
+//
+// FLS §15: Tuple variant construction stores a discriminant (slot 0) and
+// positional fields (slots 1..N) on the stack. Pattern matching compares the
+// discriminant at runtime and binds each field identifier to its slot.
+//
+// FLS §6.1.2:37–45: Construction and matching are runtime operations; the
+// discriminant comparison is never constant-folded.
+
+/// Milestone 41: Some arm taken — extracts the wrapped value.
+///
+/// FLS §15: `Opt::Some(42)` stores discriminant=1 + field=42.
+/// Matching `Opt::Some(v) => v` compares discriminant=1 at runtime.
+#[test]
+fn milestone_41_tuple_variant_some_taken() {
+    let src = r#"
+enum Opt { None, Some(i32) }
+fn main() -> i32 {
+    let x = Opt::Some(42);
+    match x {
+        Opt::Some(v) => v,
+        Opt::None => 0,
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42);
+}
+
+/// Milestone 41: None arm taken — returns 0 when variant doesn't match.
+///
+/// FLS §15: `Opt::None` stores discriminant=0 with no fields. The
+/// `Opt::Some(v)` checked arm fails; the `Opt::None` default arm runs.
+#[test]
+fn milestone_41_tuple_variant_none_taken() {
+    let src = r#"
+enum Opt { None, Some(i32) }
+fn main() -> i32 {
+    let x = Opt::None;
+    match x {
+        Opt::Some(v) => v,
+        Opt::None => 0,
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0);
+}
+
+/// Milestone 41: field value used in arithmetic.
+///
+/// FLS §15: `Some(v) => v + 1` exercises using the bound field variable.
+#[test]
+fn milestone_41_tuple_variant_field_in_arithmetic() {
+    let src = r#"
+enum Opt { None, Some(i32) }
+fn main() -> i32 {
+    let x = Opt::Some(10);
+    match x {
+        Opt::Some(v) => v + 5,
+        Opt::None => 0,
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 15);
+}
+
+/// Milestone 41: two-field tuple variant.
+///
+/// FLS §15: A variant with two fields stores discriminant, field0, field1
+/// in consecutive slots. Pattern `Pair(a, b) => a + b` binds both.
+#[test]
+fn milestone_41_two_field_tuple_variant() {
+    let src = r#"
+enum Pair { None, Two(i32, i32) }
+fn main() -> i32 {
+    let p = Pair::Two(3, 7);
+    match p {
+        Pair::Two(a, b) => a + b,
+        Pair::None => 0,
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10);
+}
+
+/// Milestone 41: wildcard field pattern ignores field.
+///
+/// FLS §5.1: `_` in a tuple struct field position is a wildcard — matches
+/// but does not bind. FLS §15: only the discriminant comparison runs.
+#[test]
+fn milestone_41_wildcard_field() {
+    let src = r#"
+enum Opt { None, Some(i32) }
+fn main() -> i32 {
+    let x = Opt::Some(99);
+    match x {
+        Opt::Some(_) => 1,
+        Opt::None => 0,
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1);
+}
+
+/// Milestone 41: TupleStruct as the last (default) arm.
+///
+/// FLS §6.18: The last arm in a match is emitted unconditionally. When
+/// the last arm has a TupleStruct pattern, its field bindings are installed
+/// before the body executes.
+#[test]
+fn milestone_41_tuple_variant_default_arm() {
+    let src = r#"
+enum Opt { None, Some(i32) }
+fn main() -> i32 {
+    let x = Opt::Some(7);
+    match x {
+        Opt::None => 0,
+        Opt::Some(v) => v,
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7);
+}
+
+/// Milestone 41: on a parameter value — non-literal scrutinee.
+///
+/// FLS §6.1.2:37–45: The runtime must handle this via actual branch
+/// instructions; the value is not known at compile time.
+#[test]
+fn milestone_41_tuple_variant_on_parameter() {
+    let src = r#"
+enum Opt { None, Some(i32) }
+fn unwrap_or_zero(o: Opt) -> i32 {
+    match o {
+        Opt::Some(v) => v,
+        Opt::None => 0,
+    }
+}
+fn main() -> i32 {
+    let a = Opt::Some(13);
+    let b = Opt::None;
+    unwrap_or_zero(a) + unwrap_or_zero(b)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 13);
+}
+
+/// Milestone 41: assembly inspection — tuple variant construction emits stores.
+///
+/// FLS §15: `Opt::Some(42)` must emit at minimum two `str` instructions:
+/// one for the discriminant and one for the field value.
+#[test]
+fn runtime_tuple_variant_construction_emits_stores() {
+    let src = r#"
+enum Opt { None, Some(i32) }
+fn main() -> i32 {
+    let x = Opt::Some(42);
+    match x { Opt::Some(v) => v, Opt::None => 0, }
+}
+"#;
+    let asm = compile_to_asm(src);
+    let store_count = asm.lines().filter(|l| l.trim().starts_with("str")).count();
+    assert!(
+        store_count >= 2,
+        "expected ≥2 str instructions for tuple variant construction (discriminant + field)\nasm:\n{asm}"
+    );
+}

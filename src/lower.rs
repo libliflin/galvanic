@@ -30,12 +30,13 @@ use std::collections::HashMap;
 use crate::ast::{BinOp, Block, Expr, ExprKind, ItemKind, Pat, SourceFile, Stmt, StmtKind, StructKind, TyKind};
 use crate::ir::{IrBinOp, Instr, IrFn, IrTy, IrValue, Module};
 
-/// Enum variant registry: maps enum name → (variant name → discriminant).
+/// Enum variant registry: maps enum name → (variant name → (discriminant, field_count)).
 ///
-/// FLS §15: Enumerations. Each unit variant is assigned an integer
-/// discriminant starting at 0, incrementing by 1 unless an explicit
-/// discriminant is specified (explicit discriminants are future work).
-type EnumDefs = HashMap<String, HashMap<String, i32>>;
+/// FLS §15: Enumerations. Each variant is assigned an integer discriminant
+/// starting at 0. `field_count` is 0 for unit variants and N for tuple
+/// variants with N positional fields. Named-field variants are future work.
+type EnumVariantInfo = (i32, usize);
+type EnumDefs = HashMap<String, HashMap<String, EnumVariantInfo>>;
 
 // ── FLS citations added in this module ───────────────────────────────────────
 // FLS §6.12.1: Call expressions — `lower_expr` handles `ExprKind::Call`.
@@ -255,20 +256,24 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                 }
             }
             ItemKind::Enum(e) => {
-                // FLS §15: Collect unit variants with auto-discriminants.
-                // Tuple and named variants are not yet supported.
+                // FLS §15: Collect variants with auto-discriminants and field counts.
+                // Unit variants have field_count = 0; tuple variants have field_count = N.
+                // Named-field variants are not yet supported.
                 let enum_name = e.name.text(source).to_owned();
-                let mut variants: HashMap<String, i32> = HashMap::new();
+                let mut variants: HashMap<String, EnumVariantInfo> = HashMap::new();
                 for (discriminant, variant) in e.variants.iter().enumerate() {
                     use crate::ast::EnumVariantKind;
+                    let variant_name = variant.name.text(source).to_owned();
                     match &variant.kind {
                         EnumVariantKind::Unit => {
-                            let variant_name = variant.name.text(source).to_owned();
-                            variants.insert(variant_name, discriminant as i32);
+                            variants.insert(variant_name, (discriminant as i32, 0));
                         }
-                        EnumVariantKind::Tuple(_) | EnumVariantKind::Named(_) => {
+                        EnumVariantKind::Tuple(fields) => {
+                            variants.insert(variant_name, (discriminant as i32, fields.len()));
+                        }
+                        EnumVariantKind::Named(_) => {
                             return Err(LowerError::Unsupported(
-                                "tuple/named enum variants not yet supported".into(),
+                                "named-field enum variants not yet supported".into(),
                             ));
                         }
                     }
@@ -337,8 +342,57 @@ fn lower_fn(
     //
     // Cache-line note: each spill is one `str` instruction (4 bytes); two
     // spills per 8-byte stack pair keep the spill sequence cache-aligned.
-    for (i, param) in fn_def.params.iter().enumerate() {
-        if i >= 8 {
+    // FLS §9: Spill parameters from ARM64 registers to stack slots.
+    // `reg_idx` tracks the current register number, which may advance by more
+    // than 1 per parameter when an enum type occupies multiple registers
+    // (discriminant + field registers).
+    let mut reg_idx: usize = 0;
+    for param in fn_def.params.iter() {
+        let param_name = param.name.text(source);
+
+        // FLS §15: Enum type parameters — `fn f(o: Opt)`.
+        //
+        // An enum value with max N fields occupies N+1 consecutive registers:
+        // register reg_idx holds the discriminant; registers reg_idx+1..=reg_idx+N
+        // hold the fields. All registers are spilled to consecutive stack slots so
+        // that TupleStruct patterns can access fields via `base_slot + 1 + fi`.
+        //
+        // FLS §6.1.2:37–45: All spills are runtime store instructions.
+        // Cache-line note: each spill is one `str` instruction (4 bytes).
+        if let TyKind::Path(segs) = &param.ty.kind
+            && segs.len() == 1
+        {
+            let type_name = segs[0].text(source);
+            if let Some(variants) = enum_defs.get(type_name) {
+                let max_fields = variants.values().map(|&(_, fc)| fc).max().unwrap_or(0);
+                let regs_needed = 1 + max_fields;
+                if reg_idx + regs_needed > 8 {
+                    return Err(LowerError::Unsupported(
+                        "enum parameter exceeds ARM64 register window (>8 total registers)".into(),
+                    ));
+                }
+                let base_slot = ctx.alloc_slot()?;
+                for _ in 0..max_fields {
+                    ctx.alloc_slot()?;
+                }
+                ctx.locals.insert(param_name, base_slot);
+                ctx.local_enum_types.insert(base_slot, type_name.to_owned());
+                // Spill discriminant register.
+                ctx.instrs.push(Instr::Store { src: reg_idx as u8, slot: base_slot });
+                // Spill field registers.
+                for fi in 0..max_fields {
+                    ctx.instrs.push(Instr::Store {
+                        src: (reg_idx + fi + 1) as u8,
+                        slot: base_slot + 1 + fi as u8,
+                    });
+                }
+                reg_idx += regs_needed;
+                continue;
+            }
+        }
+
+        // FLS §9: i32 and bool parameters — one register each.
+        if reg_idx >= 8 {
             return Err(LowerError::Unsupported(
                 "functions with more than 8 parameters (exceeds ARM64 register window)".into(),
             ));
@@ -351,12 +405,10 @@ fn lower_fn(
             return Err(LowerError::Unsupported("parameter type other than i32/bool".into()));
         }
         let slot = ctx.alloc_slot()?;
-        let param_name = param.name.text(source);
         ctx.locals.insert(param_name, slot);
-        // Spill parameter register i (arm64 x{i}) to its stack slot.
-        // `src: i as u8` directly names the incoming register — this is
-        // safe because the body hasn't allocated any virtual registers yet.
-        ctx.instrs.push(Instr::Store { src: i as u8, slot });
+        // Spill parameter register reg_idx (arm64 x{reg_idx}) to its stack slot.
+        ctx.instrs.push(Instr::Store { src: reg_idx as u8, slot });
+        reg_idx += 1;
     }
 
     ctx.lower_block(body, &ret_ty)?;
@@ -513,6 +565,15 @@ struct LowerCtx<'src> {
     /// the slot offset. When `let p = Point { x, y }` is lowered, `p`'s
     /// base slot is registered here with type `"Point"`.
     local_struct_types: HashMap<u8, String>,
+
+    /// Maps an enum variable's base stack slot to its enum type name.
+    ///
+    /// FLS §15: Enum values with tuple variants occupy multiple consecutive
+    /// slots: slot 0 = discriminant, slots 1..N = positional fields.
+    /// When `let x = Opt::Some(v)` is lowered, `x`'s base slot is
+    /// registered here with type `"Opt"`. Used by TupleStruct pattern
+    /// lowering to locate field slots from the base slot.
+    local_enum_types: HashMap<u8, String>,
 }
 
 impl<'src> LowerCtx<'src> {
@@ -535,6 +596,7 @@ impl<'src> LowerCtx<'src> {
             struct_defs,
             enum_defs,
             local_struct_types: HashMap::new(),
+            local_enum_types: HashMap::new(),
         }
     }
 
@@ -587,7 +649,7 @@ impl<'src> LowerCtx<'src> {
                 self.enum_defs
                     .get(enum_name)
                     .and_then(|v| v.get(variant_name))
-                    .copied()
+                    .map(|&(disc, _)| disc)
                     .ok_or_else(|| LowerError::Unsupported(format!(
                         "unknown enum variant `{enum_name}::{variant_name}` in pattern"
                     )))
@@ -727,6 +789,96 @@ impl<'src> LowerCtx<'src> {
                         return Ok(());
                 }
 
+                // FLS §15: Enum tuple variant construction — `let x = Enum::Variant(f0, f1, ...)`.
+                //
+                // A two-segment path callee in a call expression is an enum tuple variant
+                // constructor. Layout: slot 0 = discriminant, slots 1..N = fields.
+                // The variable's slot maps to the discriminant slot; `local_enum_types`
+                // records the enum type so TupleStruct patterns can locate field slots.
+                //
+                // FLS §6.1.2:37–45: Construction stores at runtime; no const folding.
+                //
+                // Cache-line note: a variant with N fields occupies N+1 consecutive slots.
+                if let Some(init_expr) = init.as_ref()
+                    && let ExprKind::Call { callee, args } = &init_expr.kind
+                    && let ExprKind::Path(segs) = &callee.kind
+                    && segs.len() == 2
+                {
+                    let enum_name = segs[0].text(self.source);
+                    let variant_name = segs[1].text(self.source);
+                    if let Some(&(discriminant, field_count)) = self.enum_defs
+                        .get(enum_name)
+                        .and_then(|v| v.get(variant_name))
+                    {
+                        if args.len() != field_count {
+                            return Err(LowerError::Unsupported(format!(
+                                "enum variant `{enum_name}::{variant_name}` expects {field_count} fields, got {}",
+                                args.len()
+                            )));
+                        }
+                        // Allocate discriminant slot + one slot per field.
+                        let base_slot = self.alloc_slot()?;
+                        for _ in 0..field_count {
+                            self.alloc_slot()?;
+                        }
+                        self.locals.insert(var_name, base_slot);
+                        self.local_enum_types
+                            .insert(base_slot, enum_name.to_owned());
+                        // Store discriminant.
+                        let disc_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(disc_reg, discriminant));
+                        self.instrs.push(Instr::Store { src: disc_reg, slot: base_slot });
+                        // Store each field in source order.
+                        for (i, arg) in args.iter().enumerate() {
+                            let val = self.lower_expr(arg, &IrTy::I32)?;
+                            let src = self.val_to_reg(val)?;
+                            self.instrs.push(Instr::Store { src, slot: base_slot + 1 + i as u8 });
+                        }
+                        return Ok(());
+                    }
+                }
+
+                // FLS §15: Enum unit variant let binding — `let x = Opt::None;`
+                //
+                // Unit variants are path expressions (not call expressions), so they
+                // are not caught by the call-based enum check above. Detect them here
+                // and register the variable in `local_enum_types` so TupleStruct
+                // patterns can locate the discriminant slot during match lowering.
+                //
+                // Allocate enough field slots to accommodate the enum's max field
+                // count so that `base_slot + 1 + fi` is always a valid slot index
+                // even for unit variant values (fields are uninitialized but never
+                // accessed due to discriminant check in the pattern).
+                //
+                // FLS §6.1.2:37–45: Discriminant store is a runtime instruction.
+                if let Some(init_expr) = init.as_ref()
+                    && let ExprKind::Path(segs) = &init_expr.kind
+                    && segs.len() == 2
+                {
+                    let enum_name = segs[0].text(self.source);
+                    let variant_name = segs[1].text(self.source);
+                    if let Some(&(discriminant, 0)) = self.enum_defs
+                        .get(enum_name)
+                        .and_then(|v| v.get(variant_name))
+                    {
+                        // Compute max field count across all variants of this enum.
+                        let max_fields = self.enum_defs
+                            .get(enum_name)
+                            .map(|v| v.values().map(|&(_, fc)| fc).max().unwrap_or(0))
+                            .unwrap_or(0);
+                        let base_slot = self.alloc_slot()?;
+                        for _ in 0..max_fields {
+                            self.alloc_slot()?; // Reserve field slots (uninitialized for unit variant).
+                        }
+                        self.locals.insert(var_name, base_slot);
+                        self.local_enum_types.insert(base_slot, enum_name.to_owned());
+                        let disc_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(disc_reg, discriminant));
+                        self.instrs.push(Instr::Store { src: disc_reg, slot: base_slot });
+                        return Ok(());
+                    }
+                }
+
                 // Normal (non-struct) let binding.
                 let slot = self.alloc_slot()?;
                 self.locals.insert(var_name, slot);
@@ -859,7 +1011,7 @@ impl<'src> LowerCtx<'src> {
                 let discriminant = self.enum_defs
                     .get(enum_name)
                     .and_then(|variants| variants.get(variant_name))
-                    .copied()
+                    .map(|&(disc, _)| disc)
                     .ok_or_else(|| {
                         LowerError::Unsupported(format!(
                             "unknown path `{enum_name}::{variant_name}` (not an enum variant)"
@@ -1208,7 +1360,7 @@ impl<'src> LowerCtx<'src> {
                         let discriminant = self.enum_defs
                             .get(enum_name)
                             .and_then(|v| v.get(variant_name))
-                            .copied()
+                            .map(|&(disc, _)| disc)
                             .ok_or_else(|| LowerError::Unsupported(format!(
                                 "unknown enum variant `{enum_name}::{variant_name}` in pattern"
                             )))?;
@@ -1336,6 +1488,12 @@ impl<'src> LowerCtx<'src> {
                             label: else_label,
                         });
                     }
+                    // FLS §5.4 + §15: TupleStruct pattern in if-let — future milestone.
+                    Pat::TupleStruct { .. } => {
+                        return Err(LowerError::Unsupported(
+                            "TupleStruct pattern in if-let not yet supported".into(),
+                        ));
+                    }
                 }
 
                 // Install identifier binding (if any) before the then block.
@@ -1461,6 +1619,23 @@ impl<'src> LowerCtx<'src> {
                 } else {
                     IrTy::I32
                 };
+                // FLS §15: If the scrutinee is a plain variable holding an enum
+                // tuple variant, record its base slot for TupleStruct pattern field
+                // access. `scrut_slot` holds the discriminant copy; fields are at
+                // `enum_base_slot + 1..N`.
+                let enum_base_slot: Option<u8> =
+                    if let ExprKind::Path(segs) = &scrutinee.kind
+                        && segs.len() == 1
+                    {
+                        let var_name = segs[0].text(self.source);
+                        self.locals
+                            .get(var_name)
+                            .copied()
+                            .filter(|s| self.local_enum_types.contains_key(s))
+                    } else {
+                        None
+                    };
+
                 let scrut_val = self.lower_expr(scrutinee, &scrut_ty)?;
                 let scrut_reg = self.val_to_reg(scrut_val)?;
                 let scrut_slot = self.alloc_slot()?;
@@ -1700,7 +1875,7 @@ impl<'src> LowerCtx<'src> {
                                         self.enum_defs
                                             .get(enum_name)
                                             .and_then(|v| v.get(variant_name))
-                                            .copied()
+                                            .map(|&(disc, _)| disc)
                                             .ok_or_else(|| LowerError::Unsupported(format!(
                                                 "unknown enum variant `{enum_name}::{variant_name}` in match pattern"
                                             )))?
@@ -1724,6 +1899,79 @@ impl<'src> LowerCtx<'src> {
                                         reg: cmp_reg,
                                         label: next_label,
                                     });
+                                }
+                                // FLS §5.4 + §15: Tuple struct/variant pattern.
+                                //
+                                // Strategy: compare discriminant at scrut_slot against
+                                // the variant's discriminant, branch on mismatch, then
+                                // install field bindings from enum_base_slot + 1 + idx.
+                                //
+                                // FLS §6.1.2:37–45: All instructions are runtime.
+                                // Cache-line note: ~5 instructions (ldr + mov + cmp +
+                                // cbz + N×ldr per field binding = 20+ bytes).
+                                Pat::TupleStruct { path: segs, fields } => {
+                                    if segs.len() != 2 {
+                                        return Err(LowerError::Unsupported(
+                                            "tuple struct pattern path must have two segments".into(),
+                                        ));
+                                    }
+                                    let enum_name = segs[0].text(self.source);
+                                    let variant_name = segs[1].text(self.source);
+                                    let discriminant = self.enum_defs
+                                        .get(enum_name)
+                                        .and_then(|v| v.get(variant_name))
+                                        .map(|&(disc, _)| disc)
+                                        .ok_or_else(|| LowerError::Unsupported(format!(
+                                            "unknown enum variant `{enum_name}::{variant_name}`"
+                                        )))?;
+                                    let base = enum_base_slot.ok_or_else(|| {
+                                        LowerError::Unsupported(
+                                            "TupleStruct pattern requires enum variable scrutinee".into(),
+                                        )
+                                    })?;
+                                    // Discriminant check.
+                                    let s_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                                    let p_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::LoadImm(p_reg, discriminant));
+                                    let cmp_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::BinOp {
+                                        op: IrBinOp::Eq,
+                                        dst: cmp_reg,
+                                        lhs: s_reg,
+                                        rhs: p_reg,
+                                    });
+                                    self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
+                                    // Install field bindings.
+                                    let mut bound: Vec<&str> = Vec::new();
+                                    for (fi, fp) in fields.iter().enumerate() {
+                                        if let Pat::Ident(span) = fp {
+                                            let fname = span.text(self.source);
+                                            let fslot = base + 1 + fi as u8;
+                                            let bslot = self.alloc_slot()?;
+                                            let breg = self.alloc_reg()?;
+                                            self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                            self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                            self.locals.insert(fname, bslot);
+                                            bound.push(fname);
+                                        } else if !matches!(fp, Pat::Wildcard) {
+                                            return Err(LowerError::Unsupported(
+                                                "only ident/wildcard field patterns in TupleStruct".into(),
+                                            ));
+                                        }
+                                    }
+                                    if let Some(guard) = &arm.guard {
+                                        let gv = self.lower_expr(guard, &IrTy::Bool)?;
+                                        let gr = self.val_to_reg(gv)?;
+                                        self.instrs.push(Instr::CondBranch { reg: gr, label: next_label });
+                                    }
+                                    let body_val = self.lower_expr(&arm.body, ret_ty)?;
+                                    let body_reg = self.val_to_reg(body_val)?;
+                                    self.instrs.push(Instr::Store { src: body_reg, slot: phi_slot });
+                                    self.instrs.push(Instr::Branch(exit_label));
+                                    for name in &bound { self.locals.remove(*name); }
+                                    self.instrs.push(Instr::Label(next_label));
+                                    continue;
                                 }
                                 _ => {
                                     // Single literal pattern: load scrutinee, compare, cbz.
@@ -1793,7 +2041,9 @@ impl<'src> LowerCtx<'src> {
 
                         // FLS §5.1.4: If the default arm has an identifier pattern,
                         // bind the scrutinee to the name before lowering the body.
-                        let default_binding = match &default_arm[0].pat {
+                        // FLS §5.4 + §15: If the default arm has a TupleStruct pattern,
+                        // install field bindings from enum_base_slot.
+                        let default_bindings: Vec<&str> = match &default_arm[0].pat {
                             Pat::Ident(span) => {
                                 let name = span.text(self.source);
                                 let bind_slot = self.alloc_slot()?;
@@ -1801,13 +2051,32 @@ impl<'src> LowerCtx<'src> {
                                 self.instrs.push(Instr::Load { dst: bind_reg, slot: scrut_slot });
                                 self.instrs.push(Instr::Store { src: bind_reg, slot: bind_slot });
                                 self.locals.insert(name, bind_slot);
-                                Some(name)
+                                vec![name]
                             }
-                            _ => None,
+                            Pat::TupleStruct { path: segs, fields } if segs.len() == 2 => {
+                                let base = enum_base_slot.ok_or_else(|| LowerError::Unsupported(
+                                    "TupleStruct default arm requires enum variable scrutinee".into(),
+                                ))?;
+                                let mut names = Vec::new();
+                                for (fi, fp) in fields.iter().enumerate() {
+                                    if let Pat::Ident(span) = fp {
+                                        let fname = span.text(self.source);
+                                        let fslot = base + 1 + fi as u8;
+                                        let bslot = self.alloc_slot()?;
+                                        let breg = self.alloc_reg()?;
+                                        self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                        self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                        self.locals.insert(fname, bslot);
+                                        names.push(fname);
+                                    }
+                                }
+                                names
+                            }
+                            _ => vec![],
                         };
                         let body_val = self.lower_expr(&default_arm[0].body, ret_ty)?;
-                        if let Some(name) = default_binding {
-                            self.locals.remove(name);
+                        for name in &default_bindings {
+                            self.locals.remove(*name);
                         }
                         let body_reg = self.val_to_reg(body_val)?;
                         self.instrs.push(Instr::Store { src: body_reg, slot: phi_slot });
@@ -1988,7 +2257,7 @@ impl<'src> LowerCtx<'src> {
                                         self.enum_defs
                                             .get(enum_name)
                                             .and_then(|v| v.get(variant_name))
-                                            .copied()
+                                            .map(|&(disc, _)| disc)
                                             .ok_or_else(|| LowerError::Unsupported(format!(
                                                 "unknown enum variant `{enum_name}::{variant_name}` in match pattern"
                                             )))?
@@ -2012,6 +2281,66 @@ impl<'src> LowerCtx<'src> {
                                         reg: cmp_reg,
                                         label: next_label,
                                     });
+                                }
+                                // FLS §5.4 + §15: Tuple struct/variant pattern (unit return).
+                                Pat::TupleStruct { path: segs, fields } => {
+                                    if segs.len() != 2 {
+                                        return Err(LowerError::Unsupported(
+                                            "tuple struct pattern path must have two segments".into(),
+                                        ));
+                                    }
+                                    let enum_name = segs[0].text(self.source);
+                                    let variant_name = segs[1].text(self.source);
+                                    let discriminant = self.enum_defs
+                                        .get(enum_name)
+                                        .and_then(|v| v.get(variant_name))
+                                        .map(|&(disc, _)| disc)
+                                        .ok_or_else(|| LowerError::Unsupported(format!(
+                                            "unknown enum variant `{enum_name}::{variant_name}`"
+                                        )))?;
+                                    let base = enum_base_slot.ok_or_else(|| LowerError::Unsupported(
+                                        "TupleStruct pattern requires enum variable scrutinee".into(),
+                                    ))?;
+                                    let s_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                                    let p_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::LoadImm(p_reg, discriminant));
+                                    let cmp_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::BinOp {
+                                        op: IrBinOp::Eq,
+                                        dst: cmp_reg,
+                                        lhs: s_reg,
+                                        rhs: p_reg,
+                                    });
+                                    self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
+                                    // Install field bindings.
+                                    let mut bound: Vec<&str> = Vec::new();
+                                    for (fi, fp) in fields.iter().enumerate() {
+                                        if let Pat::Ident(span) = fp {
+                                            let fname = span.text(self.source);
+                                            let fslot = base + 1 + fi as u8;
+                                            let bslot = self.alloc_slot()?;
+                                            let breg = self.alloc_reg()?;
+                                            self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                            self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                            self.locals.insert(fname, bslot);
+                                            bound.push(fname);
+                                        } else if !matches!(fp, Pat::Wildcard) {
+                                            return Err(LowerError::Unsupported(
+                                                "only ident/wildcard fields in TupleStruct pattern".into(),
+                                            ));
+                                        }
+                                    }
+                                    if let Some(guard) = &arm.guard {
+                                        let gv = self.lower_expr(guard, &IrTy::Bool)?;
+                                        let gr = self.val_to_reg(gv)?;
+                                        self.instrs.push(Instr::CondBranch { reg: gr, label: next_label });
+                                    }
+                                    self.lower_expr(&arm.body, &IrTy::Unit)?;
+                                    self.instrs.push(Instr::Branch(exit_label));
+                                    for name in &bound { self.locals.remove(*name); }
+                                    self.instrs.push(Instr::Label(next_label));
+                                    continue;
                                 }
                                 _ => {
                                     let s_reg = self.alloc_reg()?;
@@ -2063,7 +2392,8 @@ impl<'src> LowerCtx<'src> {
                         }
 
                         // FLS §5.1.4: If the default arm has an identifier pattern, bind.
-                        let default_binding_unit = match &default_arm[0].pat {
+                        // FLS §5.4 + §15: TupleStruct default arm installs field bindings.
+                        let default_bindings_unit: Vec<&str> = match &default_arm[0].pat {
                             Pat::Ident(span) => {
                                 let name = span.text(self.source);
                                 let bind_slot = self.alloc_slot()?;
@@ -2071,13 +2401,32 @@ impl<'src> LowerCtx<'src> {
                                 self.instrs.push(Instr::Load { dst: bind_reg, slot: scrut_slot });
                                 self.instrs.push(Instr::Store { src: bind_reg, slot: bind_slot });
                                 self.locals.insert(name, bind_slot);
-                                Some(name)
+                                vec![name]
                             }
-                            _ => None,
+                            Pat::TupleStruct { path: segs, fields } if segs.len() == 2 => {
+                                let base = enum_base_slot.ok_or_else(|| LowerError::Unsupported(
+                                    "TupleStruct default arm requires enum variable scrutinee".into(),
+                                ))?;
+                                let mut names = Vec::new();
+                                for (fi, fp) in fields.iter().enumerate() {
+                                    if let Pat::Ident(span) = fp {
+                                        let fname = span.text(self.source);
+                                        let fslot = base + 1 + fi as u8;
+                                        let bslot = self.alloc_slot()?;
+                                        let breg = self.alloc_reg()?;
+                                        self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                        self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                        self.locals.insert(fname, bslot);
+                                        names.push(fname);
+                                    }
+                                }
+                                names
+                            }
+                            _ => vec![],
                         };
                         self.lower_expr(&default_arm[0].body, &IrTy::Unit)?;
-                        if let Some(name) = default_binding_unit {
-                            self.locals.remove(name);
+                        for name in &default_bindings_unit {
+                            self.locals.remove(*name);
                         }
                         self.instrs.push(Instr::Label(exit_label));
                         Ok(IrValue::Unit)
@@ -2102,9 +2451,24 @@ impl<'src> LowerCtx<'src> {
             // pointers and method calls are deferred to a future milestone.
             ExprKind::Call { callee, args } => {
                 // Resolve the callee to a function name.
+                // FLS §15: Two-segment path callees are enum tuple variant constructors.
+                // As standalone expressions they are only supported inside let-binding
+                // initializers (handled in lower_stmt). Other contexts are future work.
                 let fn_name = match &callee.kind {
                     ExprKind::Path(segments) if segments.len() == 1 => {
                         segments[0].text(self.source).to_owned()
+                    }
+                    ExprKind::Path(segments) if segments.len() == 2 => {
+                        let en = segments[0].text(self.source);
+                        let vn = segments[1].text(self.source);
+                        if self.enum_defs.get(en).and_then(|v| v.get(vn)).is_some() {
+                            return Err(LowerError::Unsupported(format!(
+                                "enum variant `{en}::{vn}(...)` as expression; use in `let` binding"
+                            )));
+                        }
+                        return Err(LowerError::Unsupported(
+                            "two-segment path call on non-enum (function pointers not yet supported)".into(),
+                        ));
                     }
                     _ => {
                         return Err(LowerError::Unsupported(
@@ -2119,14 +2483,60 @@ impl<'src> LowerCtx<'src> {
                     ));
                 }
 
-                // Lower each argument to a virtual register, left-to-right.
-                // We assume i32 arguments at this milestone — type inference
-                // is future work.
+                // Lower each argument to virtual registers, left-to-right.
+                //
+                // FLS §15: If an argument is an enum variable (recorded in
+                // `local_enum_types`), it expands to multiple registers:
+                // discriminant in the first, fields in subsequent registers.
+                // This matches the enum parameter calling convention in `lower_fn`.
+                //
+                // FLS §6.1.2:37–45: All loads are runtime instructions.
                 let mut arg_regs = Vec::with_capacity(args.len());
                 for arg in args {
-                    let val = self.lower_expr(arg, &IrTy::I32)?;
-                    let reg = self.val_to_reg(val)?;
-                    arg_regs.push(reg);
+                    // Check whether this argument is an enum variable.
+                    let enum_info: Option<(u8, usize)> = if let ExprKind::Path(segs) = &arg.kind
+                        && segs.len() == 1
+                    {
+                        let var_name = segs[0].text(self.source);
+                        let base_slot_opt = self.locals.get(var_name).copied();
+                        if let Some(base_slot) = base_slot_opt {
+                            if let Some(en) = self.local_enum_types.get(&base_slot) {
+                                let en_name = en.clone();
+                                let max_fields = self.enum_defs
+                                    .get(en_name.as_str())
+                                    .map(|v| v.values().map(|&(_, fc)| fc).max().unwrap_or(0))
+                                    .unwrap_or(0);
+                                Some((base_slot, max_fields))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    if let Some((base_slot, max_fields)) = enum_info {
+                        // Pass discriminant register.
+                        let disc_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: disc_reg, slot: base_slot });
+                        arg_regs.push(disc_reg);
+                        // Pass field registers (uninitialized for unit variants, but
+                        // discriminant check in callee prevents any use of them).
+                        for fi in 0..max_fields {
+                            let field_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load {
+                                dst: field_reg,
+                                slot: base_slot + 1 + fi as u8,
+                            });
+                            arg_regs.push(field_reg);
+                        }
+                    } else {
+                        let val = self.lower_expr(arg, &IrTy::I32)?;
+                        let reg = self.val_to_reg(val)?;
+                        arg_regs.push(reg);
+                    }
                 }
 
                 // Allocate the destination register for the return value.
@@ -2655,7 +3065,7 @@ impl<'src> LowerCtx<'src> {
                             self.enum_defs
                                 .get(enum_name)
                                 .and_then(|v| v.get(variant_name))
-                                .copied()
+                                .map(|&(disc, _)| disc)
                                 .ok_or_else(|| LowerError::Unsupported(format!(
                                     "unknown enum variant `{enum_name}::{variant_name}` in while-let pattern"
                                 )))?
@@ -2676,6 +3086,12 @@ impl<'src> LowerCtx<'src> {
                             rhs: p_reg,
                         });
                         self.instrs.push(Instr::CondBranch { reg: eq_reg, label: exit_label });
+                    }
+                    // FLS §5.4 + §15: TupleStruct pattern in while-let — future milestone.
+                    Pat::TupleStruct { .. } => {
+                        return Err(LowerError::Unsupported(
+                            "TupleStruct pattern in while-let not yet supported".into(),
+                        ));
                     }
                 }
 

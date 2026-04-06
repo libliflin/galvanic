@@ -99,6 +99,24 @@ fn describe_direction(d: i32) -> i32 {
     }
 }
 
+// FLS §15: Enum with a tuple variant — stores discriminant + fields.
+// FLS §5.4: Tuple struct/variant pattern `Opt::Some(v)` matches the
+// variant and binds the first field to `v`.
+// FLS §5.4 NOTE: The spec does not provide a self-contained code example
+// for tuple struct patterns; this is derived from the semantic description.
+enum Opt {
+    None,
+    Some(i32),
+}
+
+// FLS §15 + §5.4: Construct a tuple variant, match it, extract the field.
+fn unwrap_or_zero(o: Opt) -> i32 {
+    match o {
+        Opt::Some(v) => v,
+        Opt::None => 0,
+    }
+}
+
 fn main() -> i32 {
     // FLS §5.1.9: inclusive range — value 2 in [1,3] → 1.
     let a = range_inclusive(2);
@@ -116,6 +134,11 @@ fn main() -> i32 {
     let g = bind_and_use(3);
     // FLS §5.5: path pattern — Direction::East discriminant 2 → match arm → 2.
     let h = describe_direction(Direction::East);
-    // a=1, b=2, c=1, d=1, e=1, f=1, g=4, h=2 → sum=13; exit 13 to signal correct execution.
-    a + b + c + d + e + f + g + h
+    // FLS §15 + §5.4: tuple variant Some(3) → v=3; None → 0.
+    let s = Opt::Some(3);
+    let i = unwrap_or_zero(s);
+    let n = Opt::None;
+    let j = unwrap_or_zero(n);
+    // a=1, b=2, c=1, d=1, e=1, f=1, g=4, h=2, i=3, j=0 → sum=16
+    a + b + c + d + e + f + g + h + i + j
 }
