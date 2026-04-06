@@ -872,6 +872,25 @@ struct_update_example:
     add     sp, sp, #32             // FLS §8.1: restore stack frame
     ret
 
+    // fn chained_field_access_example — FLS §9
+    .global chained_field_access_example
+chained_field_access_example:
+    sub     sp, sp, #32             // FLS §8.1: frame for 4 slot(s)
+    mov     x0, #0                   // FLS §2.4.4.1: load imm 0
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    mov     x1, #0                   // FLS §2.4.4.1: load imm 0
+    str     x1, [sp, #8              ] // FLS §8.1: store slot 1
+    mov     x2, #3                   // FLS §2.4.4.1: load imm 3
+    str     x2, [sp, #16             ] // FLS §8.1: store slot 2
+    mov     x3, #4                   // FLS §2.4.4.1: load imm 4
+    str     x3, [sp, #24             ] // FLS §8.1: store slot 3
+    ldr     x4, [sp, #16             ] // FLS §8.1: load slot 2
+    ldr     x5, [sp, #24             ] // FLS §8.1: load slot 3
+    add     x6, x4, x5          // FLS §6.5.5: add
+    mov     x0, x6              // FLS §6.19: return reg 6 → x0
+    add     sp, sp, #32             // FLS §8.1: restore stack frame
+    ret
+
     // ELF entry point — FLS §18.1
     .global _start
 _start:
