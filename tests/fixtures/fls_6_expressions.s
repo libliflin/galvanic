@@ -931,6 +931,19 @@ deref_ref_example:
     add     sp, sp, #16             // FLS §8.1: restore stack frame
     ret
 
+    // fn mut_ref_assign_example — FLS §9
+    .global mut_ref_assign_example
+mut_ref_assign_example:
+    sub     sp, sp, #16             // FLS §8.1: frame for 2 slot(s)
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    str     x1, [sp, #8              ] // FLS §8.1: store slot 1
+    ldr     x0, [sp, #0              ] // FLS §8.1: load slot 0
+    ldr     x1, [sp, #8              ] // FLS §8.1: load slot 1
+    str     x1, [x0]           // FLS §6.5.10: store through pointer in x0
+    mov     x0, #0              // FLS §4.4: unit return
+    add     sp, sp, #16             // FLS §8.1: restore stack frame
+    ret
+
     // ELF entry point — FLS §18.1
     .global _start
 _start:
