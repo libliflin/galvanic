@@ -126,6 +126,47 @@ fn stmt_contains_call(stmt: &Stmt) -> bool {
     }
 }
 
+// ── Break-with-value detection ───────────────────────────────────────────────
+
+/// Return `true` if the block contains a `break <value>` expression that
+/// belongs to the *current* loop level (not a nested loop).
+///
+/// FLS §6.15.6: Only `loop` expressions support break-with-value; `while`
+/// and `for` loops do not yield a value via `break`.
+fn block_contains_break_with_value(block: &Block) -> bool {
+    block.stmts.iter().any(stmt_contains_break_with_value)
+        || block.tail.as_ref().is_some_and(|e| expr_contains_break_with_value(e))
+}
+
+fn stmt_contains_break_with_value(stmt: &Stmt) -> bool {
+    match &stmt.kind {
+        StmtKind::Expr(e) => expr_contains_break_with_value(e),
+        StmtKind::Let { init, .. } => {
+            init.as_ref().is_some_and(|e| expr_contains_break_with_value(e))
+        }
+        StmtKind::Empty => false,
+    }
+}
+
+/// Return `true` if the expression contains a `break <value>` at the current
+/// loop level. Does **not** recurse into nested loop bodies, because `break`
+/// statements inside nested loops belong to those loops, not the outer one.
+fn expr_contains_break_with_value(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Break(Some(_)) => true,
+        // Recurse into non-loop control-flow.
+        ExprKind::If { cond, then_block, else_expr } => {
+            expr_contains_break_with_value(cond)
+                || block_contains_break_with_value(then_block)
+                || else_expr.as_ref().is_some_and(|e| expr_contains_break_with_value(e))
+        }
+        ExprKind::Block(b) => block_contains_break_with_value(b),
+        // Do NOT recurse into nested loops — their `break` belongs to them.
+        ExprKind::Loop(_) | ExprKind::While { .. } | ExprKind::For { .. } => false,
+        _ => false,
+    }
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 /// Lower a parsed source file to the IR.
@@ -268,6 +309,14 @@ struct LoopCtx {
     header_label: u32,
     /// Label immediately after the loop. Target for `break`.
     exit_label: u32,
+    /// Stack slot for the loop's result value, allocated when the loop body
+    /// contains a `break <value>` expression. Only `loop` expressions support
+    /// break-with-value (FLS §6.15.6). `None` for `while` and `for` loops.
+    break_slot: Option<u8>,
+    /// The expected result type of the loop expression. Needed so that
+    /// `break <expr>` can lower the value with the correct type context.
+    /// Matches the `ret_ty` passed to `lower_expr` for the `loop` node.
+    break_ret_ty: IrTy,
 }
 
 // ── Lowering context ─────────────────────────────────────────────────────────
@@ -1050,7 +1099,8 @@ impl<'src> LowerCtx<'src> {
                 // Push a loop context so that `break`/`continue` inside the body
                 // can resolve to the correct labels.
                 // FLS §6.15.3, §6.15.6, §6.15.7.
-                self.loop_stack.push(LoopCtx { header_label, exit_label });
+                // `while` loops do not support break-with-value (FLS §6.15.6).
+                self.loop_stack.push(LoopCtx { header_label, exit_label, break_slot: None, break_ret_ty: IrTy::Unit });
 
                 // Loop top: the branch target for the back-edge.
                 self.instrs.push(Instr::Label(header_label));
@@ -1151,7 +1201,8 @@ impl<'src> LowerCtx<'src> {
                 // Push loop context: `continue` → incr_label, `break` → exit_label.
                 // FLS §6.15.7: `continue` in a for loop advances to the next iteration.
                 // For a range-based for loop, the "next iteration" is the increment step.
-                self.loop_stack.push(LoopCtx { header_label: incr_label, exit_label });
+                // `for` loops do not support break-with-value (FLS §6.15.6).
+                self.loop_stack.push(LoopCtx { header_label: incr_label, exit_label, break_slot: None, break_ret_ty: IrTy::Unit });
 
                 // Bind the loop variable name so body can load it via Path.
                 self.locals.insert(pat_name, i_slot);
@@ -1226,12 +1277,26 @@ impl<'src> LowerCtx<'src> {
                 let header_label = self.alloc_label();
                 let exit_label = self.alloc_label();
 
-                self.loop_stack.push(LoopCtx { header_label, exit_label });
+                // FLS §6.15.6: Only `loop` expressions support break-with-value.
+                // Scan the body for `break <value>` at this loop level. If any
+                // are present, allocate a stack slot to hold the result — the
+                // same phi-slot pattern used for if-else expressions.
+                //
+                // The break_slot is allocated BEFORE entering the loop body so
+                // that `break <value>` can store into it during body lowering.
+                let break_slot = if block_contains_break_with_value(body) {
+                    Some(self.alloc_slot()?)
+                } else {
+                    None
+                };
+
+                self.loop_stack.push(LoopCtx { header_label, exit_label, break_slot, break_ret_ty: *ret_ty });
 
                 // Loop top: the branch-back target.
                 self.instrs.push(Instr::Label(header_label));
 
                 // Execute body. Value is discarded; only side effects matter.
+                // The `break <value>` arms inside lower_expr will store to break_slot.
                 self.lower_block_to_value(body, &IrTy::Unit)?;
 
                 // Back-edge: jump unconditionally to the top of the loop.
@@ -1243,9 +1308,21 @@ impl<'src> LowerCtx<'src> {
 
                 self.loop_stack.pop();
 
-                // FLS §6.15.2: "The type of a loop expression is the unit type."
-                // (Break-with-value support is a future milestone.)
-                Ok(IrValue::Unit)
+                // FLS §6.15.2: "The type of a loop expression is determined by
+                // its break expressions." If break-with-value was used, load the
+                // result from the break slot. Otherwise the loop has type `()`.
+                //
+                // Cache-line note: the Load after the exit label is typically the
+                // first instruction in a new cache line (the back-edge `b` and
+                // the exit label occupy the end of the previous line). One Load
+                // = 4 bytes.
+                if let Some(slot) = break_slot {
+                    let result_reg = self.alloc_reg()?;
+                    self.instrs.push(Instr::Load { dst: result_reg, slot });
+                    Ok(IrValue::Reg(result_reg))
+                } else {
+                    Ok(IrValue::Unit)
+                }
             }
 
             // FLS §6.15.6: Break expression — exit the innermost enclosing loop.
@@ -1264,22 +1341,42 @@ impl<'src> LowerCtx<'src> {
             // resolves at runtime.
             //
             // Cache-line note: `b .L{exit}` is 4 bytes — one instruction slot.
+            // FLS §6.15.6: Break expression — exit the innermost enclosing loop.
+            //
+            // Two forms:
+            //   - `break` (no value): branch to exit_label.
+            //   - `break <expr>` (with value): lower the value, store it to the
+            //     loop's break_slot, then branch to exit_label. The slot was
+            //     allocated by the enclosing `loop` lowering if any break-with-value
+            //     was detected via `block_contains_break_with_value`.
+            //
+            // FLS §6.15.6: "Only `loop` expressions support break-with-value."
+            // Attempting `break value` in `while` or `for` (which have
+            // `break_slot: None`) produces an unsupported error — consistent
+            // with the spec restriction.
+            //
+            // FLS §6.1.2:37–45: The branch is a runtime `b` instruction.
+            // Cache-line note: `store + b` = 8 bytes — two instructions, fits
+            // in one half of a 16-byte bundle.
             ExprKind::Break(value) => {
-                // Resolve the exit label from the innermost loop context.
-                let exit_label = self.loop_stack.last()
-                    .map(|ctx| ctx.exit_label)
+                // Resolve the exit label and optional break slot from the
+                // innermost loop context.
+                let (exit_label, break_slot, break_ret_ty) = self.loop_stack.last()
+                    .map(|ctx| (ctx.exit_label, ctx.break_slot, ctx.break_ret_ty))
                     .ok_or_else(|| LowerError::Unsupported(
                         "break expression outside of a loop".into()
                     ))?;
 
-                // Break-with-value is not yet supported at this milestone.
-                // FLS §6.15.6: only `loop` expressions support break-with-value;
-                // `while` and `for` loops do not. Full support requires a break
-                // slot allocated in the enclosing `loop` lowering.
-                if value.is_some() {
-                    return Err(LowerError::Unsupported(
-                        "break with value (loop-as-expression) not yet supported".into(),
-                    ));
+                if let Some(val_expr) = value {
+                    // break-with-value: store result to the break_slot, then jump.
+                    // Use the loop's break_ret_ty (not the break statement's ret_ty,
+                    // which is Unit in the body context) to lower the value correctly.
+                    let slot = break_slot.ok_or_else(|| LowerError::Unsupported(
+                        "break with value is only valid in a `loop` expression (FLS §6.15.6)".into(),
+                    ))?;
+                    let v = self.lower_expr(val_expr, &break_ret_ty)?;
+                    let r = self.val_to_reg(v)?;
+                    self.instrs.push(Instr::Store { src: r, slot });
                 }
 
                 // Emit the branch to the loop exit.

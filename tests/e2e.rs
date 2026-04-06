@@ -1985,3 +1985,87 @@ fn runtime_for_loop_emits_cmp_cbz_add_and_back_branch() {
     // Back-edge: unconditional branch to the condition label.
     assert!(asm.contains("b "), "expected back-edge branch in for loop assembly");
 }
+
+// ── Milestone 20: loop-as-expression with break value ─────────────────────────
+//
+// FLS §6.15.2: A `loop` expression has the type of its `break <value>`
+// expressions. The result is delivered via a stack phi slot.
+// FLS §6.15.6: Only `loop` (not `while` or `for`) expressions support
+// break-with-value.
+
+/// Milestone 20: simplest loop-as-expression — `loop { break 42; }`.
+///
+/// The loop immediately breaks with 42. The result is stored to a phi slot
+/// and loaded after the exit label.
+///
+/// FLS §6.15.2: Loop expression type is determined by break expressions.
+/// FLS §6.15.6: `break <value>` stores to the loop's result slot.
+#[test]
+fn milestone_20_loop_break_immediate() {
+    let src = "fn main() -> i32 { let x = loop { break 42; }; x }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 42, "expected loop to yield 42, got {exit_code}");
+}
+
+/// Milestone 20: loop that runs several iterations before breaking with a value.
+///
+/// `loop { i += 1; if i == 5 { break i * 2; } }` → 10.
+///
+/// FLS §6.15.2: The break expression carries the loop's yielded value.
+/// FLS §6.1.2:37–45: The loop body and break expression execute at runtime.
+#[test]
+fn milestone_20_loop_break_with_computed_value() {
+    let src = "fn main() -> i32 { let mut i = 0; let r = loop { i += 1; if i == 5 { break i * 2; } }; r }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 10, "expected loop to yield 10, got {exit_code}");
+}
+
+/// Milestone 20: loop-as-expression used directly as a function return value.
+///
+/// `loop { break 7; }` used as the tail expression of main.
+///
+/// FLS §6.15.2: The loop expression itself is the tail value.
+#[test]
+fn milestone_20_loop_as_tail_expression() {
+    let src = "fn main() -> i32 { loop { break 7; } }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 7, "expected tail loop to yield 7, got {exit_code}");
+}
+
+/// Milestone 20: loop-as-expression used in arithmetic.
+///
+/// `1 + loop { break 6; }` → 7.
+///
+/// FLS §6.15.2: The loop expression can appear anywhere an expression is valid.
+#[test]
+fn milestone_20_loop_in_arithmetic() {
+    let src = "fn main() -> i32 { 1 + loop { break 6; } }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 7, "expected 1 + loop{{break 6}} = 7, got {exit_code}");
+}
+
+/// Milestone 20: assembly inspection — loop-as-expression emits a store before
+/// the break branch and a load after the exit label.
+///
+/// The phi-slot pattern: `str` (in the break arm) + `b .Lexit` + `.Lexit:` +
+/// `ldr` (to materialise the result register).
+///
+/// FLS §6.15.6: break-with-value stores to the loop's phi slot at runtime.
+#[test]
+fn runtime_loop_break_value_emits_store_and_load() {
+    let src = "fn main() -> i32 { loop { break 42; } }\n";
+    let asm = compile_to_asm(src);
+    // The break value must be stored (phi slot) and loaded after the exit label.
+    assert!(asm.contains("str"), "expected str (phi store) for loop break value");
+    assert!(asm.contains("ldr"), "expected ldr (phi load) after loop exit label");
+    // The back-edge must still be present (the loop is a real loop at runtime).
+    assert!(asm.contains("b "), "expected back-edge branch in loop assembly");
+}
