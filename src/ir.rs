@@ -296,6 +296,11 @@ pub enum IrValue {
 /// An IR type.
 ///
 /// Minimal set for milestone 1. Grows with each new milestone program.
+///
+/// `Clone` and `Copy` are derived so that `LowerCtx` can store the function
+/// return type and pass it to `return` expression lowering without borrow
+/// conflicts (FLS §6.19).
+#[derive(Clone, Copy)]
 pub enum IrTy {
     /// The `i32` type. FLS §4.1.
     I32,
