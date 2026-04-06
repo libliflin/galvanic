@@ -31,4 +31,13 @@ fn main() {
     let _n = '\t';
     let _o = '\\';
     let _p = '\u{1F600}';
+
+    // FLS §2.4.1 — Byte literals
+    // A byte literal has the form `b'...'` and type `u8`.
+    // Galvanic maps `u8` to `IrTy::U32` (zero-extended in 64-bit register).
+    let _q: u8 = b'A';
+    let _r: u8 = b'0';
+    let _s: u8 = b'\n';
+    let _t: u8 = b'\t';
+    let _u: u8 = b'\\';
 }
