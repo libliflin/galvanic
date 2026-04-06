@@ -3188,3 +3188,83 @@ fn runtime_field_access_emits_ldr() {
     let load_count = asm.lines().filter(|l| l.trim().starts_with("ldr")).count();
     assert!(load_count >= 2, "expected ≥2 ldr instructions for field accesses, got {load_count}");
 }
+
+// ── Milestone 39: mutable struct field assignment ─────────────────────────────
+//
+// FLS §6.5.10: Assignment expressions. The LHS is a place expression.
+// FLS §6.13: Field access on a place produces a place — i.e., `s.field`
+//   on the LHS of `=` is a field write.
+// FLS §6.1.2:37–45: The store must be a runtime instruction, not folded.
+
+/// Milestone 39: basic mutable field assignment.
+///
+/// FLS §6.5.10 + §6.13: `s.field = value` stores to the field's stack slot.
+#[test]
+fn milestone_39_field_assign_basic() {
+    let src = "struct Point { x: i32, y: i32 }\nfn main() -> i32 { let mut p = Point { x: 1, y: 2 }; p.x = 10; p.x }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "expected p.x = 10 after assignment, got {exit_code}");
+}
+
+/// Milestone 39: assign to second field.
+///
+/// FLS §6.5.10 + §6.13: field index offset is applied correctly.
+#[test]
+fn milestone_39_field_assign_second_field() {
+    let src = "struct Point { x: i32, y: i32 }\nfn main() -> i32 { let mut p = Point { x: 1, y: 2 }; p.y = 7; p.y }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected p.y = 7 after assignment, got {exit_code}");
+}
+
+/// Milestone 39: assign to one field, read other field unchanged.
+///
+/// FLS §6.13: Assigning `s.x` must not disturb `s.y`.
+#[test]
+fn milestone_39_field_assign_does_not_clobber_other_field() {
+    let src = "struct Point { x: i32, y: i32 }\nfn main() -> i32 { let mut p = Point { x: 1, y: 42 }; p.x = 99; p.y }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected p.y unchanged at 42, got {exit_code}");
+}
+
+/// Milestone 39: assign multiple fields sequentially.
+///
+/// FLS §6.5.10: Sequential assignments evaluate left-to-right, each storing
+/// to the target slot independently.
+#[test]
+fn milestone_39_field_assign_multiple() {
+    let src = "struct Point { x: i32, y: i32 }\nfn main() -> i32 { let mut p = Point { x: 0, y: 0 }; p.x = 3; p.y = 4; p.x + p.y }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 3 + 4 = 7, got {exit_code}");
+}
+
+/// Milestone 39: assign field using a runtime-computed value.
+///
+/// FLS §6.5.10 + §6.1.2:37–45: The RHS is evaluated at runtime.
+#[test]
+fn milestone_39_field_assign_from_expr() {
+    let src = "struct Counter { n: i32, step: i32 }\nfn main() -> i32 { let mut c = Counter { n: 0, step: 3 }; c.n = c.step * 5; c.n }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 15, "expected step * 5 = 15, got {exit_code}");
+}
+
+/// Milestone 39: assign field inside a loop (accumulate via field).
+///
+/// FLS §6.5.10 + §6.15.3: While loops may contain field assignment expressions.
+#[test]
+fn milestone_39_field_assign_in_loop() {
+    let src = "struct Acc { val: i32 }\nfn main() -> i32 { let mut a = Acc { val: 0 }; let mut i = 0; while i < 5 { a.val = a.val + i; i = i + 1; } a.val }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "expected 0+1+2+3+4 = 10, got {exit_code}");
+}
+
+/// Milestone 39: assembly inspection — field assignment emits a str instruction.
+///
+/// FLS §6.5.10 + §6.1.2:37–45: Must emit a runtime store, not fold at compile time.
+#[test]
+fn runtime_field_assign_emits_str() {
+    let src = "struct Point { x: i32, y: i32 }\nfn main() -> i32 { let mut p = Point { x: 1, y: 2 }; p.x = 10; p.x }\n";
+    let asm = compile_to_asm(src);
+    // At least 3 str instructions: 2 for struct init + 1 for field assignment.
+    let store_count = asm.lines().filter(|l| l.trim().starts_with("str")).count();
+    assert!(store_count >= 3, "expected ≥3 str instructions (2 init + 1 field assign), got {store_count}");
+}
