@@ -3472,26 +3472,20 @@ impl<'src> LowerCtx<'src> {
                         })?
                     }
                     ExprKind::FieldAccess { receiver, field } => {
-                        // Resolve the receiver to its base slot and struct type.
-                        let (base_slot, struct_type_name) = match &receiver.kind {
+                        // Resolve the receiver to its base slot.
+                        //
+                        // FLS §6.5.10: The left operand must be a place expression.
+                        // Supported forms:
+                        //   - Struct field: `s.name = value` (FLS §6.13)
+                        //   - Tuple element: `t.0 = value` (FLS §6.10)
+                        let base_slot = match &receiver.kind {
                             ExprKind::Path(segs) if segs.len() == 1 => {
                                 let var_name = segs[0].text(self.source);
-                                let base_slot =
-                                    self.locals.get(var_name).copied().ok_or_else(|| {
-                                        LowerError::Unsupported(format!(
-                                            "undefined variable `{var_name}` in field assignment"
-                                        ))
-                                    })?;
-                                let type_name = self
-                                    .local_struct_types
-                                    .get(&base_slot)
-                                    .ok_or_else(|| {
-                                        LowerError::Unsupported(format!(
-                                            "variable `{var_name}` is not a struct"
-                                        ))
-                                    })?
-                                    .clone();
-                                (base_slot, type_name)
+                                self.locals.get(var_name).copied().ok_or_else(|| {
+                                    LowerError::Unsupported(format!(
+                                        "undefined variable `{var_name}` in field assignment"
+                                    ))
+                                })?
                             }
                             _ => {
                                 return Err(LowerError::Unsupported(
@@ -3500,23 +3494,50 @@ impl<'src> LowerCtx<'src> {
                                 ));
                             }
                         };
-                        // Look up the field index in the struct definition.
                         let field_name = field.text(self.source);
-                        let field_names =
-                            self.struct_defs.get(&struct_type_name).ok_or_else(|| {
+
+                        // FLS §6.10: Tuple element store `t.N = value`.
+                        // The field token is a decimal integer naming the index.
+                        if self.local_tuple_lens.contains_key(&base_slot) {
+                            let idx: usize = field_name.parse().map_err(|_| {
                                 LowerError::Unsupported(format!(
-                                    "unknown struct type `{struct_type_name}`"
+                                    "invalid tuple field index `{field_name}`"
                                 ))
                             })?;
-                        let field_idx = field_names
-                            .iter()
-                            .position(|n| n == field_name)
-                            .ok_or_else(|| {
-                                LowerError::Unsupported(format!(
-                                    "no field `{field_name}` in struct `{struct_type_name}`"
-                                ))
-                            })?;
-                        base_slot + field_idx as u8
+                            let n = self.local_tuple_lens[&base_slot];
+                            if idx >= n {
+                                return Err(LowerError::Unsupported(format!(
+                                    "tuple index {idx} out of range for {n}-element tuple"
+                                )));
+                            }
+                            base_slot + idx as u8
+                        } else {
+                            // FLS §6.13: Struct field assignment by name.
+                            let struct_type_name = self
+                                .local_struct_types
+                                .get(&base_slot)
+                                .ok_or_else(|| {
+                                    LowerError::Unsupported(format!(
+                                        "variable at slot {base_slot} is not a struct or tuple"
+                                    ))
+                                })?
+                                .clone();
+                            let field_names =
+                                self.struct_defs.get(&struct_type_name).ok_or_else(|| {
+                                    LowerError::Unsupported(format!(
+                                        "unknown struct type `{struct_type_name}`"
+                                    ))
+                                })?;
+                            let field_idx = field_names
+                                .iter()
+                                .position(|n| n == field_name)
+                                .ok_or_else(|| {
+                                    LowerError::Unsupported(format!(
+                                        "no field `{field_name}` in struct `{struct_type_name}`"
+                                    ))
+                                })?;
+                            base_slot + field_idx as u8
+                        }
                     }
                     // FLS §6.5.10: Assignment to an indexed place expression `arr[index] = value`.
                     // FLS §6.9: The base must be a known array variable; the index is a runtime value.
@@ -3638,25 +3659,17 @@ impl<'src> LowerCtx<'src> {
                         })?
                     }
                     ExprKind::FieldAccess { receiver, field } => {
-                        // Resolve receiver variable to base slot and struct type.
-                        let (base_slot, struct_type_name) = match &receiver.kind {
+                        // Resolve receiver variable to its base slot.
+                        //
+                        // FLS §6.5.11: Supports struct field and tuple element forms.
+                        let base_slot = match &receiver.kind {
                             ExprKind::Path(segs) if segs.len() == 1 => {
                                 let var_name = segs[0].text(self.source);
-                                let base_slot = self.locals.get(var_name).copied().ok_or_else(|| {
+                                self.locals.get(var_name).copied().ok_or_else(|| {
                                     LowerError::Unsupported(format!(
                                         "undefined variable `{var_name}` in compound field assignment"
                                     ))
-                                })?;
-                                let type_name = self
-                                    .local_struct_types
-                                    .get(&base_slot)
-                                    .ok_or_else(|| {
-                                        LowerError::Unsupported(format!(
-                                            "variable `{var_name}` is not a struct in compound field assignment"
-                                        ))
-                                    })?
-                                    .clone();
-                                (base_slot, type_name)
+                                })?
                             }
                             _ => {
                                 return Err(LowerError::Unsupported(
@@ -3664,19 +3677,47 @@ impl<'src> LowerCtx<'src> {
                                 ));
                             }
                         };
-                        // Compute slot: base + field_index.
                         let field_name = field.text(self.source);
-                        let field_names = self.struct_defs.get(&struct_type_name).ok_or_else(|| {
-                            LowerError::Unsupported(format!(
-                                "unknown struct type `{struct_type_name}` in compound field assignment"
-                            ))
-                        })?;
-                        let field_idx = field_names.iter().position(|n| n == field_name).ok_or_else(|| {
-                            LowerError::Unsupported(format!(
-                                "no field `{field_name}` in struct `{struct_type_name}`"
-                            ))
-                        })?;
-                        base_slot + field_idx as u8
+
+                        // FLS §6.10: Tuple element compound assignment `t.N += value`.
+                        if self.local_tuple_lens.contains_key(&base_slot) {
+                            let idx: usize = field_name.parse().map_err(|_| {
+                                LowerError::Unsupported(format!(
+                                    "invalid tuple field index `{field_name}`"
+                                ))
+                            })?;
+                            let n = self.local_tuple_lens[&base_slot];
+                            if idx >= n {
+                                return Err(LowerError::Unsupported(format!(
+                                    "tuple index {idx} out of range for {n}-element tuple"
+                                )));
+                            }
+                            base_slot + idx as u8
+                        } else {
+                            // FLS §6.13: Struct field compound assignment by name.
+                            let struct_type_name = self
+                                .local_struct_types
+                                .get(&base_slot)
+                                .ok_or_else(|| {
+                                    LowerError::Unsupported(format!(
+                                        "variable at slot {base_slot} is not a struct or tuple"
+                                    ))
+                                })?
+                                .clone();
+                            let field_names =
+                                self.struct_defs.get(&struct_type_name).ok_or_else(|| {
+                                    LowerError::Unsupported(format!(
+                                        "unknown struct type `{struct_type_name}` in compound field assignment"
+                                    ))
+                                })?;
+                            let field_idx =
+                                field_names.iter().position(|n| n == field_name).ok_or_else(|| {
+                                    LowerError::Unsupported(format!(
+                                        "no field `{field_name}` in struct `{struct_type_name}`"
+                                    ))
+                                })?;
+                            base_slot + field_idx as u8
+                        }
                     }
                     _ => {
                         return Err(LowerError::Unsupported(
