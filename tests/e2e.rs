@@ -7376,19 +7376,168 @@ fn main() -> i32 {
     width(r)
 }
 "#;
-    // This test may be skipped if nested structs as function parameters are
-    // not yet supported (the flat-register calling convention does not handle
-    // multi-slot struct arguments). Only run if it compiles cleanly.
-    let tokens = galvanic::lexer::tokenize(src).expect("lex");
-    let sf = galvanic::parser::parse(&tokens, src).expect("parse");
-    // Lower may return Unsupported for nested struct parameters; that is OK
-    // at this milestone — we're only testing local variable access here.
-    if galvanic::lower::lower(&sf, src).is_err() {
-        eprintln!("milestone_63_on_parameter_via_fn: nested struct parameter not yet supported — skipping");
-        return;
-    }
+    // Milestone 64 fixed nested struct parameter passing — this test now
+    // compiles and runs correctly.
     let Some(exit_code) = compile_and_run(src) else { return; };
     assert_eq!(exit_code, 3, "expected 3 (4-1), got {exit_code}");
+}
+
+// ── Milestone 64: nested struct as function parameter ─────────────────────────
+//
+// Programs where a struct whose fields are themselves structs is passed by
+// value to a function. The function receives the nested struct as a flat
+// sequence of registers — one per total slot in the outermost struct.
+//
+// FLS §4.11: Struct layout — fields are stored in declaration order, each
+// occupying as many consecutive slots as the field's type requires.
+// FLS §9: Function parameters receive values in registers x0–x7.
+// FLS §6.11: Struct expressions initialise all fields in declaration order.
+// FLS §6.13: Field access uses the slot offset computed from struct_sizes.
+
+/// Milestone 64: pass nested struct to fn, read first scalar field.
+///
+/// FLS §4.11, §9, §6.13
+#[test]
+fn milestone_64_nested_param_first_scalar_field() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+struct Rect { min: Point, max: Point }
+fn get_min_x(r: Rect) -> i32 { r.min.x }
+fn main() -> i32 {
+    let r = Rect { min: Point { x: 5, y: 0 }, max: Point { x: 9, y: 0 } };
+    get_min_x(r)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "expected 5, got {exit_code}");
+}
+
+/// Milestone 64: pass nested struct to fn, read a field in the second sub-struct.
+///
+/// FLS §4.11, §9, §6.13
+#[test]
+fn milestone_64_nested_param_second_substruct_field() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+struct Rect { min: Point, max: Point }
+fn get_max_y(r: Rect) -> i32 { r.max.y }
+fn main() -> i32 {
+    let r = Rect { min: Point { x: 0, y: 0 }, max: Point { x: 0, y: 7 } };
+    get_max_y(r)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 7, got {exit_code}");
+}
+
+/// Milestone 64: nested struct parameter, arithmetic across sub-struct fields.
+///
+/// FLS §4.11, §9, §6.13, §6.5.5
+#[test]
+fn milestone_64_nested_param_cross_substruct_arithmetic() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+struct Rect { min: Point, max: Point }
+fn height(r: Rect) -> i32 { r.max.y - r.min.y }
+fn main() -> i32 {
+    let r = Rect { min: Point { x: 0, y: 2 }, max: Point { x: 0, y: 8 } };
+    height(r)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "expected 6, got {exit_code}");
+}
+
+/// Milestone 64: nested struct passed to multiple functions.
+///
+/// FLS §4.11, §9, §6.13
+#[test]
+fn milestone_64_nested_param_two_fns() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+struct Rect { a: Point, b: Point }
+fn left(r: Rect) -> i32 { r.a.x }
+fn right(r: Rect) -> i32 { r.b.x }
+fn main() -> i32 {
+    let r = Rect { a: Point { x: 1, y: 0 }, b: Point { x: 4, y: 0 } };
+    right(r) - left(r)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "expected 3, got {exit_code}");
+}
+
+/// Milestone 64: nested struct parameter in a function called with a local variable.
+///
+/// FLS §4.11, §9, §6.13
+#[test]
+fn milestone_64_nested_param_in_if_expression() {
+    let src = r#"
+struct Vec2 { x: i32, y: i32 }
+struct Segment { start: Vec2, end: Vec2 }
+fn horizontal(s: Segment) -> i32 {
+    if s.start.y == s.end.y { 1 } else { 0 }
+}
+fn main() -> i32 {
+    let s = Segment { start: Vec2 { x: 0, y: 3 }, end: Vec2 { x: 5, y: 3 } };
+    horizontal(s)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected 1 (horizontal), got {exit_code}");
+}
+
+/// Milestone 64: nested struct parameter passed from a function parameter.
+///
+/// FLS §4.11, §9: nested struct arriving as a function parameter can itself
+/// be passed to another function.
+#[test]
+fn milestone_64_nested_param_forwarded() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+struct Rect { min: Point, max: Point }
+fn area_proxy(r: Rect) -> i32 { r.max.x * r.max.y }
+fn compute(r: Rect) -> i32 { area_proxy(r) }
+fn main() -> i32 {
+    let r = Rect { min: Point { x: 0, y: 0 }, max: Point { x: 3, y: 4 } };
+    compute(r)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 12, "expected 12 (3*4), got {exit_code}");
+}
+
+/// Milestone 64: assembly inspection — nested struct parameter spills N total
+/// slots (not just direct field count) into consecutive stack slots.
+///
+/// FLS §4.11: Rect has 2 declared fields (min, max) but 4 total slots.
+/// The parameter spill must emit 4 `str` instructions, not 2.
+#[test]
+fn runtime_nested_struct_param_spills_total_slots() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+struct Rect { min: Point, max: Point }
+fn width(r: Rect) -> i32 { r.max.x - r.min.x }
+fn main() -> i32 {
+    let r = Rect { min: Point { x: 1, y: 0 }, max: Point { x: 4, y: 0 } };
+    width(r)
+}
+"#;
+    let asm = compile_to_asm(src);
+    // The `width` function receives 4 registers (min.x, min.y, max.x, max.y)
+    // and must spill all 4 to the stack. Verify 4 store instructions in the
+    // function prologue by checking the asm has enough `str` occurrences.
+    let str_count = asm.lines()
+        .filter(|l| l.trim_start().starts_with("str") && !l.contains("lr"))
+        .count();
+    assert!(
+        str_count >= 4,
+        "expected at least 4 str instructions for 4-slot Rect parameter, got {str_count}:\n{asm}"
+    );
+    // Verify the correct result is produced.
+    let tokens = galvanic::lexer::tokenize(src).expect("lex");
+    let sf = galvanic::parser::parse(&tokens, src).expect("parse");
+    let _module = galvanic::lower::lower(&sf, src).expect("lower");
 }
 
 /// Milestone 63: assembly inspection — chained field access emits correct `ldr`

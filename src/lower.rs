@@ -984,22 +984,36 @@ fn lower_fn(
 
             // FLS §11 / §6.12.2: Struct parameter — pass each field as a
             // separate register, matching the method self-parameter convention.
+            //
+            // For nested structs (e.g., `fn width(r: Rect)` where `Rect` has two
+            // `Point` fields), the total slot count from `struct_sizes` is used
+            // rather than the number of direct fields. This handles the case where
+            // `Rect` has 2 declared fields but 4 total slots (2 per `Point`).
+            //
+            // FLS §4.11: Struct layout — fields are stored in declaration order.
+            // FLS §6.11: Struct expressions — field initializers are evaluated in
+            // declaration order and each occupies one or more consecutive slots.
+            //
+            // Cache-line note: N total slots emit N × 4-byte `str` spill instructions.
+            // For a 2-field flat struct: 8 bytes (2 instructions, same as before).
+            // For a 2-field nested struct like Rect: 16 bytes (4 instructions).
             if let Some(field_names) = struct_defs.get(type_name) {
-                let n_fields = field_names.len();
-                let regs_needed = n_fields.max(1); // unit structs use 0 regs but need 1 slot
-                if n_fields > 0 && reg_idx + n_fields > 8 {
+                // Use total slot count (accounts for nested struct fields).
+                let n_slots = struct_sizes.get(type_name).copied().unwrap_or(field_names.len());
+                let regs_needed = n_slots.max(1); // unit structs use 0 slots but need 1 slot allocated
+                if n_slots > 0 && reg_idx + n_slots > 8 {
                     return Err(LowerError::Unsupported(
                         "struct parameter exceeds ARM64 register window (>8 total registers)".into(),
                     ));
                 }
                 let base_slot = ctx.alloc_slot()?;
-                for _ in 1..n_fields {
+                for _ in 1..n_slots {
                     ctx.alloc_slot()?;
                 }
                 ctx.locals.insert(param_name, base_slot);
                 ctx.local_struct_types.insert(base_slot, type_name.to_owned());
-                // Spill each field register to its stack slot.
-                for fi in 0..n_fields {
+                // Spill each slot register to its stack slot.
+                for fi in 0..n_slots {
                     ctx.instrs.push(Instr::Store {
                         src: (reg_idx + fi) as u8,
                         slot: base_slot + fi as u8,
@@ -4991,17 +5005,32 @@ impl<'src> LowerCtx<'src> {
                 let mut arg_regs = Vec::with_capacity(args.len());
                 for arg in args {
                     // Check whether this argument is a struct variable.
+                    //
+                    // For nested structs, use the total slot count from `struct_sizes`
+                    // (e.g., Rect with two Point fields has 4 total slots, not 2).
+                    // This ensures the correct number of registers are loaded and
+                    // passed to the callee, matching the parameter spill in `lower_fn`.
+                    //
+                    // FLS §4.11: Nested struct fields occupy consecutive slots in
+                    // declaration order of the outermost struct.
+                    // FLS §6.1.2:37–45: All loads are runtime instructions.
                     let struct_info: Option<(u8, usize)> = if let ExprKind::Path(segs) = &arg.kind
                         && segs.len() == 1
                     {
                         let var_name = segs[0].text(self.source);
                         if let Some(&base_slot) = self.locals.get(var_name) {
                             if let Some(st_name) = self.local_struct_types.get(&base_slot) {
-                                let n_fields = self.struct_defs
+                                // Use struct_sizes for total slot count (handles nested structs).
+                                let n_slots = self.struct_sizes
                                     .get(st_name.as_str())
-                                    .map(|f| f.len())
-                                    .unwrap_or(0);
-                                Some((base_slot, n_fields))
+                                    .copied()
+                                    .unwrap_or_else(|| {
+                                        self.struct_defs
+                                            .get(st_name.as_str())
+                                            .map(|f| f.len())
+                                            .unwrap_or(0)
+                                    });
+                                Some((base_slot, n_slots))
                             } else {
                                 None
                             }
