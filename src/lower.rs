@@ -143,6 +143,7 @@ fn expr_contains_call(expr: &Expr) -> bool {
         }
         ExprKind::FieldAccess { receiver, .. } => expr_contains_call(receiver),
         ExprKind::Array(elems) => elems.iter().any(expr_contains_call),
+        ExprKind::Tuple(elems) => elems.iter().any(expr_contains_call),
         ExprKind::Index { base, index } => expr_contains_call(base) || expr_contains_call(index),
         // Leaves: literals, paths, unit — none contain calls.
         _ => false,
@@ -219,6 +220,7 @@ fn expr_contains_break_with_value(expr: &Expr) -> bool {
         }
         ExprKind::FieldAccess { receiver, .. } => expr_contains_break_with_value(receiver),
         ExprKind::Array(elems) => elems.iter().any(expr_contains_break_with_value),
+        ExprKind::Tuple(elems) => elems.iter().any(expr_contains_break_with_value),
         ExprKind::Index { base, index } => {
             expr_contains_break_with_value(base) || expr_contains_break_with_value(index)
         }
@@ -988,6 +990,17 @@ struct LowerCtx<'src> {
     /// Cache-line note: populated once per array let binding; read once per
     /// index expression. Not on a hot path.
     local_array_lens: HashMap<u8, usize>,
+
+    /// Maps a tuple variable's base stack slot to its field count.
+    ///
+    /// FLS §6.10: Tuple values occupy N consecutive 8-byte stack slots where
+    /// N is the number of elements. When `let t = (a, b)` is lowered, `t`'s
+    /// base slot is registered here with count 2. Field access `.0`, `.1`
+    /// is lowered to `base_slot + index`.
+    ///
+    /// Cache-line note: same layout as struct fields or array elements —
+    /// N consecutive slots per tuple.
+    local_tuple_lens: HashMap<u8, usize>,
 }
 
 impl<'src> LowerCtx<'src> {
@@ -1017,6 +1030,7 @@ impl<'src> LowerCtx<'src> {
             local_struct_types: HashMap::new(),
             local_enum_types: HashMap::new(),
             local_array_lens: HashMap::new(),
+            local_tuple_lens: HashMap::new(),
         }
     }
 
@@ -1450,6 +1464,36 @@ impl<'src> LowerCtx<'src> {
                     self.local_array_lens.insert(base_slot, n);
                     // Evaluate and store each element.
                     // FLS §6.8: Elements are evaluated left-to-right.
+                    for (i, elem_expr) in elems.iter().enumerate() {
+                        let val = self.lower_expr(elem_expr, &IrTy::I32)?;
+                        let src = self.val_to_reg(val)?;
+                        self.instrs.push(Instr::Store { src, slot: base_slot + i as u8 });
+                    }
+                    return Ok(());
+                }
+
+                // FLS §6.10: Tuple literal `let t = (e0, e1, ...)`.
+                //
+                // A tuple of N elements is laid out as N consecutive 8-byte
+                // stack slots, identical to a struct or array. The variable
+                // name maps to the base slot (slot of element 0). Elements
+                // are evaluated and stored left-to-right (FLS §6.4:14).
+                //
+                // `local_tuple_lens` records the field count so that `.0`,
+                // `.1` field accesses can compute `base_slot + index`.
+                //
+                // Cache-line note: same layout as arrays — N stores per init.
+                if let Some(init_expr) = init.as_ref()
+                    && let ExprKind::Tuple(elems) = &init_expr.kind
+                {
+                    let n = elems.len();
+                    let base_slot = self.alloc_slot()?;
+                    for _ in 1..n {
+                        self.alloc_slot()?;
+                    }
+                    self.locals.insert(var_name, base_slot);
+                    self.local_tuple_lens.insert(base_slot, n);
+                    // FLS §6.10: Elements evaluated left-to-right.
                     for (i, elem_expr) in elems.iter().enumerate() {
                         let val = self.lower_expr(elem_expr, &IrTy::I32)?;
                         let src = self.val_to_reg(val)?;
@@ -3474,6 +3518,71 @@ impl<'src> LowerCtx<'src> {
                             })?;
                         base_slot + field_idx as u8
                     }
+                    // FLS §6.5.10: Assignment to an indexed place expression `arr[index] = value`.
+                    // FLS §6.9: The base must be a known array variable; the index is a runtime value.
+                    //
+                    // Lowering strategy:
+                    // 1. Resolve base to its array stack slot.
+                    // 2. Lower index to a virtual register.
+                    // 3. Lower RHS to a virtual register.
+                    // 4. Allocate a scratch register for base address computation.
+                    // 5. Emit `StoreIndexed { src, base_slot, index_reg, scratch }`.
+                    //
+                    // Evaluation order: FLS §6.5.10 evaluates the place (base, index)
+                    // before the value, but since both are side-effect-free in the
+                    // current subset, we lower RHS first to keep register allocation
+                    // linear (index_reg < scratch so scratch doesn't alias either).
+                    //
+                    // FLS §14.1 AMBIGUOUS: The spec does not enumerate which place
+                    // expressions are valid LHS for assignment. We restrict the base
+                    // to a simple variable path (consistent with plain assignment).
+                    ExprKind::Index { base, index } => {
+                        // Resolve base array variable to its stack slot.
+                        let base_slot = match &base.kind {
+                            ExprKind::Path(segs) if segs.len() == 1 => {
+                                let var_name = segs[0].text(self.source);
+                                let slot =
+                                    self.locals.get(var_name).copied().ok_or_else(|| {
+                                        LowerError::Unsupported(format!(
+                                            "undefined variable `{var_name}` in index assignment"
+                                        ))
+                                    })?;
+                                if !self.local_array_lens.contains_key(&slot) {
+                                    return Err(LowerError::Unsupported(format!(
+                                        "variable `{var_name}` is not an array (index assignment on non-arrays not supported)"
+                                    )));
+                                }
+                                slot
+                            }
+                            _ => {
+                                return Err(LowerError::Unsupported(
+                                    "index assignment on non-variable base not yet supported"
+                                        .into(),
+                                ));
+                            }
+                        };
+
+                        // Lower the RHS (value to store).
+                        let rhs_val = self.lower_expr(rhs, &IrTy::I32)?;
+                        let src_reg = self.val_to_reg(rhs_val)?;
+
+                        // Lower the index.
+                        let idx_val = self.lower_expr(index, &IrTy::I32)?;
+                        let index_reg = self.val_to_reg(idx_val)?;
+
+                        // Allocate scratch for base-address computation.
+                        let scratch = self.alloc_reg()?;
+
+                        self.instrs.push(Instr::StoreIndexed {
+                            src: src_reg,
+                            base_slot,
+                            index_reg,
+                            scratch,
+                        });
+
+                        // FLS §6.5.10: assignment expressions have type `()`.
+                        return Ok(IrValue::Unit);
+                    }
                     _ => {
                         return Err(LowerError::Unsupported(
                             "assignment to non-variable place expression not yet supported".into(),
@@ -3699,6 +3808,14 @@ impl<'src> LowerCtx<'src> {
                 let header_label = self.alloc_label();
                 let exit_label = self.alloc_label();
 
+                // Save the register watermark before entering the loop.
+                // After the loop exits (exit_label), all registers allocated inside
+                // the loop are dead — the loop returns unit and carries no value
+                // forward. Resetting next_reg here allows subsequent code (e.g., the
+                // function tail expression) to reuse those register numbers, keeping
+                // the total register count well below x30 (the ARM64 link register).
+                let reg_mark = self.next_reg;
+
                 // Push a loop context so that `break`/`continue` inside the body
                 // can resolve to the correct labels.
                 // FLS §6.15.3, §6.15.6, §6.15.7.
@@ -3730,6 +3847,11 @@ impl<'src> LowerCtx<'src> {
                 self.instrs.push(Instr::Label(exit_label));
 
                 self.loop_stack.pop();
+
+                // Restore register watermark. Registers allocated inside the loop
+                // are only referenced by instructions between header_label and the
+                // back-edge Branch. After exit_label, none of them are live.
+                self.next_reg = reg_mark;
 
                 // FLS §6.15.3: "The type of a while expression is the unit type ()."
                 Ok(IrValue::Unit)
@@ -3768,6 +3890,9 @@ impl<'src> LowerCtx<'src> {
             ExprKind::WhileLet { pat, scrutinee, body } => {
                 let header_label = self.alloc_label();
                 let exit_label = self.alloc_label();
+
+                // Save register watermark — same rationale as While above.
+                let reg_mark = self.next_reg;
 
                 // Push loop context — while-let has no break-with-value.
                 // FLS §6.15.4, §6.15.6.
@@ -4018,6 +4143,9 @@ impl<'src> LowerCtx<'src> {
                 self.instrs.push(Instr::Label(exit_label));
                 self.loop_stack.pop();
 
+                // Restore register watermark (see While above for rationale).
+                self.next_reg = reg_mark;
+
                 // FLS §6.15.4: "The type of a while let loop expression is the unit type ()."
                 Ok(IrValue::Unit)
             }
@@ -4070,6 +4198,11 @@ impl<'src> LowerCtx<'src> {
                 // Allocate a slot for the end bound (evaluated once before the loop).
                 // FLS §6.16: The range bounds are evaluated once, not on each iteration.
                 let end_slot = self.alloc_slot()?;
+
+                // Save register watermark — same rationale as While above. Saved
+                // BEFORE lowering start/end expressions so those temp registers are
+                // also recyclable (they are consumed by Store and not live after it).
+                let reg_mark = self.next_reg;
 
                 // Lower and store the start bound into the loop variable slot.
                 // FLS §6.16: `start` is evaluated first (left-to-right, FLS §6:3).
@@ -4135,6 +4268,9 @@ impl<'src> LowerCtx<'src> {
 
                 self.loop_stack.pop();
 
+                // Restore register watermark (see While above for rationale).
+                self.next_reg = reg_mark;
+
                 // FLS §6.15.1: "The type of a for loop expression is the unit type ()."
                 Ok(IrValue::Unit)
             }
@@ -4180,6 +4316,11 @@ impl<'src> LowerCtx<'src> {
                     None
                 };
 
+                // Save register watermark — same rationale as While above.
+                // Saved AFTER break_slot allocation (a stack slot, not a register)
+                // and BEFORE any register allocations inside the body.
+                let reg_mark = self.next_reg;
+
                 self.loop_stack.push(LoopCtx { header_label, exit_label, break_slot, break_ret_ty: *ret_ty });
 
                 // Loop top: the branch-back target.
@@ -4197,6 +4338,12 @@ impl<'src> LowerCtx<'src> {
                 self.instrs.push(Instr::Label(exit_label));
 
                 self.loop_stack.pop();
+
+                // Restore register watermark. Any registers used inside the loop body
+                // are only live between header_label and the back-edge Branch. After
+                // exit_label they are dead, so we can reuse their numbers. The result
+                // register (if any) is freshly allocated below from the restored mark.
+                self.next_reg = reg_mark;
 
                 // FLS §6.15.2: "The type of a loop expression is determined by
                 // its break expressions." If break-with-value was used, load the
@@ -4588,22 +4735,15 @@ impl<'src> LowerCtx<'src> {
             // access on a temporary (non-place) expression is well-formed.
             // Galvanic restricts to named local variables for this milestone.
             ExprKind::FieldAccess { receiver, field } => {
-                // Resolve receiver to its base slot and struct type name.
-                let (base_slot, struct_type_name) = match &receiver.kind {
+                // Resolve receiver to its base slot.
+                let base_slot = match &receiver.kind {
                     ExprKind::Path(segs) if segs.len() == 1 => {
                         let var_name = segs[0].text(self.source);
-                        let base_slot = *self.locals.get(var_name).ok_or_else(|| {
+                        *self.locals.get(var_name).ok_or_else(|| {
                             LowerError::Unsupported(format!(
                                 "undefined variable `{var_name}` in field access"
                             ))
-                        })?;
-                        let type_name =
-                            self.local_struct_types.get(&base_slot).ok_or_else(|| {
-                                LowerError::Unsupported(format!(
-                                    "variable `{var_name}` is not a struct"
-                                ))
-                            })?;
-                        (base_slot, type_name.clone())
+                        })?
                     }
                     _ => {
                         return Err(LowerError::Unsupported(
@@ -4612,8 +4752,37 @@ impl<'src> LowerCtx<'src> {
                     }
                 };
 
-                // Look up the field index in the struct definition.
                 let field_name = field.text(self.source);
+
+                // FLS §6.10: Tuple field access `.0`, `.1`, etc.
+                // The field token is a decimal integer literal; parse it as
+                // the index into the tuple's consecutive stack slots.
+                if self.local_tuple_lens.contains_key(&base_slot) {
+                    let idx: usize = field_name.parse().map_err(|_| {
+                        LowerError::Unsupported(format!(
+                            "invalid tuple field index `{field_name}`"
+                        ))
+                    })?;
+                    let n = self.local_tuple_lens[&base_slot];
+                    if idx >= n {
+                        return Err(LowerError::Unsupported(format!(
+                            "tuple index {idx} out of range for {n}-element tuple"
+                        )));
+                    }
+                    let slot = base_slot + idx as u8;
+                    let reg = self.alloc_reg()?;
+                    self.instrs.push(Instr::Load { dst: reg, slot });
+                    return Ok(IrValue::Reg(reg));
+                }
+
+                // FLS §6.13: Struct field access by name.
+                let struct_type_name = self.local_struct_types.get(&base_slot).ok_or_else(|| {
+                    LowerError::Unsupported(format!(
+                        "variable at slot {base_slot} is not a struct or tuple"
+                    ))
+                })?.clone();
+
+                // Look up the field index in the struct definition.
                 let field_names = self.struct_defs.get(&struct_type_name).ok_or_else(|| {
                     LowerError::Unsupported(format!("unknown struct type `{struct_type_name}`"))
                 })?;
@@ -4811,6 +4980,15 @@ impl<'src> LowerCtx<'src> {
                 self.instrs.push(Instr::LoadIndexed { dst, base_slot, index_reg });
                 Ok(IrValue::Reg(dst))
             }
+
+            // FLS §6.10: Tuple expression as a value (not as a let initializer).
+            // This path is reached when a tuple literal appears as a tail expression
+            // or in a context where it's used as a value directly (rare; most tuple
+            // usage goes through the `let` path above). Not yet supported — tuples
+            // must be bound to a named variable first.
+            ExprKind::Tuple(_) => Err(LowerError::Unsupported(
+                "tuple expression must be bound to a `let` variable at this milestone".into(),
+            )),
 
             // Anything else: not yet supported as runtime codegen.
             _ => Err(LowerError::Unsupported(

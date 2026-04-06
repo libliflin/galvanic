@@ -378,3 +378,28 @@ fn array_variable_index_example() -> i32 {
     let i = 2;
     a[i]                  // FLS §6.9: runtime index — loads element at position i (15)
 }
+
+// FLS §6.5.10 + §6.9 — Array element store expressions.
+//
+// FLS §6.5.10: "An assignment expression assigns a new value to a place."
+// When the place is an indexing expression (FLS §6.9), the assignment stores
+// to the element at the given index.
+//
+// FLS §6.9: "An indexing expression is used to index into an array or slice."
+//
+// FLS §6.8: Array literals construct the initial value.
+//
+// Note: FLS §6.5.10 provides no self-contained runnable example of indexed
+// assignment. This function is derived from the combined semantics of §6.5.10
+// (assignment to a place) and §6.9 (indexing as a place expression).
+//
+// FLS §6.5.10 AMBIGUOUS: The spec does not enumerate which place expression
+// forms are valid LHS for assignment. Galvanic restricts the base to a simple
+// variable path, consistent with the restriction on plain scalar assignment.
+fn array_store_example() -> i32 {
+    let mut a = [1, 2, 3];   // FLS §6.8: array literal
+    a[0] = 10;               // FLS §6.5.10 + §6.9: store to first element
+    a[1] = 20;               // FLS §6.5.10 + §6.9: store to second element
+    a[2] = 30;               // FLS §6.5.10 + §6.9: store to third element
+    a[0] + a[1] + a[2]       // FLS §6.9: load all three — result is 60
+}

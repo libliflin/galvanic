@@ -540,6 +540,32 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool) 
             )?;
         }
 
+        // FLS §6.5.10 + §6.9: Store to an indexed array element `arr[index] = src`.
+        //
+        // Two-instruction sequence:
+        //   add x{scratch}, sp, #{base_slot*8}  — base address of arr[0]
+        //   str x{src}, [x{scratch}, x{index_reg}, lsl #3]  — store arr[index]
+        //
+        // The `lsl #3` scales the index by 8 (bytes per slot), matching the
+        // element layout established by array literal stores.
+        //
+        // FLS §6.9 AMBIGUOUS: No bounds check emitted at this milestone.
+        //
+        // Cache-line note: add + str = two 4-byte instructions = 8 bytes,
+        // mirroring LoadIndexed. The pair fits in one adjacent instruction
+        // slot pair in a 64-byte cache line.
+        Instr::StoreIndexed { src, base_slot, index_reg, scratch } => {
+            let base_offset = *base_slot as u32 * 8;
+            writeln!(
+                out,
+                "    add     x{scratch}, sp, #{base_offset:<15} // FLS §6.9: address of arr[0]"
+            )?;
+            writeln!(
+                out,
+                "    str     x{src}, [x{scratch}, x{index_reg}, lsl #3] // FLS §6.5.10: store arr[index]"
+            )?;
+        }
+
         // FLS §6.12.2 + §10.1: Call a `&mut self` method and write modified fields back.
         //
         // After the `bl`, x0..x{N-1} hold the method's modified field values

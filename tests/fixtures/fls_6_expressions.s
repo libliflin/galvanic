@@ -182,8 +182,8 @@ count_to_ten:
     str     x6, [sp, #0              ] // FLS §8.1: store slot 0
     b       .L10                       // FLS §6.17: branch to end
 .L11:                              // FLS §6.17: branch target
-    ldr     x7, [sp, #0              ] // FLS §8.1: load slot 0
-    mov     x0, x7              // FLS §6.19: return reg 7 → x0
+    ldr     x1, [sp, #0              ] // FLS §8.1: load slot 0
+    mov     x0, x1              // FLS §6.19: return reg 1 → x0
     add     sp, sp, #16             // FLS §8.1: restore stack frame
     ret
 
@@ -209,8 +209,8 @@ find_first_over_threshold:
     str     x6, [sp, #0              ] // FLS §8.1: store slot 0
     b       .L12                       // FLS §6.17: branch to end
 .L13:                              // FLS §6.17: branch target
-    ldr     x7, [sp, #0              ] // FLS §8.1: load slot 0
-    mov     x0, x7              // FLS §6.19: return reg 7 → x0
+    ldr     x1, [sp, #0              ] // FLS §8.1: load slot 0
+    mov     x0, x1              // FLS §6.19: return reg 1 → x0
     add     sp, sp, #16             // FLS §8.1: restore stack frame
     ret
 
@@ -238,10 +238,10 @@ loop_returning_value:
 .L19:                              // FLS §6.17: branch target
     b       .L16                       // FLS §6.17: branch to end
 .L17:                              // FLS §6.17: branch target
-    ldr     x8, [sp, #16             ] // FLS §8.1: load slot 2
-    str     x8, [sp, #8              ] // FLS §8.1: store slot 1
-    ldr     x9, [sp, #8              ] // FLS §8.1: load slot 1
-    mov     x0, x9              // FLS §6.19: return reg 9 → x0
+    ldr     x1, [sp, #16             ] // FLS §8.1: load slot 2
+    str     x1, [sp, #8              ] // FLS §8.1: store slot 1
+    ldr     x2, [sp, #8              ] // FLS §8.1: load slot 1
+    mov     x0, x2              // FLS §6.19: return reg 2 → x0
     add     sp, sp, #32             // FLS §8.1: restore stack frame
     ret
 
@@ -278,8 +278,8 @@ sum_skipping_three:
     str     x13, [sp, #8              ] // FLS §8.1: store slot 1
     b       .L20                       // FLS §6.17: branch to end
 .L21:                              // FLS §6.17: branch target
-    ldr     x14, [sp, #8              ] // FLS §8.1: load slot 1
-    mov     x0, x14              // FLS §6.19: return reg 14 → x0
+    ldr     x2, [sp, #8              ] // FLS §8.1: load slot 1
+    mov     x0, x2              // FLS §6.19: return reg 2 → x0
     add     sp, sp, #16             // FLS §8.1: restore stack frame
     ret
 
@@ -434,8 +434,8 @@ for_loop_sum_example:
     str     x11, [sp, #8              ] // FLS §8.1: store slot 1
     b       .L26                       // FLS §6.17: branch to end
 .L28:                              // FLS §6.17: branch target
-    ldr     x12, [sp, #0              ] // FLS §8.1: load slot 0
-    mov     x0, x12              // FLS §6.19: return reg 12 → x0
+    ldr     x1, [sp, #0              ] // FLS §8.1: load slot 0
+    mov     x0, x1              // FLS §6.19: return reg 1 → x0
     add     sp, sp, #32             // FLS §8.1: restore stack frame
     ret
 
@@ -466,8 +466,8 @@ for_loop_inclusive_example:
     str     x11, [sp, #8              ] // FLS §8.1: store slot 1
     b       .L29                       // FLS §6.17: branch to end
 .L31:                              // FLS §6.17: branch target
-    ldr     x12, [sp, #0              ] // FLS §8.1: load slot 0
-    mov     x0, x12              // FLS §6.19: return reg 12 → x0
+    ldr     x1, [sp, #0              ] // FLS §8.1: load slot 0
+    mov     x0, x1              // FLS §6.19: return reg 1 → x0
     add     sp, sp, #32             // FLS §8.1: restore stack frame
     ret
 
@@ -781,6 +781,43 @@ array_variable_index_example:
     add     x5, sp, #0               // FLS §6.9: address of arr[0]
     ldr     x5, [x5, x4, lsl #3] // FLS §6.9: load arr[index]
     mov     x0, x5              // FLS §6.19: return reg 5 → x0
+    add     sp, sp, #32             // FLS §8.1: restore stack frame
+    ret
+
+    // fn array_store_example — FLS §9
+    .global array_store_example
+array_store_example:
+    sub     sp, sp, #32             // FLS §8.1: frame for 3 slot(s)
+    mov     x0, #1                   // FLS §2.4.4.1: load imm 1
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    mov     x1, #2                   // FLS §2.4.4.1: load imm 2
+    str     x1, [sp, #8              ] // FLS §8.1: store slot 1
+    mov     x2, #3                   // FLS §2.4.4.1: load imm 3
+    str     x2, [sp, #16             ] // FLS §8.1: store slot 2
+    mov     x3, #10                  // FLS §2.4.4.1: load imm 10
+    mov     x4, #0                   // FLS §2.4.4.1: load imm 0
+    add     x5, sp, #0               // FLS §6.9: address of arr[0]
+    str     x3, [x5, x4, lsl #3] // FLS §6.5.10: store arr[index]
+    mov     x6, #20                  // FLS §2.4.4.1: load imm 20
+    mov     x7, #1                   // FLS §2.4.4.1: load imm 1
+    add     x8, sp, #0               // FLS §6.9: address of arr[0]
+    str     x6, [x8, x7, lsl #3] // FLS §6.5.10: store arr[index]
+    mov     x9, #30                  // FLS §2.4.4.1: load imm 30
+    mov     x10, #2                   // FLS §2.4.4.1: load imm 2
+    add     x11, sp, #0               // FLS §6.9: address of arr[0]
+    str     x9, [x11, x10, lsl #3] // FLS §6.5.10: store arr[index]
+    mov     x12, #0                   // FLS §2.4.4.1: load imm 0
+    add     x13, sp, #0               // FLS §6.9: address of arr[0]
+    ldr     x13, [x13, x12, lsl #3] // FLS §6.9: load arr[index]
+    mov     x14, #1                   // FLS §2.4.4.1: load imm 1
+    add     x15, sp, #0               // FLS §6.9: address of arr[0]
+    ldr     x15, [x15, x14, lsl #3] // FLS §6.9: load arr[index]
+    add     x16, x13, x15          // FLS §6.5.5: add
+    mov     x17, #2                   // FLS §2.4.4.1: load imm 2
+    add     x18, sp, #0               // FLS §6.9: address of arr[0]
+    ldr     x18, [x18, x17, lsl #3] // FLS §6.9: load arr[index]
+    add     x19, x16, x18          // FLS §6.5.5: add
+    mov     x0, x19              // FLS §6.19: return reg 19 → x0
     add     sp, sp, #32             // FLS §8.1: restore stack frame
     ret
 
