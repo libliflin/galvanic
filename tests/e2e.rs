@@ -17684,3 +17684,183 @@ fn main() -> i32 {
         "default method body must call Foo__value: {asm}"
     );
 }
+
+/// Milestone 128: basic associated constant on an inherent impl.
+///
+/// FLS §10.3: An impl block may declare `const NAME: Type = VALUE;`.
+/// Access via `TypeName::CONST_NAME` substitutes the value at the use site.
+#[test]
+fn milestone_128_assoc_const_basic() {
+    let src = r#"
+struct Config;
+impl Config {
+    const MAX: i32 = 100;
+}
+fn main() -> i32 { Config::MAX }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 100, "Config::MAX=100, got {exit_code}");
+}
+
+/// Milestone 128: associated constant on a trait impl.
+///
+/// FLS §10.3: A trait impl may provide a concrete value for a required
+/// associated constant declared in the trait body.
+#[test]
+fn milestone_128_assoc_const_trait_impl() {
+    let src = r#"
+trait HasId {
+    const ID: i32;
+}
+struct Foo;
+impl HasId for Foo {
+    const ID: i32 = 42;
+}
+fn main() -> i32 { Foo::ID }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "Foo::ID=42, got {exit_code}");
+}
+
+/// Milestone 128: two types with different associated constant values.
+///
+/// FLS §10.3: Each impl block provides its own value for the same associated
+/// constant name.
+#[test]
+fn milestone_128_assoc_const_two_types() {
+    let src = r#"
+trait HasSides {
+    const SIDES: i32;
+}
+struct Triangle;
+impl HasSides for Triangle {
+    const SIDES: i32 = 3;
+}
+struct Square;
+impl HasSides for Square {
+    const SIDES: i32 = 4;
+}
+fn main() -> i32 { Triangle::SIDES + Square::SIDES }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "3+4=7, got {exit_code}");
+}
+
+/// Milestone 128: associated constant used in arithmetic.
+///
+/// FLS §10.3: An associated constant can appear in any value context.
+#[test]
+fn milestone_128_assoc_const_in_arithmetic() {
+    let src = r#"
+struct Limits;
+impl Limits {
+    const MIN: i32 = 1;
+    const MAX: i32 = 10;
+}
+fn main() -> i32 { Limits::MAX - Limits::MIN }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 9, "10-1=9, got {exit_code}");
+}
+
+/// Milestone 128: associated constant used as an if condition operand.
+///
+/// FLS §10.3: Associated constants can be used wherever a value expression
+/// of the appropriate type is expected.
+#[test]
+fn milestone_128_assoc_const_in_if() {
+    let src = r#"
+struct Flags;
+impl Flags {
+    const ENABLED: i32 = 1;
+}
+fn main() -> i32 {
+    if Flags::ENABLED == 1 { 5 } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "flag enabled path, got {exit_code}");
+}
+
+/// Milestone 128: associated constant passed as a function argument.
+///
+/// FLS §10.3: The substituted value is a regular i32 and can be passed as an
+/// argument to any function accepting i32.
+#[test]
+fn milestone_128_assoc_const_as_fn_arg() {
+    let src = r#"
+struct Sizes;
+impl Sizes {
+    const SMALL: i32 = 7;
+}
+fn double(x: i32) -> i32 { x * 2 }
+fn main() -> i32 { double(Sizes::SMALL) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 14, "7*2=14, got {exit_code}");
+}
+
+/// Milestone 128: associated constant that references a top-level const.
+///
+/// FLS §10.3, §7.1: An associated constant initializer is a constant expression
+/// and may reference other const items visible in scope.
+#[test]
+fn milestone_128_assoc_const_references_const() {
+    let src = r#"
+const BASE: i32 = 5;
+struct Derived;
+impl Derived {
+    const VALUE: i32 = BASE * 2;
+}
+fn main() -> i32 { Derived::VALUE }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "5*2=10, got {exit_code}");
+}
+
+/// Milestone 128: associated constant used as a loop bound.
+///
+/// FLS §10.3: An associated constant can appear in any position a constant
+/// expression is expected.
+#[test]
+fn milestone_128_assoc_const_as_loop_bound() {
+    let src = r#"
+struct Iter;
+impl Iter {
+    const COUNT: i32 = 4;
+}
+fn main() -> i32 {
+    let mut sum = 0;
+    let mut i = 0;
+    while i < Iter::COUNT {
+        sum = sum + i;
+        i = i + 1;
+    }
+    sum
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "0+1+2+3=6, got {exit_code}");
+}
+
+/// Assembly check: associated constant emits `LoadImm`, not a stack load.
+///
+/// FLS §10.3: Every use of an associated constant is replaced with its value —
+/// no memory access, just an immediate load (same as top-level const items,
+/// FLS §7.1:10).
+#[test]
+fn runtime_assoc_const_emits_loadimm() {
+    let src = r#"
+struct Config;
+impl Config {
+    const MAX: i32 = 100;
+}
+fn main() -> i32 { Config::MAX }
+"#;
+    let asm = compile_to_asm(src);
+    // The value 100 must appear as an immediate move — not a load from memory.
+    assert!(
+        asm.contains("mov     x0, #100") || asm.contains("mov x0, #100"),
+        "assoc const must emit immediate load of 100: {asm}"
+    );
+}

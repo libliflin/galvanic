@@ -939,6 +939,33 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         }
     }
 
+    // Collect associated constants from impl blocks. FLS §10.3: Associated Constants.
+    //
+    // Each impl block may declare `const NAME: i32 = VALUE;`. Galvanic stores these
+    // as `"TypeName::CONST_NAME" → i32` and substitutes the value at every use site
+    // via `LoadImm` (FLS §10.3: "associated constants are substituted at each use site").
+    //
+    // Multi-pass to handle assoc consts referencing top-level consts (already in
+    // `const_vals`). Float-typed assoc consts are deferred to a later milestone.
+    //
+    // Cache-line note: this map is built once and shared read-only across all
+    // `lower_fn` calls — not on any hot runtime path.
+    let mut assoc_const_vals: HashMap<String, i32> = HashMap::new();
+    for item in &src.items {
+        if let ItemKind::Impl(impl_def) = &item.kind {
+            let type_name = impl_def.ty.text(source);
+            for ac in &impl_def.assoc_consts {
+                let ac_name = ac.name.text(source);
+                let key = format!("{type_name}::{ac_name}");
+                if let Some(expr) = &ac.value
+                    && let Some(val) = eval_const_expr(expr, source, &const_vals, &const_fns)
+                {
+                    assoc_const_vals.insert(key, val);
+                }
+            }
+        }
+    }
+
     // Collect f64 const items.
     //
     // FLS §7.1, §4.2: Const items with float types are evaluated at compile
@@ -1495,7 +1522,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     for item in &src.items {
         match &item.kind {
             ItemKind::Fn(fn_def) => {
-                let (ir_fn, closure_fns, fn_trampolines, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &tuple_struct_float_field_types, &enum_defs, &enum_variant_float_field_types, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &const_f64_vals, &const_f32_vals, &static_names, &static_f64_names, &static_f32_names, &fn_names, &struct_raw_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, None, label_base)?;
+                let (ir_fn, closure_fns, fn_trampolines, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &tuple_struct_float_field_types, &enum_defs, &enum_variant_float_field_types, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &const_f64_vals, &const_f32_vals, &assoc_const_vals, &static_names, &static_f64_names, &static_f32_names, &fn_names, &struct_raw_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, None, label_base)?;
                 label_base = next_label;
                 fns.push(ir_fn);
                 fns.extend(closure_fns);
@@ -1542,6 +1569,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         &const_vals,
                         &const_f64_vals,
                         &const_f32_vals,
+                        &assoc_const_vals,
                         &static_names,
                         &static_f64_names,
                         &static_f32_names,
@@ -1607,6 +1635,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                                 &const_vals,
                                 &const_f64_vals,
                                 &const_f32_vals,
+                                &assoc_const_vals,
                                 &static_names,
                                 &static_f64_names,
                                 &static_f32_names,
@@ -1734,6 +1763,7 @@ fn lower_fn(
     const_vals: &HashMap<String, i32>,
     const_f64_vals: &HashMap<String, f64>,
     const_f32_vals: &HashMap<String, f32>,
+    assoc_const_vals: &HashMap<String, i32>,
     static_names: &std::collections::HashSet<String>,
     static_f64_names: &std::collections::HashSet<String>,
     static_f32_names: &std::collections::HashSet<String>,
@@ -1815,7 +1845,7 @@ fn lower_fn(
         Some(block) => block,
     };
 
-    let mut ctx = LowerCtx::new(source, &name, ret_ty, struct_defs, tuple_struct_defs, tuple_struct_float_field_types, enum_defs, enum_variant_float_field_types, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, f64_return_fns, f32_return_fns, const_vals, const_f64_vals, const_f32_vals, static_names, static_f64_names, static_f32_names, fn_names, struct_field_types, struct_field_offsets, struct_sizes, type_aliases, struct_float_field_types, start_label);
+    let mut ctx = LowerCtx::new(source, &name, ret_ty, struct_defs, tuple_struct_defs, tuple_struct_float_field_types, enum_defs, enum_variant_float_field_types, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, f64_return_fns, f32_return_fns, const_vals, const_f64_vals, const_f32_vals, assoc_const_vals, static_names, static_f64_names, static_f32_names, fn_names, struct_field_types, struct_field_offsets, struct_sizes, type_aliases, struct_float_field_types, start_label);
 
     // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
     // to stack slots. Each parameter slot is allocated in parameter order
@@ -3488,6 +3518,15 @@ struct LowerCtx<'src> {
     /// Cache-line note: read-only during lowering; not on any hot path.
     const_f32_vals: &'src HashMap<String, f32>,
 
+    /// Associated constant values: maps `"TypeName::CONST_NAME"` → i32.
+    ///
+    /// FLS §10.3: Associated constants. Every use of `TypeName::CONST_NAME`
+    /// is replaced with `LoadImm(value)` — identical to top-level const
+    /// substitution but keyed by the two-segment `TypeName::CONST_NAME` path.
+    ///
+    /// Cache-line note: read-only during lowering; not on any hot path.
+    assoc_const_vals: &'src HashMap<String, i32>,
+
     /// Static variable names: the set of names declared as integer `static` items.
     ///
     /// FLS §7.2: Static items. When a path expression `FOO` resolves to a known
@@ -3789,6 +3828,7 @@ impl<'src> LowerCtx<'src> {
         const_vals: &'src HashMap<String, i32>,
         const_f64_vals: &'src HashMap<String, f64>,
         const_f32_vals: &'src HashMap<String, f32>,
+        assoc_const_vals: &'src HashMap<String, i32>,
         static_names: &'src std::collections::HashSet<String>,
         static_f64_names: &'src std::collections::HashSet<String>,
         static_f32_names: &'src std::collections::HashSet<String>,
@@ -3830,6 +3870,7 @@ impl<'src> LowerCtx<'src> {
             const_vals,
             const_f64_vals,
             const_f32_vals,
+            assoc_const_vals,
             static_names,
             static_f64_names,
             static_f32_names,
@@ -7554,6 +7595,7 @@ impl<'src> LowerCtx<'src> {
                     self.const_vals,
                     self.const_f64_vals,
                     self.const_f32_vals,
+                    self.assoc_const_vals,
                     self.static_names,
                     self.static_f64_names,
                     self.static_f32_names,
@@ -7891,6 +7933,27 @@ impl<'src> LowerCtx<'src> {
             // FLS §15 AMBIGUOUS: The spec does not specify the default discriminant
             // values for unit variants. Galvanic assigns 0, 1, 2, ... in declaration
             // order, which matches rustc's default behavior.
+            // FLS §10.3: Associated constant `TypeName::CONST_NAME`.
+            // Check associated consts before enum variant discriminants —
+            // both use two-segment paths, but consts take priority.
+            ExprKind::Path(segments)
+                if segments.len() == 2
+                    && {
+                        let type_name = segments[0].text(self.source);
+                        let const_name = segments[1].text(self.source);
+                        self.assoc_const_vals
+                            .contains_key(&format!("{type_name}::{const_name}"))
+                    } =>
+            {
+                let type_name = segments[0].text(self.source);
+                let const_name = segments[1].text(self.source);
+                let key = format!("{type_name}::{const_name}");
+                let val = *self.assoc_const_vals.get(&key).unwrap();
+                let r = self.alloc_reg()?;
+                self.instrs.push(Instr::LoadImm(r, val));
+                Ok(IrValue::Reg(r))
+            }
+
             ExprKind::Path(segments) if segments.len() == 2 => {
                 let enum_name = segments[0].text(self.source);
                 let variant_name = segments[1].text(self.source);
@@ -13894,6 +13957,7 @@ impl<'src> LowerCtx<'src> {
                     self.const_vals,
                     self.const_f64_vals,
                     self.const_f32_vals,
+                    self.assoc_const_vals,
                     self.static_names,
                     self.static_f64_names,
                     self.static_f32_names,
