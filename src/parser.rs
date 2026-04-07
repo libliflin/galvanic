@@ -1176,6 +1176,62 @@ impl<'src> Parser<'src> {
                 Ok(Ty { kind: TyKind::Path(segments), span: start.to(end) })
             }
 
+            // `impl Fn(T1, ...) -> R` — anonymous type parameter. FLS §12: argument-position
+            // `impl Trait` is syntactic sugar for an anonymous type parameter with a trait bound.
+            // FLS §4.13: `Fn`, `FnMut`, and `FnOnce` are the closure traits.
+            //
+            // Galvanic maps `impl Fn(T1, ...) -> R` to `TyKind::FnPtr { params, ret }` — the
+            // same IR representation as `fn(T1, ...) -> R`. Non-capturing closures passed to
+            // `impl Fn` parameters are coerced to function pointers at the call site.
+            //
+            // FLS §12 NOTE: The full semantics of `impl Trait` (monomorphisation, capturing
+            // closures) are not yet implemented. Only non-capturing closures are supported.
+            TokenKind::KwImpl => {
+                self.advance(); // consume `impl`
+                // Expect a trait name identifier.
+                if self.peek_kind() != TokenKind::Ident {
+                    return Err(self.error(format!(
+                        "expected trait name after `impl`, found {:?}",
+                        self.peek_kind()
+                    )));
+                }
+                let trait_span = self.current_span();
+                let trait_name = trait_span.text(self.src);
+                self.advance(); // consume trait name
+
+                // The callable closure traits use `Fn(T1, ...) -> R` call-parens syntax.
+                // FLS §4.13: `Fn`, `FnMut`, `FnOnce` all use this form.
+                if matches!(trait_name, "Fn" | "FnMut" | "FnOnce") {
+                    self.expect(TokenKind::OpenParen)?;
+                    let mut params = Vec::new();
+                    if self.peek_kind() != TokenKind::CloseParen {
+                        loop {
+                            params.push(self.parse_ty()?);
+                            if !self.eat(TokenKind::Comma) {
+                                break;
+                            }
+                            if self.peek_kind() == TokenKind::CloseParen {
+                                break;
+                            }
+                        }
+                    }
+                    let end = self.current_span();
+                    self.expect(TokenKind::CloseParen)?;
+                    let ret = if self.peek_kind() == TokenKind::RArrow {
+                        self.advance(); // consume `->`
+                        Some(Box::new(self.parse_ty()?))
+                    } else {
+                        None
+                    };
+                    let end = if let Some(ref r) = ret { r.span } else { end };
+                    Ok(Ty { kind: TyKind::FnPtr { params, ret }, span: start.to(end) })
+                } else {
+                    // Non-callable trait (e.g. `impl Display`): treat as a named path type.
+                    // FLS §12: Non-callable impl Trait — not yet lowered.
+                    Ok(Ty { kind: TyKind::Path(vec![trait_span]), span: start.to(trait_span) })
+                }
+            }
+
             kind => Err(self.error(format!("expected type, found {kind:?}"))),
         }
     }
@@ -3155,6 +3211,53 @@ mod tests {
     fn fn_ptr_type_two_params() {
         // FLS §4.9: function pointer type with two parameters `fn(i32, i32) -> i32`.
         let src = "fn apply2(f: fn(i32, i32) -> i32) -> i32 { 0 }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let TyKind::FnPtr { ref params, .. } = f.params[0].ty.kind else { panic!("expected FnPtr") };
+        assert_eq!(params.len(), 2);
+    }
+
+    #[test]
+    fn impl_fn_type_no_ret() {
+        // FLS §12, §4.13: `impl Fn(i32)` as a parameter type (anonymous type parameter).
+        // Maps to FnPtr internally — same lowering path as `fn(i32)`.
+        let src = "fn apply(f: impl Fn(i32)) {}";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        assert!(matches!(&f.params[0].ty.kind, TyKind::FnPtr { ret: None, .. }));
+    }
+
+    #[test]
+    fn impl_fn_type_with_ret() {
+        // FLS §12, §4.13: `impl Fn(i32) -> i32` as a parameter type.
+        let src = "fn apply(f: impl Fn(i32) -> i32, x: i32) -> i32 { f(x) }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        assert!(matches!(&f.params[0].ty.kind, TyKind::FnPtr { ret: Some(_), .. }));
+    }
+
+    #[test]
+    fn impl_fnmut_type() {
+        // FLS §12, §4.13: `impl FnMut() -> i32` as a parameter type.
+        let src = "fn run(f: impl FnMut() -> i32) -> i32 { f() }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        assert!(matches!(&f.params[0].ty.kind, TyKind::FnPtr { ret: Some(_), .. }));
+    }
+
+    #[test]
+    fn impl_fnonce_type() {
+        // FLS §12, §4.13: `impl FnOnce() -> i32` as a parameter type.
+        let src = "fn consume(f: impl FnOnce() -> i32) -> i32 { f() }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        assert!(matches!(&f.params[0].ty.kind, TyKind::FnPtr { ret: Some(_), .. }));
+    }
+
+    #[test]
+    fn impl_fn_two_params() {
+        // FLS §12, §4.13: `impl Fn(i32, i32) -> i32` — two-parameter closure trait.
+        let src = "fn apply2(f: impl Fn(i32, i32) -> i32, a: i32, b: i32) -> i32 { f(a, b) }";
         let sf = parse_ok(src);
         let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         let TyKind::FnPtr { ref params, .. } = f.params[0].ty.kind else { panic!("expected FnPtr") };
