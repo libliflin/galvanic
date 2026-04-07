@@ -18490,3 +18490,162 @@ fn main() -> i32 { compute(7) }
         "named block result must not be constant-folded to 21: {asm}"
     );
 }
+
+// ── Milestone 131: Const Block Expressions (FLS §6.4.2) ──────────────────────
+
+/// Milestone 131: basic const block expression returning a computed value.
+///
+/// FLS §6.4.2: `const { expr }` evaluates `expr` in a const context at
+/// compile time. The result is substituted as a constant at the use site.
+#[test]
+fn milestone_131_const_block_basic() {
+    let src = r#"
+fn main() -> i32 {
+    const { 2 + 3 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "const {{ 2 + 3 }} = 5, got {exit_code}");
+}
+
+/// Milestone 131: const block in a let binding.
+///
+/// FLS §6.4.2: The result of a const block may be bound to a variable;
+/// the variable then holds the computed constant value.
+#[test]
+fn milestone_131_const_block_in_let() {
+    let src = r#"
+fn main() -> i32 {
+    let x = const { 10 * 4 };
+    x
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 40, "const {{ 10 * 4 }} = 40, got {exit_code}");
+}
+
+/// Milestone 131: const block in arithmetic expression.
+///
+/// FLS §6.4.2: A const block expression may appear anywhere a value expression
+/// is expected, including as an operand in a larger expression.
+#[test]
+fn milestone_131_const_block_in_arithmetic() {
+    let src = r#"
+fn add(a: i32, b: i32) -> i32 { a + b }
+fn main() -> i32 {
+    add(const { 3 * 4 }, 6)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 18, "add(const {{ 3*4 }}, 6) = add(12, 6) = 18, got {exit_code}");
+}
+
+/// Milestone 131: const block with let bindings inside the block.
+///
+/// FLS §6.4.2: A const block body may contain let statements, evaluated
+/// at compile time in sequence like a const fn body.
+#[test]
+fn milestone_131_const_block_with_let_bindings() {
+    let src = r#"
+fn main() -> i32 {
+    const {
+        let a = 6;
+        let b = 7;
+        a * b
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "const block 6*7=42, got {exit_code}");
+}
+
+/// Milestone 131: const block referencing a named const item.
+///
+/// FLS §6.4.2, §7.1: Inside a const block, named const items are visible
+/// and can be referenced. The const block inherits the surrounding const
+/// environment.
+#[test]
+fn milestone_131_const_block_references_const() {
+    let src = r#"
+const FACTOR: i32 = 8;
+fn main() -> i32 {
+    const { FACTOR * 5 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 40, "const {{ FACTOR * 5 }} = 40, got {exit_code}");
+}
+
+/// Milestone 131: const block as the condition operand.
+///
+/// FLS §6.4.2: Const blocks are expressions and may appear wherever an
+/// expression is valid, including in if conditions.
+#[test]
+fn milestone_131_const_block_as_fn_arg() {
+    let src = r#"
+fn double(x: i32) -> i32 { x * 2 }
+fn main() -> i32 {
+    double(const { 21 })
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "double(const {{ 21 }}) = 42, got {exit_code}");
+}
+
+/// Milestone 131: const block with subtraction.
+///
+/// FLS §6.4.2: Subtraction is a valid const expression form.
+#[test]
+fn milestone_131_const_block_subtraction() {
+    let src = r#"
+fn main() -> i32 {
+    const { 100 - 58 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "const {{ 100 - 58 }} = 42, got {exit_code}");
+}
+
+/// Milestone 131: two const blocks in the same function.
+///
+/// FLS §6.4.2: Multiple const block expressions may appear in the same
+/// function, each evaluated independently at compile time.
+#[test]
+fn milestone_131_two_const_blocks() {
+    let src = r#"
+fn add(a: i32, b: i32) -> i32 { a + b }
+fn main() -> i32 {
+    add(const { 3 * 3 }, const { 4 * 4 })
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 25, "add(const {{ 9 }}, const {{ 16 }}) = 25, got {exit_code}");
+}
+
+/// Assembly check: const block emits the compile-time value as a `LoadImm`.
+///
+/// FLS §6.4.2: A const block is a const context — emitting `LoadImm` (mov #N)
+/// is CORRECT here (not a compiler-as-interpreter error). The constant folding
+/// is mandated by the spec. The assembly must contain the correct constant value.
+#[test]
+fn runtime_const_block_emits_loadimm() {
+    let src = r#"
+fn add(a: i32, b: i32) -> i32 { a + b }
+fn main() -> i32 {
+    add(const { 6 * 7 }, 0)
+}
+"#;
+    let asm = compile_to_asm(src);
+    // The const block { 6 * 7 } must evaluate to 42 at compile time.
+    // FLS §6.4.2: const block IS a const context — LoadImm with #42 is correct.
+    assert!(
+        asm.contains("#42"),
+        "const block 6*7 must emit #42 as a compile-time constant: {asm}"
+    );
+    // The add call must still emit a `bl` (runtime function call) — the function
+    // call itself is not folded even though its argument is a const block.
+    assert!(
+        asm.contains("bl"),
+        "function call add() must still emit bl instruction: {asm}"
+    );
+}

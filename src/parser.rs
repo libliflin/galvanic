@@ -2524,6 +2524,27 @@ impl<'src> Parser<'src> {
                 })
             }
 
+            // Const block expression — FLS §6.4.2.
+            //
+            // `const { ... }` — a block whose body is evaluated in a const
+            // context at compile time. Distinct from top-level const items
+            // (§7.1, which are named) and `const fn` declarations (§9:41–43).
+            //
+            // Disambiguation: `const fn` is parsed at the item level (the
+            // parser never reaches here for `const fn` in item position).
+            // Inside an expression context the only valid `const` primary is
+            // `const { ... }` because `const NAME` and `const fn` can only
+            // appear at statement/item level, not as sub-expressions.
+            //
+            // FLS §6.4.2: "A const block expression is a block expression
+            // preceded by the keyword `const`."
+            TokenKind::KwConst if self.peek_nth(1) == TokenKind::OpenBrace => {
+                self.advance(); // eat `const`
+                let block = self.parse_block()?;
+                let span = start.to(block.span);
+                Ok(Expr { kind: ExprKind::ConstBlock(Box::new(block)), span })
+            }
+
             // Closure expression — FLS §6.14.
             //
             // `|params| body` or `|params| -> RetTy body` where body is

@@ -544,6 +544,49 @@ fn eval_const_fn_body(
     eval_const_expr(body.tail.as_ref()?, source, &local, const_fns)
 }
 
+/// Evaluate a const block body at compile time.
+///
+/// FLS §6.4.2: A `const { body }` expression evaluates `body` in a const
+/// context. Supports the same expression forms as `eval_const_expr` plus
+/// `let` bindings with simple identifier patterns.
+///
+/// `global_known` provides the set of already-computed const item values
+/// visible at the use site (e.g. top-level `const X: i32 = ...` items).
+/// Calls to `const fn` items are not supported here because the LowerCtx
+/// does not carry `const fn` AST references; document that as a limitation.
+///
+/// FLS §6.4.2 AMBIGUOUS: The spec does not enumerate which expression forms
+/// must be const-evaluable inside a const block. Galvanic supports integer
+/// arithmetic, bitwise ops, negation, and const name references. Calls to
+/// `const fn` items inside a const block are not yet implemented.
+///
+/// Returns `None` if any statement or tail expression is not const-evaluable.
+fn eval_const_block(
+    block: &crate::ast::Block,
+    source: &str,
+    global_known: &HashMap<String, i32>,
+) -> Option<i32> {
+    let mut local: HashMap<String, i32> = global_known.clone();
+    // Empty map: calling const fns inside a const block is not yet supported.
+    // FLS §6.4.2 AMBIGUOUS: the spec permits const fn calls in const blocks.
+    let empty_fns: HashMap<String, &crate::ast::FnDef> = HashMap::new();
+    for stmt in &block.stmts {
+        match &stmt.kind {
+            // Simple `let x = expr;` binding — evaluate and add to local scope.
+            StmtKind::Let { pat: Pat::Ident(span), init, .. } => {
+                let init_val = eval_const_expr(init.as_ref()?, source, &local, &empty_fns)?;
+                local.insert(span.text(source).to_owned(), init_val);
+            }
+            // Complex patterns not const-evaluable at this milestone.
+            StmtKind::Let { .. } => return None,
+            StmtKind::Empty => {}
+            // Expression statements not const-evaluable (no side-effects in const).
+            _ => return None,
+        }
+    }
+    eval_const_expr(block.tail.as_ref()?, source, &local, &empty_fns)
+}
+
 /// Evaluate a float const initializer at compile time.
 ///
 /// FLS §7.1, §6.1.2:37–45: Const items may be initialised with float literal
@@ -12895,6 +12938,35 @@ impl<'src> LowerCtx<'src> {
                     // Registers allocated in the body remain live.
                     Ok(tail_val)
                 }
+            }
+
+            // Const block expression — FLS §6.4.2.
+            //
+            // `const { body }` is mandated by the spec to be evaluated at
+            // compile time. This is explicitly a const context (FLS §6.1.2:37–45
+            // Constraint 1 exception) — constant folding of the result is CORRECT
+            // and required behavior here, not a compiler-as-interpreter error.
+            //
+            // FLS §6.4.2: "A const block expression is a block expression
+            // preceded by the keyword `const`."
+            //
+            // Implementation: evaluate the block at compile time via
+            // `eval_const_block`, then emit `LoadImm(val)` to materialise the
+            // result. If the block is not fully const-evaluable, it is a
+            // compile error (not a fallback to runtime code).
+            //
+            // Cache-line note: emits one `LoadImm` = 4 bytes (one instruction
+            // slot). Identical footprint to a named `const` item reference.
+            ExprKind::ConstBlock(block) => {
+                let val = eval_const_block(block, self.source, self.const_vals)
+                    .ok_or_else(|| LowerError::Unsupported(
+                        "const block body is not const-evaluable (FLS §6.4.2): \
+                         only integer arithmetic, bitwise ops, and const name \
+                         references are supported at this milestone".into(),
+                    ))?;
+                let r = self.alloc_reg()?;
+                self.instrs.push(Instr::LoadImm(r, val));
+                Ok(IrValue::Reg(r))
             }
 
             // FLS §6.15.6: Break expression — exit the innermost enclosing loop.
