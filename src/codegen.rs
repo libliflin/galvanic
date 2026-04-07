@@ -108,6 +108,34 @@ pub fn emit_asm(module: &Module) -> Result<String, CodegenError> {
         }
     }
 
+    // Emit .rodata section for float constants.
+    //
+    // FLS §2.4.4.2: Float literals are stored as raw IEEE 754 bit patterns.
+    // Each constant is 8 bytes (.quad), 8-byte aligned.  The label
+    // `{fn_name}__fc{idx}` matches the ADRP/ADD/LDR sequence in LoadF64Const.
+    //
+    // Cache-line note: each float constant occupies one 8-byte slot in the
+    // cache line — identical footprint to a static item.  Using .rodata
+    // (vs .data) tells the OS to map the page read-only, reducing TLB pressure
+    // from store-miss writeback.
+    let has_floats = module.fns.iter().any(|f| !f.float_consts.is_empty());
+    if has_floats {
+        writeln!(out)?;
+        writeln!(out, "    .section .rodata")?;
+        for func in &module.fns {
+            for (idx, &bits) in func.float_consts.iter().enumerate() {
+                // Reconstruct the float value for the comment.
+                let val = f64::from_bits(bits);
+                writeln!(out, "    .align 3")?;
+                writeln!(out, "{}__fc{idx}:", func.name)?;
+                writeln!(
+                    out,
+                    "    .quad 0x{bits:016x}          // f64 {val} (FLS §2.4.4.2)"
+                )?;
+            }
+        }
+    }
+
     Ok(out)
 }
 
@@ -178,7 +206,7 @@ fn emit_fn(out: &mut String, func: &crate::ir::IrFn) -> Result<(), CodegenError>
     }
 
     for instr in &func.body {
-        emit_instr(out, instr, fsize, func.saves_lr)?;
+        emit_instr(out, instr, fsize, func.saves_lr, &func.name)?;
     }
 
     Ok(())
@@ -188,7 +216,7 @@ fn emit_fn(out: &mut String, func: &crate::ir::IrFn) -> Result<(), CodegenError>
 ///
 /// `frame_size` is passed so that `Ret` can restore `sp` before branching.
 /// `saves_lr` is passed so that `Ret` can restore `x30` before `ret`.
-fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool) -> Result<(), CodegenError> {
+fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, fn_name: &str) -> Result<(), CodegenError> {
     match instr {
         // FLS §6.19: Return expression.
         // ARM64 ABI: return value in x0; `ret` branches to link register x30.
@@ -832,6 +860,85 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool) 
                 "    str     x{src}, [x{addr}]           // FLS §6.5.10: store through pointer in x{addr}"
             )?;
         }
+
+        // FLS §2.4.4.2: Load a 64-bit float constant from the per-function
+        // .rodata pool into float register d{dst}.
+        //
+        // ARM64 sequence:
+        //   ADRP x17, label   — load page-aligned PC-relative base into x17
+        //   ADD  x17, x17, :lo12:label — apply low-12-bit page offset
+        //   LDR  d{dst}, [x17] — load 8-byte float into d{dst}
+        //
+        // x17 (ip1) is the ARM64 intra-procedure-call scratch register,
+        // reserved for linker veneers and callee-saved scratch. Using it avoids
+        // consuming a general virtual register for the address computation.
+        //
+        // FLS §6.1.2:37–45: Even a float literal emits runtime loads.
+        //
+        // Cache-line note: 3 × 4-byte instructions = 12 bytes. The constant
+        // (.quad in .rodata) is one 8-byte slot — same as a static item.
+        Instr::LoadF64Const { dst, idx } => {
+            let label = format!("{fn_name}__fc{idx}");
+            writeln!(out, "    adrp    x17, {label}              // FLS §2.4.4.2: f64 const addr (page)")?;
+            writeln!(out, "    add     x17, x17, :lo12:{label}  // FLS §2.4.4.2: f64 const addr (offset)")?;
+            writeln!(out, "    ldr     d{dst}, [x17]             // FLS §2.4.4.2: load f64 into d{dst}")?;
+        }
+
+        // FLS §8.1: Store a float register to a stack slot.
+        //
+        // `str d{src}, [sp, #{slot*8}]` — stores 8 bytes from `d{src}` to the
+        // stack frame at byte offset `slot * 8`.
+        //
+        // ARM64: float `str` uses the same addressing mode as integer `str`,
+        // but targets the SIMD/FP register bank. 8-byte alignment is satisfied
+        // because all stack slots are 8 bytes and the frame base is 16-byte aligned.
+        //
+        // Cache-line note: one 4-byte instruction — same footprint as integer Store.
+        Instr::StoreF64 { src, slot } => {
+            let off = (*slot as u32) * 8;
+            writeln!(
+                out,
+                "    str     d{src}, [sp, #{off:<14}] // FLS §8.1: store f64 slot {slot}"
+            )?;
+        }
+
+        // FLS §8.1: Load a float register from a stack slot.
+        //
+        // `ldr d{dst}, [sp, #{slot*8}]` — loads 8 bytes from the stack frame
+        // into `d{dst}`.
+        //
+        // Cache-line note: one 4-byte instruction — same footprint as integer Load.
+        Instr::LoadF64Slot { dst, slot } => {
+            let off = (*slot as u32) * 8;
+            writeln!(
+                out,
+                "    ldr     d{dst}, [sp, #{off:<14}] // FLS §8.1: load f64 slot {slot}"
+            )?;
+        }
+
+        // FLS §6.5.9: Convert a 64-bit float register to a signed 32-bit
+        // integer, truncating toward zero.
+        //
+        // `fcvtzs w{dst}, d{src}` — FCVTZS (Fixed-point Convert to Signed,
+        // rounding toward Zero). Writes a 32-bit result into `w{dst}` (which
+        // is the low 32 bits of `x{dst}`; the upper 32 bits are zero-extended).
+        //
+        // FLS §6.5.9: `f64 as i32` truncates (rounds toward zero).
+        //   3.9  as i32 → 3
+        //   -3.9 as i32 → -3
+        //
+        // Out-of-range: ARM64 FCVTZS saturates to INT32_MIN/INT32_MAX.
+        // FLS §6.5.9 AMBIGUOUS: Rust requires wrapping behaviour in release
+        // and a panic in debug when out-of-range; saturation differs from both.
+        // Galvanic emits saturation at this milestone — documented limitation.
+        //
+        // Cache-line note: one 4-byte FCVTZS instruction.
+        Instr::F64ToI32 { dst, src } => {
+            writeln!(
+                out,
+                "    fcvtzs  w{dst}, d{src}              // FLS §6.5.9: f64→i32 truncate"
+            )?;
+        }
     }
     Ok(())
 }
@@ -870,6 +977,13 @@ fn emit_load_x0(out: &mut String, value: &IrValue) -> Result<(), CodegenError> {
                     "    mov     x0, x{r}              // FLS §6.19: return reg {r} → x0"
                 )?;
             }
+        }
+        // FLS §4.2: Returning a raw float register is not yet supported.
+        // Float functions must be cast to an integer type before returning.
+        IrValue::FReg(_) => {
+            return Err(CodegenError::Unsupported(
+                "returning a float value directly is not yet supported; cast to i32 first".into(),
+            ));
         }
     }
     Ok(())

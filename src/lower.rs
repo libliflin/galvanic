@@ -1631,7 +1631,8 @@ fn lower_fn(
     let saves_lr = ctx.has_calls;
     let next_label = ctx.next_label;
     let pending_closures = ctx.pending_closures;
-    Ok((IrFn { name, ret_ty, body: body_instrs, stack_slots, saves_lr }, pending_closures, next_label))
+    let float_consts = ctx.float_consts;
+    Ok((IrFn { name, ret_ty, body: body_instrs, stack_slots, saves_lr, float_consts }, pending_closures, next_label))
 }
 
 // ── Type lowering ────────────────────────────────────────────────────────────
@@ -1658,6 +1659,34 @@ fn lower_fn(
 /// - Hex escapes: `'\x7F'` → 127
 /// - Unicode escapes: `'\u{1F600}'` → 128512
 ///
+/// Parse the text of a float literal token into an `f64` value.
+///
+/// FLS §2.4.4.2: Float literal syntax:
+///   - Optional sign (handled by unary `-` at the expression level)
+///   - Decimal digits, optional decimal point, optional exponent
+///   - Optional suffix `_f32` or `_f64`
+///   - Underscores allowed as digit separators (e.g. `1_000.0`)
+///
+/// FLS §2.4.4.2: The suffix determines the type (`f32` or `f64`); galvanic
+/// only supports `f64` at this milestone. The value is the same regardless
+/// of suffix — suffix affects type, not magnitude.
+///
+/// FLS §2.4.4.2 AMBIGUOUS: The spec does not specify the handling of
+/// NaN/infinity literals (Rust has none) or hexadecimal float literals
+/// (not supported by the lexer at this milestone).
+fn parse_float_value(text: &str) -> Result<f64, LowerError> {
+    // Strip suffix: _f32 or _f64 must be checked longest-first.
+    let nosuffix = text
+        .strip_suffix("_f64")
+        .or_else(|| text.strip_suffix("_f32"))
+        .unwrap_or(text);
+    // Strip underscores used as digit separators.
+    let cleaned: String = nosuffix.chars().filter(|&c| c != '_').collect();
+    cleaned.parse::<f64>().map_err(|_| {
+        LowerError::Unsupported(format!("cannot parse float literal: `{text}`"))
+    })
+}
+
 /// FLS §2.4.5: "A character literal is a character within single-quotes."
 /// FLS §4.2 AMBIGUOUS: The spec refers to `char` as "the Unicode scalar value
 /// type" but does not give a precise section number in the FLS TOC shown here.
@@ -1866,6 +1895,10 @@ fn lower_ty(ty: &crate::ast::Ty, source: &str) -> Result<IrTy, LowerError> {
                 // Galvanic materialises `&str` values as their byte length (an i32 immediate)
                 // at this milestone.  The pointer half is deferred.
                 "str" => Ok(IrTy::I32),
+                // FLS §4.2: The 64-bit floating-point type.
+                // ARM64: float values live in the `d{N}` register bank.
+                // Stack slots are 8 bytes — same layout as integer/pointer types.
+                "f64" => Ok(IrTy::F64),
                 name => Err(LowerError::Unsupported(format!("type `{name}`"))),
             }
         }
@@ -1959,6 +1992,25 @@ struct LowerCtx<'src> {
     /// FLS §6.12.1: Call expressions make a function non-leaf; the link
     /// register must be preserved so the function can return correctly.
     has_calls: bool,
+
+    /// Maps float (`f64`) local variable names to their stack slot indices.
+    ///
+    /// FLS §4.2: Float locals are stored in 8-byte stack slots, identical in
+    /// layout to integer locals. They are loaded/stored with float-register
+    /// instructions (`ldr d{N}` / `str d{N}`) rather than integer ones.
+    ///
+    /// Kept separate from `locals` so that path-expression lowering can choose
+    /// the right load instruction (`LoadF64Slot` vs `Load`) without tracking
+    /// per-slot type information across the entire `locals` map.
+    float_locals: HashMap<&'src str, u8>,
+
+    /// Accumulated float constants for the current function.
+    ///
+    /// FLS §2.4.4.2: Float literals. Each entry is the raw IEEE 754 bit
+    /// pattern of a `f64` constant referenced by index in the function body
+    /// via `Instr::LoadF64Const`. Moved into `IrFn::float_consts` when the
+    /// function finishes lowering.
+    float_consts: Vec<u64>,
     /// Stack of enclosing loop contexts.
     ///
     /// Each entry corresponds to one loop currently being lowered. The top
@@ -2493,6 +2545,8 @@ impl<'src> LowerCtx<'src> {
             local_str_slots: std::collections::HashSet::new(),
             local_capture_args: HashMap::new(),
             last_closure_captures: None,
+            float_locals: HashMap::new(),
+            float_consts: Vec::new(),
         }
     }
 
@@ -2514,6 +2568,24 @@ impl<'src> LowerCtx<'src> {
             LowerError::Unsupported("exceeded 256 stack slots".into())
         })?;
         Ok(s)
+    }
+
+    /// Return true if `expr` is statically known to produce an `f64` value.
+    ///
+    /// FLS §4.2: Used at cast sites to select `F64ToI32` (FCVTZS) when the
+    /// source is a float, vs. integer identity/narrowing otherwise.
+    ///
+    /// Conservative check: only recognises float literals and path expressions
+    /// to variables registered in `float_locals`. All other expressions are
+    /// assumed integer-typed at this milestone.
+    fn is_f64_expr(&self, expr: &crate::ast::Expr) -> bool {
+        match &expr.kind {
+            crate::ast::ExprKind::LitFloat => true,
+            crate::ast::ExprKind::Path(segs) if segs.len() == 1 => {
+                self.float_locals.contains_key(segs[0].text(self.source))
+            }
+            _ => false,
+        }
     }
 
     /// FLS §5.10.3 + §8.1: Recursively bind a tuple pattern to a tuple literal init.
@@ -2632,6 +2704,11 @@ impl<'src> LowerCtx<'src> {
             }
             IrValue::Unit => Err(LowerError::Unsupported(
                 "unit value used as arithmetic operand".into(),
+            )),
+            // FLS §4.2: Float register values cannot be used in integer
+            // arithmetic contexts directly; F64ToI32 is required first.
+            IrValue::FReg(_) => Err(LowerError::Unsupported(
+                "float register used in integer context; cast to i32 first (FLS §6.5.9)".into(),
             )),
         }
     }
@@ -3978,7 +4055,7 @@ impl<'src> LowerCtx<'src> {
             //
             // FLS §6.1.2:37–45: Any store instruction is a runtime instruction;
             // the initializer (when present) is evaluated at runtime.
-            StmtKind::Let { pat, ty: _, init } => {
+            StmtKind::Let { pat, ty, init } => {
                 // FLS §5.10.3: Tuple pattern in let position — `let (a, b) = t;`.
                 //
                 // Handled before the scalar special-case chain since it
@@ -5122,6 +5199,37 @@ impl<'src> LowerCtx<'src> {
                 // then insert the new binding into locals.
                 let slot = self.alloc_slot()?;
 
+                // FLS §4.2: If the type annotation is `f64`, use float
+                // store/load instructions and register in `float_locals`.
+                //
+                // Type annotation drives the choice because type inference is
+                // not yet implemented (FLS §8.1 AMBIGUOUS on inference rules).
+                // `let x: f64 = 3.0` is unambiguous; `let x = 3.0` would need
+                // inference and is not yet supported.
+                let declared_f64 = ty.as_ref().is_some_and(|t| {
+                    matches!(&t.kind, crate::ast::TyKind::Path(segs)
+                        if segs.len() == 1 && segs[0].text(self.source) == "f64")
+                });
+
+                if declared_f64 {
+                    if let Some(init_expr) = init.as_ref() {
+                        // FLS §2.4.4.2: f64 initializer must produce a float reg.
+                        // FLS §6.1.2:37–45: store is a runtime instruction.
+                        let val = self.lower_expr(init_expr, &IrTy::F64)?;
+                        let src = match val {
+                            IrValue::FReg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "f64 let binding: initializer did not produce a float value".into(),
+                            )),
+                        };
+                        self.instrs.push(Instr::StoreF64 { src, slot });
+                    }
+                    // Register as a float local (not in `locals`) so path
+                    // expressions emit `LoadF64Slot` rather than `Load`.
+                    self.float_locals.insert(var_name, slot);
+                    return Ok(());
+                }
+
                 if let Some(init_expr) = init.as_ref() {
                     // Lower the initializer. We assume i32 for numeric
                     // expressions. Type inference is future work.
@@ -5309,6 +5417,29 @@ impl<'src> LowerCtx<'src> {
                 Ok(IrValue::Reg(r))
             }
 
+            // FLS §2.4.4.2: Float literal — load a 64-bit float constant from
+            // the per-function constant pool into a float register.
+            //
+            // The float value is stored in `.rodata` as its raw IEEE 754 bits
+            // and loaded at runtime via ADRP + ADD + LDR into `d{dst}`.
+            //
+            // FLS §4.2: `f64` is a 64-bit IEEE 754 floating-point type.
+            // FLS §6.1.2:37–45: Even a float literal emits runtime instructions;
+            // there is no constant folding for non-const code.
+            //
+            // Cache-line note: ADRP + ADD + LDR = 3 instructions = 12 bytes.
+            // The constant itself is one 8-byte `.quad` in `.rodata`.
+            ExprKind::LitFloat => {
+                let text = expr.span.text(self.source);
+                let val = parse_float_value(text)?;
+                let bits = val.to_bits();
+                let idx = self.float_consts.len() as u32;
+                self.float_consts.push(bits);
+                let dst = self.alloc_reg()?;
+                self.instrs.push(Instr::LoadF64Const { dst, idx });
+                Ok(IrValue::FReg(dst))
+            }
+
             // FLS §4.4: Unit literal `()`.
             ExprKind::Unit => Ok(IrValue::Unit),
 
@@ -5355,6 +5486,13 @@ impl<'src> LowerCtx<'src> {
                     let r = self.alloc_reg()?;
                     self.instrs.push(Instr::LoadFnAddr { dst: r, name: var_name.to_owned() });
                     return Ok(IrValue::Reg(r));
+                }
+                // Check float_locals: FLS §4.2 — float variables use float
+                // register instructions (LoadF64Slot) rather than integer loads.
+                if let Some(&slot) = self.float_locals.get(var_name) {
+                    let dst = self.alloc_reg()?;
+                    self.instrs.push(Instr::LoadF64Slot { dst, slot });
+                    return Ok(IrValue::FReg(dst));
                 }
                 let slot = self.locals.get(var_name).copied().ok_or_else(|| {
                     LowerError::Unsupported(format!("undefined variable `{var_name}`"))
@@ -5680,6 +5818,12 @@ impl<'src> LowerCtx<'src> {
                         self.instrs.push(Instr::Label(end_label));
                         Ok(IrValue::Unit)
                     }
+
+                    // FLS §4.2: Float-producing if expressions are not yet
+                    // supported (float phi slots would need StoreF64/LoadF64Slot).
+                    IrTy::F64 => Err(LowerError::Unsupported(
+                        "if expression producing f64 not yet supported (FLS §4.2)".into(),
+                    )),
                 }
             }
 
@@ -6197,6 +6341,9 @@ impl<'src> LowerCtx<'src> {
                         self.instrs.push(Instr::Label(end_label));
                         Ok(IrValue::Unit)
                     }
+                    IrTy::F64 => Err(LowerError::Unsupported(
+                        "if-let expression producing f64 not yet supported (FLS §4.2)".into(),
+                    )),
                 }
             }
 
@@ -7431,6 +7578,11 @@ impl<'src> LowerCtx<'src> {
                         self.instrs.push(Instr::Label(exit_label));
                         Ok(IrValue::Unit)
                     }
+                    // FLS §4.2: Match expressions producing f64 are not yet
+                    // supported at this milestone.
+                    IrTy::F64 => Err(LowerError::Unsupported(
+                        "match expression producing f64 not yet supported (FLS §4.2)".into(),
+                    )),
                 }
             }
 
@@ -9443,7 +9595,23 @@ impl<'src> LowerCtx<'src> {
                     // integer types. Narrowing (i64→i8, i64→i16) is identity
                     // at the register level for values within the target range.
                     "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => {
-                        self.lower_expr(inner, &IrTy::I32)
+                        // FLS §6.5.9: If the inner expression is f64-typed,
+                        // emit FCVTZS (float-to-signed-integer, truncating toward zero).
+                        // Otherwise, re-lower as integer (identity or narrowing cast).
+                        if self.is_f64_expr(inner) {
+                            let val = self.lower_expr(inner, &IrTy::F64)?;
+                            let src = match val {
+                                IrValue::FReg(r) => r,
+                                _ => return Err(LowerError::Unsupported(
+                                    "expected float register for f64 cast source".into(),
+                                )),
+                            };
+                            let dst = self.alloc_reg()?;
+                            self.instrs.push(Instr::F64ToI32 { dst, src });
+                            Ok(IrValue::Reg(dst))
+                        } else {
+                            self.lower_expr(inner, &IrTy::I32)
+                        }
                     }
 
                     // FLS §6.5.9: Unsigned integer targets.
@@ -10064,6 +10232,7 @@ impl<'src> LowerCtx<'src> {
                     body: closure_ctx.instrs,
                     stack_slots,
                     saves_lr,
+                    float_consts: closure_ctx.float_consts,
                 };
 
                 // Collect this closure and any closures defined inside it.
