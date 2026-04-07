@@ -28,7 +28,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{BinOp, Block, Expr, ExprKind, ItemKind, Pat, SelfKind, SourceFile, Stmt, StmtKind, StructKind, TyKind};
-use crate::ir::{IrBinOp, Instr, IrFn, IrTy, IrValue, Module};
+use crate::ir::{F64BinOp, IrBinOp, Instr, IrFn, IrTy, IrValue, Module};
 
 /// Enum variant registry: maps enum name → (variant name → (discriminant, field_names)).
 ///
@@ -2583,6 +2583,11 @@ impl<'src> LowerCtx<'src> {
             crate::ast::ExprKind::LitFloat => true,
             crate::ast::ExprKind::Path(segs) if segs.len() == 1 => {
                 self.float_locals.contains_key(segs[0].text(self.source))
+            }
+            // FLS §6.5.5: A binary arithmetic expression on f64 operands produces f64.
+            // Bitwise ops and shifts are not defined for f64 (FLS §6.5.6–§6.5.8).
+            crate::ast::ExprKind::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div, lhs, rhs } => {
+                self.is_f64_expr(lhs) && self.is_f64_expr(rhs)
             }
             _ => false,
         }
@@ -5682,6 +5687,40 @@ impl<'src> LowerCtx<'src> {
                         };
                         self.instrs.push(Instr::BinOp { op: ir_op, dst, lhs: lhs_reg, rhs: rhs_reg });
                         Ok(IrValue::Reg(dst))
+                    }
+                    // FLS §6.5.5: Float arithmetic on f64 operands.
+                    // Only Add/Sub/Mul/Div are defined for f64; bitwise ops and
+                    // shifts are integer-only (FLS §6.5.6–§6.5.8).
+                    IrTy::F64 => {
+                        if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div) {
+                            return Err(LowerError::Unsupported(
+                                "bitwise/shift/rem operators are not defined for f64 (FLS §6.5.6)".into(),
+                            ));
+                        }
+                        let lhs_val = self.lower_expr(lhs, &IrTy::F64)?;
+                        let lhs_freg = match lhs_val {
+                            IrValue::FReg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "f64 binary op: lhs did not produce a float register".into(),
+                            )),
+                        };
+                        let rhs_val = self.lower_expr(rhs, &IrTy::F64)?;
+                        let rhs_freg = match rhs_val {
+                            IrValue::FReg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "f64 binary op: rhs did not produce a float register".into(),
+                            )),
+                        };
+                        let dst = self.alloc_reg()?;
+                        let f_op = match op {
+                            BinOp::Add => F64BinOp::Add,
+                            BinOp::Sub => F64BinOp::Sub,
+                            BinOp::Mul => F64BinOp::Mul,
+                            BinOp::Div => F64BinOp::Div,
+                            _ => unreachable!("checked above"),
+                        };
+                        self.instrs.push(Instr::F64BinOp { op: f_op, dst, lhs: lhs_freg, rhs: rhs_freg });
+                        Ok(IrValue::FReg(dst))
                     }
                     _ => Err(LowerError::Unsupported("bitwise/arithmetic on non-integer type".into())),
                 }

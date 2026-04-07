@@ -12319,3 +12319,161 @@ fn main() -> i32 {
         "expected float constant label main__fc0 in assembly:\n{asm}"
     );
 }
+
+// ── Milestone 97: f64 arithmetic (fadd/fsub/fmul/fdiv) ───────────────────────
+
+/// Milestone 97: f64 addition of two let bindings, cast to i32.
+///
+/// FLS §6.5.5: The `+` operator on `f64` operands produces an `f64` result.
+/// FLS §6.5.9: The result is cast to i32 for use as an exit code.
+#[test]
+fn milestone_97_f64_add_two_bindings() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f64 = 1.5;
+    let b: f64 = 2.5;
+    (a + b) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 4, "1.5 + 2.5 = 4.0 as i32 = 4, got {exit_code}");
+}
+
+/// Milestone 97: f64 subtraction.
+///
+/// FLS §6.5.5: The `-` operator on `f64` operands produces an `f64` result.
+#[test]
+fn milestone_97_f64_sub() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f64 = 10.0;
+    let b: f64 = 3.0;
+    (a - b) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "10.0 - 3.0 = 7.0 as i32 = 7, got {exit_code}");
+}
+
+/// Milestone 97: f64 multiplication.
+///
+/// FLS §6.5.5: The `*` operator on `f64` operands produces an `f64` result.
+#[test]
+fn milestone_97_f64_mul() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f64 = 3.0;
+    let b: f64 = 4.0;
+    (a * b) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 12, "3.0 * 4.0 = 12.0 as i32 = 12, got {exit_code}");
+}
+
+/// Milestone 97: f64 division.
+///
+/// FLS §6.5.5: The `/` operator on `f64` operands produces an `f64` result.
+/// IEEE 754: 10.0 / 4.0 = 2.5; truncation toward zero gives 2.
+#[test]
+fn milestone_97_f64_div() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f64 = 10.0;
+    let b: f64 = 4.0;
+    (a / b) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2, "10.0 / 4.0 = 2.5 as i32 = 2, got {exit_code}");
+}
+
+/// Milestone 97: f64 arithmetic with inline literals (no explicit let binding).
+///
+/// FLS §6.5.5: Float arithmetic applies to literal expressions directly.
+/// FLS §2.4.4.2: Float literals are typed as f64 without a suffix in this context.
+#[test]
+fn milestone_97_f64_add_inline_literals() {
+    let src = r#"
+fn main() -> i32 {
+    (3.0_f64 + 2.0_f64) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "3.0 + 2.0 = 5.0 as i32 = 5, got {exit_code}");
+}
+
+/// Milestone 97: chained f64 arithmetic (a + b + c).
+///
+/// FLS §6.5.5: Left-associative evaluation: (a + b) + c.
+/// FLS §6.21: Addition is left-associative.
+#[test]
+fn milestone_97_f64_add_three_values() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f64 = 1.0;
+    let b: f64 = 2.0;
+    let c: f64 = 3.0;
+    (a + b + c) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "1.0 + 2.0 + 3.0 = 6.0 as i32 = 6, got {exit_code}");
+}
+
+/// Milestone 97: f64 result stored in a let binding before cast.
+///
+/// FLS §8.1: A `let` binding can hold an f64 value computed at runtime.
+/// FLS §6.5.5: The arithmetic result is stored, then cast.
+#[test]
+fn milestone_97_f64_result_in_let() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f64 = 2.5;
+    let b: f64 = 1.5;
+    let c: f64 = a + b;
+    c as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 4, "2.5 + 1.5 = 4.0 as i32 = 4, got {exit_code}");
+}
+
+/// Milestone 97: f64 arithmetic result used in integer expression.
+///
+/// FLS §6.5.9: The i32 from a float cast can be used in further integer arithmetic.
+#[test]
+fn milestone_97_f64_add_in_integer_expr() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f64 = 1.5;
+    let b: f64 = 2.5;
+    (a + b) as i32 + 1
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "(1.5 + 2.5) as i32 + 1 = 4 + 1 = 5, got {exit_code}");
+}
+
+/// Assembly check: f64 addition emits fadd instruction.
+///
+/// FLS §6.5.5: Float arithmetic uses ARM64 FP instructions, not integer ALU.
+#[test]
+fn runtime_f64_add_emits_fadd() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f64 = 1.0;
+    let b: f64 = 2.0;
+    (a + b) as i32
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("fadd"),
+        "expected `fadd` instruction in assembly:\n{asm}"
+    );
+    assert!(
+        asm.contains("fcvtzs"),
+        "expected `fcvtzs` after fadd in assembly:\n{asm}"
+    );
+}
