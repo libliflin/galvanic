@@ -478,6 +478,34 @@ fn runtime_call_emits_bl_and_lr_save() {
         asm.contains("ldr     x30, [sp], #16"),
         "expected lr restore before ret in non-leaf main:\n{asm}"
     );
+    // Must not fold `add(1, 2)` to constant #3 in main — the call must actually happen.
+    assert!(
+        !asm.contains("mov     x0, #3"),
+        "assembly must not fold call `add(1, 2)` to constant #3 in caller:\n{asm}"
+    );
+}
+
+/// A function call with literal args must emit `bl` and NOT fold the result.
+///
+/// This is the primary guard against function-call constant propagation: if galvanic
+/// ever adds inlining + constant folding for functions called with known literals,
+/// `square(6)` could silently become `mov x0, #36` without emitting `bl square`.
+///
+/// FLS §6.12.1: Call expressions are runtime events; the callee must execute.
+/// FLS §6.1.2:37–45: Non-const code must not be evaluated at compile time.
+#[test]
+fn runtime_fn_call_result_not_folded() {
+    // square(6) = 36 — if constant-folded, emits `mov x0, #36` without `bl square`
+    let src = "fn square(x: i32) -> i32 { x * x }\nfn main() -> i32 { square(6) }\n";
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("bl      square"),
+        "expected `bl square` in assembly for call expression, got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #36"),
+        "assembly must not fold `square(6)` to constant #36 — call must happen at runtime:\n{asm}"
+    );
 }
 
 /// `fn main() -> i32 { if true { 1 } else { 0 } }` must emit `cbz`.

@@ -92,6 +92,23 @@ the spec's section list), add it here.
 
 ---
 
+## Claim 6: Function calls with literal arguments emit branch instructions, not folded constants
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: Galvanic does not inline functions and constant-fold their results. When
+a function is called with statically-known literal arguments, the call must emit `bl`
+at the call site and compute the result at runtime. `square(6)` must emit `bl square`
+and NOT `mov x0, #36`. This is a specific attack on Claim 1: a compiler could pass
+the `1 + 2 → add` check while still folding function calls with known inputs.
+
+**Violated if**: `compile_to_asm("fn square(x: i32) -> i32 { x * x }\nfn main() -> i32 { square(6) }\n")`
+returns assembly containing `mov x0, #36` instead of `bl square`.
+
+**Test**: `cargo test --test e2e -- runtime_fn_call_result_not_folded`
+
+---
+
 ## Not Yet Claims (honest gaps)
 
 These are promises the project will eventually make but cannot yet be falsified:

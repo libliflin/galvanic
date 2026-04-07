@@ -134,6 +134,20 @@ print('}')
     fi
 fi
 
+# ── Claim 6: Function calls with literal args emit branch instructions ────────
+# Tests that `square(6)` emits `bl square`, NOT `mov x0, #36`.
+# Guards against function inlining + constant propagation regressions.
+# Claim 1 only tests inline arithmetic — this catches the complementary attack:
+# a fold at the call site, not inside the arithmetic expression itself.
+# References: claims.md Claim 6.
+
+echo "--- Claim 6: function calls with literal args emit bl, not folded constant ---"
+if cargo test --test e2e --quiet -- runtime_fn_call_result_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 6" "runtime_fn_call_result_not_folded FAILED — galvanic may be inlining and folding function calls with literal arguments"
+else
+    pass "Claim 6: function calls emit runtime bl (not folded constant)"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""
