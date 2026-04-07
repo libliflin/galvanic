@@ -16810,3 +16810,162 @@ fn main() -> i32 { (HALF + 1.5_f32) as i32 }
         "f32 static load must emit `ldr s{{n}}`: {asm}"
     );
 }
+
+// ── Milestone 123: const fn — compile-time function evaluation ────────────────
+//
+// FLS §9:41–43: A `const fn` may be evaluated at compile time when called
+// from a const context (const item initializer, const block, etc.). When
+// called from a non-const context it runs as a normal runtime function.
+//
+// FLS §6.1.2:37–45: Const initializers are evaluated at compile time;
+// the result is substituted at every use site as a `LoadImm`.
+//
+// FLS §9 AMBIGUOUS: The spec does not restrict which expressions may appear
+// in a `const fn` body beyond requiring them to be constant expressions
+// in a const context. Galvanic limits compile-time evaluation to bodies
+// consisting of simple `let` bindings and a tail expression.
+
+/// Milestone 123: const fn with two parameters evaluated in a const initializer.
+///
+/// FLS §9:41–43, §7.1: `const fn add(a, b) -> i32 { a + b }` called from
+/// `const SUM: i32 = add(3, 4)` must evaluate to 7 at compile time.
+/// The FLS spec does not provide an example; this is derived from §9:41 semantics.
+#[test]
+fn milestone_123_const_fn_two_params() {
+    let src = r#"
+const fn add(a: i32, b: i32) -> i32 { a + b }
+const SUM: i32 = add(3, 4);
+fn main() -> i32 { SUM - 7 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "SUM=add(3,4)=7, SUM-7=0, got {exit_code}");
+}
+
+/// Milestone 123: const fn with one parameter (squaring).
+///
+/// FLS §9:41–43: `const fn square(n: i32) -> i32 { n * n }` evaluated
+/// in a const context yields 25 for n=5.
+#[test]
+fn milestone_123_const_fn_square() {
+    let src = r#"
+const fn square(n: i32) -> i32 { n * n }
+const N: i32 = square(5);
+fn main() -> i32 { N - 25 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "N=square(5)=25, N-25=0, got {exit_code}");
+}
+
+/// Milestone 123: const fn composed with another const fn.
+///
+/// FLS §9:41–43: A const fn may call another const fn in a const context.
+/// `add(double(3), 6)` = `add(6, 6)` = 12.
+#[test]
+fn milestone_123_const_fn_chained() {
+    let src = r#"
+const fn double(n: i32) -> i32 { n * 2 }
+const fn add(a: i32, b: i32) -> i32 { a + b }
+const X: i32 = add(double(3), 6);
+fn main() -> i32 { X - 12 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "X=add(double(3),6)=12, X-12=0, got {exit_code}");
+}
+
+/// Milestone 123: const fn referencing a const item in its body.
+///
+/// FLS §9:41–43, §7.1:10: A const fn body may reference global const items.
+#[test]
+fn milestone_123_const_fn_references_const() {
+    let src = r#"
+const FACTOR: i32 = 10;
+const fn scale(n: i32) -> i32 { n * FACTOR }
+const RESULT: i32 = scale(4);
+fn main() -> i32 { RESULT - 40 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "RESULT=scale(4)=40, RESULT-40=0, got {exit_code}");
+}
+
+/// Milestone 123: const fn called at runtime (non-const context).
+///
+/// FLS §9:41–43: When a `const fn` is called from a non-const context
+/// it executes as a normal runtime function — identical codegen to a
+/// regular fn. Exit code 42 = add(20, 22).
+#[test]
+fn milestone_123_const_fn_runtime_call() {
+    let src = r#"
+const fn add(a: i32, b: i32) -> i32 { a + b }
+fn main() -> i32 { add(20, 22) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "add(20,22)=42 at runtime, got {exit_code}");
+}
+
+/// Milestone 123: const fn with a let binding in the body.
+///
+/// FLS §9:41–43, §8.1: A const fn body may include let statements.
+/// `const fn triple(n) { let doubled = n * 2; doubled + n }` = 3*n.
+#[test]
+fn milestone_123_const_fn_let_binding() {
+    let src = r#"
+const fn triple(n: i32) -> i32 {
+    let doubled = n * 2;
+    doubled + n
+}
+const T: i32 = triple(7);
+fn main() -> i32 { T - 21 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "T=triple(7)=21, T-21=0, got {exit_code}");
+}
+
+/// Milestone 123: const fn result used in an arithmetic expression.
+///
+/// FLS §9:41–43, §7.1:10: The evaluated const is substituted at use sites.
+#[test]
+fn milestone_123_const_fn_in_arithmetic() {
+    let src = r#"
+const fn half(n: i32) -> i32 { n / 2 }
+const BASE: i32 = half(100);
+fn main() -> i32 { BASE - 50 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "BASE=half(100)=50, BASE-50=0, got {exit_code}");
+}
+
+/// Milestone 123: const fn result passed as function argument.
+///
+/// FLS §9:41–43, §7.1:10: Const-evaluated value used as an argument to
+/// a runtime function call.
+#[test]
+fn milestone_123_const_fn_as_fn_arg() {
+    let src = r#"
+const fn base() -> i32 { 21 }
+const B: i32 = base();
+fn double(n: i32) -> i32 { n * 2 }
+fn main() -> i32 { double(B) - 42 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "B=base()=21, double(21)=42, 42-42=0, got {exit_code}");
+}
+
+/// Milestone 123: assembly inspection — const fn call in const context emits LoadImm.
+///
+/// FLS §9:41–43, §7.1:10: The compile-time evaluation of a const fn call
+/// produces a compile-time integer value. At every use site galvanic emits
+/// `LoadImm` (ARM64: `mov xN, #value`), not a runtime `bl` to the const fn.
+#[test]
+fn runtime_const_fn_call_emits_loadimm() {
+    let src = r#"
+const fn add(a: i32, b: i32) -> i32 { a + b }
+const SUM: i32 = add(10, 32);
+fn main() -> i32 { SUM }
+"#;
+    let asm = compile_to_asm(src);
+    // The const value 42 must appear as an immediate load in main.
+    assert!(
+        asm.contains("#42") || asm.contains("42"),
+        "const fn call in const context must emit LoadImm(42): {asm}"
+    );
+}

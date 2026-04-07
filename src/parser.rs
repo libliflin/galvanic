@@ -199,7 +199,7 @@ impl<'src> Parser<'src> {
 
         match self.peek_kind() {
             TokenKind::KwFn => {
-                let fn_def = self.parse_fn_def(vis)?;
+                let fn_def = self.parse_fn_def(vis, false)?;
                 let end = fn_def
                     .body
                     .as_ref()
@@ -229,9 +229,20 @@ impl<'src> Parser<'src> {
                 Ok(Item { kind: ItemKind::Trait(Box::new(trait_def)), span })
             }
             TokenKind::KwConst => {
-                let const_def = self.parse_const_def(vis)?;
-                let span = start.to(const_def.span);
-                Ok(Item { kind: ItemKind::Const(Box::new(const_def)), span })
+                // FLS §9:41–43: `const fn` — a function eligible for compile-time
+                // evaluation. Detect `const` followed immediately by `fn` and parse as
+                // an `is_const` function rather than a const item.
+                if self.peek_nth(1) == TokenKind::KwFn {
+                    self.advance(); // consume `const`
+                    let fn_def = self.parse_fn_def(vis, true)?;
+                    let end = fn_def.body.as_ref().map(|b| b.span).unwrap_or(start);
+                    let span = start.to(end);
+                    Ok(Item { kind: ItemKind::Fn(Box::new(fn_def)), span })
+                } else {
+                    let const_def = self.parse_const_def(vis)?;
+                    let span = start.to(const_def.span);
+                    Ok(Item { kind: ItemKind::Const(Box::new(const_def)), span })
+                }
             }
             TokenKind::KwStatic => {
                 let static_def = self.parse_static_def(vis)?;
@@ -277,7 +288,9 @@ impl<'src> Parser<'src> {
     /// are listed in FLS §9 but their interaction rules are not fully
     /// specified. This implementation accepts no qualifiers; encountering
     /// one produces a parse error directing the user to the limitation.
-    fn parse_fn_def(&mut self, vis: Visibility) -> Result<FnDef, ParseError> {
+    /// `is_const` is `true` when the `const` keyword preceded `fn` at the call
+    /// site (the caller has already consumed `const`). FLS §9:41–43.
+    fn parse_fn_def(&mut self, vis: Visibility, is_const: bool) -> Result<FnDef, ParseError> {
         self.expect(TokenKind::KwFn)?;
 
         // Function name must be an identifier — keywords are not valid here.
@@ -321,7 +334,7 @@ impl<'src> Parser<'src> {
             Some(self.parse_block()?)
         };
 
-        Ok(FnDef { vis, name, self_param, params, ret_ty, body })
+        Ok(FnDef { vis, is_const, name, self_param, params, ret_ty, body })
     }
 
     /// Parse an inherent impl block.
@@ -376,13 +389,22 @@ impl<'src> Parser<'src> {
         let mut methods = Vec::new();
         while self.peek_kind() != TokenKind::CloseBrace && self.peek_kind() != TokenKind::Eof {
             let vis = self.parse_visibility();
+            // FLS §9:41: Allow `const fn` inside impl blocks.
+            let is_const = if self.peek_kind() == TokenKind::KwConst
+                && self.peek_nth(1) == TokenKind::KwFn
+            {
+                self.advance(); // consume `const`
+                true
+            } else {
+                false
+            };
             if self.peek_kind() != TokenKind::KwFn {
                 return Err(self.error(format!(
                     "expected `fn` inside impl block, found {:?}",
                     self.peek_kind()
                 )));
             }
-            let method = self.parse_fn_def(vis)?;
+            let method = self.parse_fn_def(vis, is_const)?;
             methods.push(Box::new(method));
         }
 
@@ -429,6 +451,15 @@ impl<'src> Parser<'src> {
         let mut methods = Vec::new();
         while self.peek_kind() != TokenKind::CloseBrace && self.peek_kind() != TokenKind::Eof {
             let vis = self.parse_visibility();
+            // FLS §9:41: `const fn` may appear in trait bodies.
+            let is_const = if self.peek_kind() == TokenKind::KwConst
+                && self.peek_nth(1) == TokenKind::KwFn
+            {
+                self.advance(); // consume `const`
+                true
+            } else {
+                false
+            };
             if self.peek_kind() != TokenKind::KwFn {
                 return Err(self.error(format!(
                     "expected `fn` inside trait body, found {:?}",
@@ -438,7 +469,7 @@ impl<'src> Parser<'src> {
             // Parse the function signature. If the next token after the
             // signature is `;`, consume it (body-less method signature).
             // If it is `{`, parse the full body (default method — future work).
-            let method = self.parse_fn_def(vis)?;
+            let method = self.parse_fn_def(vis, is_const)?;
             methods.push(Box::new(method));
         }
 
@@ -4117,6 +4148,32 @@ mod tests {
         let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         assert_eq!(f.vis, Visibility::Pub);
         assert_eq!(f.name.text(src), "exported");
+        assert!(!f.is_const, "regular fn must not be const");
+    }
+
+    #[test]
+    fn const_fn_simple() {
+        // FLS §9:41–43: `const fn` — a function eligible for compile-time
+        // evaluation when called from a const context.
+        let src = "const fn add(a: i32, b: i32) -> i32 { a + b }";
+        let sf = parse_ok(src);
+        assert_eq!(sf.items.len(), 1);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        assert!(f.is_const, "const fn must have is_const=true");
+        assert_eq!(f.name.text(src), "add");
+        assert_eq!(f.params.len(), 2);
+    }
+
+    #[test]
+    fn const_fn_pub() {
+        // FLS §9:41–43, §10.2: `pub const fn` combines visibility and const.
+        let src = "pub const fn identity(x: i32) -> i32 { x }";
+        let sf = parse_ok(src);
+        assert_eq!(sf.items.len(), 1);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        assert!(f.is_const, "pub const fn must have is_const=true");
+        assert_eq!(f.vis, Visibility::Pub);
+        assert_eq!(f.name.text(src), "identity");
     }
 
     // ── Bitwise and shift operators ───────────────────────────────────────────

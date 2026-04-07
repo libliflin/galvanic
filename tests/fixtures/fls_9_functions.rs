@@ -148,3 +148,20 @@ fn apply2(f: fn(i32, i32) -> i32, a: i32, b: i32) -> i32 {
 }
 
 fn add(a: i32, b: i32) -> i32 { a + b }
+
+// FLS §9:41–43: `const fn` — a function eligible for compile-time evaluation.
+//
+// FLS §9:41: "Functions can be declared to be constant. This enables them to
+// be called from constants, constant functions, and other constant contexts."
+// FLS §9:43: A `const fn` called from a non-const context runs as a normal
+// runtime function.
+//
+// NOTE: The FLS does not provide a self-contained code example for `const fn`
+// in §9. This example is derived from the section's semantic description.
+const fn const_add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+// Verify that a const fn can be called from a const item initializer.
+// FLS §7.1: Constant items.
+const CONST_SUM: i32 = const_add(3, 4);
