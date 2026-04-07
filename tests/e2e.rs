@@ -16998,6 +16998,37 @@ fn main() -> i32 { SUM }
     );
 }
 
+/// FLS §9:41–43 (Constraint 2): A `const fn` called from a *non-const* context
+/// must emit a runtime `bl` instruction — it must NOT be folded to a constant.
+///
+/// This guards the fundamental correctness property: a `const fn` is only
+/// eligible for compile-time evaluation when called from a const context (e.g.,
+/// `const X: i32 = add(10, 32)`). When called from a regular function body,
+/// the arguments may be dynamic at runtime, so the compiler must emit a real
+/// function call. `fn main() -> i32 { add(20, 22) }` is not a const context.
+///
+/// A galvanic regression to constant-folding would cause `milestone_123_const_fn_runtime_call`
+/// to still pass (exit code 42 is correct either way) but the program would be
+/// semantically wrong per the FLS.
+#[test]
+fn runtime_const_fn_runtime_call_emits_bl_not_folded() {
+    let src = r#"
+const fn add(a: i32, b: i32) -> i32 { a + b }
+fn main() -> i32 { add(20, 22) }
+"#;
+    let asm = compile_to_asm(src);
+    // Non-const context: must emit a real bl call to the function.
+    assert!(
+        asm.contains("bl      add") || asm.contains("bl add"),
+        "const fn called from non-const context must emit runtime bl add: {asm}"
+    );
+    // Must NOT fold add(20, 22) to the constant 42 at compile time.
+    assert!(
+        !asm.contains("#42"),
+        "const fn called from non-const context must NOT be folded to #42: {asm}"
+    );
+}
+
 // ── Milestone 124: `impl Fn` / `impl FnMut` / `impl FnOnce` in parameter position ──────────────
 
 /// Milestone 124: `impl Fn(i32) -> i32` parameter — basic apply.
