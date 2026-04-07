@@ -440,6 +440,101 @@ fn eval_const_expr(expr: &Expr, source: &str, known: &HashMap<String, i32>) -> O
     }
 }
 
+/// Evaluate a float const initializer at compile time.
+///
+/// FLS §7.1, §6.1.2:37–45: Const items may be initialised with float literal
+/// expressions. Evaluates to `Some(f64)` when the expression is a float literal,
+/// a negation of one, a reference to another known f64 const, or binary
+/// arithmetic on any of the above. Returns `None` for any expression that
+/// cannot be reduced at compile time.
+///
+/// `i32_known` is consulted for integer consts referenced inside a float
+/// initialiser (e.g. `const C: f64 = MAX as f64;` is not handled here — only
+/// pure-float expressions are folded).
+///
+/// Cache-line note: called only during the compile-time const collection pass,
+/// not on any runtime hot path.
+fn eval_float_const_expr(
+    expr: &Expr,
+    source: &str,
+    f64_known: &HashMap<String, f64>,
+) -> Option<f64> {
+    match &expr.kind {
+        // FLS §2.4.4.2: Float literal — parse the text value.
+        ExprKind::LitFloat => {
+            let text = expr.span.text(source);
+            // Strip type suffixes (_f64, _f32) before parsing.
+            let stripped = text.trim_end_matches("_f64").trim_end_matches("_f32");
+            stripped.parse::<f64>().ok()
+        }
+        // FLS §6.5.3: Arithmetic negation in const context.
+        ExprKind::Unary { op: crate::ast::UnaryOp::Neg, operand } => {
+            Some(-eval_float_const_expr(operand, source, f64_known)?)
+        }
+        // FLS §7.1:10: A single-segment path that names a known f64 const.
+        ExprKind::Path(segs) if segs.len() == 1 => {
+            f64_known.get(segs[0].text(source)).copied()
+        }
+        // FLS §6.5: Binary arithmetic on f64 operands in const context.
+        ExprKind::Binary { op, lhs, rhs } => {
+            let l = eval_float_const_expr(lhs, source, f64_known)?;
+            let r = eval_float_const_expr(rhs, source, f64_known)?;
+            match op {
+                BinOp::Add => Some(l + r),
+                BinOp::Sub => Some(l - r),
+                BinOp::Mul => Some(l * r),
+                // FLS §6.23: Division by zero in const context — produce NaN,
+                // which is not None (we do not want to silently skip the const).
+                BinOp::Div => Some(l / r),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Evaluate a f32 const initializer at compile time.
+///
+/// FLS §7.1, §4.2: Like `eval_float_const_expr` but narrows to f32 and
+/// consults the f32 const map.
+///
+/// Cache-line note: called only during compile-time const collection.
+fn eval_f32_const_expr(
+    expr: &Expr,
+    source: &str,
+    f32_known: &HashMap<String, f32>,
+) -> Option<f32> {
+    match &expr.kind {
+        ExprKind::LitFloat => {
+            let text = expr.span.text(source);
+            // Only literals with an explicit `_f32` suffix produce f32 consts.
+            if !text.ends_with("_f32") {
+                return None;
+            }
+            let stripped = text.trim_end_matches("_f32");
+            stripped.parse::<f32>().ok()
+        }
+        ExprKind::Unary { op: crate::ast::UnaryOp::Neg, operand } => {
+            Some(-eval_f32_const_expr(operand, source, f32_known)?)
+        }
+        ExprKind::Path(segs) if segs.len() == 1 => {
+            f32_known.get(segs[0].text(source)).copied()
+        }
+        ExprKind::Binary { op, lhs, rhs } => {
+            let l = eval_f32_const_expr(lhs, source, f32_known)?;
+            let r = eval_f32_const_expr(rhs, source, f32_known)?;
+            match op {
+                BinOp::Add => Some(l + r),
+                BinOp::Sub => Some(l - r),
+                BinOp::Mul => Some(l * r),
+                BinOp::Div => Some(l / r),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// definition table and used during function lowering for struct literal
 /// and field-access expressions. Enum items with unit variants (FLS §15)
 /// are collected into an enum definition table for path-expression and
@@ -710,6 +805,74 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         // If no new consts were resolved this pass, we have reached fixed-point.
         // Remaining unresolved consts have unsupported initializer forms.
         if const_vals.len() == prev_len {
+            break;
+        }
+    }
+
+    // Collect f64 const items.
+    //
+    // FLS §7.1, §4.2: Const items with float types are evaluated at compile
+    // time. The resulting f64 value is substituted at every use site via
+    // `LoadF64Const` (not `LoadImm`). Iterates to fixed-point to handle
+    // consts that reference other float consts.
+    //
+    // Cache-line note: each float const load emits `ldr d{N}, [pc, #offset]`
+    // (4 bytes) + a per-function rodata literal pool entry (8 bytes for f64).
+    let mut const_f64_vals: HashMap<String, f64> = HashMap::new();
+    loop {
+        let prev_len = const_f64_vals.len();
+        for item in &src.items {
+            if let ItemKind::Const(c) = &item.kind {
+                let name = c.name.text(source).to_owned();
+                if !const_f64_vals.contains_key(&name) {
+                    // Only evaluate if the type annotation (if present) is f64
+                    // or if the initializer is a float expression without _f32 suffix.
+                    let is_f64_typed = if let crate::ast::TyKind::Path(segs) = &c.ty.kind {
+                        segs.len() == 1 && segs[0].text(source) == "f64"
+                    } else {
+                        false
+                    };
+                    if is_f64_typed
+                        && let Some(val) = eval_float_const_expr(&c.value, source, &const_f64_vals)
+                    {
+                        const_f64_vals.insert(name, val);
+                    }
+                }
+            }
+        }
+        if const_f64_vals.len() == prev_len {
+            break;
+        }
+    }
+
+    // Collect f32 const items.
+    //
+    // FLS §7.1, §4.2: Same as f64 but for f32 consts. Float literals with
+    // `_f32` suffix or type-annotated as `f32` are collected here.
+    //
+    // Cache-line note: each f32 const load emits `ldr s{N}, [pc, #offset]`
+    // (4 bytes) + a per-function rodata literal pool entry (4 bytes for f32).
+    let mut const_f32_vals: HashMap<String, f32> = HashMap::new();
+    loop {
+        let prev_len = const_f32_vals.len();
+        for item in &src.items {
+            if let ItemKind::Const(c) = &item.kind {
+                let name = c.name.text(source).to_owned();
+                if !const_f32_vals.contains_key(&name) {
+                    let is_f32_typed = if let crate::ast::TyKind::Path(segs) = &c.ty.kind {
+                        segs.len() == 1 && segs[0].text(source) == "f32"
+                    } else {
+                        false
+                    };
+                    if is_f32_typed
+                        && let Some(val) = eval_f32_const_expr(&c.value, source, &const_f32_vals)
+                    {
+                        const_f32_vals.insert(name, val);
+                    }
+                }
+            }
+        }
+        if const_f32_vals.len() == prev_len {
             break;
         }
     }
@@ -1098,7 +1261,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     for item in &src.items {
         match &item.kind {
             ItemKind::Fn(fn_def) => {
-                let (ir_fn, closure_fns, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &tuple_struct_float_field_types, &enum_defs, &enum_variant_float_field_types, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &static_names, &fn_names, &struct_raw_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, None, label_base)?;
+                let (ir_fn, closure_fns, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &tuple_struct_float_field_types, &enum_defs, &enum_variant_float_field_types, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &const_f64_vals, &const_f32_vals, &static_names, &fn_names, &struct_raw_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, None, label_base)?;
                 label_base = next_label;
                 fns.push(ir_fn);
                 fns.extend(closure_fns);
@@ -1142,6 +1305,8 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         &f64_return_fns,
                         &f32_return_fns,
                         &const_vals,
+                        &const_f64_vals,
+                        &const_f32_vals,
                         &static_names,
                         &fn_names,
                         &struct_raw_field_types,
@@ -1262,6 +1427,8 @@ fn lower_fn(
     f64_return_fns: &std::collections::HashSet<String>,
     f32_return_fns: &std::collections::HashSet<String>,
     const_vals: &HashMap<String, i32>,
+    const_f64_vals: &HashMap<String, f64>,
+    const_f32_vals: &HashMap<String, f32>,
     static_names: &std::collections::HashSet<String>,
     fn_names: &std::collections::HashSet<String>,
     struct_field_types: &HashMap<String, Vec<Option<String>>>,
@@ -1341,7 +1508,7 @@ fn lower_fn(
         Some(block) => block,
     };
 
-    let mut ctx = LowerCtx::new(source, &name, ret_ty, struct_defs, tuple_struct_defs, tuple_struct_float_field_types, enum_defs, enum_variant_float_field_types, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, f64_return_fns, f32_return_fns, const_vals, static_names, fn_names, struct_field_types, struct_field_offsets, struct_sizes, type_aliases, struct_float_field_types, start_label);
+    let mut ctx = LowerCtx::new(source, &name, ret_ty, struct_defs, tuple_struct_defs, tuple_struct_float_field_types, enum_defs, enum_variant_float_field_types, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, f64_return_fns, f32_return_fns, const_vals, const_f64_vals, const_f32_vals, static_names, fn_names, struct_field_types, struct_field_offsets, struct_sizes, type_aliases, struct_float_field_types, start_label);
 
     // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
     // to stack slots. Each parameter slot is allocated in parameter order
@@ -2962,6 +3129,24 @@ struct LowerCtx<'src> {
     /// Cache-line note: read-only during lowering; not on any hot path.
     const_vals: &'src HashMap<String, i32>,
 
+    /// Compile-time f64 constant values: maps const name → f64.
+    ///
+    /// FLS §7.1, §4.2: Float const items. When a path expression `PI` resolves
+    /// to a known f64 const name, `LoadF64Const` is emitted using the stored
+    /// bit pattern.
+    ///
+    /// Cache-line note: read-only during lowering; not on any hot path.
+    const_f64_vals: &'src HashMap<String, f64>,
+
+    /// Compile-time f32 constant values: maps const name → f32.
+    ///
+    /// FLS §7.1, §4.2: Float const items. When a path expression `HALF` resolves
+    /// to a known f32 const name, `LoadF32Const` is emitted using the stored
+    /// bit pattern.
+    ///
+    /// Cache-line note: read-only during lowering; not on any hot path.
+    const_f32_vals: &'src HashMap<String, f32>,
+
     /// Static variable names: the set of names declared as `static` items.
     ///
     /// FLS §7.2: Static items. When a path expression `FOO` resolves to a known
@@ -3247,6 +3432,8 @@ impl<'src> LowerCtx<'src> {
         f64_return_fns: &'src std::collections::HashSet<String>,
         f32_return_fns: &'src std::collections::HashSet<String>,
         const_vals: &'src HashMap<String, i32>,
+        const_f64_vals: &'src HashMap<String, f64>,
+        const_f32_vals: &'src HashMap<String, f32>,
         static_names: &'src std::collections::HashSet<String>,
         fn_names: &'src std::collections::HashSet<String>,
         struct_field_types: &'src HashMap<String, Vec<Option<String>>>,
@@ -3284,6 +3471,8 @@ impl<'src> LowerCtx<'src> {
             f64_return_fns,
             f32_return_fns,
             const_vals,
+            const_f64_vals,
+            const_f32_vals,
             static_names,
             fn_names,
             struct_field_types,
@@ -3379,7 +3568,8 @@ impl<'src> LowerCtx<'src> {
                 !text.ends_with("_f32")
             }
             crate::ast::ExprKind::Path(segs) if segs.len() == 1 => {
-                self.float_locals.contains_key(segs[0].text(self.source))
+                let name = segs[0].text(self.source);
+                self.float_locals.contains_key(name) || self.const_f64_vals.contains_key(name)
             }
             // FLS §6.5.5: A binary arithmetic expression on f64 operands produces f64.
             // Bitwise ops and shifts are not defined for f64 (FLS §6.5.6–§6.5.8).
@@ -3492,7 +3682,8 @@ impl<'src> LowerCtx<'src> {
                 text.ends_with("_f32")
             }
             crate::ast::ExprKind::Path(segs) if segs.len() == 1 => {
-                self.float32_locals.contains_key(segs[0].text(self.source))
+                let name = segs[0].text(self.source);
+                self.float32_locals.contains_key(name) || self.const_f32_vals.contains_key(name)
             }
             // FLS §6.5.5: A binary arithmetic expression on f32 operands produces f32.
             crate::ast::ExprKind::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div, lhs, rhs } => {
@@ -7101,6 +7292,24 @@ impl<'src> LowerCtx<'src> {
                     let r = self.alloc_reg()?;
                     self.instrs.push(Instr::LoadImm(r, const_val));
                     return Ok(IrValue::Reg(r));
+                }
+                // Check f64 const items: FLS §7.1, §4.2 — float consts are
+                // substituted as LoadF64Const (ldr d{N}) rather than LoadImm.
+                if let Some(&const_val) = self.const_f64_vals.get(var_name) {
+                    let dst = self.alloc_reg()?;
+                    let idx = self.float_consts.len() as u32;
+                    self.float_consts.push(const_val.to_bits());
+                    self.instrs.push(Instr::LoadF64Const { dst, idx });
+                    return Ok(IrValue::FReg(dst));
+                }
+                // Check f32 const items: FLS §7.1, §4.2 — f32 consts are
+                // substituted as LoadF32Const (ldr s{N}).
+                if let Some(&const_val) = self.const_f32_vals.get(var_name) {
+                    let dst = self.alloc_reg()?;
+                    let idx = self.float32_consts.len() as u32;
+                    self.float32_consts.push(const_val.to_bits());
+                    self.instrs.push(Instr::LoadF32Const { dst, idx });
+                    return Ok(IrValue::F32Reg(dst));
                 }
                 // Check static_names: FLS §7.2 — all references to a static
                 // go through its memory address (ADRP + ADD + LDR).
@@ -13111,6 +13320,8 @@ impl<'src> LowerCtx<'src> {
                     self.f64_return_fns,
                     self.f32_return_fns,
                     self.const_vals,
+                    self.const_f64_vals,
+                    self.const_f32_vals,
                     self.static_names,
                     self.fn_names,
                     self.struct_field_types,
