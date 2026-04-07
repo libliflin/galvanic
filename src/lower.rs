@@ -2631,6 +2631,14 @@ impl<'src> LowerCtx<'src> {
             crate::ast::ExprKind::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div, lhs, rhs } => {
                 self.is_f64_expr(lhs) && self.is_f64_expr(rhs)
             }
+            // FLS §6.5.9: A cast expression `x as f64` produces an f64 value.
+            crate::ast::ExprKind::Cast { ty, .. } => {
+                if let crate::ast::TyKind::Path(segs) = &ty.kind {
+                    segs.len() == 1 && segs[0].text(self.source) == "f64"
+                } else {
+                    false
+                }
+            }
             _ => false,
         }
     }
@@ -2653,6 +2661,14 @@ impl<'src> LowerCtx<'src> {
             // FLS §6.5.5: A binary arithmetic expression on f32 operands produces f32.
             crate::ast::ExprKind::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div, lhs, rhs } => {
                 self.is_f32_expr(lhs) && self.is_f32_expr(rhs)
+            }
+            // FLS §6.5.9: A cast expression `x as f32` produces an f32 value.
+            crate::ast::ExprKind::Cast { ty, .. } => {
+                if let crate::ast::TyKind::Path(segs) = &ty.kind {
+                    segs.len() == 1 && segs[0].text(self.source) == "f32"
+                } else {
+                    false
+                }
             }
             _ => false,
         }
@@ -9847,10 +9863,59 @@ impl<'src> LowerCtx<'src> {
                         "cast to bool not yet supported (FLS §6.5.9)".into(),
                     )),
 
-                    // FLS §6.5.9: Cast to f64 target not yet implemented.
-                    "f64" => Err(LowerError::Unsupported(
-                        "cast to f64 not yet supported (FLS §6.5.9)".into(),
-                    )),
+                    // FLS §6.5.9: Integer-to-f64 cast.
+                    //
+                    // `i32 as f64` converts a signed integer to IEEE 754
+                    // double-precision. ARM64: `scvtf d{dst}, w{src}`.
+                    // All i32 values are exactly representable in f64.
+                    //
+                    // FLS §6.5.9: "Casting from an integer to a float will
+                    // produce the closest possible float."
+                    "f64" => {
+                        let val = self.lower_expr(inner, &IrTy::I32)?;
+                        let src = match val {
+                            IrValue::Reg(r) => r,
+                            IrValue::I32(n) => {
+                                // Materialise the constant into a register first.
+                                let r = self.alloc_reg()?;
+                                self.instrs.push(Instr::LoadImm(r, n));
+                                r
+                            }
+                            _ => return Err(LowerError::Unsupported(
+                                "cast to f64: expected integer register".into(),
+                            )),
+                        };
+                        let dst = self.alloc_reg()?;
+                        self.instrs.push(Instr::I32ToF64 { dst, src });
+                        Ok(IrValue::FReg(dst))
+                    }
+
+                    // FLS §6.5.9: Integer-to-f32 cast.
+                    //
+                    // `i32 as f32` converts a signed integer to IEEE 754
+                    // single-precision. ARM64: `scvtf s{dst}, w{src}`.
+                    // Values that cannot be exactly represented are rounded
+                    // to nearest-even.
+                    //
+                    // FLS §6.5.9: "Casting from an integer to a float will
+                    // produce the closest possible float."
+                    "f32" => {
+                        let val = self.lower_expr(inner, &IrTy::I32)?;
+                        let src = match val {
+                            IrValue::Reg(r) => r,
+                            IrValue::I32(n) => {
+                                let r = self.alloc_reg()?;
+                                self.instrs.push(Instr::LoadImm(r, n));
+                                r
+                            }
+                            _ => return Err(LowerError::Unsupported(
+                                "cast to f32: expected integer register".into(),
+                            )),
+                        };
+                        let dst = self.alloc_reg()?;
+                        self.instrs.push(Instr::I32ToF32 { dst, src });
+                        Ok(IrValue::F32Reg(dst))
+                    }
 
                     other => Err(LowerError::Unsupported(format!(
                         "cast to `{other}` not yet supported (FLS §6.5.9)"

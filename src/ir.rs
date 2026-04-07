@@ -931,6 +931,38 @@ pub enum Instr {
         src: u8,
     },
 
+    /// Convert a signed 32-bit integer register to a 64-bit float register.
+    ///
+    /// `I32ToF64 { dst, src }` → `scvtf d{dst}, w{src}` on ARM64.
+    ///
+    /// FLS §6.5.9: Numeric cast `i32 as f64`. Converts a signed integer to
+    /// IEEE 754 double-precision float. All `i32` values are exactly
+    /// representable as `f64` (which has 52-bit mantissa).
+    ///
+    /// Cache-line note: one 4-byte instruction (SCVTF).
+    I32ToF64 {
+        /// Destination float register (ARM64 `d{dst}`).
+        dst: u8,
+        /// Source integer register (ARM64 `w{src}`).
+        src: u8,
+    },
+
+    /// Convert a signed 32-bit integer register to a 32-bit float register.
+    ///
+    /// `I32ToF32 { dst, src }` → `scvtf s{dst}, w{src}` on ARM64.
+    ///
+    /// FLS §6.5.9: Numeric cast `i32 as f32`. Converts a signed integer to
+    /// IEEE 754 single-precision float. Values that cannot be exactly
+    /// represented are rounded to nearest-even.
+    ///
+    /// Cache-line note: one 4-byte instruction (SCVTF).
+    I32ToF32 {
+        /// Destination single-precision float register (ARM64 `s{dst}`).
+        dst: u8,
+        /// Source integer register (ARM64 `w{src}`).
+        src: u8,
+    },
+
     /// Floating-point binary arithmetic on `f32` values.
     ///
     /// `F32BinOp { op, dst, lhs, rhs }` emits one of:

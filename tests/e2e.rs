@@ -12637,3 +12637,150 @@ fn main() -> i32 {
         "expected `.word` directive for f32 constant in assembly:\n{asm}"
     );
 }
+
+// ── Milestone 99: integer-to-float casts (`i32 as f64`, `i32 as f32`) ──────
+//
+// FLS §6.5.9: Numeric cast expressions. Casting from an integer type to a
+// floating-point type converts the value to the closest representable float.
+// ARM64: `scvtf d{dst}, w{src}` for i32→f64; `scvtf s{dst}, w{src}` for i32→f32.
+
+/// Milestone 99: literal integer cast to f64, then back to i32.
+///
+/// FLS §6.5.9: `i32 as f64` — SCVTF converts the signed integer to IEEE 754
+/// double-precision. All i32 values are exactly representable in f64.
+#[test]
+fn milestone_99_i32_as_f64_and_back() {
+    let src = r#"
+fn main() -> i32 {
+    let x: i32 = 7;
+    let y: f64 = x as f64;
+    y as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "7 as f64 as i32 == 7, got {exit_code}");
+}
+
+/// Milestone 99: literal integer cast to f64 used in f64 arithmetic.
+///
+/// FLS §6.5.9: `i32 as f64` produces an f64, which participates in f64
+/// arithmetic (FLS §6.5.5).
+#[test]
+fn milestone_99_i32_as_f64_in_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    let x: i32 = 3;
+    let y: f64 = x as f64;
+    (y * 2.0) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "3 as f64 * 2.0 as i32 == 6, got {exit_code}");
+}
+
+/// Milestone 99: parameter cast to f64.
+///
+/// FLS §6.5.9: The cast expression works for function parameters, not just
+/// literals. Verifies runtime codegen path (param value is not statically known).
+#[test]
+fn milestone_99_param_as_f64() {
+    let src = r#"
+fn to_double(n: i32) -> i32 {
+    let f: f64 = n as f64;
+    (f * 2.0) as i32
+}
+fn main() -> i32 {
+    to_double(4)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 8, "to_double(4) == 8, got {exit_code}");
+}
+
+/// Milestone 99: literal integer cast to f32, then back to i32.
+///
+/// FLS §6.5.9: `i32 as f32` — SCVTF single-precision variant.
+#[test]
+fn milestone_99_i32_as_f32_and_back() {
+    let src = r#"
+fn main() -> i32 {
+    let x: i32 = 5;
+    let y: f32 = x as f32;
+    y as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "5 as f32 as i32 == 5, got {exit_code}");
+}
+
+/// Milestone 99: i32 as f32 in f32 arithmetic.
+///
+/// FLS §6.5.9 + §6.5.5: Cast produces f32 that participates in f32 arithmetic.
+#[test]
+fn milestone_99_i32_as_f32_in_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    let x: i32 = 4;
+    let y: f32 = x as f32;
+    (y * 3.0_f32) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 12, "4 as f32 * 3.0 as i32 == 12, got {exit_code}");
+}
+
+/// Milestone 99: parameter cast to f32.
+///
+/// FLS §6.5.9: Works for function parameters.
+#[test]
+fn milestone_99_param_as_f32() {
+    let src = r#"
+fn triple_f32(n: i32) -> i32 {
+    let f: f32 = n as f32;
+    (f * 3.0_f32) as i32
+}
+fn main() -> i32 {
+    triple_f32(5)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 15, "triple_f32(5) == 15, got {exit_code}");
+}
+
+/// Milestone 99: inline literal cast to f64 without let binding.
+///
+/// FLS §6.5.9: The cast expression is evaluated inline (no stack slot required
+/// for the intermediate float if not bound to a name).
+#[test]
+fn milestone_99_inline_literal_as_f64() {
+    let src = r#"
+fn main() -> i32 {
+    (6 as f64 + 1.5) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "6 as f64 + 1.5 as i32 == 7, got {exit_code}");
+}
+
+/// Assembly check: `i32 as f64` emits `scvtf d{N}, w{M}`.
+///
+/// FLS §6.5.9: SCVTF (Signed integer Convert to Floating-point) is the ARM64
+/// instruction for integer-to-float conversion.
+#[test]
+fn runtime_i32_as_f64_emits_scvtf_dreg() {
+    let src = r#"
+fn main() -> i32 {
+    let x: i32 = 3;
+    (x as f64) as i32
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("scvtf   d"),
+        "expected `scvtf d` (int→f64) in assembly:\n{asm}"
+    );
+    assert!(
+        asm.contains("fcvtzs"),
+        "expected `fcvtzs` (f64→int) in assembly:\n{asm}"
+    );
+}

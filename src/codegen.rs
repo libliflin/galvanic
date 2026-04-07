@@ -1038,6 +1038,32 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
             )?;
         }
 
+        // `scvtf d{dst}, w{src}` — SCVTF (Signed integer Convert to Floating-point).
+        //
+        // FLS §6.5.9: `i32 as f64`. Converts a signed 32-bit integer to IEEE 754
+        // double-precision. All i32 values are exactly representable in f64.
+        //
+        // Cache-line note: one 4-byte instruction.
+        Instr::I32ToF64 { dst, src } => {
+            writeln!(
+                out,
+                "    scvtf   d{dst}, w{src}              // FLS §6.5.9: i32→f64 convert"
+            )?;
+        }
+
+        // `scvtf s{dst}, w{src}` — SCVTF single-precision variant.
+        //
+        // FLS §6.5.9: `i32 as f32`. Values that cannot be exactly represented
+        // are rounded to nearest-even.
+        //
+        // Cache-line note: one 4-byte instruction.
+        Instr::I32ToF32 { dst, src } => {
+            writeln!(
+                out,
+                "    scvtf   s{dst}, w{src}              // FLS §6.5.9: i32→f32 convert"
+            )?;
+        }
+
         // FLS §6.5.5: Float arithmetic — fadd/fsub/fmul/fdiv on s-registers.
         //
         // Same mnemonics as F64BinOp but operands use `s{N}` (single-precision).
