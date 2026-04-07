@@ -2545,6 +2545,26 @@ impl<'src> Parser<'src> {
                 Ok(Expr { kind: ExprKind::ConstBlock(Box::new(block)), span })
             }
 
+            // Unsafe block expression — FLS §6.4.4.
+            //
+            // `unsafe { ... }` — an unsafe block expression is a block
+            // expression preceded by the keyword `unsafe`. This permits
+            // operations restricted by the safety model inside the block.
+            //
+            // Disambiguation: `unsafe` at item level can precede `fn`, `impl`,
+            // or `trait`. Those are parsed at statement/item level. Here in
+            // `parse_primary`, `unsafe` followed by `{` is unambiguously an
+            // unsafe block expression — not an item declaration.
+            //
+            // FLS §6.4.4: "An unsafe block expression is a block expression
+            // preceded by keyword unsafe."
+            TokenKind::KwUnsafe if self.peek_nth(1) == TokenKind::OpenBrace => {
+                self.advance(); // eat `unsafe`
+                let block = self.parse_block()?;
+                let span = start.to(block.span);
+                Ok(Expr { kind: ExprKind::UnsafeBlock(Box::new(block)), span })
+            }
+
             // Closure expression — FLS §6.14.
             //
             // `|params| body` or `|params| -> RetTy body` where body is

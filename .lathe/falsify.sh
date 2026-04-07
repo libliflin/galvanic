@@ -62,9 +62,20 @@ fi
 
 echo "--- Claim 3: no unsafe in library source ---"
 
-UNSAFE_BLOCKS=$(grep -rn 'unsafe\s*{' src/ 2>/dev/null | grep -v '^src/main\.rs:' || true)
-UNSAFE_FNS=$(grep -rn 'unsafe\s*fn\b' src/ 2>/dev/null | grep -v '^src/main\.rs:' || true)
-UNSAFE_IMPLS=$(grep -rn 'unsafe\s*impl\b' src/ 2>/dev/null | grep -v '^src/main\.rs:' || true)
+# Self-test: verify the comment filter does not accidentally suppress real unsafe code.
+# If the filter is too aggressive, Claim 3 becomes blind — that's worse than no check.
+_TMP_UNSAFE=$(mktemp /tmp/falsify_unsafe_XXXXXX.rs)
+trap 'rm -f "$_TMP_UNSAFE"' EXIT
+printf 'fn foo() { unsafe { let _ = 0; } }\n' > "$_TMP_UNSAFE"
+_SELFTEST=$(grep -n 'unsafe\s*{' "$_TMP_UNSAFE" | grep -Ev ':[0-9]+:[[:space:]]*//' || true)
+if [[ -z "$_SELFTEST" ]]; then
+    fail "Claim 3 self-test" "the comment-exclusion filter in Claim 3 is suppressing real unsafe blocks — the check is blind; fix the grep pattern"
+fi
+rm -f "$_TMP_UNSAFE"
+
+UNSAFE_BLOCKS=$(grep -rn 'unsafe\s*{' src/ 2>/dev/null | grep -v '^src/main\.rs:' | grep -Ev ':[0-9]+:[[:space:]]*//' || true)
+UNSAFE_FNS=$(grep -rn 'unsafe\s*fn\b' src/ 2>/dev/null | grep -v '^src/main\.rs:' | grep -Ev ':[0-9]+:[[:space:]]*//' || true)
+UNSAFE_IMPLS=$(grep -rn 'unsafe\s*impl\b' src/ 2>/dev/null | grep -v '^src/main\.rs:' | grep -Ev ':[0-9]+:[[:space:]]*//' || true)
 
 if [[ -n "$UNSAFE_BLOCKS" || -n "$UNSAFE_FNS" || -n "$UNSAFE_IMPLS" ]]; then
     fail "Claim 3" "unsafe code found in library source (outside main.rs):\n$(echo "$UNSAFE_BLOCKS$UNSAFE_FNS$UNSAFE_IMPLS" | head -5)"

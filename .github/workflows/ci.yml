@@ -143,8 +143,11 @@ jobs:
 
       - name: No unsafe blocks in source
         run: |
-          # Search for actual unsafe blocks/fn/impl, not just the keyword in strings/comments
-          if grep -rn 'unsafe\s*{' src/ || grep -rn 'unsafe\s*fn\b' src/ || grep -rn 'unsafe\s*impl\b' src/; then
+          # Search for actual unsafe blocks/fn/impl — exclude comment lines
+          # (grep -rn output format: file:N:content; filter lines where content starts with //)
+          UNSAFE=$(grep -rn 'unsafe\s*{\|unsafe\s*fn\b\|unsafe\s*impl\b' src/ | grep -Ev ':[0-9]+:[[:space:]]*//' || true)
+          if [[ -n "$UNSAFE" ]]; then
+            echo "$UNSAFE"
             echo "FAIL: unsafe code found — galvanic should be safe Rust only"
             exit 1
           fi

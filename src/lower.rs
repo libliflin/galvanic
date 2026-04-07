@@ -152,6 +152,8 @@ fn expr_contains_call(expr: &Expr) -> bool {
         // materialises its address. The body runs only when the closure
         // is invoked, not when the closure expression is evaluated.
         ExprKind::Closure { .. } => false,
+        // FLS §6.4.4: Unsafe block — recurse into its body, which may contain calls.
+        ExprKind::UnsafeBlock(block) => block_contains_call(block),
         // Leaves: literals, paths, unit — none contain calls.
         _ => false,
     }
@@ -250,6 +252,9 @@ fn expr_contains_break_with_value(expr: &Expr) -> bool {
         // named block body to find unlabeled breaks destined for an outer loop.
         // FLS §6.4.3, §6.15.6.
         ExprKind::NamedBlock { body, .. } => block_contains_break_with_value(body),
+        // FLS §6.4.4: Unsafe block — recurse into body; breaks inside may target
+        // an enclosing loop.
+        ExprKind::UnsafeBlock(b) => block_contains_break_with_value(b),
         // A closure body is a separate function — its `break` expressions belong to loops
         // inside the closure, not to any enclosing loop of the closure expression itself.
         ExprKind::Closure { .. } => false,
@@ -387,6 +392,9 @@ fn expr_contains_labeled_break_with_value(expr: &Expr, target_label: &str) -> bo
                 block_contains_labeled_break_with_value(body, target_label)
             }
         }
+        // FLS §6.4.4: Unsafe block — recurse into body; a break inside may target
+        // an outer labeled loop or named block.
+        ExprKind::UnsafeBlock(b) => block_contains_labeled_break_with_value(b, target_label),
         // Closures are separate functions — their breaks don't target outer loops.
         ExprKind::Closure { .. } => false,
         _ => false,
@@ -3834,6 +3842,11 @@ fn find_captures<'src>(
             find_in_block(block, outer_locals, closure_params, source, captured);
         }
 
+        // FLS §6.4.4: Unsafe block — same as regular block for capture analysis.
+        ExprKind::UnsafeBlock(block) => {
+            find_in_block(block, outer_locals, closure_params, source, captured);
+        }
+
         // Recurse into all compound expression forms.
         ExprKind::Unary { operand, .. } => {
             find_captures(operand, outer_locals, closure_params, source, captured);
@@ -5095,7 +5108,7 @@ impl<'src> LowerCtx<'src> {
             }
 
             // FLS §6.4: Block expression — lower stmts then handle tail.
-            ExprKind::Block(block) => {
+            ExprKind::Block(block) | ExprKind::UnsafeBlock(block) => {
                 for stmt in &block.stmts {
                     self.lower_stmt(stmt)?;
                 }
@@ -5341,7 +5354,7 @@ impl<'src> LowerCtx<'src> {
             }
 
             // FLS §6.4: Block expression — lower stmts then handle tail.
-            ExprKind::Block(block) => {
+            ExprKind::Block(block) | ExprKind::UnsafeBlock(block) => {
                 for stmt in &block.stmts {
                     self.lower_stmt(stmt)?;
                 }
@@ -5641,7 +5654,7 @@ impl<'src> LowerCtx<'src> {
             }
 
             // FLS §6.4: Block expression — lower statements then handle tail.
-            ExprKind::Block(block) => {
+            ExprKind::Block(block) | ExprKind::UnsafeBlock(block) => {
                 for stmt in &block.stmts {
                     self.lower_stmt(stmt)?;
                 }
@@ -12968,6 +12981,34 @@ impl<'src> LowerCtx<'src> {
                 self.instrs.push(Instr::LoadImm(r, val));
                 Ok(IrValue::Reg(r))
             }
+
+            // Unsafe block expression — FLS §6.4.4.
+            //
+            // `unsafe { stmts... expr? }` — lowered identically to a regular
+            // block expression. The `unsafe` marker is a semantic annotation
+            // permitting restricted operations; it does not change the code
+            // generated for the block body.
+            //
+            // FLS §6.4.4: "An unsafe block expression is a block expression
+            // preceded by keyword unsafe."
+            //
+            // FLS §6.4.4 AMBIGUOUS: The spec enumerates what is *permitted*
+            // inside an unsafe block (raw pointer derefs, unsafe fn calls,
+            // mutable static access, union field access) but does not specify
+            // whether a conforming compiler must enforce the safety boundary
+            // (rejecting these operations outside unsafe). Galvanic accepts the
+            // syntax but does not implement a safety checker — there is no
+            // observable difference between safe and unsafe block codegen at
+            // this milestone.
+            //
+            // FLS §6.1.2 (Constraint 1): Unsafe blocks are NOT const contexts —
+            // the block body produces runtime instructions. No compile-time
+            // folding of the body occurs (unlike `const { ... }` which IS a
+            // const context per §6.1.2:37–45).
+            //
+            // Cache-line note: identical to a regular block. No extra
+            // instructions for the `unsafe` marker.
+            ExprKind::UnsafeBlock(block) => self.lower_block_to_value(block, ret_ty),
 
             // FLS §6.15.6: Break expression — exit the innermost enclosing loop.
             //

@@ -18649,3 +18649,166 @@ fn main() -> i32 {
         "function call add() must still emit bl instruction: {asm}"
     );
 }
+
+// ── Milestone 132: Unsafe Block Expressions (FLS §6.4.4) ─────────────────────
+
+/// Milestone 132: basic unsafe block expression returning a literal.
+///
+/// FLS §6.4.4: An unsafe block expression is a block expression preceded by
+/// keyword `unsafe`. The enclosed code runs at runtime — it is not a const
+/// context.
+#[test]
+fn milestone_132_unsafe_block_basic() {
+    let src = r#"
+fn main() -> i32 {
+    unsafe { 7 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "unsafe {{ 7 }} = 7, got {exit_code}");
+}
+
+/// Milestone 132: unsafe block in a let binding.
+///
+/// FLS §6.4.4: An unsafe block expression may appear anywhere a value
+/// expression is expected, including as the initializer of a let binding.
+#[test]
+fn milestone_132_unsafe_block_in_let() {
+    let src = r#"
+fn main() -> i32 {
+    let x = unsafe { 3 + 4 };
+    x
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "unsafe {{ 3 + 4 }} = 7, got {exit_code}");
+}
+
+/// Milestone 132: unsafe block in arithmetic expression.
+///
+/// FLS §6.4.4: An unsafe block expression may appear as an operand in a
+/// larger arithmetic expression.
+#[test]
+fn milestone_132_unsafe_block_in_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    1 + unsafe { 3 * 2 } + 1
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 8, "1 + unsafe {{3*2}} + 1 = 8, got {exit_code}");
+}
+
+/// Milestone 132: unsafe block with parameter.
+///
+/// FLS §6.4.4: An unsafe block that references a function parameter must
+/// emit runtime code — the parameter is not a compile-time constant.
+#[test]
+fn milestone_132_unsafe_block_from_param() {
+    let src = r#"
+fn double(n: i32) -> i32 {
+    unsafe { n * 2 }
+}
+fn main() -> i32 { double(6) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 12, "double(6) = 12, got {exit_code}");
+}
+
+/// Milestone 132: unsafe block with local variable binding inside.
+///
+/// FLS §6.4.4: An unsafe block may contain let bindings that are local to
+/// the block scope.
+#[test]
+fn milestone_132_unsafe_block_with_let_bindings() {
+    let src = r#"
+fn main() -> i32 {
+    unsafe {
+        let a = 5;
+        let b = 3;
+        a + b
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 8, "unsafe {{ let a=5; let b=3; a+b }} = 8, got {exit_code}");
+}
+
+/// Milestone 132: unsafe block passed as function argument.
+///
+/// FLS §6.4.4: An unsafe block expression may appear as a function call
+/// argument, producing a value passed to the callee.
+#[test]
+fn milestone_132_unsafe_block_as_fn_arg() {
+    let src = r#"
+fn add(a: i32, b: i32) -> i32 { a + b }
+fn main() -> i32 {
+    add(unsafe { 4 }, unsafe { 3 })
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "add(unsafe{{4}}, unsafe{{3}}) = 7, got {exit_code}");
+}
+
+/// Milestone 132: nested unsafe block.
+///
+/// FLS §6.4.4: Unsafe blocks may be nested. Each nested block is separately
+/// a valid unsafe context.
+#[test]
+fn milestone_132_unsafe_block_nested() {
+    let src = r#"
+fn main() -> i32 {
+    unsafe { unsafe { 5 } + 2 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "nested unsafe blocks = 7, got {exit_code}");
+}
+
+/// Milestone 132: unsafe block result in if expression.
+///
+/// FLS §6.4.4: An unsafe block may appear as the condition-dependent
+/// value in an if/else expression.
+#[test]
+fn milestone_132_unsafe_block_in_if() {
+    let src = r#"
+fn check(n: i32) -> i32 {
+    if n > 0 { unsafe { n * 2 } } else { 0 }
+}
+fn main() -> i32 { check(4) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 8, "check(4) = 8, got {exit_code}");
+}
+
+/// Assembly inspection: unsafe block must emit runtime instructions, not fold.
+///
+/// FLS §6.4.4: An unsafe block is NOT a const context — the enclosed code
+/// executes at runtime.
+///
+/// FLS §6.1.2 (Constraint 1): A regular function body is not a const context.
+/// Even if all values in `unsafe { n * 3 }` were statically known, galvanic
+/// must emit a runtime `mul` instruction — not evaluate at compile time.
+///
+/// Anti-fold assertion: `unsafe { n * 3 }` with parameter `n` must not fold
+/// to a constant, because `n` is not a compile-time constant.
+#[test]
+fn runtime_unsafe_block_emits_runtime_instructions_not_folded() {
+    let src = r#"
+fn triple(n: i32) -> i32 {
+    unsafe { n * 3 }
+}
+fn main() -> i32 { triple(4) }
+"#;
+    let asm = compile_to_asm(src);
+    // Must emit mul for n * 3 (runtime computation).
+    assert!(
+        asm.contains("mul"),
+        "unsafe block n*3 must emit mul instruction (not folded): {asm}"
+    );
+    // Must not fold triple(4) = 12 to a constant.
+    assert!(
+        !asm.contains("mov     x0, #12") && !asm.contains("mov x0, #12"),
+        "unsafe block result must not be constant-folded to 12: {asm}"
+    );
+}
