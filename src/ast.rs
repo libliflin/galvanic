@@ -1064,6 +1064,23 @@ pub enum ExprKind {
     /// A 8-element array fills exactly one 64-byte cache line on the stack.
     Array(Vec<Expr>),
 
+    /// An array repeat expression. FLS §6.8.
+    ///
+    /// `[value; N]` — constructs an array of `N` elements, each initialized
+    /// to `value`. `N` must be a constant expression (FLS §6.1.2).
+    ///
+    /// FLS §6.8: "An array expression can be written with the syntax
+    /// `[operand; repetition_operand]`."
+    ///
+    /// Cache-line note: N elements occupying N consecutive 8-byte stack slots.
+    /// A 8-element repeat fills exactly one 64-byte cache line on the stack.
+    ArrayRepeat {
+        /// The fill value — evaluated once and stored into every slot.
+        value: Box<Expr>,
+        /// The repetition count — must be a const expression.
+        count: Box<Expr>,
+    },
+
     /// A tuple expression. FLS §6.10.
     ///
     /// `(expr0, expr1, ...)` — always two or more elements (one-element tuples

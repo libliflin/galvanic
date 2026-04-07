@@ -13621,3 +13621,169 @@ fn main() -> i32 {
         "expected at least two `b` instructions for nested labeled loop, got:\n{asm}"
     );
 }
+
+// ── Milestone 105: array repeat expressions `[value; N]` ─────────────────────
+//
+// FLS §6.8: "An array expression can be written with the syntax
+// `[operand; repetition_operand]`."
+//
+// The fill value is evaluated once and stored into every element slot.
+// The repeat count must be a const expression (here: integer literal).
+//
+// FLS §6.1.2:37–45: All stores are runtime instructions — no const folding.
+
+/// `[0_i32; 5]` — every element is zero.
+///
+/// FLS §6.8: Array repeat expression with literal fill and literal count.
+#[test]
+fn milestone_105_repeat_zeros() {
+    let src = r#"
+fn main() -> i32 {
+    let arr = [0_i32; 5];
+    arr[0] + arr[1] + arr[2] + arr[3] + arr[4]
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected sum of 5 zeros = 0, got {exit_code}");
+}
+
+/// `[7_i32; 4]` — every element is 7, sum is 28.
+///
+/// FLS §6.8: Array repeat expression with nonzero fill.
+#[test]
+fn milestone_105_repeat_nonzero_fill() {
+    let src = r#"
+fn main() -> i32 {
+    let arr = [7_i32; 4];
+    arr[0] + arr[1] + arr[2] + arr[3]
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 28, "expected sum of 4 sevens = 28, got {exit_code}");
+}
+
+/// `[1_i32; 1]` — single-element repeat.
+///
+/// FLS §6.8: N=1 is valid; the element is stored once.
+#[test]
+fn milestone_105_repeat_count_one() {
+    let src = r#"
+fn main() -> i32 {
+    let arr = [42_i32; 1];
+    arr[0]
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "expected arr[0] = 42, got {exit_code}");
+}
+
+/// Repeat with a parameter-derived fill value (runtime fill, compile-time count).
+///
+/// FLS §6.8: The fill value expression may be any expression, not just a literal.
+/// FLS §6.1.2:37–45: The fill value is a runtime value loaded from a register.
+#[test]
+fn milestone_105_repeat_param_fill() {
+    let src = r#"
+fn fill_array(v: i32) -> i32 {
+    let arr = [v; 3];
+    arr[0] + arr[1] + arr[2]
+}
+fn main() -> i32 {
+    fill_array(5)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 15, "expected 5+5+5 = 15, got {exit_code}");
+}
+
+/// Repeat followed by element mutation and re-read.
+///
+/// FLS §6.8 + §6.9: After a repeat init, individual elements can be assigned
+/// via indexing and the new value is read correctly (array mutation milestone).
+#[test]
+fn milestone_105_repeat_then_store() {
+    let src = r#"
+fn main() -> i32 {
+    let mut arr = [0_i32; 3];
+    arr[1] = 99;
+    arr[0] + arr[1] + arr[2]
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 99, "expected 0+99+0 = 99, got {exit_code}");
+}
+
+/// Repeat in arithmetic expression (index into repeat array as part of a sum).
+///
+/// FLS §6.8 + §6.5.5: Repeat array elements are usable in arithmetic directly.
+#[test]
+fn milestone_105_repeat_in_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    let arr = [3_i32; 4];
+    arr[0] * arr[1] + arr[2] - arr[3]
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    // 3*3 + 3 - 3 = 9 + 3 - 3 = 9
+    assert_eq!(exit_code, 9, "expected 3*3+3-3 = 9, got {exit_code}");
+}
+
+/// Repeat with a variable index (runtime-computed index into repeat array).
+///
+/// FLS §6.9: Index expressions may use runtime values as the index.
+#[test]
+fn milestone_105_repeat_variable_index() {
+    let src = r#"
+fn main() -> i32 {
+    let arr = [10_i32; 5];
+    let i = 3;
+    arr[i]
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "expected arr[3] = 10, got {exit_code}");
+}
+
+/// Repeat in a loop (sum all elements of a repeat array using a for loop).
+///
+/// FLS §6.8 + §6.15.1: A for loop over a range can index into a repeat array.
+#[test]
+fn milestone_105_repeat_summed_in_loop() {
+    let src = r#"
+fn main() -> i32 {
+    let arr = [4_i32; 6];
+    let mut sum = 0;
+    for i in 0..6 {
+        sum += arr[i];
+    }
+    sum
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 24, "expected 6*4 = 24, got {exit_code}");
+}
+
+/// Assembly inspection: `[v; N]` emits N store instructions from a single register.
+///
+/// FLS §6.8: The fill value is loaded once into a register, then stored N times.
+/// FLS §6.1.2:37–45: All N stores are runtime instructions.
+#[test]
+fn runtime_array_repeat_emits_n_stores() {
+    let src = r#"
+fn main() -> i32 {
+    let arr = [5_i32; 3];
+    arr[0]
+}
+"#;
+    let asm = compile_to_asm(src);
+    // Count `str` instructions — there should be at least 3 (one per element).
+    let str_count = asm
+        .lines()
+        .filter(|l| l.trim_start().starts_with("str ") || l.trim_start().starts_with("str\t"))
+        .count();
+    assert!(
+        str_count >= 3,
+        "expected at least 3 str instructions for [5; 3], got {str_count}:\n{asm}"
+    );
+}

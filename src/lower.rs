@@ -144,6 +144,7 @@ fn expr_contains_call(expr: &Expr) -> bool {
         }
         ExprKind::FieldAccess { receiver, .. } => expr_contains_call(receiver),
         ExprKind::Array(elems) => elems.iter().any(expr_contains_call),
+        ExprKind::ArrayRepeat { value, count } => expr_contains_call(value) || expr_contains_call(count),
         ExprKind::Tuple(elems) => elems.iter().any(expr_contains_call),
         ExprKind::Index { base, index } => expr_contains_call(base) || expr_contains_call(index),
         // FLS §6.14: A closure expression itself does not call anything
@@ -227,6 +228,9 @@ fn expr_contains_break_with_value(expr: &Expr) -> bool {
         }
         ExprKind::FieldAccess { receiver, .. } => expr_contains_break_with_value(receiver),
         ExprKind::Array(elems) => elems.iter().any(expr_contains_break_with_value),
+        ExprKind::ArrayRepeat { value, count } => {
+            expr_contains_break_with_value(value) || expr_contains_break_with_value(count)
+        }
         ExprKind::Tuple(elems) => elems.iter().any(expr_contains_break_with_value),
         ExprKind::Index { base, index } => {
             expr_contains_break_with_value(base) || expr_contains_break_with_value(index)
@@ -318,6 +322,10 @@ fn expr_contains_labeled_break_with_value(expr: &Expr, target_label: &str) -> bo
         ExprKind::Array(elems) => elems
             .iter()
             .any(|e| expr_contains_labeled_break_with_value(e, target_label)),
+        ExprKind::ArrayRepeat { value, count } => {
+            expr_contains_labeled_break_with_value(value, target_label)
+                || expr_contains_labeled_break_with_value(count, target_label)
+        }
         ExprKind::Tuple(elems) => elems
             .iter()
             .any(|e| expr_contains_labeled_break_with_value(e, target_label)),
@@ -2705,6 +2713,10 @@ fn find_captures<'src>(
             for e in elems {
                 find_captures(e, outer_locals, closure_params, source, captured);
             }
+        }
+        ExprKind::ArrayRepeat { value, count } => {
+            find_captures(value, outer_locals, closure_params, source, captured);
+            find_captures(count, outer_locals, closure_params, source, captured);
         }
         ExprKind::While { cond, body, .. } => {
             find_captures(cond, outer_locals, closure_params, source, captured);
@@ -5416,6 +5428,81 @@ impl<'src> LowerCtx<'src> {
                     for (i, elem_expr) in elems.iter().enumerate() {
                         let val = self.lower_expr(elem_expr, &IrTy::I32)?;
                         let src = self.val_to_reg(val)?;
+                        self.instrs.push(Instr::Store { src, slot: base_slot + i as u8 });
+                    }
+                    return Ok(());
+                }
+
+                // FLS §6.8: Array repeat expression `let a = [value; N]`.
+                //
+                // Allocates N consecutive 8-byte stack slots, evaluates
+                // `value` once, and stores a copy into each slot.
+                //
+                // FLS §6.8: "The type of an array expression is [T; N] where
+                // T is the type of the element expression." N must be a
+                // const expression (FLS §6.1.2:37–45). At this milestone
+                // galvanic accepts only integer literal and const-item counts
+                // (the common case in practice).
+                //
+                // FLS §6.1.2:37–45: All stores are runtime instructions.
+                //
+                // Cache-line note: N elements × 8-byte stack slots. An
+                // 8-element repeat array exactly fills one 64-byte cache line.
+                if let Some(init_expr) = init.as_ref()
+                    && let ExprKind::ArrayRepeat { value: val_expr, count: cnt_expr } =
+                        &init_expr.kind
+                {
+                    // Resolve the count to a compile-time integer.
+                    // FLS §6.8: The repetition operand must be a constant expression.
+                    let n: usize = match &cnt_expr.kind {
+                        ExprKind::LitInt(v) => {
+                            usize::try_from(*v).map_err(|_| {
+                                LowerError::Unsupported(format!(
+                                    "array repeat count `{v}` is too large"
+                                ))
+                            })?
+                        }
+                        ExprKind::Path(segs) if segs.len() == 1 => {
+                            // FLS §7.1: Allow named const items as the count.
+                            let name = segs[0].text(self.source);
+                            match self.const_vals.get(name) {
+                                Some(&v) if v >= 0 => v as usize,
+                                Some(_) => {
+                                    return Err(LowerError::Unsupported(format!(
+                                        "array repeat count const `{name}` is negative"
+                                    )))
+                                }
+                                None => {
+                                    return Err(LowerError::Unsupported(format!(
+                                        "array repeat count must be a const expression; `{name}` not found"
+                                    )))
+                                }
+                            }
+                        }
+                        _ => {
+                            return Err(LowerError::Unsupported(
+                                "array repeat count must be an integer literal or const item".into(),
+                            ))
+                        }
+                    };
+
+                    // Allocate N consecutive slots.
+                    let base_slot = self.alloc_slot()?;
+                    for _ in 1..n {
+                        self.alloc_slot()?;
+                    }
+                    self.locals.insert(var_name, base_slot);
+                    self.local_array_lens.insert(base_slot, n);
+
+                    // Evaluate the fill value once.
+                    // FLS §6.8: The element expression is evaluated exactly once
+                    // and then copied N times (for Copy types). Here we lower
+                    // the expression once and store it into each slot.
+                    //
+                    // FLS §6.1.2:37–45: All stores are runtime instructions.
+                    let val = self.lower_expr(val_expr, &IrTy::I32)?;
+                    let src = self.val_to_reg(val)?;
+                    for i in 0..n {
                         self.instrs.push(Instr::Store { src, slot: base_slot + i as u8 });
                     }
                     return Ok(());

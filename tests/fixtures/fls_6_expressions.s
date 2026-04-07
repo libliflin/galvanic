@@ -1153,6 +1153,51 @@ __closure_capturing_closure_example_0:
     add     sp, sp, #16             // FLS §8.1: restore stack frame
     ret
 
+    // fn array_repeat_example — FLS §9
+    .global array_repeat_example
+array_repeat_example:
+    sub     sp, sp, #96             // FLS §8.1: frame for 12 slot(s)
+    mov     x0, #0                   // FLS §2.4.4.1: load imm 0
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    str     x0, [sp, #8              ] // FLS §8.1: store slot 1
+    str     x0, [sp, #16             ] // FLS §8.1: store slot 2
+    str     x0, [sp, #24             ] // FLS §8.1: store slot 3
+    str     x0, [sp, #32             ] // FLS §8.1: store slot 4
+    str     x0, [sp, #40             ] // FLS §8.1: store slot 5
+    str     x0, [sp, #48             ] // FLS §8.1: store slot 6
+    str     x0, [sp, #56             ] // FLS §8.1: store slot 7
+    mov     x1, #1                   // FLS §2.4.4.1: load imm 1
+    str     x1, [sp, #64             ] // FLS §8.1: store slot 8
+    str     x1, [sp, #72             ] // FLS §8.1: store slot 9
+    str     x1, [sp, #80             ] // FLS §8.1: store slot 10
+    str     x1, [sp, #88             ] // FLS §8.1: store slot 11
+    mov     x2, #0                   // FLS §2.4.4.1: load imm 0
+    add     x3, sp, #0               // FLS §6.9: address of arr[0]
+    ldr     x3, [x3, x2, lsl #3] // FLS §6.9: load arr[index]
+    mov     x4, #7                   // FLS §2.4.4.1: load imm 7
+    add     x5, sp, #0               // FLS §6.9: address of arr[0]
+    ldr     x5, [x5, x4, lsl #3] // FLS §6.9: load arr[index]
+    add     x6, x3, x5          // FLS §6.5.5: add
+    mov     x7, #0                   // FLS §2.4.4.1: load imm 0
+    add     x8, sp, #64              // FLS §6.9: address of arr[0]
+    ldr     x8, [x8, x7, lsl #3] // FLS §6.9: load arr[index]
+    add     x9, x6, x8          // FLS §6.5.5: add
+    mov     x10, #1                   // FLS §2.4.4.1: load imm 1
+    add     x11, sp, #64              // FLS §6.9: address of arr[0]
+    ldr     x11, [x11, x10, lsl #3] // FLS §6.9: load arr[index]
+    add     x12, x9, x11          // FLS §6.5.5: add
+    mov     x13, #2                   // FLS §2.4.4.1: load imm 2
+    add     x14, sp, #64              // FLS §6.9: address of arr[0]
+    ldr     x14, [x14, x13, lsl #3] // FLS §6.9: load arr[index]
+    add     x15, x12, x14          // FLS §6.5.5: add
+    mov     x16, #3                   // FLS §2.4.4.1: load imm 3
+    add     x17, sp, #64              // FLS §6.9: address of arr[0]
+    ldr     x17, [x17, x16, lsl #3] // FLS §6.9: load arr[index]
+    add     x18, x15, x17          // FLS §6.5.5: add
+    mov     x0, x18              // FLS §6.19: return reg 18 → x0
+    add     sp, sp, #96             // FLS §8.1: restore stack frame
+    ret
+
     // ELF entry point — FLS §18.1
     .global _start
 _start:
