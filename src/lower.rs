@@ -462,6 +462,17 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     // FLS §14.2: Tuple struct field counts. Maps struct name → field count.
     // Used to recognize constructor calls `Point(a, b)` during let-binding lowering.
     let mut tuple_struct_defs: HashMap<String, usize> = HashMap::new();
+    // FLS §4.2, §14.2: Per-field float type for tuple structs.
+    // `None` = integer/bool field; `Some(IrTy::F64)` = f64; `Some(IrTy::F32)` = f32.
+    // Used to select StoreF64/StoreF32 vs Store during construction and
+    // LoadF64Slot/LoadF32Slot vs Load when loading fields to pass as arguments.
+    let mut tuple_struct_float_field_types: HashMap<String, Vec<Option<IrTy>>> = HashMap::new();
+    // FLS §4.2, §15: Per-field float type for enum tuple variants.
+    // Maps enum_name → variant_name → [field_float_types].
+    // `None` = integer/bool field; `Some(IrTy::F64)` = f64; `Some(IrTy::F32)` = f32.
+    // Used to select StoreF64/StoreF32 vs Store during variant construction and
+    // LoadF64Slot/LoadF32Slot vs Load when binding fields in TupleStruct patterns.
+    let mut enum_variant_float_field_types: HashMap<String, HashMap<String, Vec<Option<IrTy>>>> = HashMap::new();
     // FLS §6.11, §6.13, §4.11: Track per-field struct type names for nested struct
     // construction and chained field access. `None` = scalar field, `Some(name)` =
     // field whose type is another named struct (requiring multiple stack slots).
@@ -536,7 +547,21 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         // FLS §14.2: Tuple struct. Record field count so that
                         // constructor calls `Point(a, b)` can allocate the right
                         // number of consecutive stack slots.
-                        tuple_struct_defs.insert(struct_name, fields.len());
+                        let float_types: Vec<Option<IrTy>> = fields
+                            .iter()
+                            .map(|f| match &f.ty.kind {
+                                TyKind::Path(segs) if segs.len() == 1 => {
+                                    match segs[0].text(source) {
+                                        "f64" => Some(IrTy::F64),
+                                        "f32" => Some(IrTy::F32),
+                                        _ => None,
+                                    }
+                                }
+                                _ => None,
+                            })
+                            .collect();
+                        tuple_struct_defs.insert(struct_name.clone(), fields.len());
+                        tuple_struct_float_field_types.insert(struct_name, float_types);
                     }
                 }
             }
@@ -546,6 +571,9 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                 // placeholder names. Named-field variants: actual declaration-order names.
                 let enum_name = e.name.text(source).to_owned();
                 let mut variants: HashMap<String, EnumVariantInfo> = HashMap::new();
+                // FLS §4.2, §15: Per-variant float field type tracking.
+                // Maps variant_name → [field_float_types] for tuple variants.
+                let mut variant_float_types: HashMap<String, Vec<Option<IrTy>>> = HashMap::new();
                 for (discriminant, variant) in e.variants.iter().enumerate() {
                     use crate::ast::EnumVariantKind;
                     let variant_name = variant.name.text(source).to_owned();
@@ -556,9 +584,24 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         EnumVariantKind::Tuple(fields) => {
                             // Positional placeholders — names unused; only count matters.
                             variants.insert(
-                                variant_name,
+                                variant_name.clone(),
                                 (discriminant as i32, vec!["".to_owned(); fields.len()]),
                             );
+                            // FLS §4.2: Record f64/f32 field positions for this variant.
+                            let float_tys: Vec<Option<IrTy>> = fields
+                                .iter()
+                                .map(|f| match &f.ty.kind {
+                                    TyKind::Path(segs) if segs.len() == 1 => {
+                                        match segs[0].text(source) {
+                                            "f64" => Some(IrTy::F64),
+                                            "f32" => Some(IrTy::F32),
+                                            _ => None,
+                                        }
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            variant_float_types.insert(variant_name, float_tys);
                         }
                         // FLS §15.3: Named-field variant. Store names in declaration order
                         // so that construction and patterns can map name → slot index.
@@ -571,7 +614,10 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         }
                     }
                 }
-                enum_defs.insert(enum_name, variants);
+                enum_defs.insert(enum_name.clone(), variants);
+                if !variant_float_types.is_empty() {
+                    enum_variant_float_field_types.insert(enum_name, variant_float_types);
+                }
             }
             ItemKind::Fn(_) | ItemKind::Impl(_) | ItemKind::Trait(_) | ItemKind::Const(_) | ItemKind::Static(_) | ItemKind::TypeAlias(_) => {}
         }
@@ -1034,7 +1080,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     for item in &src.items {
         match &item.kind {
             ItemKind::Fn(fn_def) => {
-                let (ir_fn, closure_fns, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &enum_defs, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &static_names, &fn_names, &struct_raw_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, None, label_base)?;
+                let (ir_fn, closure_fns, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &tuple_struct_float_field_types, &enum_defs, &enum_variant_float_field_types, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &static_names, &fn_names, &struct_raw_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, None, label_base)?;
                 label_base = next_label;
                 fns.push(ir_fn);
                 fns.extend(closure_fns);
@@ -1065,7 +1111,9 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         source,
                         &struct_defs,
                         &tuple_struct_defs,
+                        &tuple_struct_float_field_types,
                         &enum_defs,
+                        &enum_variant_float_field_types,
                         &method_self_kinds,
                         &mut_self_scalar_return_fns,
                         &struct_return_fns,
@@ -1183,7 +1231,9 @@ fn lower_fn(
     source: &str,
     struct_defs: &HashMap<String, Vec<String>>,
     tuple_struct_defs: &HashMap<String, usize>,
+    tuple_struct_float_field_types: &HashMap<String, Vec<Option<IrTy>>>,
     enum_defs: &EnumDefs,
+    enum_variant_float_field_types: &HashMap<String, HashMap<String, Vec<Option<IrTy>>>>,
     method_self_kinds: &HashMap<String, SelfKind>,
     mut_self_scalar_return_fns: &std::collections::HashSet<String>,
     struct_return_fns: &HashMap<String, String>,
@@ -1273,7 +1323,7 @@ fn lower_fn(
         Some(block) => block,
     };
 
-    let mut ctx = LowerCtx::new(source, &name, ret_ty, struct_defs, tuple_struct_defs, enum_defs, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, f64_return_fns, f32_return_fns, const_vals, static_names, fn_names, struct_field_types, struct_field_offsets, struct_sizes, type_aliases, struct_float_field_types, start_label);
+    let mut ctx = LowerCtx::new(source, &name, ret_ty, struct_defs, tuple_struct_defs, tuple_struct_float_field_types, enum_defs, enum_variant_float_field_types, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, f64_return_fns, f32_return_fns, const_vals, static_names, fn_names, struct_field_types, struct_field_offsets, struct_sizes, type_aliases, struct_float_field_types, start_label);
 
     // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
     // to stack slots. Each parameter slot is allocated in parameter order
@@ -1421,16 +1471,29 @@ fn lower_fn(
         } else if let Some(&n_fields) = tuple_struct_defs.get(type_name) {
             // FLS §14.2, §10.1: Tuple struct self parameter.
             //
-            // A tuple struct with N fields is passed as N consecutive registers
-            // (one per field), identical to anonymous tuple and named struct
-            // calling conventions. Spill to N consecutive stack slots; register
-            // in `local_tuple_lens` for `.0`/`.1` field access and in
-            // `local_tuple_struct_types` for method call dispatch.
+            // A tuple struct with N fields is passed as N consecutive registers,
+            // with integer fields in x{reg_idx}..x{reg_idx+n_int-1} and float
+            // fields in d{freg_idx}..d{freg_idx+n_float-1} (ARM64 ABI).
+            // Spill to N consecutive stack slots; register in `local_tuple_lens`
+            // for `.0`/`.1` field access and in `local_tuple_struct_types` for
+            // method call dispatch.
             //
+            // FLS §4.2: f64/f32 fields arrive in the float register bank (d0-d7
+            // / s0-s7); integer fields arrive in x0-x7.
             // FLS §6.1.2:37–45: All spills are runtime store instructions.
             // Cache-line note: N × 4-byte `str` per self spill.
             if n_fields > 0 {
-                if reg_idx + n_fields > 8 {
+                let float_field_tys = tuple_struct_float_field_types
+                    .get(type_name)
+                    .cloned()
+                    .unwrap_or_default();
+                let n_int_fields = float_field_tys
+                    .iter()
+                    .filter(|t| t.is_none())
+                    .count()
+                    .max(n_fields.saturating_sub(float_field_tys.len()));
+                let n_float_fields = float_field_tys.iter().filter(|t| t.is_some()).count();
+                if reg_idx + n_int_fields > 8 || freg_idx + n_float_fields > 8 {
                     return Err(LowerError::Unsupported(
                         "tuple struct self fields exceed ARM64 register window".into(),
                     ));
@@ -1439,16 +1502,44 @@ fn lower_fn(
                 for _ in 1..n_fields {
                     ctx.alloc_slot()?;
                 }
+                let mut self_int = 0usize;
+                let mut self_float = 0usize;
                 for fi in 0..n_fields {
-                    ctx.instrs.push(Instr::Store {
-                        src: (reg_idx + fi) as u8,
-                        slot: base_slot + fi as u8,
-                    });
+                    let slot = base_slot + fi as u8;
+                    match float_field_tys.get(fi).copied().flatten() {
+                        Some(IrTy::F64) => {
+                            // FLS §4.2: f64 self field arrives in d{freg_idx+self_float}.
+                            ctx.instrs.push(Instr::StoreF64 {
+                                src: (freg_idx + self_float) as u8,
+                                slot,
+                            });
+                            ctx.slot_float_ty.insert(slot, IrTy::F64);
+                            self_float += 1;
+                        }
+                        Some(IrTy::F32) => {
+                            // FLS §4.2: f32 self field arrives in s{freg_idx+self_float}.
+                            ctx.instrs.push(Instr::StoreF32 {
+                                src: (freg_idx + self_float) as u8,
+                                slot,
+                            });
+                            ctx.slot_float_ty.insert(slot, IrTy::F32);
+                            self_float += 1;
+                        }
+                        _ => {
+                            // Integer/bool field arrives in x{reg_idx+self_int}.
+                            ctx.instrs.push(Instr::Store {
+                                src: (reg_idx + self_int) as u8,
+                                slot,
+                            });
+                            self_int += 1;
+                        }
+                    }
                 }
                 ctx.locals.insert("self", base_slot);
                 ctx.local_tuple_lens.insert(base_slot, n_fields);
                 ctx.local_tuple_struct_types.insert(base_slot, type_name.to_owned());
-                reg_idx += n_fields;
+                reg_idx += self_int;
+                freg_idx += self_float;
             } else {
                 // Zero-field tuple struct: allocate a dummy slot for `self`.
                 let base_slot = ctx.alloc_slot()?;
@@ -1592,7 +1683,15 @@ fn lower_fn(
                     "tuple struct pattern parameter for unknown type `{type_name}`"
                 ))
             })?;
-            if n_fields > 0 && reg_idx + n_fields > 8 {
+            // FLS §4.2: float fields arrive in d-registers, integer fields in x-registers.
+            let float_field_tys = tuple_struct_float_field_types
+                .get(type_name)
+                .cloned()
+                .unwrap_or_default();
+            let n_int = float_field_tys.iter().filter(|t| t.is_none()).count()
+                .max(n_fields.saturating_sub(float_field_tys.len()));
+            let n_flt = float_field_tys.iter().filter(|t| t.is_some()).count();
+            if n_fields > 0 && (reg_idx + n_int > 8 || freg_idx + n_flt > 8) {
                 return Err(LowerError::Unsupported(
                     "tuple struct parameter exceeds ARM64 register window (>8 total registers)"
                         .into(),
@@ -1602,11 +1701,26 @@ fn lower_fn(
             for _ in 1..n_fields {
                 ctx.alloc_slot()?;
             }
+            let mut p_int = 0usize;
+            let mut p_flt = 0usize;
             for fi in 0..n_fields {
-                ctx.instrs.push(Instr::Store {
-                    src: (reg_idx + fi) as u8,
-                    slot: base_slot + fi as u8,
-                });
+                let slot = base_slot + fi as u8;
+                match float_field_tys.get(fi).copied().flatten() {
+                    Some(IrTy::F64) => {
+                        ctx.instrs.push(Instr::StoreF64 { src: (freg_idx + p_flt) as u8, slot });
+                        ctx.slot_float_ty.insert(slot, IrTy::F64);
+                        p_flt += 1;
+                    }
+                    Some(IrTy::F32) => {
+                        ctx.instrs.push(Instr::StoreF32 { src: (freg_idx + p_flt) as u8, slot });
+                        ctx.slot_float_ty.insert(slot, IrTy::F32);
+                        p_flt += 1;
+                    }
+                    _ => {
+                        ctx.instrs.push(Instr::Store { src: (reg_idx + p_int) as u8, slot });
+                        p_int += 1;
+                    }
+                }
             }
             // Bind each positional name to its slot (FLS §5.10.4).
             for (fi, name_span) in fields.iter().enumerate() {
@@ -1617,7 +1731,8 @@ fn lower_fn(
             }
             // Track type for `.0`/`.1` field access and method dispatch.
             ctx.local_tuple_struct_types.insert(base_slot, type_name.to_owned());
-            reg_idx += n_fields;
+            reg_idx += p_int;
+            freg_idx += p_flt;
             continue;
         }
 
@@ -1721,8 +1836,9 @@ fn lower_fn(
 
             // FLS §14.2, §10.1: Tuple struct parameter — `fn f(w: Wrap)`.
             //
-            // A tuple struct with N fields is passed as N consecutive registers,
-            // identical to the tuple struct self-parameter calling convention.
+            // A tuple struct with N fields is passed with integer fields in
+            // x{reg_idx}..x{reg_idx+n_int-1} and float fields in
+            // d{freg_idx}..d{freg_idx+n_flt-1} (ARM64 ABI, FLS §4.2).
             // Spill to N consecutive stack slots; register in `local_tuple_lens`
             // for `.0`/`.1` field access and `local_tuple_struct_types` for
             // method call dispatch (so `w.val()` resolves to `Wrap::val`).
@@ -1731,7 +1847,14 @@ fn lower_fn(
             // Cache-line note: N × 4-byte `str` per parameter spill.
             if let Some(&n_fields) = tuple_struct_defs.get(type_name) {
                 if n_fields > 0 {
-                    if reg_idx + n_fields > 8 {
+                    let float_field_tys = tuple_struct_float_field_types
+                        .get(type_name)
+                        .cloned()
+                        .unwrap_or_default();
+                    let n_int = float_field_tys.iter().filter(|t| t.is_none()).count()
+                        .max(n_fields.saturating_sub(float_field_tys.len()));
+                    let n_flt = float_field_tys.iter().filter(|t| t.is_some()).count();
+                    if reg_idx + n_int > 8 || freg_idx + n_flt > 8 {
                         return Err(LowerError::Unsupported(
                             "tuple struct parameter exceeds ARM64 register window (>8 total registers)".into(),
                         ));
@@ -1743,13 +1866,29 @@ fn lower_fn(
                     ctx.locals.insert(param_name, base_slot);
                     ctx.local_tuple_lens.insert(base_slot, n_fields);
                     ctx.local_tuple_struct_types.insert(base_slot, type_name.to_owned());
+                    let mut p_int = 0usize;
+                    let mut p_flt = 0usize;
                     for fi in 0..n_fields {
-                        ctx.instrs.push(Instr::Store {
-                            src: (reg_idx + fi) as u8,
-                            slot: base_slot + fi as u8,
-                        });
+                        let slot = base_slot + fi as u8;
+                        match float_field_tys.get(fi).copied().flatten() {
+                            Some(IrTy::F64) => {
+                                ctx.instrs.push(Instr::StoreF64 { src: (freg_idx + p_flt) as u8, slot });
+                                ctx.slot_float_ty.insert(slot, IrTy::F64);
+                                p_flt += 1;
+                            }
+                            Some(IrTy::F32) => {
+                                ctx.instrs.push(Instr::StoreF32 { src: (freg_idx + p_flt) as u8, slot });
+                                ctx.slot_float_ty.insert(slot, IrTy::F32);
+                                p_flt += 1;
+                            }
+                            _ => {
+                                ctx.instrs.push(Instr::Store { src: (reg_idx + p_int) as u8, slot });
+                                p_int += 1;
+                            }
+                        }
                     }
-                    reg_idx += n_fields;
+                    reg_idx += p_int;
+                    freg_idx += p_flt;
                 } else {
                     // Zero-field tuple struct: allocate a dummy slot.
                     let base_slot = ctx.alloc_slot()?;
@@ -2542,6 +2681,16 @@ struct LowerCtx<'src> {
     /// 8-byte slots, with `.i` at `base_slot + i`.
     tuple_struct_defs: &'src HashMap<String, usize>,
 
+    /// Per-field float type for tuple structs.
+    ///
+    /// FLS §4.2, §14.2: `None` = integer/bool field; `Some(IrTy::F64)` = f64;
+    /// `Some(IrTy::F32)` = f32. Used to select StoreF64/StoreF32 during
+    /// construction, StoreF64/StoreF32 during parameter spilling, and
+    /// LoadF64Slot/LoadF32Slot when loading fields to pass as arguments.
+    ///
+    /// Cache-line note: read-only during lowering; not on any hot path.
+    tuple_struct_float_field_types: &'src HashMap<String, Vec<Option<IrTy>>>,
+
     /// Enum type definitions: maps enum name → (variant name → discriminant).
     ///
     /// FLS §15: Enumerations. Unit variants are assigned integer discriminants
@@ -2552,6 +2701,16 @@ struct LowerCtx<'src> {
     /// Cache-line note: enum values are represented as i32, occupying one
     /// 8-byte stack slot — identical to any other i32 local.
     enum_defs: &'src EnumDefs,
+
+    /// Per-field float type for enum tuple variants.
+    ///
+    /// FLS §4.2, §15: Maps enum_name → variant_name → [field_float_types].
+    /// `None` = integer/bool field; `Some(IrTy::F64)` = f64; `Some(IrTy::F32)` = f32.
+    /// Used during variant construction (StoreF64/StoreF32 vs Store) and
+    /// TupleStruct pattern binding (LoadF64Slot/LoadF32Slot vs Load).
+    ///
+    /// Cache-line note: read-only during lowering; not on any hot path.
+    enum_variant_float_field_types: &'src HashMap<String, HashMap<String, Vec<Option<IrTy>>>>,
 
     /// Method self-kind registry: maps mangled method name → SelfKind.
     ///
@@ -3057,7 +3216,9 @@ impl<'src> LowerCtx<'src> {
         fn_ret_ty: IrTy,
         struct_defs: &'src HashMap<String, Vec<String>>,
         tuple_struct_defs: &'src HashMap<String, usize>,
+        tuple_struct_float_field_types: &'src HashMap<String, Vec<Option<IrTy>>>,
         enum_defs: &'src EnumDefs,
+        enum_variant_float_field_types: &'src HashMap<String, HashMap<String, Vec<Option<IrTy>>>>,
         method_self_kinds: &'src HashMap<String, SelfKind>,
         mut_self_scalar_return_fns: &'src std::collections::HashSet<String>,
         struct_return_fns: &'src HashMap<String, String>,
@@ -3092,7 +3253,9 @@ impl<'src> LowerCtx<'src> {
             fn_ret_ty,
             struct_defs,
             tuple_struct_defs,
+            tuple_struct_float_field_types,
             enum_defs,
+            enum_variant_float_field_types,
             method_self_kinds,
             mut_self_scalar_return_fns,
             struct_return_fns,
@@ -3158,6 +3321,25 @@ impl<'src> LowerCtx<'src> {
     fn field_float_ty(&self, struct_name: &str, field_idx: usize) -> Option<IrTy> {
         self.struct_float_field_types
             .get(struct_name)
+            .and_then(|fts| fts.get(field_idx))
+            .copied()
+            .flatten()
+    }
+
+    /// Return the float IrTy (F64 or F32) for a positional field of an enum tuple variant.
+    ///
+    /// FLS §4.2, §15: Used during variant construction and TupleStruct pattern binding
+    /// to choose StoreF64/LoadF64Slot vs StoreF32/LoadF32Slot vs Store/Load.
+    /// Returns `None` for integer/bool fields.
+    fn enum_variant_field_float_ty(
+        &self,
+        enum_name: &str,
+        variant_name: &str,
+        field_idx: usize,
+    ) -> Option<IrTy> {
+        self.enum_variant_float_field_types
+            .get(enum_name)
+            .and_then(|vm| vm.get(variant_name))
             .and_then(|fts| fts.get(field_idx))
             .copied()
             .flatten()
@@ -3255,17 +3437,22 @@ impl<'src> LowerCtx<'src> {
             // FLS §6.12.2, §4.2: A method call `var.method(...)` returns f64 if the
             // method is registered in `f64_return_fns` (mangled as `Type__method`).
             // Required so that `p.sum() as i32` selects `F64ToI32` (fcvtzs).
+            // FLS §14.2: Tuple struct receivers are registered in `local_tuple_struct_types`,
+            // not `local_struct_types` — check both.
             crate::ast::ExprKind::MethodCall { receiver, method, .. } => {
                 if let crate::ast::ExprKind::Path(segs) = &receiver.kind
                     && segs.len() == 1
                 {
                     let var_name = segs[0].text(self.source);
-                    if let Some(&slot) = self.locals.get(var_name)
-                        && let Some(struct_name) = self.local_struct_types.get(&slot).cloned()
-                    {
-                        let method_name = method.text(self.source);
-                        let mangled = format!("{struct_name}__{method_name}");
-                        return self.f64_return_fns.contains(&mangled);
+                    if let Some(&slot) = self.locals.get(var_name) {
+                        let struct_name = self.local_struct_types.get(&slot)
+                            .or_else(|| self.local_tuple_struct_types.get(&slot))
+                            .cloned();
+                        if let Some(struct_name) = struct_name {
+                            let method_name = method.text(self.source);
+                            let mangled = format!("{struct_name}__{method_name}");
+                            return self.f64_return_fns.contains(&mangled);
+                        }
                     }
                 }
                 false
@@ -3362,17 +3549,22 @@ impl<'src> LowerCtx<'src> {
             // FLS §6.12.2, §4.2: A method call `var.method(...)` returns f32 if the
             // method is registered in `f32_return_fns` (mangled as `Type__method`).
             // Required so that `p.sum() as i32` selects `F32ToI32` (fcvtzs).
+            // FLS §14.2: Tuple struct receivers are registered in `local_tuple_struct_types`,
+            // not `local_struct_types` — check both.
             crate::ast::ExprKind::MethodCall { receiver, method, .. } => {
                 if let crate::ast::ExprKind::Path(segs) = &receiver.kind
                     && segs.len() == 1
                 {
                     let var_name = segs[0].text(self.source);
-                    if let Some(&slot) = self.locals.get(var_name)
-                        && let Some(struct_name) = self.local_struct_types.get(&slot).cloned()
-                    {
-                        let method_name = method.text(self.source);
-                        let mangled = format!("{struct_name}__{method_name}");
-                        return self.f32_return_fns.contains(&mangled);
+                    if let Some(&slot) = self.locals.get(var_name) {
+                        let struct_name = self.local_struct_types.get(&slot)
+                            .or_else(|| self.local_tuple_struct_types.get(&slot))
+                            .cloned();
+                        if let Some(struct_name) = struct_name {
+                            let method_name = method.text(self.source);
+                            let mangled = format!("{struct_name}__{method_name}");
+                            return self.f32_return_fns.contains(&mangled);
+                        }
                     }
                 }
                 false
@@ -6028,10 +6220,39 @@ impl<'src> LowerCtx<'src> {
                         self.instrs.push(Instr::LoadImm(disc_reg, discriminant));
                         self.instrs.push(Instr::Store { src: disc_reg, slot: base_slot });
                         // Store each field in source order.
+                        // FLS §4.2, §15: Float fields use StoreF64/StoreF32;
+                        // integer/bool fields use the regular Store instruction.
                         for (i, arg) in args.iter().enumerate() {
-                            let val = self.lower_expr(arg, &IrTy::I32)?;
-                            let src = self.val_to_reg(val)?;
-                            self.instrs.push(Instr::Store { src, slot: base_slot + 1 + i as u8 });
+                            let slot = base_slot + 1 + i as u8;
+                            match self.enum_variant_field_float_ty(enum_name, variant_name, i) {
+                                Some(IrTy::F64) => {
+                                    let val = self.lower_expr(arg, &IrTy::F64)?;
+                                    let src = match val {
+                                        IrValue::FReg(r) => r,
+                                        _ => return Err(LowerError::Unsupported(
+                                            "f64 enum variant field did not produce a float value".into(),
+                                        )),
+                                    };
+                                    self.instrs.push(Instr::StoreF64 { src, slot });
+                                    self.slot_float_ty.insert(slot, IrTy::F64);
+                                }
+                                Some(IrTy::F32) => {
+                                    let val = self.lower_expr(arg, &IrTy::F32)?;
+                                    let src = match val {
+                                        IrValue::F32Reg(r) => r,
+                                        _ => return Err(LowerError::Unsupported(
+                                            "f32 enum variant field did not produce a float value".into(),
+                                        )),
+                                    };
+                                    self.instrs.push(Instr::StoreF32 { src, slot });
+                                    self.slot_float_ty.insert(slot, IrTy::F32);
+                                }
+                                _ => {
+                                    let val = self.lower_expr(arg, &IrTy::I32)?;
+                                    let src = self.val_to_reg(val)?;
+                                    self.instrs.push(Instr::Store { src, slot });
+                                }
+                            }
                         }
                         return Ok(());
                     }
@@ -6382,11 +6603,45 @@ impl<'src> LowerCtx<'src> {
                         // FLS §14.2: Record the tuple struct type so method call dispatch
                         // can compute the mangled name `TypeName__method_name`.
                         self.local_tuple_struct_types.insert(base_slot, ctor_name.to_owned());
+                        // FLS §4.2, §14.2: Look up per-field float types so f64/f32
+                        // fields use float registers and StoreF64/StoreF32.
+                        let float_field_tys = self
+                            .tuple_struct_float_field_types
+                            .get(ctor_name)
+                            .cloned()
+                            .unwrap_or_default();
                         // FLS §6.4:14 / §6.10: Arguments evaluated left-to-right.
                         for (i, arg_expr) in args.iter().enumerate() {
-                            let val = self.lower_expr(arg_expr, &IrTy::I32)?;
-                            let src = self.val_to_reg(val)?;
-                            self.instrs.push(Instr::Store { src, slot: base_slot + i as u8 });
+                            let slot = base_slot + i as u8;
+                            match float_field_tys.get(i).copied().flatten() {
+                                Some(IrTy::F64) => {
+                                    let val = self.lower_expr(arg_expr, &IrTy::F64)?;
+                                    let src = match val {
+                                        IrValue::FReg(r) => r,
+                                        _ => return Err(LowerError::Unsupported(
+                                            "f64 tuple struct field did not produce a float value".into(),
+                                        )),
+                                    };
+                                    self.instrs.push(Instr::StoreF64 { src, slot });
+                                    self.slot_float_ty.insert(slot, IrTy::F64);
+                                }
+                                Some(IrTy::F32) => {
+                                    let val = self.lower_expr(arg_expr, &IrTy::F32)?;
+                                    let src = match val {
+                                        IrValue::F32Reg(r) => r,
+                                        _ => return Err(LowerError::Unsupported(
+                                            "f32 tuple struct field did not produce a float value".into(),
+                                        )),
+                                    };
+                                    self.instrs.push(Instr::StoreF32 { src, slot });
+                                    self.slot_float_ty.insert(slot, IrTy::F32);
+                                }
+                                _ => {
+                                    let val = self.lower_expr(arg_expr, &IrTy::I32)?;
+                                    let src = self.val_to_reg(val)?;
+                                    self.instrs.push(Instr::Store { src, slot });
+                                }
+                            }
                         }
                         return Ok(());
                     }
@@ -7585,14 +7840,35 @@ impl<'src> LowerCtx<'src> {
                         });
                         self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: else_label });
                         // Install positional field bindings into bound_names.
+                        // FLS §4.2, §15: Float fields use LoadF64Slot/LoadF32Slot.
+                        // FLS §4.2: Register f64/f32 bindings in float_locals/float32_locals so
+                        // that path expressions like `x as i32` correctly emit fcvtzs (F64ToI32).
                         for (fi, fp) in fields.iter().enumerate() {
                             if let Pat::Ident(span) = fp {
                                 let fname = span.text(self.source);
                                 let fslot = base + 1 + fi as u8;
                                 let bslot = self.alloc_slot()?;
-                                let breg = self.alloc_reg()?;
-                                self.instrs.push(Instr::Load { dst: breg, slot: fslot });
-                                self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                match self.enum_variant_field_float_ty(enum_name, variant_name, fi) {
+                                    Some(IrTy::F64) => {
+                                        let freg = self.alloc_reg()?;
+                                        self.instrs.push(Instr::LoadF64Slot { dst: freg, slot: fslot });
+                                        self.instrs.push(Instr::StoreF64 { src: freg, slot: bslot });
+                                        self.slot_float_ty.insert(bslot, IrTy::F64);
+                                        self.float_locals.insert(fname, bslot);
+                                    }
+                                    Some(IrTy::F32) => {
+                                        let freg = self.alloc_reg()?;
+                                        self.instrs.push(Instr::LoadF32Slot { dst: freg, slot: fslot });
+                                        self.instrs.push(Instr::StoreF32 { src: freg, slot: bslot });
+                                        self.slot_float_ty.insert(bslot, IrTy::F32);
+                                        self.float32_locals.insert(fname, bslot);
+                                    }
+                                    _ => {
+                                        let breg = self.alloc_reg()?;
+                                        self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                        self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                    }
+                                }
                                 self.locals.insert(fname, bslot);
                                 bound_names.push(fname);
                             } else if !matches!(fp, Pat::Wildcard) {
@@ -7754,6 +8030,8 @@ impl<'src> LowerCtx<'src> {
                         let then_val = self.lower_block_to_value(then_block, ret_ty)?;
                         for name in &bound_names {
                             self.locals.remove(*name);
+                            self.float_locals.remove(*name);
+                            self.float32_locals.remove(*name);
                         }
                         let then_reg = self.val_to_reg(then_val)?;
                         self.instrs.push(Instr::Store { src: then_reg, slot: phi_slot });
@@ -7782,6 +8060,8 @@ impl<'src> LowerCtx<'src> {
                         self.lower_block_to_value(then_block, &IrTy::Unit)?;
                         for name in &bound_names {
                             self.locals.remove(*name);
+                            self.float_locals.remove(*name);
+                            self.float32_locals.remove(*name);
                         }
                         self.instrs.push(Instr::Branch(end_label));
 
@@ -7806,6 +8086,8 @@ impl<'src> LowerCtx<'src> {
                         let then_val = self.lower_block_to_value(then_block, &IrTy::F64)?;
                         for name in &bound_names {
                             self.locals.remove(*name);
+                            self.float_locals.remove(*name);
+                            self.float32_locals.remove(*name);
                         }
                         let then_freg = match then_val {
                             IrValue::FReg(r) => r,
@@ -7850,6 +8132,8 @@ impl<'src> LowerCtx<'src> {
                         let then_val = self.lower_block_to_value(then_block, &IrTy::F32)?;
                         for name in &bound_names {
                             self.locals.remove(*name);
+                            self.float_locals.remove(*name);
+                            self.float32_locals.remove(*name);
                         }
                         let then_freg = match then_val {
                             IrValue::F32Reg(r) => r,
@@ -8281,15 +8565,35 @@ impl<'src> LowerCtx<'src> {
                                     });
                                     self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
                                     // Install field bindings.
+                                    // FLS §4.2, §15: Float fields use LoadF64Slot/LoadF32Slot.
+                                    // FLS §4.2: Register f64/f32 bindings in float_locals/float32_locals.
                                     let mut bound: Vec<&str> = Vec::new();
                                     for (fi, fp) in fields.iter().enumerate() {
                                         if let Pat::Ident(span) = fp {
                                             let fname = span.text(self.source);
                                             let fslot = base + 1 + fi as u8;
                                             let bslot = self.alloc_slot()?;
-                                            let breg = self.alloc_reg()?;
-                                            self.instrs.push(Instr::Load { dst: breg, slot: fslot });
-                                            self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                            match self.enum_variant_field_float_ty(enum_name, variant_name, fi) {
+                                                Some(IrTy::F64) => {
+                                                    let freg = self.alloc_reg()?;
+                                                    self.instrs.push(Instr::LoadF64Slot { dst: freg, slot: fslot });
+                                                    self.instrs.push(Instr::StoreF64 { src: freg, slot: bslot });
+                                                    self.slot_float_ty.insert(bslot, IrTy::F64);
+                                                    self.float_locals.insert(fname, bslot);
+                                                }
+                                                Some(IrTy::F32) => {
+                                                    let freg = self.alloc_reg()?;
+                                                    self.instrs.push(Instr::LoadF32Slot { dst: freg, slot: fslot });
+                                                    self.instrs.push(Instr::StoreF32 { src: freg, slot: bslot });
+                                                    self.slot_float_ty.insert(bslot, IrTy::F32);
+                                                    self.float32_locals.insert(fname, bslot);
+                                                }
+                                                _ => {
+                                                    let breg = self.alloc_reg()?;
+                                                    self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                                    self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                                }
+                                            }
                                             self.locals.insert(fname, bslot);
                                             bound.push(fname);
                                         } else if !matches!(fp, Pat::Wildcard) {
@@ -8307,7 +8611,11 @@ impl<'src> LowerCtx<'src> {
                                     let body_reg = self.val_to_reg(body_val)?;
                                     self.instrs.push(Instr::Store { src: body_reg, slot: phi_slot });
                                     self.instrs.push(Instr::Branch(exit_label));
-                                    for name in &bound { self.locals.remove(*name); }
+                                    for name in &bound {
+                                        self.locals.remove(*name);
+                                        self.float_locals.remove(*name);
+                                        self.float32_locals.remove(*name);
+                                    }
                                     self.instrs.push(Instr::Label(next_label));
                                     continue;
                                 }
@@ -8515,18 +8823,40 @@ impl<'src> LowerCtx<'src> {
                                 vec![name]
                             }
                             Pat::TupleStruct { path: segs, fields } if segs.len() == 2 => {
+                                let enum_name_def = segs[0].text(self.source);
+                                let variant_name_def = segs[1].text(self.source);
                                 let base = enum_base_slot.ok_or_else(|| LowerError::Unsupported(
                                     "TupleStruct default arm requires enum variable scrutinee".into(),
                                 ))?;
                                 let mut names = Vec::new();
+                                // FLS §4.2, §15: Float fields use LoadF64Slot/LoadF32Slot.
+                                // FLS §4.2: Register f64/f32 bindings in float_locals/float32_locals.
                                 for (fi, fp) in fields.iter().enumerate() {
                                     if let Pat::Ident(span) = fp {
                                         let fname = span.text(self.source);
                                         let fslot = base + 1 + fi as u8;
                                         let bslot = self.alloc_slot()?;
-                                        let breg = self.alloc_reg()?;
-                                        self.instrs.push(Instr::Load { dst: breg, slot: fslot });
-                                        self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                        match self.enum_variant_field_float_ty(enum_name_def, variant_name_def, fi) {
+                                            Some(IrTy::F64) => {
+                                                let freg = self.alloc_reg()?;
+                                                self.instrs.push(Instr::LoadF64Slot { dst: freg, slot: fslot });
+                                                self.instrs.push(Instr::StoreF64 { src: freg, slot: bslot });
+                                                self.slot_float_ty.insert(bslot, IrTy::F64);
+                                                self.float_locals.insert(fname, bslot);
+                                            }
+                                            Some(IrTy::F32) => {
+                                                let freg = self.alloc_reg()?;
+                                                self.instrs.push(Instr::LoadF32Slot { dst: freg, slot: fslot });
+                                                self.instrs.push(Instr::StoreF32 { src: freg, slot: bslot });
+                                                self.slot_float_ty.insert(bslot, IrTy::F32);
+                                                self.float32_locals.insert(fname, bslot);
+                                            }
+                                            _ => {
+                                                let breg = self.alloc_reg()?;
+                                                self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                                self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                            }
+                                        }
                                         self.locals.insert(fname, bslot);
                                         names.push(fname);
                                     }
@@ -8599,6 +8929,8 @@ impl<'src> LowerCtx<'src> {
                         let body_val = self.lower_expr(&default_arm[0].body, ret_ty)?;
                         for name in &default_bindings {
                             self.locals.remove(*name);
+                            self.float_locals.remove(*name);
+                            self.float32_locals.remove(*name);
                         }
                         let body_reg = self.val_to_reg(body_val)?;
                         self.instrs.push(Instr::Store { src: body_reg, slot: phi_slot });
@@ -8836,15 +9168,35 @@ impl<'src> LowerCtx<'src> {
                                     });
                                     self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
                                     // Install field bindings.
+                                    // FLS §4.2, §15: Float fields use LoadF64Slot/LoadF32Slot.
+                                    // FLS §4.2: Register f64/f32 bindings in float_locals/float32_locals.
                                     let mut bound: Vec<&str> = Vec::new();
                                     for (fi, fp) in fields.iter().enumerate() {
                                         if let Pat::Ident(span) = fp {
                                             let fname = span.text(self.source);
                                             let fslot = base + 1 + fi as u8;
                                             let bslot = self.alloc_slot()?;
-                                            let breg = self.alloc_reg()?;
-                                            self.instrs.push(Instr::Load { dst: breg, slot: fslot });
-                                            self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                            match self.enum_variant_field_float_ty(enum_name, variant_name, fi) {
+                                                Some(IrTy::F64) => {
+                                                    let freg = self.alloc_reg()?;
+                                                    self.instrs.push(Instr::LoadF64Slot { dst: freg, slot: fslot });
+                                                    self.instrs.push(Instr::StoreF64 { src: freg, slot: bslot });
+                                                    self.slot_float_ty.insert(bslot, IrTy::F64);
+                                                    self.float_locals.insert(fname, bslot);
+                                                }
+                                                Some(IrTy::F32) => {
+                                                    let freg = self.alloc_reg()?;
+                                                    self.instrs.push(Instr::LoadF32Slot { dst: freg, slot: fslot });
+                                                    self.instrs.push(Instr::StoreF32 { src: freg, slot: bslot });
+                                                    self.slot_float_ty.insert(bslot, IrTy::F32);
+                                                    self.float32_locals.insert(fname, bslot);
+                                                }
+                                                _ => {
+                                                    let breg = self.alloc_reg()?;
+                                                    self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                                    self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                                }
+                                            }
                                             self.locals.insert(fname, bslot);
                                             bound.push(fname);
                                         } else if !matches!(fp, Pat::Wildcard) {
@@ -8860,7 +9212,11 @@ impl<'src> LowerCtx<'src> {
                                     }
                                     self.lower_expr(&arm.body, &IrTy::Unit)?;
                                     self.instrs.push(Instr::Branch(exit_label));
-                                    for name in &bound { self.locals.remove(*name); }
+                                    for name in &bound {
+                                        self.locals.remove(*name);
+                                        self.float_locals.remove(*name);
+                                        self.float32_locals.remove(*name);
+                                    }
                                     self.instrs.push(Instr::Label(next_label));
                                     continue;
                                 }
@@ -9029,18 +9385,40 @@ impl<'src> LowerCtx<'src> {
                                 vec![name]
                             }
                             Pat::TupleStruct { path: segs, fields } if segs.len() == 2 => {
+                                let enum_name_def2 = segs[0].text(self.source);
+                                let variant_name_def2 = segs[1].text(self.source);
                                 let base = enum_base_slot.ok_or_else(|| LowerError::Unsupported(
                                     "TupleStruct default arm requires enum variable scrutinee".into(),
                                 ))?;
                                 let mut names = Vec::new();
+                                // FLS §4.2, §15: Float fields use LoadF64Slot/LoadF32Slot.
+                                // FLS §4.2: Register f64/f32 bindings in float_locals/float32_locals.
                                 for (fi, fp) in fields.iter().enumerate() {
                                     if let Pat::Ident(span) = fp {
                                         let fname = span.text(self.source);
                                         let fslot = base + 1 + fi as u8;
                                         let bslot = self.alloc_slot()?;
-                                        let breg = self.alloc_reg()?;
-                                        self.instrs.push(Instr::Load { dst: breg, slot: fslot });
-                                        self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                        match self.enum_variant_field_float_ty(enum_name_def2, variant_name_def2, fi) {
+                                            Some(IrTy::F64) => {
+                                                let freg = self.alloc_reg()?;
+                                                self.instrs.push(Instr::LoadF64Slot { dst: freg, slot: fslot });
+                                                self.instrs.push(Instr::StoreF64 { src: freg, slot: bslot });
+                                                self.slot_float_ty.insert(bslot, IrTy::F64);
+                                                self.float_locals.insert(fname, bslot);
+                                            }
+                                            Some(IrTy::F32) => {
+                                                let freg = self.alloc_reg()?;
+                                                self.instrs.push(Instr::LoadF32Slot { dst: freg, slot: fslot });
+                                                self.instrs.push(Instr::StoreF32 { src: freg, slot: bslot });
+                                                self.slot_float_ty.insert(bslot, IrTy::F32);
+                                                self.float32_locals.insert(fname, bslot);
+                                            }
+                                            _ => {
+                                                let breg = self.alloc_reg()?;
+                                                self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                                self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                            }
+                                        }
                                         self.locals.insert(fname, bslot);
                                         names.push(fname);
                                     }
@@ -9111,6 +9489,8 @@ impl<'src> LowerCtx<'src> {
                         self.lower_expr(&default_arm[0].body, &IrTy::Unit)?;
                         for name in &default_bindings_unit {
                             self.locals.remove(*name);
+                            self.float_locals.remove(*name);
+                            self.float32_locals.remove(*name);
                         }
                         self.instrs.push(Instr::Label(exit_label));
                         Ok(IrValue::Unit)
@@ -9407,10 +9787,38 @@ impl<'src> LowerCtx<'src> {
                                 ctor_args.len()
                             )));
                         }
-                        for ctor_arg in ctor_args {
-                            let val = self.lower_expr(ctor_arg, &IrTy::I32)?;
-                            let reg = self.val_to_reg(val)?;
-                            arg_regs.push(reg);
+                        // FLS §4.2: f64/f32 fields go in float_arg_regs (d/s registers).
+                        let float_field_tys = self
+                            .tuple_struct_float_field_types
+                            .get(ctor_name)
+                            .cloned()
+                            .unwrap_or_default();
+                        for (i, ctor_arg) in ctor_args.iter().enumerate() {
+                            match float_field_tys.get(i).copied().flatten() {
+                                Some(IrTy::F64) => {
+                                    let val = self.lower_expr(ctor_arg, &IrTy::F64)?;
+                                    match val {
+                                        IrValue::FReg(r) => float_arg_regs.push(r),
+                                        _ => return Err(LowerError::Unsupported(
+                                            "f64 tuple struct ctor arg did not produce float".into(),
+                                        )),
+                                    }
+                                }
+                                Some(IrTy::F32) => {
+                                    let val = self.lower_expr(ctor_arg, &IrTy::F32)?;
+                                    match val {
+                                        IrValue::F32Reg(r) => float_arg_regs.push(r),
+                                        _ => return Err(LowerError::Unsupported(
+                                            "f32 tuple struct ctor arg did not produce float".into(),
+                                        )),
+                                    }
+                                }
+                                _ => {
+                                    let val = self.lower_expr(ctor_arg, &IrTy::I32)?;
+                                    let reg = self.val_to_reg(val)?;
+                                    arg_regs.push(reg);
+                                }
+                            }
                         }
                     } else if let ExprKind::StructLit {
                         name: struct_name_span,
@@ -9450,15 +9858,32 @@ impl<'src> LowerCtx<'src> {
                         && let Some(&base_slot) = self.locals.get(segs[0].text(self.source))
                         && let Some(&n_elems) = self.local_tuple_lens.get(&base_slot)
                     {
-                        // FLS §5.10.3, §9.2: Tuple variable used as a function argument.
-                        // Load each element from consecutive stack slots into registers,
-                        // matching the tuple parameter calling convention in `lower_fn`.
+                        // FLS §5.10.3, §9.2: Tuple / tuple struct variable used as a
+                        // function argument. Load each element from consecutive stack slots
+                        // into registers, using float registers (d/s) for f64/f32 elements
+                        // identified via slot_float_ty.
                         //
+                        // FLS §4.2: float elements go in d0-d7; integer elements in x0-x7.
                         // FLS §6.1.2:37–45: All loads emit runtime instructions.
                         for i in 0..n_elems {
-                            let reg = self.alloc_reg()?;
-                            self.instrs.push(Instr::Load { dst: reg, slot: base_slot + i as u8 });
-                            arg_regs.push(reg);
+                            let slot = base_slot + i as u8;
+                            match self.slot_float_ty.get(&slot).copied() {
+                                Some(IrTy::F64) => {
+                                    let reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::LoadF64Slot { dst: reg, slot });
+                                    float_arg_regs.push(reg);
+                                }
+                                Some(IrTy::F32) => {
+                                    let reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::LoadF32Slot { dst: reg, slot });
+                                    float_arg_regs.push(reg);
+                                }
+                                _ => {
+                                    let reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::Load { dst: reg, slot });
+                                    arg_regs.push(reg);
+                                }
+                            }
                         }
                     } else if let ExprKind::Array(elems) = &arg.kind {
                         // FLS §6.8, §9.2: Array literal used directly as a function argument —
@@ -10626,14 +11051,34 @@ impl<'src> LowerCtx<'src> {
                         });
                         self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: exit_label });
                         // Install positional field bindings into bound_names.
+                        // FLS §4.2, §15: Float fields use LoadF64Slot/LoadF32Slot.
+                        // FLS §4.2: Register f64/f32 bindings in float_locals/float32_locals.
                         for (fi, fp) in fields.iter().enumerate() {
                             if let Pat::Ident(span) = fp {
                                 let fname = span.text(self.source);
                                 let fslot = base + 1 + fi as u8;
                                 let bslot = self.alloc_slot()?;
-                                let breg = self.alloc_reg()?;
-                                self.instrs.push(Instr::Load { dst: breg, slot: fslot });
-                                self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                match self.enum_variant_field_float_ty(enum_name, variant_name, fi) {
+                                    Some(IrTy::F64) => {
+                                        let freg = self.alloc_reg()?;
+                                        self.instrs.push(Instr::LoadF64Slot { dst: freg, slot: fslot });
+                                        self.instrs.push(Instr::StoreF64 { src: freg, slot: bslot });
+                                        self.slot_float_ty.insert(bslot, IrTy::F64);
+                                        self.float_locals.insert(fname, bslot);
+                                    }
+                                    Some(IrTy::F32) => {
+                                        let freg = self.alloc_reg()?;
+                                        self.instrs.push(Instr::LoadF32Slot { dst: freg, slot: fslot });
+                                        self.instrs.push(Instr::StoreF32 { src: freg, slot: bslot });
+                                        self.slot_float_ty.insert(bslot, IrTy::F32);
+                                        self.float32_locals.insert(fname, bslot);
+                                    }
+                                    _ => {
+                                        let breg = self.alloc_reg()?;
+                                        self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                        self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                    }
+                                }
                                 self.locals.insert(fname, bslot);
                                 bound_names.push(fname);
                             } else if !matches!(fp, Pat::Wildcard) {
@@ -10784,6 +11229,8 @@ impl<'src> LowerCtx<'src> {
                 // Remove all bindings before back-edge.
                 for name in &bound_names {
                     self.locals.remove(*name);
+                    self.float_locals.remove(*name);
+                    self.float32_locals.remove(*name);
                 }
 
                 // Back-edge: re-evaluate scrutinee and re-check pattern.
@@ -12143,16 +12590,32 @@ impl<'src> LowerCtx<'src> {
                     }
                 } else if let Some(&n_fields) = self.tuple_struct_defs.get(recv_type_name.as_str()) {
                     // FLS §14.2, §10.1: Tuple struct receiver — load N fields from
-                    // consecutive slots. Same register convention as named struct.
+                    // consecutive slots. f64/f32 fields go in float registers (d/s),
+                    // integer fields go in integer registers (x).
                     //
+                    // FLS §4.2: float fields → float register bank.
                     // FLS §6.1.2:37–45: All loads are runtime instructions.
                     // Cache-line note: N × 4-byte `ldr` instructions per method call.
                     n_self_regs = n_fields;
                     for fi in 0..n_fields {
                         let slot = recv_base_slot + fi as u8;
-                        let reg = self.alloc_reg()?;
-                        self.instrs.push(Instr::Load { dst: reg, slot });
-                        arg_regs.push(reg);
+                        match self.slot_float_ty.get(&slot).copied() {
+                            Some(IrTy::F64) => {
+                                let reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::LoadF64Slot { dst: reg, slot });
+                                float_self_regs.push(reg);
+                            }
+                            Some(IrTy::F32) => {
+                                let reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::LoadF32Slot { dst: reg, slot });
+                                float_self_regs.push(reg);
+                            }
+                            _ => {
+                                let reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::Load { dst: reg, slot });
+                                arg_regs.push(reg);
+                            }
+                        }
                     }
                 } else {
                     return Err(LowerError::Unsupported(format!(
@@ -12456,7 +12919,9 @@ impl<'src> LowerCtx<'src> {
                     closure_ret_ty,
                     self.struct_defs,
                     self.tuple_struct_defs,
+                    self.tuple_struct_float_field_types,
                     self.enum_defs,
+                    self.enum_variant_float_field_types,
                     self.method_self_kinds,
                     self.mut_self_scalar_return_fns,
                     self.struct_return_fns,

@@ -1385,6 +1385,26 @@ for_f64_array_example:
     add     sp, sp, #48             // FLS §8.1: restore stack frame
     ret
 
+    // fn f64_tuple_struct_example — FLS §9
+    .global f64_tuple_struct_example
+f64_tuple_struct_example:
+    sub     sp, sp, #16             // FLS §8.1: frame for 2 slot(s)
+    adrp    x17, f64_tuple_struct_example__fc0              // FLS §2.4.4.2: f64 const addr (page)
+    add     x17, x17, :lo12:f64_tuple_struct_example__fc0  // FLS §2.4.4.2: f64 const addr (offset)
+    ldr     d0, [x17]             // FLS §2.4.4.2: load f64 into d0
+    str     d0, [sp, #0             ] // FLS §8.1: store f64 slot 0
+    adrp    x17, f64_tuple_struct_example__fc1              // FLS §2.4.4.2: f64 const addr (page)
+    add     x17, x17, :lo12:f64_tuple_struct_example__fc1  // FLS §2.4.4.2: f64 const addr (offset)
+    ldr     d1, [x17]             // FLS §2.4.4.2: load f64 into d1
+    str     d1, [sp, #8             ] // FLS §8.1: store f64 slot 1
+    ldr     d2, [sp, #0             ] // FLS §8.1: load f64 slot 0
+    ldr     d3, [sp, #8             ] // FLS §8.1: load f64 slot 1
+    fadd    d4, d2, d3           // FLS §6.5.5: f64 fadd
+    fcvtzs  w5, d4              // FLS §6.5.9: f64→i32 truncate
+    mov     x0, x5              // FLS §6.19: return reg 5 → x0
+    add     sp, sp, #16             // FLS §8.1: restore stack frame
+    ret
+
     // ELF entry point — FLS §18.1
     .global _start
 _start:
@@ -1415,3 +1435,9 @@ for_f64_array_example__fc2:
     .align 3
 for_f64_array_example__fc3:
     .quad 0x0000000000000000          // f64 0 (FLS §2.4.4.2)
+    .align 3
+f64_tuple_struct_example__fc0:
+    .quad 0x3ff8000000000000          // f64 1.5 (FLS §2.4.4.2)
+    .align 3
+f64_tuple_struct_example__fc1:
+    .quad 0x4004000000000000          // f64 2.5 (FLS §2.4.4.2)
