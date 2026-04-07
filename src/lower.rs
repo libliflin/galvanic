@@ -826,6 +826,24 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         }
     }
 
+    // Collect trait definitions (name → TraitDef) for default method resolution.
+    //
+    // FLS §10.1.1: A trait method may include a default implementation — a body
+    // provided in the trait definition. When an `impl Trait for Type` block omits
+    // an overridable method, the default body is used verbatim for that type.
+    //
+    // Galvanic emits `TypeName__methodName` for each default method that is not
+    // overridden in the implementing `impl` block.
+    //
+    // Cache-line note: this map is built once and read-only after construction;
+    // not on any hot runtime path.
+    let mut trait_defs_map: HashMap<String, &crate::ast::TraitDef> = HashMap::new();
+    for item in &src.items {
+        if let ItemKind::Trait(td) = &item.kind {
+            trait_defs_map.insert(td.name.text(source).to_owned(), td);
+        }
+    }
+
     // Collect type alias IrTy mappings: maps alias name → resolved IrTy.
     //
     // FLS §4.10: A type alias defines a new name for an existing type.
@@ -1075,6 +1093,29 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                     method_self_kinds.insert(mangled, kind);
                 }
             }
+            // FLS §10.1.1: Also register default methods from the implemented trait.
+            if let Some(trait_span) = impl_def.trait_name {
+                let trait_name = trait_span.text(source);
+                if let Some(td) = trait_defs_map.get(trait_name) {
+                    let overridden: std::collections::HashSet<&str> = impl_def.methods
+                        .iter()
+                        .map(|m| m.name.text(source))
+                        .collect();
+                    for default_method in &td.methods {
+                        if default_method.body.is_none() {
+                            continue; // abstract method — no default
+                        }
+                        let method_name = default_method.name.text(source);
+                        if overridden.contains(method_name) {
+                            continue; // overridden — use explicit impl
+                        }
+                        if let Some(kind) = default_method.self_param {
+                            let mangled = format!("{type_name}__{method_name}");
+                            method_self_kinds.insert(mangled, kind);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1188,6 +1229,33 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                     }
                 }
             }
+            // FLS §10.1.1: Also register default trait methods returning structs.
+            if let Some(trait_span) = impl_def.trait_name {
+                let trait_name = trait_span.text(source);
+                if let Some(td) = trait_defs_map.get(trait_name) {
+                    let overridden: std::collections::HashSet<&str> = impl_def.methods
+                        .iter()
+                        .map(|m| m.name.text(source))
+                        .collect();
+                    for default_method in &td.methods {
+                        if default_method.body.is_none() || default_method.self_param != Some(SelfKind::Ref) {
+                            continue;
+                        }
+                        let method_name = default_method.name.text(source);
+                        if overridden.contains(method_name) { continue; }
+                        let mangled = format!("{type_name}__{method_name}");
+                        if let Some(ret_ty) = &default_method.ret_ty
+                            && let TyKind::Path(segs) = &ret_ty.kind
+                            && segs.len() == 1
+                        {
+                            let ret_name = segs[0].text(source);
+                            if struct_defs.contains_key(ret_name) {
+                                struct_return_methods.insert(mangled, ret_name.to_owned());
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1258,6 +1326,32 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         "f64" => { f64_return_fns.insert(mangled); }
                         "f32" => { f32_return_fns.insert(mangled); }
                         _ => {}
+                    }
+                }
+            }
+            // FLS §10.1.1: Also register default trait methods returning f64/f32.
+            if let Some(trait_span) = impl_def.trait_name {
+                let trait_name = trait_span.text(source);
+                if let Some(td) = trait_defs_map.get(trait_name) {
+                    let overridden: std::collections::HashSet<&str> = impl_def.methods
+                        .iter()
+                        .map(|m| m.name.text(source))
+                        .collect();
+                    for default_method in &td.methods {
+                        if default_method.body.is_none() { continue; }
+                        let method_name = default_method.name.text(source);
+                        if overridden.contains(method_name) { continue; }
+                        let mangled = format!("{type_name}__{method_name}");
+                        if let Some(ret_ty) = &default_method.ret_ty
+                            && let TyKind::Path(segs) = &ret_ty.kind
+                            && segs.len() == 1
+                        {
+                            match segs[0].text(source) {
+                                "f64" => { f64_return_fns.insert(mangled); }
+                                "f32" => { f32_return_fns.insert(mangled); }
+                                _ => {}
+                            }
+                        }
                     }
                 }
             }
@@ -1465,10 +1559,77 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                     fns.extend(closure_fns);
                     trampolines.extend(fn_trampolines);
                 }
+                // FLS §10.1.1: Emit default trait methods that are not overridden.
+                //
+                // When `impl Trait for Type` omits a method that has a default body
+                // in the trait definition, galvanic emits `TypeName__methodName` using
+                // the default body from the trait, with `impl_type = Some(type_name)` so
+                // that `self.foo()` calls inside the default body resolve to
+                // `TypeName__foo` (static dispatch, FLS §13).
+                if let Some(trait_span) = impl_def.trait_name {
+                    let trait_name = trait_span.text(source);
+                    if let Some(td) = trait_defs_map.get(trait_name) {
+                        let overridden: std::collections::HashSet<&str> = impl_def.methods
+                            .iter()
+                            .map(|m| m.name.text(source))
+                            .collect();
+                        for default_method in &td.methods {
+                            if default_method.body.is_none() {
+                                continue; // abstract method — body provided by impl
+                            }
+                            let method_name = default_method.name.text(source);
+                            if overridden.contains(method_name) {
+                                continue; // impl provides its own version
+                            }
+                            let mangled = format!("{type_name}__{method_name}");
+                            let mctx = Some(MethodCtx {
+                                impl_type: default_method.self_param.map(|_| type_name),
+                                mangled_name: &mangled,
+                                self_kind: default_method.self_param,
+                            });
+                            let (ir_fn, closure_fns, fn_trampolines, next_label) = lower_fn(
+                                default_method,
+                                source,
+                                &struct_defs,
+                                &tuple_struct_defs,
+                                &tuple_struct_float_field_types,
+                                &enum_defs,
+                                &enum_variant_float_field_types,
+                                &method_self_kinds,
+                                &mut_self_scalar_return_fns,
+                                &struct_return_fns,
+                                &struct_return_free_fns,
+                                &enum_return_fns,
+                                &struct_return_methods,
+                                &tuple_return_free_fns,
+                                &f64_return_fns,
+                                &f32_return_fns,
+                                &const_vals,
+                                &const_f64_vals,
+                                &const_f32_vals,
+                                &static_names,
+                                &static_f64_names,
+                                &static_f32_names,
+                                &fn_names,
+                                &struct_raw_field_types,
+                                &struct_field_offsets,
+                                &struct_sizes,
+                                &type_alias_irtys,
+                                &struct_float_field_types,
+                                mctx,
+                                label_base,
+                            )?;
+                            label_base = next_label;
+                            fns.push(ir_fn);
+                            fns.extend(closure_fns);
+                            trampolines.extend(fn_trampolines);
+                        }
+                    }
+                }
             }
             ItemKind::Struct(_) | ItemKind::Enum(_) => {} // already processed above
-            // FLS §13: Trait definitions are parsed but produce no codegen.
-            // Trait method implementations are emitted via `ItemKind::Impl`.
+            // FLS §13: Trait definitions are parsed but produce no codegen directly.
+            // Default method implementations are emitted via `ItemKind::Impl` above.
             ItemKind::Trait(_) => {}
             // FLS §7.1: Const items are collected in the first pass above.
             // They produce no runtime code of their own.
