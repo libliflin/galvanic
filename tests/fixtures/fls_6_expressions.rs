@@ -742,3 +742,21 @@ fn array_type_annotation_example() -> i32 {
     // FLS §6.9: element access on annotated arrays.
     a[1] + b[0]  // 20 + 5 = 25
 }
+
+// FLS §6.8 + §6.9: 2D array literal and nested indexing.
+//
+// FLS §6.8: An array expression `[[1, 2], [3, 4]]` has type `[[i32; 2]; 2]`.
+// FLS §6.9: Nested index `grid[i][j]` selects element at row i, column j.
+//
+// FLS §6.8 NOTE: The spec does not provide a 2D array code example.
+// This function is derived from the type and expression rules in §6.8 and §6.9.
+//
+// Cache-line note: a 2×2 i32 grid (4 × 8-byte slots = 32 bytes) fits in one
+// 64-byte cache line. A 4×4 grid (16 × 8 bytes = 128 bytes) spans two lines.
+
+fn two_d_array_example() -> i32 {
+    // FLS §6.8: 2D array literal initializer.
+    let grid = [[1, 2], [3, 4]];
+    // FLS §6.9: nested indexing: grid[0][0]=1, grid[1][1]=4, sum=5.
+    grid[0][0] + grid[1][1]  // 1 + 4 = 5
+}
