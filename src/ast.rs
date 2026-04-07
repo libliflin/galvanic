@@ -1274,6 +1274,23 @@ pub enum ExprKind {
         body: Box<Block>,
     },
 
+    /// Const block expression — FLS §6.4.2.
+    ///
+    /// `const { body }` evaluates `body` in a const context at compile time.
+    /// The result is a compile-time constant substituted at the use site as
+    /// a `LoadImm`, identical to referencing a named `const` item.
+    ///
+    /// Unlike a named `const` item (§7.1) the value is anonymous and scoped
+    /// to the surrounding expression. Unlike a `const fn` call (§9:41–43)
+    /// no prior declaration is required.
+    ///
+    /// FLS §6.4.2: "A const block expression is a block expression preceded
+    /// by the keyword `const`."
+    ///
+    /// Cache-line note: each use emits one `LoadImm` (MOV imm) — 4 bytes,
+    /// identical footprint to a named constant reference. No stack slot needed.
+    ConstBlock(Box<Block>),
+
     /// A closure expression. FLS §6.14.
     ///
     /// `|params| body` or `|params| -> RetTy { body }` or `|| body`.
