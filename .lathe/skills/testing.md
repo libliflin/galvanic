@@ -1,171 +1,152 @@
-# Testing in galvanic
+# Testing — How Galvanic Tests Itself
 
-This file exists to answer: "What does a good test look like in this project, and where do tests live?"
-
----
-
-## Current state (Phase 2, as of init)
-
-There is exactly one test: `tests/smoke.rs::empty_file_exits_zero`. It:
-1. Creates a temp file with a `.rs` suffix
-2. Runs the `galvanic` binary on it
-3. Asserts exit 0
-4. Asserts stdout contains `"galvanic: compiling"`
-
-This is an integration test (via `std::process::Command` + `env!("CARGO_BIN_EXE_galvanic")`). It tells us the binary runs. It tells us nothing about whether the lexer or parser produce correct output.
+This file exists to prevent a specific mistake: writing a milestone test that
+checks only the exit code. An interpreter and a compiler can both produce exit
+code 42 for `fn main() -> i32 { 42 }`. Assembly inspection is what separates them.
 
 ---
 
-## Test locations
+## Test Suite Structure
 
 ```
-tests/          — Integration tests (Rust convention: separate test binaries)
-  smoke.rs      — Current binary smoke test
-
-src/lexer.rs    — Inline unit tests go in #[cfg(test)] mod tests { } at the bottom
-src/parser.rs   — Same: inline #[cfg(test)] mod tests { }
-src/ast.rs      — Less relevant; AST is just data structures
+tests/
+  smoke.rs          — binary behavior (runs galvanic as a subprocess)
+  fls_fixtures.rs   — parse-only acceptance tests for FLS programs
+  e2e.rs            — full pipeline tests (assembly inspection + compile-and-run)
+  fixtures/
+    fls_*.rs        — Rust programs derived from FLS examples
+    fls_*.s         — expected ARM64 assembly output (golden files)
+    milestone_1.rs  — first milestone program
 ```
 
-The pattern for inline tests in Rust:
+---
+
+## Three Kinds of Tests
+
+### 1. Parse acceptance (`tests/fls_fixtures.rs`)
+
 ```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
+fn assert_galvanic_accepts(fixture: &str) { ... }
 
-    #[test]
-    fn test_name() {
-        // ...
-    }
+#[test]
+fn fls_10_3_assoc_consts() {
+    assert_galvanic_accepts("fls_10_3_assoc_consts.rs");
 }
 ```
 
----
+These verify galvanic can lex and parse a fixture file without error. They do
+**not** verify codegen. A feature can appear here long before it appears in e2e.
+When you add a new fixture (e.g., `fls_12_generics.rs`), add a test here first.
 
-## How to test the lexer
-
-The public API is `lexer::tokenize(src: &str) -> Result<Vec<Token>, LexError>`.
-
-A useful lexer test feeds a source string and checks the `TokenKind` sequence:
+### 2. Assembly inspection (`compile_to_asm` in `tests/e2e.rs`)
 
 ```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
+fn compile_to_asm(source: &str) -> String { ... }
 
-    fn kinds(src: &str) -> Vec<TokenKind> {
-        tokenize(src)
-            .unwrap()
-            .iter()
-            .map(|t| t.kind)
-            .collect()
-    }
-
-    #[test]
-    fn integer_literal() {
-        assert_eq!(kinds("42"), vec![TokenKind::LitInteger, TokenKind::Eof]);
-    }
-
-    #[test]
-    fn hex_literal() {
-        assert_eq!(kinds("0xFF"), vec![TokenKind::LitInteger, TokenKind::Eof]);
-    }
-
-    #[test]
-    fn fn_keyword() {
-        assert_eq!(kinds("fn"), vec![TokenKind::KwFn, TokenKind::Eof]);
-    }
+#[test]
+fn runtime_add_emits_add_instruction() {
+    let asm = compile_to_asm("fn main() -> i32 { 1 + 2 }\n");
+    assert!(asm.contains("add"), "expected add instruction...");
+    assert!(!asm.contains("mov     x0, #3"), "must not fold to constant...");
 }
 ```
 
-Key things to test in the lexer:
-- All literal types: integer (decimal, hex, octal, binary), float, string, char, byte literals
-- Keywords: `fn`, `let`, `if`, `else`, `return`, `mut`, `pub`
-- Operators and punctuation: `+`, `-`, `*`, `/`, `==`, `!=`, `->`, `::`, `{`, `}`
-- Identifiers vs. keywords (e.g., `foo` vs. `fn`)
-- Whitespace and comment stripping (they should not appear in output)
-- Lifetime tokens: `'a`, `'static`
-- Error cases: unterminated string, unknown character
+`compile_to_asm` runs lex → parse → lower → codegen and returns the assembly
+string. It does **not** assemble or run the result. It works on macOS without
+cross tools. This is the **primary correctness check** for new codegen features.
 
----
+Every new operator, control flow construct, or IR instruction type needs:
+- A positive assertion: the expected instruction is present in the assembly.
+- A negative assertion: the constant is NOT folded into a `mov #N`.
 
-## How to test the parser
-
-The public API is `parser::parse(tokens: &[Token], src: &str) -> Result<SourceFile, ParseError>`.
-
-The easiest way to test the parser is to lex first:
+### 3. Compile and run (`compile_and_run` in `tests/e2e.rs`)
 
 ```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::lexer;
+fn compile_and_run(source: &str) -> Option<i32> { ... }
 
-    fn parse_ok(src: &str) -> SourceFile {
-        let tokens = lexer::tokenize(src).expect("lex failed");
-        parse(&tokens, src).expect("parse failed")
-    }
-
-    fn parse_err(src: &str) -> ParseError {
-        let tokens = lexer::tokenize(src).expect("lex failed");
-        parse(&tokens, src).expect_err("expected parse error")
-    }
-
-    #[test]
-    fn empty_source() {
-        let sf = parse_ok("");
-        assert_eq!(sf.items.len(), 0);
-    }
-
-    #[test]
-    fn simple_fn_no_args_no_return() {
-        let sf = parse_ok("fn foo() {}");
-        assert_eq!(sf.items.len(), 1);
-        // Check it's a Fn item
-        match &sf.items[0].kind {
-            ItemKind::Fn(f) => assert_eq!(f.name.text("fn foo() {}"), "foo"),
-            _ => panic!("expected Fn item"),
-        }
-    }
-
-    #[test]
-    fn fn_with_return_literal() {
-        let src = "fn answer() -> i32 { 42 }";
-        let sf = parse_ok(src);
-        assert_eq!(sf.items.len(), 1);
-        // body has no stmts, tail is LitInt(42)
-    }
+#[test]
+fn milestone_1_main_returns_zero() {
+    let Some(exit_code) = compile_and_run("fn main() -> i32 { 0 }\n") else {
+        return; // skipped if cross tools unavailable
+    };
+    assert_eq!(exit_code, 0);
 }
 ```
 
-Key things to test in the parser:
-- Empty source → 0 items
-- Single fn with no params, no return type, empty body
-- Fn with params: `fn add(a: i32, b: i32) -> i32 { a + b }`
-- Return type: `-> i32`, `-> ()`, omitted (implicit unit)
-- Tail expression vs. expression statement: `{ 42 }` vs. `{ 42; }`
-- If expression: `if x { 1 } else { 2 }`
-- Nested calls: `foo(bar(1, 2))`
-- Let binding: `let x = 5;`, `let x: i32 = 5;`
-- Binary operators across precedence levels: `a + b * c` (multiplication binds tighter)
-- Multiple fns in one file
-- Error cases: `fn foo(` → unterminated parameter list
+Runs the full pipeline including assembling, linking, and executing the ARM64
+binary (via qemu-aarch64 on non-ARM64 hosts). Skips automatically when cross
+tools are not installed. Always runs on CI (ubuntu-latest installs them).
+
+This is the end-to-end truth check but it cannot distinguish "correct runtime
+behavior" from "correct constant folded at compile time" by itself — that is
+why assembly inspection is also required.
 
 ---
 
-## Integration test pattern (existing in tests/smoke.rs)
+## Writing a Complete Milestone Test
 
-For testing the binary end-to-end, the existing pattern uses:
-- `tempfile::NamedTempFile::with_suffix(".rs")` to create temp input files
-- `env!("CARGO_BIN_EXE_galvanic")` to get the compiled binary path
-- `std::process::Command` to run it
+A well-covered milestone has ALL THREE test layers:
 
-The `tempfile` crate is already a dev-dependency. Use this pattern for any integration tests that need real Rust source files on disk.
+```rust
+// Layer 1: parse acceptance (in fls_fixtures.rs)
+#[test]
+fn fls_15_closures() {
+    assert_galvanic_accepts("fls_15_closures.rs");
+}
+
+// Layer 2: assembly inspection (in e2e.rs) — REQUIRED
+// Tests that the feature emits the right instruction AND doesn't constant-fold
+#[test]
+fn milestone_N_closure_captures_emit_load() {
+    let asm = compile_to_asm("fn main() -> i32 { let x = 7; let f = || x; f() }\n");
+    assert!(asm.contains("ldr"), "closure must emit a load from capture slot");
+    assert!(!asm.contains("mov     x0, #7"), "must not constant-fold captured value");
+}
+
+// Layer 3: compile and run (in e2e.rs)
+#[test]
+fn milestone_N_closure_captures_correct_value() {
+    let Some(exit_code) = compile_and_run("fn main() -> i32 { let x = 7; let f = || x; f() }\n") else {
+        return;
+    };
+    assert_eq!(exit_code, 7);
+}
+```
+
+If a milestone only has Layer 3, it is incompletely tested.
 
 ---
 
-## What NOT to do
+## Fixture Files (`tests/fixtures/`)
 
-- Don't add golden-file tests (comparing serialized AST output to files). The AST Debug impl is fine for assertions, but golden files become brittle as the AST evolves.
-- Don't test internal parser methods directly — test via the `parse()` public function.
-- Don't delete the smoke test to "simplify." It catches a different failure mode (binary doesn't run at all) than unit tests.
+Fixture `.rs` files are Rust programs derived from FLS examples. Not invented —
+taken from the spec. When the FLS provides an example, use it verbatim or
+minimally adapted. If the spec provides no example, note that in the file.
+
+Some fixtures have a corresponding `.s` file (expected ARM64 assembly). These
+are golden files. If `emit_asm` output for a fixture changes, update the `.s`
+file and explain the change in the changelog.
+
+---
+
+## Test Naming Convention
+
+Follow the pattern already in `tests/e2e.rs`:
+
+- `milestone_{N}_{description}` — numbered milestone tests
+- `runtime_{op}_emits_{instruction}_instruction` — assembly inspection tests
+- `fls_{section}_{description}` — FLS-derived acceptance tests
+
+---
+
+## What Makes a Test Adversarial
+
+The easiest test is always: `fn main() -> i32 { 42 }`. This tests almost nothing.
+A better test uses:
+
+- **Parameters**: `fn f(x: i32) -> i32 { ... }` — prevents constant folding by making the input unknown at compile time.
+- **Multiple operations**: chains of operations that would produce the wrong answer if any step was skipped.
+- **Boundary values**: 0, negative numbers, i32::MAX, for types that have them.
+- **Interaction between features**: a closure that captures a variable that was computed by a function call.
+
+When writing a test for a new feature, ask: "would this test catch the bug where galvanic constant-folds instead of generating runtime code?" If not, add a negative assertion.
