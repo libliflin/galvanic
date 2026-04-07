@@ -8008,69 +8008,90 @@ impl<'src> LowerCtx<'src> {
                         | BinOp::Shr
                 ) =>
             {
+                // Flatten the left-associative spine iteratively to avoid stack
+                // overflow on deeply nested binary expressions (e.g. 150 additions).
+                //
+                // A left-associative chain `a + b + c + d` parses to:
+                //   Binary { lhs: Binary { lhs: Binary { lhs: a, rhs: b }, rhs: c }, rhs: d }
+                // Naively recursing on lhs at each level creates call-stack depth
+                // proportional to the chain length. We instead walk the spine here
+                // and collect (op, rhs) pairs, then process them iteratively.
+                //
+                // FLS §6.4.1: Expressions in a block are evaluated left-to-right.
+                // FLS §6.5.5: Binary arithmetic is left-associative.
+                let is_arith_op = |o: &BinOp| matches!(
+                    o,
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
+                        | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+                        | BinOp::Shl | BinOp::Shr
+                );
+                let mut spine: Vec<(&BinOp, &Expr)> = vec![(op, rhs)];
+                let mut leftmost: &Expr = lhs;
+                while let ExprKind::Binary { op: spine_op, lhs: spine_lhs, rhs: spine_rhs } = &leftmost.kind {
+                    if is_arith_op(spine_op) {
+                        spine.push((spine_op, spine_rhs));
+                        leftmost = spine_lhs;
+                    } else {
+                        break;
+                    }
+                }
+                spine.reverse(); // now in left-to-right evaluation order
+
                 match ret_ty {
                     IrTy::I32 => {
-                        let lhs_val = self.lower_expr(lhs, ret_ty)?;
+                        // Lower the leftmost leaf (not a binary arithmetic node).
+                        let mut acc_val = self.lower_expr(leftmost, ret_ty)?;
 
-                        // Spill lhs to a stack slot if rhs contains a call.
+                        // Apply each (op, rhs) iteratively, spilling the accumulator
+                        // register when the rhs contains a call (caller-saved regs).
                         //
                         // ARM64 calling convention: x0–x17 are caller-saved.
-                        // A `bl` instruction in the rhs lowers to a call that
-                        // clobbers every register in that range, including the
-                        // register that holds the lhs result. Without a spill,
-                        // `fib(n-1) + fib(n-2)` would compute the wrong answer
-                        // because fib(n-2)'s call sequence overwrites the
-                        // register that holds fib(n-1)'s result.
-                        //
-                        // Only spill when lhs is already in a register (not an
-                        // unresolved immediate like `IrValue::I32`). Immediates
-                        // are not in any register yet so they are unaffected by
-                        // the call.
-                        //
-                        // FLS §6.12.1: Call expressions follow ARM64 AAPCS64
-                        // calling convention (caller-saved: x0–x17).
-                        let lhs_spill: Option<u8> = if let IrValue::Reg(r) = lhs_val {
-                            if expr_contains_call(rhs) {
-                                let slot = self.alloc_slot()?;
-                                self.instrs.push(Instr::Store { src: r, slot });
-                                Some(slot)
+                        // A `bl` instruction in rhs clobbers the register holding acc.
+                        // Without a spill, `fib(n-1) + fib(n-2)` would compute the
+                        // wrong answer. FLS §6.12.1: Call expressions follow AAPCS64.
+                        for (step_op, rhs_expr) in &spine {
+                            let acc_spill: Option<u8> = if let IrValue::Reg(r) = acc_val {
+                                if expr_contains_call(rhs_expr) {
+                                    let slot = self.alloc_slot()?;
+                                    self.instrs.push(Instr::Store { src: r, slot });
+                                    Some(slot)
+                                } else {
+                                    None
+                                }
                             } else {
                                 None
-                            }
-                        } else {
-                            None
-                        };
+                            };
 
-                        let rhs_val = self.lower_expr(rhs, ret_ty)?;
+                            let rhs_val = self.lower_expr(rhs_expr, ret_ty)?;
 
-                        // Reload lhs from its spill slot, if we spilled it.
-                        let lhs_val = if let Some(slot) = lhs_spill {
+                            let acc_resolved = if let Some(slot) = acc_spill {
+                                let dst = self.alloc_reg()?;
+                                self.instrs.push(Instr::Load { dst, slot });
+                                IrValue::Reg(dst)
+                            } else {
+                                acc_val
+                            };
+
+                            let lhs_reg = self.val_to_reg(acc_resolved)?;
+                            let rhs_reg = self.val_to_reg(rhs_val)?;
                             let dst = self.alloc_reg()?;
-                            self.instrs.push(Instr::Load { dst, slot });
-                            IrValue::Reg(dst)
-                        } else {
-                            lhs_val
-                        };
-
-                        let lhs_reg = self.val_to_reg(lhs_val)?;
-                        let rhs_reg = self.val_to_reg(rhs_val)?;
-
-                        let dst = self.alloc_reg()?;
-                        let ir_op = match op {
-                            BinOp::Add => IrBinOp::Add,
-                            BinOp::Sub => IrBinOp::Sub,
-                            BinOp::Mul => IrBinOp::Mul,
-                            BinOp::Div => IrBinOp::Div,
-                            BinOp::Rem => IrBinOp::Rem,
-                            BinOp::BitAnd => IrBinOp::BitAnd,
-                            BinOp::BitOr => IrBinOp::BitOr,
-                            BinOp::BitXor => IrBinOp::BitXor,
-                            BinOp::Shl => IrBinOp::Shl,
-                            BinOp::Shr => IrBinOp::Shr,
-                            _ => unreachable!("matched above"),
-                        };
-                        self.instrs.push(Instr::BinOp { op: ir_op, dst, lhs: lhs_reg, rhs: rhs_reg });
-                        Ok(IrValue::Reg(dst))
+                            let ir_op = match step_op {
+                                BinOp::Add => IrBinOp::Add,
+                                BinOp::Sub => IrBinOp::Sub,
+                                BinOp::Mul => IrBinOp::Mul,
+                                BinOp::Div => IrBinOp::Div,
+                                BinOp::Rem => IrBinOp::Rem,
+                                BinOp::BitAnd => IrBinOp::BitAnd,
+                                BinOp::BitOr => IrBinOp::BitOr,
+                                BinOp::BitXor => IrBinOp::BitXor,
+                                BinOp::Shl => IrBinOp::Shl,
+                                BinOp::Shr => IrBinOp::Shr,
+                                _ => unreachable!("matched above"),
+                            };
+                            self.instrs.push(Instr::BinOp { op: ir_op, dst, lhs: lhs_reg, rhs: rhs_reg });
+                            acc_val = IrValue::Reg(dst);
+                        }
+                        Ok(acc_val)
                     }
                     // FLS §4.1: Unsigned integer arithmetic. Same spill/reload
                     // logic as signed, but division uses `udiv` (IrBinOp::UDiv)
@@ -8078,50 +8099,52 @@ impl<'src> LowerCtx<'src> {
                     // unsigned semantics. Add/sub/mul/bitwise are identical to
                     // signed at the hardware level on ARM64.
                     IrTy::U32 => {
-                        let lhs_val = self.lower_expr(lhs, ret_ty)?;
+                        let mut acc_val = self.lower_expr(leftmost, ret_ty)?;
 
-                        let lhs_spill: Option<u8> = if let IrValue::Reg(r) = lhs_val {
-                            if expr_contains_call(rhs) {
-                                let slot = self.alloc_slot()?;
-                                self.instrs.push(Instr::Store { src: r, slot });
-                                Some(slot)
+                        for (step_op, rhs_expr) in &spine {
+                            let acc_spill: Option<u8> = if let IrValue::Reg(r) = acc_val {
+                                if expr_contains_call(rhs_expr) {
+                                    let slot = self.alloc_slot()?;
+                                    self.instrs.push(Instr::Store { src: r, slot });
+                                    Some(slot)
+                                } else {
+                                    None
+                                }
                             } else {
                                 None
-                            }
-                        } else {
-                            None
-                        };
+                            };
 
-                        let rhs_val = self.lower_expr(rhs, ret_ty)?;
+                            let rhs_val = self.lower_expr(rhs_expr, ret_ty)?;
 
-                        let lhs_val = if let Some(slot) = lhs_spill {
+                            let acc_resolved = if let Some(slot) = acc_spill {
+                                let dst = self.alloc_reg()?;
+                                self.instrs.push(Instr::Load { dst, slot });
+                                IrValue::Reg(dst)
+                            } else {
+                                acc_val
+                            };
+
+                            let lhs_reg = self.val_to_reg(acc_resolved)?;
+                            let rhs_reg = self.val_to_reg(rhs_val)?;
                             let dst = self.alloc_reg()?;
-                            self.instrs.push(Instr::Load { dst, slot });
-                            IrValue::Reg(dst)
-                        } else {
-                            lhs_val
-                        };
-
-                        let lhs_reg = self.val_to_reg(lhs_val)?;
-                        let rhs_reg = self.val_to_reg(rhs_val)?;
-
-                        let dst = self.alloc_reg()?;
-                        // FLS §4.1: unsigned uses udiv and lsr; all others identical to signed.
-                        let ir_op = match op {
-                            BinOp::Add => IrBinOp::Add,
-                            BinOp::Sub => IrBinOp::Sub,
-                            BinOp::Mul => IrBinOp::Mul,
-                            BinOp::Div => IrBinOp::UDiv,
-                            BinOp::Rem => IrBinOp::Rem, // unsigned rem: sdiv step replaced by udiv in codegen
-                            BinOp::BitAnd => IrBinOp::BitAnd,
-                            BinOp::BitOr => IrBinOp::BitOr,
-                            BinOp::BitXor => IrBinOp::BitXor,
-                            BinOp::Shl => IrBinOp::Shl,
-                            BinOp::Shr => IrBinOp::UShr,
-                            _ => unreachable!("matched above"),
-                        };
-                        self.instrs.push(Instr::BinOp { op: ir_op, dst, lhs: lhs_reg, rhs: rhs_reg });
-                        Ok(IrValue::Reg(dst))
+                            // FLS §4.1: unsigned uses udiv and lsr; all others identical to signed.
+                            let ir_op = match step_op {
+                                BinOp::Add => IrBinOp::Add,
+                                BinOp::Sub => IrBinOp::Sub,
+                                BinOp::Mul => IrBinOp::Mul,
+                                BinOp::Div => IrBinOp::UDiv,
+                                BinOp::Rem => IrBinOp::Rem,
+                                BinOp::BitAnd => IrBinOp::BitAnd,
+                                BinOp::BitOr => IrBinOp::BitOr,
+                                BinOp::BitXor => IrBinOp::BitXor,
+                                BinOp::Shl => IrBinOp::Shl,
+                                BinOp::Shr => IrBinOp::UShr,
+                                _ => unreachable!("matched above"),
+                            };
+                            self.instrs.push(Instr::BinOp { op: ir_op, dst, lhs: lhs_reg, rhs: rhs_reg });
+                            acc_val = IrValue::Reg(dst);
+                        }
+                        Ok(acc_val)
                     }
                     // FLS §6.5.5: Float arithmetic on f64 operands.
                     // Only Add/Sub/Mul/Div are defined for f64; bitwise ops and
@@ -8132,30 +8155,39 @@ impl<'src> LowerCtx<'src> {
                                 "bitwise/shift/rem operators are not defined for f64 (FLS §6.5.6)".into(),
                             ));
                         }
-                        let lhs_val = self.lower_expr(lhs, &IrTy::F64)?;
-                        let lhs_freg = match lhs_val {
+                        let lhs_val = self.lower_expr(leftmost, &IrTy::F64)?;
+                        let mut acc_freg = match lhs_val {
                             IrValue::FReg(r) => r,
                             _ => return Err(LowerError::Unsupported(
                                 "f64 binary op: lhs did not produce a float register".into(),
                             )),
                         };
-                        let rhs_val = self.lower_expr(rhs, &IrTy::F64)?;
-                        let rhs_freg = match rhs_val {
-                            IrValue::FReg(r) => r,
-                            _ => return Err(LowerError::Unsupported(
-                                "f64 binary op: rhs did not produce a float register".into(),
-                            )),
-                        };
-                        let dst = self.alloc_reg()?;
-                        let f_op = match op {
-                            BinOp::Add => F64BinOp::Add,
-                            BinOp::Sub => F64BinOp::Sub,
-                            BinOp::Mul => F64BinOp::Mul,
-                            BinOp::Div => F64BinOp::Div,
-                            _ => unreachable!("checked above"),
-                        };
-                        self.instrs.push(Instr::F64BinOp { op: f_op, dst, lhs: lhs_freg, rhs: rhs_freg });
-                        Ok(IrValue::FReg(dst))
+
+                        for (step_op, rhs_expr) in &spine {
+                            if !matches!(step_op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div) {
+                                return Err(LowerError::Unsupported(
+                                    "bitwise/shift/rem operators are not defined for f64 (FLS §6.5.6)".into(),
+                                ));
+                            }
+                            let rhs_val = self.lower_expr(rhs_expr, &IrTy::F64)?;
+                            let rhs_freg = match rhs_val {
+                                IrValue::FReg(r) => r,
+                                _ => return Err(LowerError::Unsupported(
+                                    "f64 binary op: rhs did not produce a float register".into(),
+                                )),
+                            };
+                            let dst = self.alloc_reg()?;
+                            let f_op = match step_op {
+                                BinOp::Add => F64BinOp::Add,
+                                BinOp::Sub => F64BinOp::Sub,
+                                BinOp::Mul => F64BinOp::Mul,
+                                BinOp::Div => F64BinOp::Div,
+                                _ => unreachable!("checked above"),
+                            };
+                            self.instrs.push(Instr::F64BinOp { op: f_op, dst, lhs: acc_freg, rhs: rhs_freg });
+                            acc_freg = dst;
+                        }
+                        Ok(IrValue::FReg(acc_freg))
                     }
                     // FLS §6.5.5: Float arithmetic on f32 operands.
                     // Only Add/Sub/Mul/Div are defined for f32; bitwise ops and
@@ -8166,30 +8198,39 @@ impl<'src> LowerCtx<'src> {
                                 "bitwise/shift/rem operators are not defined for f32 (FLS §6.5.6)".into(),
                             ));
                         }
-                        let lhs_val = self.lower_expr(lhs, &IrTy::F32)?;
-                        let lhs_freg = match lhs_val {
+                        let lhs_val = self.lower_expr(leftmost, &IrTy::F32)?;
+                        let mut acc_freg = match lhs_val {
                             IrValue::F32Reg(r) => r,
                             _ => return Err(LowerError::Unsupported(
                                 "f32 binary op: lhs did not produce an f32 register".into(),
                             )),
                         };
-                        let rhs_val = self.lower_expr(rhs, &IrTy::F32)?;
-                        let rhs_freg = match rhs_val {
-                            IrValue::F32Reg(r) => r,
-                            _ => return Err(LowerError::Unsupported(
-                                "f32 binary op: rhs did not produce an f32 register".into(),
-                            )),
-                        };
-                        let dst = self.alloc_reg()?;
-                        let f_op = match op {
-                            BinOp::Add => F32BinOp::Add,
-                            BinOp::Sub => F32BinOp::Sub,
-                            BinOp::Mul => F32BinOp::Mul,
-                            BinOp::Div => F32BinOp::Div,
-                            _ => unreachable!("checked above"),
-                        };
-                        self.instrs.push(Instr::F32BinOp { op: f_op, dst, lhs: lhs_freg, rhs: rhs_freg });
-                        Ok(IrValue::F32Reg(dst))
+
+                        for (step_op, rhs_expr) in &spine {
+                            if !matches!(step_op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div) {
+                                return Err(LowerError::Unsupported(
+                                    "bitwise/shift/rem operators are not defined for f32 (FLS §6.5.6)".into(),
+                                ));
+                            }
+                            let rhs_val = self.lower_expr(rhs_expr, &IrTy::F32)?;
+                            let rhs_freg = match rhs_val {
+                                IrValue::F32Reg(r) => r,
+                                _ => return Err(LowerError::Unsupported(
+                                    "f32 binary op: rhs did not produce an f32 register".into(),
+                                )),
+                            };
+                            let dst = self.alloc_reg()?;
+                            let f_op = match step_op {
+                                BinOp::Add => F32BinOp::Add,
+                                BinOp::Sub => F32BinOp::Sub,
+                                BinOp::Mul => F32BinOp::Mul,
+                                BinOp::Div => F32BinOp::Div,
+                                _ => unreachable!("checked above"),
+                            };
+                            self.instrs.push(Instr::F32BinOp { op: f_op, dst, lhs: acc_freg, rhs: rhs_freg });
+                            acc_freg = dst;
+                        }
+                        Ok(IrValue::F32Reg(acc_freg))
                     }
                     _ => Err(LowerError::Unsupported("bitwise/arithmetic on non-integer type".into())),
                 }
