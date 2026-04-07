@@ -803,12 +803,19 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
 
         // FLS §6.9 + §4.5 + §4.2: Load an f32 element from a `[f32; N]` array.
         //
-        // Two-instruction sequence:
+        // Three-instruction sequence:
         //   add x9, sp, #{base_slot*8}            — base address of arr[0]
-        //   ldr s{dst}, [x9, x{index_reg}, lsl #3] — load arr[index] into s-register
+        //   add x9, x9, x{index_reg}, lsl #3      — advance by index*8 (stride=8 bytes)
+        //   ldr s{dst}, [x9]                       — load f32 at computed address
+        //
+        // f32 elements occupy one 8-byte slot each on the stack (same as all other types),
+        // so the stride is 8 (lsl #3). ARM64 `ldr s` only allows lsl #0 or lsl #2 in the
+        // scaled-register addressing mode (because s-registers are 4 bytes, 2^2=4). Using
+        // `add` with lsl #3 is valid in the shifted-register form of `add`, so we
+        // pre-compute the byte address with `add` and then use an unscaled `ldr`.
         //
         // FLS §4.2: f32 values are in s-registers (IEEE 754 single-precision).
-        // Cache-line note: add + ldr = two 4-byte instructions = 8 bytes.
+        // Cache-line note: add + add + ldr = three 4-byte instructions = 12 bytes.
         Instr::LoadIndexedF32 { dst, base_slot, index_reg } => {
             let base_offset = *base_slot as u32 * 8;
             writeln!(
@@ -817,7 +824,11 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
             )?;
             writeln!(
                 out,
-                "    ldr     s{dst}, [x9, x{index_reg}, lsl #3] // FLS §6.9: load f32 arr[index]"
+                "    add     x9, x9, x{index_reg}, lsl #3 // FLS §6.9: advance by index*8 (stride)"
+            )?;
+            writeln!(
+                out,
+                "    ldr     s{dst}, [x9]               // FLS §6.9: load f32 arr[index]"
             )?;
         }
 

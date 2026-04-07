@@ -3073,6 +3073,17 @@ impl<'src> LowerCtx<'src> {
             crate::ast::ExprKind::Unary { op: crate::ast::UnaryOp::Neg, operand } => {
                 self.is_f64_expr(operand)
             }
+            // FLS §6.9 + §4.5: `arr[i]` produces f64 if `arr` is a `[f64; N]` local.
+            // Required so that `arr[i] as i32` selects `F64ToI32` (fcvtzs).
+            crate::ast::ExprKind::Index { base, .. } => {
+                if let crate::ast::ExprKind::Path(segs) = &base.kind
+                    && segs.len() == 1
+                    && let Some(&slot) = self.locals.get(segs[0].text(self.source))
+                {
+                    return self.local_f64_array_slots.contains(&slot);
+                }
+                false
+            }
             // FLS §6.12.1: A call to a function in `f64_return_fns` produces f64.
             // Required so that `f64_fn(...) as i32` selects `F64ToI32` (fcvtzs)
             // rather than falling through to the integer cast path.
@@ -3122,6 +3133,17 @@ impl<'src> LowerCtx<'src> {
             // FLS §6.5.4: `-expr` has the same type as `expr`.
             crate::ast::ExprKind::Unary { op: crate::ast::UnaryOp::Neg, operand } => {
                 self.is_f32_expr(operand)
+            }
+            // FLS §6.9 + §4.5: `arr[i]` produces f32 if `arr` is a `[f32; N]` local.
+            // Required so that `arr[i] as i32` selects `F32ToI32` (fcvtzs).
+            crate::ast::ExprKind::Index { base, .. } => {
+                if let crate::ast::ExprKind::Path(segs) = &base.kind
+                    && segs.len() == 1
+                    && let Some(&slot) = self.locals.get(segs[0].text(self.source))
+                {
+                    return self.local_f32_array_slots.contains(&slot);
+                }
+                false
             }
             // FLS §6.12.1: A call to a function in `f32_return_fns` produces f32.
             // Required so that `f32_fn(...) as i32` selects `F32ToI32` (fcvtzs)
