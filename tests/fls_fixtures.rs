@@ -97,3 +97,8 @@ fn fls_12_1_generic_fns() {
 fn fls_12_1_generic_methods() {
     assert_galvanic_accepts("fls_12_1_generic_methods.rs");
 }
+
+#[test]
+fn fls_12_1_generic_structs() {
+    assert_galvanic_accepts("fls_12_1_generic_structs.rs");
+}

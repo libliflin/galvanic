@@ -739,6 +739,15 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         match &item.kind {
             ItemKind::Struct(s) => {
                 let struct_name = s.name.text(source).to_owned();
+                // FLS §12.1: Collect the names of any generic type parameters so that
+                // field types that reference them (e.g., `first: T`) are treated as
+                // scalar slots rather than as nested user-defined struct types.
+                // Galvanic monomorphizes all type params to i32 at this milestone.
+                let generic_param_names: std::collections::HashSet<&str> = s
+                    .generic_params
+                    .iter()
+                    .map(|p| p.text(source))
+                    .collect();
                 match &s.kind {
                     StructKind::Named(fields) => {
                         let field_names = fields
@@ -749,12 +758,17 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         // nested slot offsets for chained field access (`s.b.x`).
                         // Scalar primitive types map to `None`; user-defined struct types
                         // map to `Some(type_name)` and occupy multiple consecutive slots.
+                        // FLS §12.1: Fields whose type is a generic type parameter are
+                        // treated as scalars (None) — they monomorphize to i32 at this milestone.
                         let field_types: Vec<Option<String>> = fields
                             .iter()
                             .map(|f| match &f.ty.kind {
                                 TyKind::Path(segs) if segs.len() == 1 => {
                                     let ty_name = segs[0].text(source);
-                                    // Primitive scalar types — each occupies exactly one slot.
+                                    // Generic type params and primitive scalar types — each one slot.
+                                    if generic_param_names.contains(ty_name) {
+                                        return None;
+                                    }
                                     match ty_name {
                                         "i8" | "i16" | "i32" | "i64" | "i128"
                                         | "u8" | "u16" | "u32" | "u64" | "u128"

@@ -752,6 +752,36 @@ impl<'src> Parser<'src> {
         let name = self.current_span();
         self.advance();
 
+        // FLS §12.1: A generic struct may declare type parameters after its name:
+        // `struct Pair<T, U> { ... }`. Each parameter is a plain identifier;
+        // bounds and where-clauses are not yet supported.
+        //
+        // FLS §12.1 AMBIGUOUS: The FLS does not specify the disambiguation rule
+        // for `<` in this position. In practice `<` immediately after a struct
+        // name always starts a generic parameter list.
+        let mut generic_params = Vec::new();
+        if self.peek_kind() == TokenKind::Lt {
+            self.advance(); // eat `<`
+            loop {
+                if self.peek_kind() == TokenKind::Gt {
+                    self.advance(); // eat `>`
+                    break;
+                }
+                if self.peek_kind() != TokenKind::Ident {
+                    return Err(self.error(format!(
+                        "expected type parameter name or `>`, found {:?}",
+                        self.peek_kind()
+                    )));
+                }
+                generic_params.push(self.current_span());
+                self.advance();
+                if !self.eat(TokenKind::Comma) {
+                    self.expect(TokenKind::Gt)?;
+                    break;
+                }
+            }
+        }
+
         let (kind, end) = match self.peek_kind() {
             // Named-field struct: `struct Foo { … }`
             TokenKind::OpenBrace => {
@@ -784,7 +814,7 @@ impl<'src> Parser<'src> {
         };
 
         let span = start.to(end);
-        Ok(StructDef { vis, name, kind, span })
+        Ok(StructDef { vis, name, generic_params, kind, span })
     }
 
     /// Parse an enum definition.

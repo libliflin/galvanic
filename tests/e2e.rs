@@ -19208,3 +19208,203 @@ fn main() -> i32 { use_wrapper(7) }
         "call use_wrapper(7) must emit bl use_wrapper — must not be folded away: {asm}"
     );
 }
+
+// ── Milestone 135: Generic struct definitions (FLS §12.1) ─────────────────────
+//
+// FLS §12.1: A generic struct declares type parameters after its name:
+// `struct Pair<T> { first: T, second: T }`. Each use site substitutes the
+// type parameters with concrete types (monomorphization). Galvanic currently
+// supports only scalar (integer/bool) type parameters.
+//
+// FLS §12.1 AMBIGUOUS: The spec does not specify the exact disambiguation rule
+// for `<` after a struct name (generic list vs. less-than). Galvanic follows
+// rustc's precedent: `<` immediately after a struct name always opens a
+// generic parameter list.
+
+/// Milestone 135: basic generic struct — single type parameter, field access.
+///
+/// FLS §12.1: `struct Wrapper<T> { value: T }` is the simplest generic struct.
+/// Accessing `w.value` after `let w = Wrapper { value: 42 };` must return 42.
+#[test]
+fn milestone_135_generic_struct_basic() {
+    let src = r#"
+struct Wrapper<T> { value: T }
+fn main() -> i32 {
+    let w = Wrapper { value: 42 };
+    w.value
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 42, "Wrapper {{ value: 42 }}.value = 42, got {exit}");
+}
+
+/// Milestone 135: generic struct with two type parameters.
+///
+/// FLS §12.1: Multiple type parameters are allowed: `struct Pair<T, U>`.
+/// Both fields must be independently accessible.
+#[test]
+fn milestone_135_generic_struct_two_params() {
+    let src = r#"
+struct Pair<T, U> { first: T, second: U }
+fn main() -> i32 {
+    let p = Pair { first: 3, second: 7 };
+    p.first + p.second
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 10, "Pair {{ 3, 7 }}: first + second = 10, got {exit}");
+}
+
+/// Milestone 135: generic struct first field only.
+///
+/// FLS §12.1: Fields are indexed by name; accessing one field must not
+/// clobber or confuse adjacent fields.
+#[test]
+fn milestone_135_generic_struct_first_field() {
+    let src = r#"
+struct Pair<T, U> { first: T, second: U }
+fn main() -> i32 {
+    let p = Pair { first: 5, second: 99 };
+    p.first
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 5, "Pair.first = 5, got {exit}");
+}
+
+/// Milestone 135: generic struct second field only.
+///
+/// FLS §12.1: Verifies the offset computation for the second field.
+#[test]
+fn milestone_135_generic_struct_second_field() {
+    let src = r#"
+struct Pair<T, U> { first: T, second: U }
+fn main() -> i32 {
+    let p = Pair { first: 11, second: 22 };
+    p.second
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 22, "Pair.second = 22, got {exit}");
+}
+
+/// Milestone 135: generic struct with a concrete field alongside the type param.
+///
+/// FLS §12.1: A struct may mix generic and concrete fields. The concrete field
+/// must be stored and loaded at the correct offset.
+#[test]
+fn milestone_135_generic_struct_mixed_fields() {
+    let src = r#"
+struct Tagged<T> { tag: i32, data: T }
+fn main() -> i32 {
+    let t = Tagged { tag: 1, data: 10 };
+    t.tag + t.data
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 11, "Tagged {{ tag: 1, data: 10 }}: tag + data = 11, got {exit}");
+}
+
+/// Milestone 135: generic struct field used in arithmetic.
+///
+/// FLS §12.1: The monomorphized field behaves identically to a concrete i32
+/// field in expressions.
+#[test]
+fn milestone_135_generic_struct_field_in_arithmetic() {
+    let src = r#"
+struct Wrapper<T> { value: T }
+fn main() -> i32 {
+    let w = Wrapper { value: 6 };
+    w.value * 7
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 42, "Wrapper {{ value: 6 }}.value * 7 = 42, got {exit}");
+}
+
+/// Milestone 135: generic struct field passed to a function.
+///
+/// FLS §12.1: A field extracted from a generic struct can be used as a
+/// function argument, forcing the value through a register.
+#[test]
+fn milestone_135_generic_struct_field_passed_to_fn() {
+    let src = r#"
+struct Wrapper<T> { value: T }
+fn double(x: i32) -> i32 { x * 2 }
+fn main() -> i32 {
+    let w = Wrapper { value: 9 };
+    double(w.value)
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 18, "double(Wrapper {{ value: 9 }}.value) = 18, got {exit}");
+}
+
+/// Milestone 135: generic struct field used in an if condition.
+///
+/// FLS §12.1: The monomorphized field participates in conditional expressions.
+#[test]
+fn milestone_135_generic_struct_field_in_if() {
+    let src = r#"
+struct Wrapper<T> { value: T }
+fn main() -> i32 {
+    let w = Wrapper { value: 5 };
+    if w.value > 3 { 1 } else { 0 }
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 1, "if Wrapper {{ value: 5 }}.value > 3: 1, got {exit}");
+}
+
+/// Assembly check: generic struct field access emits load/store instructions.
+///
+/// The field type `T` (monomorphized to i32) must be stored during struct
+/// construction and loaded during field access. Critically, the function
+/// must not be constant-folded: `use_wrapper(7)` must emit `bl use_wrapper`,
+/// not be replaced by a constant result.
+///
+/// FLS §12.1: Each generic struct field is a runtime value even when the
+/// initializer is a literal — replacing the literal with a parameter must
+/// not break the codegen path.
+#[test]
+fn runtime_generic_struct_field_access_emits_ldr_not_folded() {
+    // use_wrapper doubles its argument via a generic struct round-trip.
+    // A folded result would be mov x0, #14; the argument load would be mov x0, #7.
+    // Checking that `bl use_wrapper` is present proves the call is NOT folded.
+    let src = r#"
+struct Wrapper<T> { value: T }
+fn use_wrapper(n: i32) -> i32 {
+    let w = Wrapper { value: n };
+    w.value * 2
+}
+fn main() -> i32 { use_wrapper(7) }
+"#;
+    let asm = compile_to_asm(src);
+    // Must emit a load (ldr) to read the field from the stack slot.
+    assert!(
+        asm.contains("ldr"),
+        "generic struct field access must emit ldr instruction: {asm}"
+    );
+    // Must emit str to store the field during struct construction.
+    assert!(
+        asm.contains("str"),
+        "generic struct literal must emit str instruction: {asm}"
+    );
+    // Must emit mul for `w.value * 2` — field value used in runtime arithmetic.
+    assert!(
+        asm.contains("mul"),
+        "generic struct field in arithmetic must emit mul instruction: {asm}"
+    );
+    // Must emit the call `bl use_wrapper` — the outer call must not be folded.
+    // If galvanic folded use_wrapper(7) = 14 by constant propagation, this bl
+    // would be absent. This is the load-bearing anti-fold check.
+    assert!(
+        asm.contains("bl      use_wrapper") || asm.contains("bl use_wrapper"),
+        "call use_wrapper(7) must emit bl use_wrapper — must not be folded away: {asm}"
+    );
+    // Must not fold to the constant result 14.
+    assert!(
+        !asm.contains("mov     x0, #14") && !asm.contains("mov x0, #14"),
+        "generic struct result must not be constant-folded to 14: {asm}"
+    );
+}
