@@ -15758,3 +15758,158 @@ fn main() -> i32 {
         "f64 method cast to i32 must emit `fcvtzs`: {asm}"
     );
 }
+
+// ── Milestone 117: f64/f32 tuple literals and field access ───────────────────
+//
+// FLS §6.10: Tuple expressions and tuple field access.
+// FLS §4.2: f64 and f32 types.
+// FLS §6.1.2:37–45: All stores/loads are runtime instructions.
+
+/// Milestone 117: first element of an f64 tuple.
+///
+/// FLS §6.10: `t.0` on a two-element tuple where element 0 is f64.
+/// FLS §4.2: float stored in d-register, loaded via LoadF64Slot.
+#[test]
+fn milestone_117_f64_tuple_first_element() {
+    let src = r#"
+fn main() -> i32 {
+    let t = (3.0_f64, 1_i32);
+    t.0 as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "t.0 = 3.0 → 3, got {exit_code}");
+}
+
+/// Milestone 117: second element of an f64 tuple (integer element next to float).
+///
+/// FLS §6.10: `t.1` where element 0 is f64 and element 1 is i32.
+/// Verifies integer slot is not affected by float storage.
+#[test]
+fn milestone_117_f64_tuple_second_element_int() {
+    let src = r#"
+fn main() -> i32 {
+    let t = (3.0_f64, 7_i32);
+    t.1
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "t.1 = 7, got {exit_code}");
+}
+
+/// Milestone 117: sum of two f64 tuple elements.
+///
+/// FLS §6.10, §6.5.5: `t.0 + t.1` where both elements are f64.
+#[test]
+fn milestone_117_f64_tuple_sum() {
+    let src = r#"
+fn main() -> i32 {
+    let t = (1.5_f64, 2.5_f64);
+    (t.0 + t.1) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 4, "1.5+2.5=4.0 → 4, got {exit_code}");
+}
+
+/// Milestone 117: f64 tuple elements in arithmetic.
+///
+/// FLS §6.10, §6.5.5: tuple field used in a larger expression.
+#[test]
+fn milestone_117_f64_tuple_in_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    let t = (3.0_f64, 4.0_f64);
+    (t.0 * t.0 + t.1 * t.1) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 25, "3*3+4*4=25, got {exit_code}");
+}
+
+/// Milestone 117: f64 tuple element passed to function.
+///
+/// FLS §6.10, §6.12.1: tuple field as function argument.
+#[test]
+fn milestone_117_f64_tuple_element_to_fn() {
+    let src = r#"
+fn double(x: f64) -> i32 { (x * 2.0) as i32 }
+fn main() -> i32 {
+    let t = (3.5_f64, 1.0_f64);
+    double(t.0)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "double(3.5)=7.0→7, got {exit_code}");
+}
+
+/// Milestone 117: f64 tuple field in if condition.
+///
+/// FLS §6.10, §6.17: tuple field used in conditional expression.
+#[test]
+fn milestone_117_f64_tuple_in_if() {
+    let src = r#"
+fn main() -> i32 {
+    let t = (5.0_f64, 2_i32);
+    if t.0 > 3.0 { t.1 } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2, "5.0 > 3.0 so t.1 = 2, got {exit_code}");
+}
+
+/// Milestone 117: let binding infers f64 from tuple field access.
+///
+/// FLS §8.1 AMBIGUOUS: no type annotation; type inferred from initializer.
+/// FLS §6.10, §4.2: `let x = t.0` where t.0 is f64 stores as float local.
+#[test]
+fn milestone_117_f64_tuple_let_infer() {
+    let src = r#"
+fn main() -> i32 {
+    let t = (2.5_f64, 3.5_f64);
+    let x = t.0;
+    let y = t.1;
+    (x + y) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "2.5+3.5=6.0→6, got {exit_code}");
+}
+
+/// Milestone 117: f32 tuple first element.
+///
+/// FLS §6.10, §4.2: f32 element stored in s-register.
+#[test]
+fn milestone_117_f32_tuple_first_element() {
+    let src = r#"
+fn main() -> i32 {
+    let t = (4.0_f32, 1_i32);
+    t.0 as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 4, "t.0 = 4.0 → 4, got {exit_code}");
+}
+
+/// Milestone 117: assembly inspection — tuple float element uses StoreF64/LoadF64.
+///
+/// FLS §4.2: float tuple elements must use d-register instructions.
+/// FLS §6.10: tuple field access emits LoadF64Slot.
+#[test]
+fn runtime_f64_tuple_element_emits_str_dreg() {
+    let src = r#"
+fn main() -> i32 {
+    let t = (3.0_f64, 1_i32);
+    t.0 as i32
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("str     d"),
+        "f64 tuple store must emit `str d{{n}}`: {asm}"
+    );
+    assert!(
+        asm.contains("ldr     d"),
+        "f64 tuple load must emit `ldr d{{n}}`: {asm}"
+    );
+}

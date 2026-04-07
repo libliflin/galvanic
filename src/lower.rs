@@ -3226,19 +3226,28 @@ impl<'src> LowerCtx<'src> {
             }
             // FLS §6.13, §4.2: Field access on a struct with an f64 field produces f64.
             // Enables `p.x as i32` and `(p.x + p.y) as i32` to select F64ToI32.
+            // FLS §6.10: Also handles tuple field access `t.0` where t has an f64
+            // element — checks slot_float_ty for the resolved element slot.
             crate::ast::ExprKind::FieldAccess { receiver, field } => {
                 if let crate::ast::ExprKind::Path(segs) = &receiver.kind
                     && segs.len() == 1
                 {
                     let var_name = segs[0].text(self.source);
-                    if let Some(&slot) = self.locals.get(var_name)
-                        && let Some(struct_name) = self.local_struct_types.get(&slot).cloned()
-                    {
-                        let field_name = field.text(self.source);
-                        if let Some(field_names) = self.struct_defs.get(&struct_name)
-                            && let Some(fi) = field_names.iter().position(|n| n == field_name) {
-                                return matches!(self.field_float_ty(&struct_name, fi), Some(IrTy::F64));
-                            }
+                    if let Some(&slot) = self.locals.get(var_name) {
+                        // FLS §6.10: Tuple field — check slot_float_ty on the element slot.
+                        if self.local_tuple_lens.contains_key(&slot)
+                            && let Ok(idx) = field.text(self.source).parse::<usize>()
+                        {
+                            let elem_slot = slot + idx as u8;
+                            return matches!(self.slot_float_ty.get(&elem_slot), Some(IrTy::F64));
+                        }
+                        if let Some(struct_name) = self.local_struct_types.get(&slot).cloned() {
+                            let field_name = field.text(self.source);
+                            if let Some(field_names) = self.struct_defs.get(&struct_name)
+                                && let Some(fi) = field_names.iter().position(|n| n == field_name) {
+                                    return matches!(self.field_float_ty(&struct_name, fi), Some(IrTy::F64));
+                                }
+                        }
                     }
                 }
                 false
@@ -3324,19 +3333,28 @@ impl<'src> LowerCtx<'src> {
             }
             // FLS §6.13, §4.2: Field access on a struct with an f32 field produces f32.
             // Enables `p.x as i32` and `(p.x + p.y) as i32` to select F32ToI32.
+            // FLS §6.10: Also handles tuple field access `t.0` where t has an f32
+            // element — checks slot_float_ty for the resolved element slot.
             crate::ast::ExprKind::FieldAccess { receiver, field } => {
                 if let crate::ast::ExprKind::Path(segs) = &receiver.kind
                     && segs.len() == 1
                 {
                     let var_name = segs[0].text(self.source);
-                    if let Some(&slot) = self.locals.get(var_name)
-                        && let Some(struct_name) = self.local_struct_types.get(&slot).cloned()
-                    {
-                        let field_name = field.text(self.source);
-                        if let Some(field_names) = self.struct_defs.get(&struct_name)
-                            && let Some(fi) = field_names.iter().position(|n| n == field_name) {
-                                return matches!(self.field_float_ty(&struct_name, fi), Some(IrTy::F32));
-                            }
+                    if let Some(&slot) = self.locals.get(var_name) {
+                        // FLS §6.10: Tuple field — check slot_float_ty on the element slot.
+                        if self.local_tuple_lens.contains_key(&slot)
+                            && let Ok(idx) = field.text(self.source).parse::<usize>()
+                        {
+                            let elem_slot = slot + idx as u8;
+                            return matches!(self.slot_float_ty.get(&elem_slot), Some(IrTy::F32));
+                        }
+                        if let Some(struct_name) = self.local_struct_types.get(&slot).cloned() {
+                            let field_name = field.text(self.source);
+                            if let Some(field_names) = self.struct_defs.get(&struct_name)
+                                && let Some(fi) = field_names.iter().position(|n| n == field_name) {
+                                    return matches!(self.field_float_ty(&struct_name, fi), Some(IrTy::F32));
+                                }
+                        }
                     }
                 }
                 false
@@ -3610,9 +3628,29 @@ impl<'src> LowerCtx<'src> {
             if let ExprKind::Tuple(inner) = &elem.kind {
                 self.store_tuple_leaves(inner, base_slot, offset)?;
             } else {
+                let slot = base_slot + *offset;
+                // FLS §4.2: lower with I32 hint; float literals and float
+                // variable paths return FReg/F32Reg regardless of hint, so
+                // detect the register kind and use the appropriate store.
+                // FLS §6.1.2:37–45: All stores are runtime instructions.
                 let val = self.lower_expr(elem, &IrTy::I32)?;
-                let src = self.val_to_reg(val)?;
-                self.instrs.push(Instr::Store { src, slot: base_slot + *offset });
+                match val {
+                    IrValue::FReg(src) => {
+                        // FLS §4.2: f64 element — record slot type and emit
+                        // StoreF64 so subsequent LoadF64Slot emits correctly.
+                        self.slot_float_ty.insert(slot, IrTy::F64);
+                        self.instrs.push(Instr::StoreF64 { src, slot });
+                    }
+                    IrValue::F32Reg(src) => {
+                        // FLS §4.2: f32 element — same pattern for s-registers.
+                        self.slot_float_ty.insert(slot, IrTy::F32);
+                        self.instrs.push(Instr::StoreF32 { src, slot });
+                    }
+                    other => {
+                        let src = self.val_to_reg(other)?;
+                        self.instrs.push(Instr::Store { src, slot });
+                    }
+                }
                 *offset += 1;
             }
         }
@@ -6427,13 +6465,40 @@ impl<'src> LowerCtx<'src> {
                 }
 
                 if let Some(init_expr) = init.as_ref() {
-                    // Lower the initializer. We assume i32 for numeric
-                    // expressions. Type inference is future work.
-                    //
                     // FLS §8.1 AMBIGUOUS: the spec does not describe how type
                     // inference resolves the type of the initializer in the
                     // absence of a type annotation. We default to i32 for
                     // integer-producing expressions.
+                    //
+                    // FLS §4.2: If the initializer is detectably a float expression
+                    // (via is_f64_expr/is_f32_expr heuristic — covers float literals,
+                    // float variables, float tuple fields, and float arithmetic) lower
+                    // it in the float path even without an explicit type annotation.
+                    // This supports `let x = t.0` when t's first element is f64.
+                    if self.is_f64_expr(init_expr) {
+                        let val = self.lower_expr(init_expr, &IrTy::F64)?;
+                        let src = match val {
+                            IrValue::FReg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "inferred f64 let binding: initializer did not produce a float register".into(),
+                            )),
+                        };
+                        self.instrs.push(Instr::StoreF64 { src, slot });
+                        self.float_locals.insert(var_name, slot);
+                        return Ok(());
+                    }
+                    if self.is_f32_expr(init_expr) {
+                        let val = self.lower_expr(init_expr, &IrTy::F32)?;
+                        let src = match val {
+                            IrValue::F32Reg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "inferred f32 let binding: initializer did not produce an f32 register".into(),
+                            )),
+                        };
+                        self.instrs.push(Instr::StoreF32 { src, slot });
+                        self.float32_locals.insert(var_name, slot);
+                        return Ok(());
+                    }
                     let val = self.lower_expr(init_expr, &IrTy::I32)?;
                     let src = self.val_to_reg(val)?;
                     self.instrs.push(Instr::Store { src, slot });
