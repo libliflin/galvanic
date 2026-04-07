@@ -3243,6 +3243,24 @@ impl<'src> LowerCtx<'src> {
                 }
                 false
             }
+            // FLS §6.12.2, §4.2: A method call `var.method(...)` returns f64 if the
+            // method is registered in `f64_return_fns` (mangled as `Type__method`).
+            // Required so that `p.sum() as i32` selects `F64ToI32` (fcvtzs).
+            crate::ast::ExprKind::MethodCall { receiver, method, .. } => {
+                if let crate::ast::ExprKind::Path(segs) = &receiver.kind
+                    && segs.len() == 1
+                {
+                    let var_name = segs[0].text(self.source);
+                    if let Some(&slot) = self.locals.get(var_name)
+                        && let Some(struct_name) = self.local_struct_types.get(&slot).cloned()
+                    {
+                        let method_name = method.text(self.source);
+                        let mangled = format!("{struct_name}__{method_name}");
+                        return self.f64_return_fns.contains(&mangled);
+                    }
+                }
+                false
+            }
             _ => false,
         }
     }
@@ -3319,6 +3337,24 @@ impl<'src> LowerCtx<'src> {
                             && let Some(fi) = field_names.iter().position(|n| n == field_name) {
                                 return matches!(self.field_float_ty(&struct_name, fi), Some(IrTy::F32));
                             }
+                    }
+                }
+                false
+            }
+            // FLS §6.12.2, §4.2: A method call `var.method(...)` returns f32 if the
+            // method is registered in `f32_return_fns` (mangled as `Type__method`).
+            // Required so that `p.sum() as i32` selects `F32ToI32` (fcvtzs).
+            crate::ast::ExprKind::MethodCall { receiver, method, .. } => {
+                if let crate::ast::ExprKind::Path(segs) = &receiver.kind
+                    && segs.len() == 1
+                {
+                    let var_name = segs[0].text(self.source);
+                    if let Some(&slot) = self.locals.get(var_name)
+                        && let Some(struct_name) = self.local_struct_types.get(&slot).cloned()
+                    {
+                        let method_name = method.text(self.source);
+                        let mangled = format!("{struct_name}__{method_name}");
+                        return self.f32_return_fns.contains(&mangled);
                     }
                 }
                 false

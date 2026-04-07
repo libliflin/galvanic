@@ -15734,3 +15734,27 @@ fn main() -> i32 {
         "f64 method arithmetic must emit `fadd`: {asm}"
     );
 }
+
+/// Fix: f64 method call result cast to i32 must emit `fcvtzs` (FLS §6.5.9, §6.12.2).
+///
+/// Previously `is_f64_expr` did not handle `ExprKind::MethodCall`, so
+/// `p.get_x() as i32` fell through to the integer cast path without emitting
+/// `fcvtzs w{dst}, d{src}`. The f64 result landed in d0 instead of x0.
+#[test]
+fn runtime_f64_method_cast_emits_fcvtzs() {
+    let src = r#"
+struct Point { x: f64, y: f64 }
+impl Point {
+    fn get_x(&self) -> f64 { self.x }
+}
+fn main() -> i32 {
+    let p = Point { x: 3.0, y: 1.0 };
+    p.get_x() as i32
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("fcvtzs"),
+        "f64 method cast to i32 must emit `fcvtzs`: {asm}"
+    );
+}
