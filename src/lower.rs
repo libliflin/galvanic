@@ -8288,6 +8288,43 @@ impl<'src> LowerCtx<'src> {
             // Cache-line note: the emitted `str` is 4 bytes — same footprint
             // as the `str` emitted by a let-binding initializer.
             ExprKind::Binary { op: BinOp::Assign, lhs, rhs } => {
+                // FLS §4.2: Handle f64/f32 variable assignment as early returns.
+                // f64/f32 locals are stored in `float_locals`/`float32_locals`,
+                // not `locals`, so they must be dispatched before the general
+                // slot-resolution block below.
+                //
+                // FLS §6.5.10: The assignment is a runtime store instruction
+                // (FLS §6.1.2:37–45); no compile-time constant folding.
+                if let ExprKind::Path(segments) = &lhs.kind
+                    && segments.len() == 1
+                {
+                    let var_name = segments[0].text(self.source);
+                    if let Some(&slot) = self.float_locals.get(var_name) {
+                        // f64 assignment: lower RHS as F64, emit StoreF64.
+                        let val = self.lower_expr(rhs, &IrTy::F64)?;
+                        let src = match val {
+                            IrValue::FReg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "f64 assignment: RHS did not produce a float register".into(),
+                            )),
+                        };
+                        self.instrs.push(Instr::StoreF64 { src, slot });
+                        return Ok(IrValue::Unit);
+                    }
+                    if let Some(&slot) = self.float32_locals.get(var_name) {
+                        // f32 assignment: lower RHS as F32, emit StoreF32.
+                        let val = self.lower_expr(rhs, &IrTy::F32)?;
+                        let src = match val {
+                            IrValue::F32Reg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "f32 assignment: RHS did not produce an f32 register".into(),
+                            )),
+                        };
+                        self.instrs.push(Instr::StoreF32 { src, slot });
+                        return Ok(IrValue::Unit);
+                    }
+                }
+
                 // Resolve the LHS to a stack slot (must be a declared local or field).
                 //
                 // FLS §6.5.10: The left operand must be a place expression. Galvanic
