@@ -1036,6 +1036,27 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         })
         .collect();
 
+    // FLS §12.1: Collect generic method definitions from impl blocks.
+    //
+    // Generic methods (methods with at least one type parameter) are NOT lowered
+    // directly. Instead, they are monomorphized on demand at call sites, just like
+    // generic free functions. The key is the base-mangled name `TypeName__method_name`.
+    //
+    // Cache-line note: built once; read-only during lowering. Not on any hot path.
+    let mut generic_method_defs: HashMap<String, (&crate::ast::FnDef, String)> = HashMap::new();
+    for item in &src.items {
+        if let ItemKind::Impl(impl_def) = &item.kind {
+            let type_name = impl_def.ty.text(source).to_owned();
+            for method in &impl_def.methods {
+                if !method.generic_params.is_empty() {
+                    let method_name = method.name.text(source);
+                    let base_mangled = format!("{type_name}__{method_name}");
+                    generic_method_defs.insert(base_mangled, (method.as_ref(), type_name.clone()));
+                }
+            }
+        }
+    }
+
     let mut const_vals: HashMap<String, i32> = HashMap::new();
     // FLS §6.1.2:37–45: Evaluate all const initializers via the compile-time
     // evaluator. Repeat until no new consts are discovered (handles consts
@@ -1230,10 +1251,16 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     // mangled name can be generated without re-parsing the FnDef.
     //
     // Cache-line note: built once; read-only during lowering. Not on any hot path.
-    let generic_fn_param_counts: HashMap<String, usize> = generic_fn_defs
+    let mut generic_fn_param_counts: HashMap<String, usize> = generic_fn_defs
         .iter()
         .map(|(name, fn_def)| (name.clone(), fn_def.generic_params.len()))
         .collect();
+    // FLS §12.1: Also register generic methods with key `TypeName__method_name`.
+    // This allows the method-call lowering path to apply the same mangle logic
+    // as free function calls.
+    for (base_mangled, (fn_def, _)) in &generic_method_defs {
+        generic_fn_param_counts.insert(base_mangled.clone(), fn_def.generic_params.len());
+    }
 
     // Build method self-kind registry: mangled name → SelfKind.
     //
@@ -1684,6 +1711,11 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                 // inherent methods — static dispatch uses the same mangling.
                 let type_name = impl_def.ty.text(source);
                 for method in &impl_def.methods {
+                    // FLS §12.1: Generic methods are monomorphized at call sites.
+                    // Skip here — they are lowered in the post-pass loop below.
+                    if !method.generic_params.is_empty() {
+                        continue;
+                    }
                     let method_name = method.name.text(source);
                     let mangled = format!("{type_name}__{method_name}");
                     // Always create MethodCtx so associated functions (no self_param)
@@ -1840,10 +1872,19 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         mono_idx += 1;
 
         // Build the substitution: all type params → IrTy::I32.
-        let fn_def = match generic_fn_defs.get(&base_name) {
-            Some(d) => *d,
-            None => continue, // should not happen
-        };
+        //
+        // FLS §12.1: Check both generic free functions and generic methods.
+        // `base_name` is either a free function name ("identity") or a
+        // base-mangled method name ("Wrapper__apply"). Look up methods first
+        // so that a method that shadows a free function resolves correctly.
+        let (fn_def, method_type_name): (&crate::ast::FnDef, Option<String>) =
+            if let Some((fn_def, type_name)) = generic_method_defs.get(&base_name) {
+                (*fn_def, Some(type_name.clone()))
+            } else if let Some(fn_def) = generic_fn_defs.get(&base_name) {
+                (*fn_def, None)
+            } else {
+                continue; // should not happen
+            };
         let n_params = fn_def.generic_params.len();
         let suffix = std::iter::repeat_n("i32", n_params).collect::<Vec<_>>().join("_");
         let mangled = format!("{base_name}__{suffix}");
@@ -1862,11 +1903,12 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
 
         // Create a MethodCtx with the mangled name (override_name) to emit
         // the specialisation under `mangled` rather than the original name.
-        // impl_type = None, self_kind = None — free function.
+        // For generic methods, impl_type is Some(type_name) and self_kind is set.
+        // For generic free functions, both are None.
         let mctx = Some(MethodCtx {
-            impl_type: None,
+            impl_type: method_type_name.as_deref(),
             mangled_name: &mangled,
-            self_kind: None,
+            self_kind: fn_def.self_param,
         });
 
         let (ir_fn, closure_fns, fn_trampolines, next_label, more_needed) = lower_fn(
@@ -14130,7 +14172,25 @@ impl<'src> LowerCtx<'src> {
 
                 // Build mangled function name: TypeName__method_name.
                 // (`method_name` was already computed above for &str early return.)
-                let mangled = format!("{recv_type_name}__{method_name}");
+                let base_mangled = format!("{recv_type_name}__{method_name}");
+
+                // FLS §12.1: If this is a generic method, mangle the specialization
+                // name to `TypeName__method_name__i32` (one `i32` per type param).
+                // Record the base mangled name in `needed_monos` so the outer
+                // monomorphization loop emits the specialised method body.
+                let mangled = if let Some(&n_params) =
+                    self.generic_fn_param_counts.get(&base_mangled)
+                {
+                    let suffix = std::iter::repeat_n("i32", n_params)
+                        .collect::<Vec<_>>()
+                        .join("_");
+                    if !self.needed_monos.contains(&base_mangled) {
+                        self.needed_monos.push(base_mangled.clone());
+                    }
+                    format!("{base_mangled}__{suffix}")
+                } else {
+                    base_mangled
+                };
 
                 // Load receiver fields into registers to pass as leading arguments.
                 //

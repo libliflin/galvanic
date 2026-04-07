@@ -19014,3 +19014,193 @@ fn main() -> i32 { use_identity(7) }
         "generic call result must not be constant-folded to 7: {asm}"
     );
 }
+
+// ── Milestone 134: generic methods in impl blocks (FLS §12.1) ─────────────────
+
+/// A struct with a generic method that returns its type-erased argument.
+#[test]
+fn milestone_134_generic_method_identity() {
+    let Some(exit) = compile_and_run(r#"
+struct Wrapper { val: i32 }
+impl Wrapper {
+    fn apply<T>(&self, x: T) -> T { x }
+}
+fn main() -> i32 {
+    let w = Wrapper { val: 0 };
+    w.apply(5)
+}
+"#) else { return; };
+    assert_eq!(exit, 5);
+}
+
+/// Generic method with arithmetic on the type-erased argument.
+#[test]
+fn milestone_134_generic_method_arithmetic() {
+    let Some(exit) = compile_and_run(r#"
+struct Wrapper { val: i32 }
+impl Wrapper {
+    fn add_val<T>(&self, x: T) -> i32 { self.val + x }
+}
+fn main() -> i32 {
+    let w = Wrapper { val: 3 };
+    w.add_val(4)
+}
+"#) else { return; };
+    assert_eq!(exit, 7);
+}
+
+/// Generic method called with a function parameter (prevents constant folding).
+#[test]
+fn milestone_134_generic_method_on_parameter() {
+    let Some(exit) = compile_and_run(r#"
+struct Wrapper { val: i32 }
+impl Wrapper {
+    fn apply<T>(&self, x: T) -> T { x }
+}
+fn use_wrapper(n: i32) -> i32 {
+    let w = Wrapper { val: 0 };
+    w.apply(n)
+}
+fn main() -> i32 { use_wrapper(9) }
+"#) else { return; };
+    assert_eq!(exit, 9);
+}
+
+/// Generic method result used in an arithmetic expression.
+#[test]
+fn milestone_134_generic_method_result_in_arithmetic() {
+    let Some(exit) = compile_and_run(r#"
+struct Wrapper { val: i32 }
+impl Wrapper {
+    fn apply<T>(&self, x: T) -> T { x }
+}
+fn main() -> i32 {
+    let w = Wrapper { val: 0 };
+    w.apply(3) + w.apply(4)
+}
+"#) else { return; };
+    assert_eq!(exit, 7);
+}
+
+/// Two calls to the same generic method with different literal args.
+#[test]
+fn milestone_134_generic_method_called_twice() {
+    let Some(exit) = compile_and_run(r#"
+struct Wrapper { val: i32 }
+impl Wrapper {
+    fn apply<T>(&self, x: T) -> T { x }
+}
+fn main() -> i32 {
+    let w = Wrapper { val: 0 };
+    let a = w.apply(2);
+    let b = w.apply(5);
+    a + b
+}
+"#) else { return; };
+    assert_eq!(exit, 7);
+}
+
+/// Generic method with two type parameters.
+#[test]
+fn milestone_134_generic_method_two_type_params() {
+    let Some(exit) = compile_and_run(r#"
+struct Wrapper { val: i32 }
+impl Wrapper {
+    fn pick_first<T, U>(&self, a: T, b: U) -> T { a }
+}
+fn main() -> i32 {
+    let w = Wrapper { val: 0 };
+    w.pick_first(6, 99)
+}
+"#) else { return; };
+    assert_eq!(exit, 6);
+}
+
+/// Generic method called from a non-generic function (no cross-contamination).
+#[test]
+fn milestone_134_generic_method_called_from_non_generic() {
+    let Some(exit) = compile_and_run(r#"
+struct Adder { base: i32 }
+impl Adder {
+    fn add<T>(&self, x: T) -> i32 { self.base + x }
+}
+fn compute(n: i32) -> i32 {
+    let a = Adder { base: 10 };
+    a.add(n)
+}
+fn main() -> i32 { compute(5) }
+"#) else { return; };
+    assert_eq!(exit, 15);
+}
+
+/// Multiple calls to same generic method, each must be runtime (not folded).
+#[test]
+fn milestone_134_multiple_calls_same_generic_method() {
+    let Some(exit) = compile_and_run(r#"
+struct Counter { start: i32 }
+impl Counter {
+    fn offset<T>(&self, delta: T) -> i32 { self.start + delta }
+}
+fn main() -> i32 {
+    let c = Counter { start: 1 };
+    c.offset(2) + c.offset(3)
+}
+"#) else { return; };
+    assert_eq!(exit, 7);
+}
+
+// ── Assembly inspection: generic methods emit mangled call, not folded ─────────
+
+/// Assembly inspection: generic method call must emit mangled `bl TypeName__method__i32`.
+///
+/// FLS §12.1: A generic method called with literal args must emit a real `bl`
+/// to the monomorphized specialization, not constant-fold the result.
+#[test]
+fn runtime_generic_method_emits_mangled_call() {
+    let src = r#"
+struct Wrapper { val: i32 }
+impl Wrapper {
+    fn apply<T>(&self, x: T) -> T { x }
+}
+fn main() -> i32 {
+    let w = Wrapper { val: 0 };
+    w.apply(5)
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("bl      Wrapper__apply__i32") || asm.contains("bl Wrapper__apply__i32"),
+        "generic method call must emit bl Wrapper__apply__i32: {asm}"
+    );
+}
+
+/// Assembly inspection: generic method called with a parameter must not be folded.
+///
+/// FLS §12.1 / FLS §9:41–43: A generic method called from a non-const context
+/// must emit runtime instructions. Replacing the literal with a parameter must
+/// not break the codegen path.
+#[test]
+fn runtime_generic_method_not_folded() {
+    let src = r#"
+struct Wrapper { val: i32 }
+impl Wrapper {
+    fn apply<T>(&self, x: T) -> T { x }
+}
+fn use_wrapper(n: i32) -> i32 {
+    let w = Wrapper { val: 0 };
+    w.apply(n)
+}
+fn main() -> i32 { use_wrapper(7) }
+"#;
+    let asm = compile_to_asm(src);
+    // Must emit the call, not fold.
+    assert!(
+        asm.contains("bl      Wrapper__apply__i32") || asm.contains("bl Wrapper__apply__i32"),
+        "generic method call must emit bl Wrapper__apply__i32 (not folded): {asm}"
+    );
+    // Must not fold use_wrapper(7) = 7 to a constant without loading from a register.
+    assert!(
+        !asm.contains("mov     x0, #7") || asm.contains("ldr"),
+        "generic method result must not be constant-folded to 7: {asm}"
+    );
+}

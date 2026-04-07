@@ -92,3 +92,8 @@ fn fls_6_4_4_unsafe_block() {
 fn fls_12_1_generic_fns() {
     assert_galvanic_accepts("fls_12_1_generic_fns.rs");
 }
+
+#[test]
+fn fls_12_1_generic_methods() {
+    assert_galvanic_accepts("fls_12_1_generic_methods.rs");
+}
