@@ -101,10 +101,33 @@ pub fn emit_asm(module: &Module) -> Result<String, CodegenError> {
         writeln!(out)?;
         writeln!(out, "    .data")?;
         for s in &module.statics {
-            writeln!(out, "    .align 3")?;
-            writeln!(out, "    .global {}", s.name)?;
-            writeln!(out, "{}:", s.name)?;
-            writeln!(out, "    .quad {}", s.value)?;
+            match s.value {
+                crate::ir::StaticValue::Int(n) => {
+                    writeln!(out, "    .align 3")?;
+                    writeln!(out, "    .global {}", s.name)?;
+                    writeln!(out, "{}:", s.name)?;
+                    writeln!(out, "    .quad {n}")?;
+                }
+                crate::ir::StaticValue::F64(v) => {
+                    // FLS §7.2, §4.2: f64 static stored as raw IEEE 754 bits (.quad).
+                    // Cache-line note: 8 bytes — same footprint as an integer static.
+                    let bits = v.to_bits();
+                    writeln!(out, "    .align 3")?;
+                    writeln!(out, "    .global {}", s.name)?;
+                    writeln!(out, "{}:", s.name)?;
+                    writeln!(out, "    .quad 0x{bits:016x}          // f64 {v} (FLS §7.2, §4.2)")?;
+                }
+                crate::ir::StaticValue::F32(v) => {
+                    // FLS §7.2, §4.2: f32 static stored as raw IEEE 754 bits (.word).
+                    // Cache-line note: 4 bytes — half an integer static. We still
+                    // align to 4 bytes (.align 2) to satisfy ARM64 LDR requirements.
+                    let bits = v.to_bits();
+                    writeln!(out, "    .align 2")?;
+                    writeln!(out, "    .global {}", s.name)?;
+                    writeln!(out, "{}:", s.name)?;
+                    writeln!(out, "    .word 0x{bits:08x}          // f32 {v} (FLS §7.2, §4.2)")?;
+                }
+            }
         }
     }
 
@@ -301,6 +324,32 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
             writeln!(out, "    adrp    x{dst}, {name}              // FLS §7.2: static addr (page)")?;
             writeln!(out, "    add     x{dst}, x{dst}, :lo12:{name}  // FLS §7.2: static addr (offset)")?;
             writeln!(out, "    ldr     x{dst}, [x{dst}]             // FLS §7.2: static load")?;
+        }
+
+        // FLS §7.2, §4.2: Load an f64 static variable into a float register.
+        //
+        // Uses x17 (scratch) for the ADRP + ADD address computation, then
+        // `ldr d{dst}` to load the 8-byte float value from the data section.
+        //
+        // Cache-line note: three 4-byte instructions (12 bytes) — same as the
+        // integer LoadStatic. The data value is 8 bytes in `.data`.
+        Instr::LoadStaticF64 { dst, name } => {
+            writeln!(out, "    adrp    x17, {name}              // FLS §7.2: f64 static addr (page)")?;
+            writeln!(out, "    add     x17, x17, :lo12:{name}  // FLS §7.2: f64 static addr (offset)")?;
+            writeln!(out, "    ldr     d{dst}, [x17]             // FLS §7.2, §4.2: load f64 static")?;
+        }
+
+        // FLS §7.2, §4.2: Load an f32 static variable into a float register.
+        //
+        // Uses x17 (scratch) for the ADRP + ADD address computation, then
+        // `ldr s{dst}` to load the 4-byte float value from the data section.
+        //
+        // Cache-line note: three 4-byte instructions (12 bytes). The data value
+        // is 4 bytes in `.data` — half the footprint of an f64 static.
+        Instr::LoadStaticF32 { dst, name } => {
+            writeln!(out, "    adrp    x17, {name}              // FLS §7.2: f32 static addr (page)")?;
+            writeln!(out, "    add     x17, x17, :lo12:{name}  // FLS §7.2: f32 static addr (offset)")?;
+            writeln!(out, "    ldr     s{dst}, [x17]             // FLS §7.2, §4.2: load f32 static")?;
         }
 
         // FLS §4.9: Load the address of a named function into a register.

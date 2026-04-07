@@ -25,6 +25,23 @@
 
 // ── Module ────────────────────────────────────────────────────────────────────
 
+/// The typed initializer value of a static item.
+///
+/// FLS §7.2: Static items. Galvanic supports integer, f64, and f32 literals
+/// as static initializers (FLS §6.1.2: constant expressions).
+///
+/// Cache-line note: `StaticValue` is a small enum; the discriminant fits in
+/// 1 byte and the payload is at most 8 bytes (f64). The enum fits in 16 bytes.
+#[derive(Debug, Clone, Copy)]
+pub enum StaticValue {
+    /// Integer static (FLS §4.1). Stored as `.quad` (8 bytes) in `.data`.
+    Int(i32),
+    /// 64-bit float static (FLS §4.2). Stored as `.quad` with raw IEEE 754 bits.
+    F64(f64),
+    /// 32-bit float static (FLS §4.2). Stored as `.word` with raw IEEE 754 bits.
+    F32(f32),
+}
+
 /// A static variable in the data section.
 ///
 /// FLS §7.2: Static items. Each static has a fixed memory address in the
@@ -41,9 +58,8 @@
 pub struct StaticData {
     /// The assembly label for this static (matches the Rust name).
     pub name: String,
-    /// The compile-time initializer value. Only integer literals are supported
-    /// at this milestone (FLS §6.1.2: constant expressions).
-    pub value: i32,
+    /// The compile-time initializer value (FLS §6.1.2: constant expressions).
+    pub value: StaticValue,
 }
 
 /// The top-level IR compilation unit.
@@ -635,6 +651,45 @@ pub enum Instr {
     /// cache line, while the value itself occupies one half of a data cache line.
     LoadStatic {
         /// Destination register for the loaded value.
+        dst: u8,
+        /// The assembly label of the static (same as the Rust static name).
+        name: String,
+    },
+
+    /// Load from an f64 static variable in the data section into a float register.
+    ///
+    /// `LoadStaticF64 { dst, name }` emits:
+    ///   `adrp x17, {name}`
+    ///   `add  x17, x17, :lo12:{name}`
+    ///   `ldr  d{dst}, [x17]`
+    ///
+    /// FLS §7.2: Static items. FLS §4.2: f64 type.
+    /// Like `LoadStatic` but loads into the SIMD/FP register `d{dst}` instead
+    /// of integer register `x{dst}`.
+    ///
+    /// Cache-line note: three 4-byte instructions (12 bytes); identical footprint
+    /// to integer `LoadStatic`. The data value is 8 bytes in `.data`.
+    LoadStaticF64 {
+        /// Destination float register (d0–d15).
+        dst: u8,
+        /// The assembly label of the static (same as the Rust static name).
+        name: String,
+    },
+
+    /// Load from an f32 static variable in the data section into a float register.
+    ///
+    /// `LoadStaticF32 { dst, name }` emits:
+    ///   `adrp x17, {name}`
+    ///   `add  x17, x17, :lo12:{name}`
+    ///   `ldr  s{dst}, [x17]`
+    ///
+    /// FLS §7.2: Static items. FLS §4.2: f32 type.
+    /// Like `LoadStaticF64` but loads into the 32-bit float register `s{dst}`.
+    ///
+    /// Cache-line note: three 4-byte instructions (12 bytes). The data value is
+    /// 4 bytes in `.data` — half the footprint of an f64 static.
+    LoadStaticF32 {
+        /// Destination float register (s0–s15).
         dst: u8,
         /// The assembly label of the static (same as the Rust static name).
         name: String,

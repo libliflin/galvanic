@@ -250,6 +250,13 @@ pub struct FnDef {
     ///
     /// FLS §10.2: Visibility determines where the function can be named.
     pub vis: Visibility,
+    /// Whether this function is declared `const`.
+    ///
+    /// FLS §9:41–43: A `const fn` may be evaluated at compile time when called
+    /// from a const context (const item initialiser, const block, etc.). When
+    /// called from a non-const context it runs as a normal runtime function —
+    /// identical codegen to a non-const fn.
+    pub is_const: bool,
     /// The function's name (span of the identifier token).
     pub name: Span,
     /// The optional `self` parameter (present in methods only).

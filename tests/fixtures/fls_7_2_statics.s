@@ -48,11 +48,35 @@ count_to_capacity:
     add     sp, sp, #16             // FLS §8.1: restore stack frame
     ret
 
+    // fn get_gravity — FLS §9
+    .global get_gravity
+get_gravity:
+    adrp    x17, GRAVITY              // FLS §7.2: f64 static addr (page)
+    add     x17, x17, :lo12:GRAVITY  // FLS §7.2: f64 static addr (offset)
+    ldr     d0, [x17]             // FLS §7.2, §4.2: load f64 static
+    fcvtzs  w1, d0              // FLS §6.5.9: f64→i32 truncate
+    mov     x0, x1              // FLS §6.19: return reg 1 → x0
+    ret
+
+    // fn scale_plus_one — FLS §9
+    .global scale_plus_one
+scale_plus_one:
+    adrp    x17, SCALE_F32              // FLS §7.2: f32 static addr (page)
+    add     x17, x17, :lo12:SCALE_F32  // FLS §7.2: f32 static addr (offset)
+    ldr     s0, [x17]             // FLS §7.2, §4.2: load f32 static
+    adrp    x17, scale_plus_one__f32c0              // FLS §2.4.4.2: f32 const addr (page)
+    add     x17, x17, :lo12:scale_plus_one__f32c0  // FLS §2.4.4.2: f32 const addr (offset)
+    ldr     s1, [x17]             // FLS §2.4.4.2: load f32 into s1
+    fadd    s2, s0, s1           // FLS §6.5.5: f32 fadd
+    fcvtzs  w3, s2              // FLS §6.5.9: f32→i32 truncate
+    mov     x0, x3              // FLS §6.19: return reg 3 → x0
+    ret
+
     // fn main — FLS §9
     .global main
 main:
     str     x30, [sp, #-16]!      // FLS §6.12.1: save lr (non-leaf)
-    sub     sp, sp, #16             // FLS §8.1: frame for 2 slot(s)
+    sub     sp, sp, #32             // FLS §8.1: frame for 4 slot(s)
     bl      get_capacity             // FLS §6.12.1: call get_capacity
     str     x0, [sp, #0              ] // FLS §8.1: store slot 0
     bl      sum_sides                // FLS §6.12.1: call sum_sides
@@ -64,8 +88,18 @@ main:
     mov     x4, x0              // FLS §6.12.1: return value → x4
     ldr     x5, [sp, #8              ] // FLS §8.1: load slot 1
     sub     x6, x5, x4          // FLS §6.5.5: sub
-    mov     x0, x6              // FLS §6.19: return reg 6 → x0
-    add     sp, sp, #16             // FLS §8.1: restore stack frame
+    str     x6, [sp, #16             ] // FLS §8.1: store slot 2
+    bl      get_gravity              // FLS §6.12.1: call get_gravity
+    mov     x7, x0              // FLS §6.12.1: return value → x7
+    ldr     x8, [sp, #16             ] // FLS §8.1: load slot 2
+    add     x9, x8, x7          // FLS §6.5.5: add
+    str     x9, [sp, #24             ] // FLS §8.1: store slot 3
+    bl      scale_plus_one           // FLS §6.12.1: call scale_plus_one
+    mov     x10, x0              // FLS §6.12.1: return value → x10
+    ldr     x11, [sp, #24             ] // FLS §8.1: load slot 3
+    sub     x12, x11, x10          // FLS §6.5.5: sub
+    mov     x0, x12              // FLS §6.19: return reg 12 → x0
+    add     sp, sp, #32             // FLS §8.1: restore stack frame
     ldr     x30, [sp], #16         // FLS §6.12.1: restore lr
     ret
 
@@ -94,3 +128,16 @@ SIDE_A:
     .global SIDE_B
 SIDE_B:
     .quad 4
+    .align 3
+    .global GRAVITY
+GRAVITY:
+    .quad 0x4022000000000000          // f64 9 (FLS §7.2, §4.2)
+    .align 2
+    .global SCALE_F32
+SCALE_F32:
+    .word 0x40000000          // f32 2 (FLS §7.2, §4.2)
+
+    .section .rodata
+    .align 2
+scale_plus_one__f32c0:
+    .word 0x3f800000            // f32 1 (FLS §2.4.4.2)

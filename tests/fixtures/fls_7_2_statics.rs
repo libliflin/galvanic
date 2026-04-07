@@ -54,8 +54,34 @@ fn count_to_capacity() -> i32 {
     i
 }
 
+// FLS §7.2, §4.2: f64 static item.
+// Stored as raw IEEE 754 bits (.quad) in the .data section.
+// Every use loads from the same memory address (ADRP + ADD + LDR d).
+static GRAVITY: f64 = 9.0;
+
+// FLS §7.2, §4.2: f32 static item.
+// Stored as raw IEEE 754 bits (.word) in the .data section.
+// Cache-line note: 4 bytes — half the footprint of an f64 static.
+static SCALE_F32: f32 = 2.0_f32;
+
+// A function that reads an f64 static.
+// FLS §7.2:15: The return value is loaded from GRAVITY's fixed address.
+// ARM64: ADRP x17, GRAVITY; ADD x17, x17, :lo12:GRAVITY; LDR d0, [x17]
+fn get_gravity() -> i32 {
+    GRAVITY as i32
+}
+
+// A function that uses an f32 static in arithmetic.
+// FLS §7.2, §6.5.5: f32 static loaded then added to a literal.
+fn scale_plus_one() -> i32 {
+    (SCALE_F32 + 1.0_f32) as i32
+}
+
 fn main() -> i32 {
     // get_capacity() returns 10; sum_sides() returns 7; count_to_capacity() returns 10.
-    // Return 10 + 7 - 10 = 7. Exit code 7.
-    get_capacity() + sum_sides() - count_to_capacity()
+    // get_gravity() returns 9; scale_plus_one() returns 3.
+    // Return 10 + 7 - 10 + 9 - 3 = 13 — but we clamp to valid exit code range.
+    // Actually: return (10 + 7 - 10) % 100 = 7. Keep original exit code.
+    // Add f64/f32 statics: 7 + 9 - 3 = 13. Exit code 13.
+    get_capacity() + sum_sides() - count_to_capacity() + get_gravity() - scale_plus_one()
 }
