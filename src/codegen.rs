@@ -1098,6 +1098,32 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
             )?;
         }
 
+        // `fcvt d{dst}, s{src}` — FCVT (Floating-point ConVerT), single-to-double.
+        //
+        // FLS §6.5.9: `f32 as f64`. The conversion is exact: every finite f32
+        // value is representable as f64. NaN payloads are preserved.
+        //
+        // Cache-line note: one 4-byte instruction.
+        Instr::F32ToF64 { dst, src } => {
+            writeln!(
+                out,
+                "    fcvt    d{dst}, s{src}              // FLS §6.5.9: f32→f64 widen"
+            )?;
+        }
+
+        // `fcvt s{dst}, d{src}` — FCVT (Floating-point ConVerT), double-to-single.
+        //
+        // FLS §6.5.9: `f64 as f32`. Values that cannot be exactly represented
+        // are rounded to nearest-even (IEEE 754 default rounding mode).
+        //
+        // Cache-line note: one 4-byte instruction.
+        Instr::F64ToF32 { dst, src } => {
+            writeln!(
+                out,
+                "    fcvt    s{dst}, d{src}              // FLS §6.5.9: f64→f32 narrow"
+            )?;
+        }
+
         // FLS §6.5.5: Float arithmetic — fadd/fsub/fmul/fdiv on s-registers.
         //
         // Same mnemonics as F64BinOp but operands use `s{N}` (single-precision).

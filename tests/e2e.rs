@@ -13068,3 +13068,180 @@ fn main() -> i32 {
         "expected `cset` (condition set) in assembly:\n{asm}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Milestone 102 — float-to-float casts: f32 as f64 and f64 as f32
+// FLS §6.5.9: Numeric cast between floating-point types.
+// ---------------------------------------------------------------------------
+
+/// Milestone 102: `f32 as f64` basic widening.
+///
+/// FLS §6.5.9: Casting a `f32` value to `f64` is an exact widening conversion.
+#[test]
+fn milestone_102_f32_as_f64_basic() {
+    let src = r#"
+fn main() -> i32 {
+    let x: f32 = 2.0_f32;
+    let y: f64 = x as f64;
+    y as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2, "2.0_f32 as f64 as i32 == 2, got {exit_code}");
+}
+
+/// Milestone 102: `f64 as f32` basic narrowing.
+///
+/// FLS §6.5.9: Casting a `f64` value to `f32` rounds to nearest-even.
+#[test]
+fn milestone_102_f64_as_f32_basic() {
+    let src = r#"
+fn main() -> i32 {
+    let x: f64 = 3.0;
+    let y: f32 = x as f32;
+    y as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "3.0_f64 as f32 as i32 == 3, got {exit_code}");
+}
+
+/// Milestone 102: `f32 as f64` used in arithmetic.
+///
+/// FLS §6.5.9: Widened value participates in f64 arithmetic.
+#[test]
+fn milestone_102_f32_as_f64_in_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f32 = 1.5_f32;
+    let b: f64 = a as f64;
+    let c: f64 = b + 0.5;
+    c as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2, "1.5_f32 as f64 + 0.5 == 2.0, as i32 == 2, got {exit_code}");
+}
+
+/// Milestone 102: `f64 as f32` used in arithmetic.
+///
+/// FLS §6.5.9: Narrowed value participates in f32 arithmetic.
+#[test]
+fn milestone_102_f64_as_f32_in_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f64 = 2.5;
+    let b: f32 = a as f32;
+    let c: f32 = b + 1.5_f32;
+    c as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 4, "2.5_f64 as f32 + 1.5_f32 == 4.0, as i32 == 4, got {exit_code}");
+}
+
+/// Milestone 102: `f32 as f64` with function parameter.
+///
+/// FLS §6.5.9: Widening cast works on non-statically-known f32 values.
+#[test]
+fn milestone_102_f32_as_f64_param() {
+    let src = r#"
+fn widen(x: f32) -> f64 {
+    x as f64
+}
+fn main() -> i32 {
+    let y: f64 = widen(5.0_f32);
+    y as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "widen(5.0_f32) as i32 == 5, got {exit_code}");
+}
+
+/// Milestone 102: `f64 as f32` with function parameter.
+///
+/// FLS §6.5.9: Narrowing cast works on non-statically-known f64 values.
+#[test]
+fn milestone_102_f64_as_f32_param() {
+    let src = r#"
+fn narrow(x: f64) -> f32 {
+    x as f32
+}
+fn main() -> i32 {
+    let y: f32 = narrow(7.0);
+    y as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "narrow(7.0) as i32 == 7, got {exit_code}");
+}
+
+/// Milestone 102: round-trip `f32 → f64 → f32`.
+///
+/// FLS §6.5.9: Widening then narrowing preserves value for f32-exact values.
+#[test]
+fn milestone_102_f32_f64_round_trip() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f32 = 6.0_f32;
+    let b: f64 = a as f64;
+    let c: f32 = b as f32;
+    c as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "6.0_f32 → f64 → f32 → i32 == 6, got {exit_code}");
+}
+
+/// Milestone 102: inline `f32` literal cast to `f64` without intermediate binding.
+///
+/// FLS §6.5.9: Cast expression on a literal.
+#[test]
+fn milestone_102_f32_literal_as_f64() {
+    let src = r#"
+fn main() -> i32 {
+    let x: f64 = 4.0_f32 as f64;
+    x as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 4, "4.0_f32 as f64 as i32 == 4, got {exit_code}");
+}
+
+/// Assembly check: `f32 as f64` emits `fcvt d{dst}, s{src}`.
+///
+/// FLS §6.5.9: ARM64 FCVT instruction for float widening.
+#[test]
+fn runtime_f32_as_f64_emits_fcvt_dreg_sreg() {
+    let src = r#"
+fn main() -> i32 {
+    let x: f32 = 1.0_f32;
+    let y: f64 = x as f64;
+    y as i32
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("fcvt    d") && asm.contains(", s"),
+        "expected `fcvt d{{n}}, s{{m}}` (f32→f64 widen) in assembly:\n{asm}"
+    );
+}
+
+/// Assembly check: `f64 as f32` emits `fcvt s{dst}, d{src}`.
+///
+/// FLS §6.5.9: ARM64 FCVT instruction for float narrowing.
+#[test]
+fn runtime_f64_as_f32_emits_fcvt_sreg_dreg() {
+    let src = r#"
+fn main() -> i32 {
+    let x: f64 = 1.0;
+    let y: f32 = x as f32;
+    y as i32
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("fcvt    s") && asm.contains(", d"),
+        "expected `fcvt s{{n}}, d{{m}}` (f64→f32 narrow) in assembly:\n{asm}"
+    );
+}
