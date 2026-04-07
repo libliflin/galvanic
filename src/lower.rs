@@ -975,6 +975,10 @@ fn lower_fn(
     // than 1 per parameter when an enum type occupies multiple registers
     // (discriminant + field registers).
     let mut reg_idx: usize = 0;
+    // `freg_idx` tracks the float register index (d0–d7 / s0–s7).
+    // ARM64 ABI: float args occupy a separate register bank from integer args.
+    // FLS §4.2: f64/f32 parameters are passed in d0–d7 / s0–s7.
+    let mut freg_idx: usize = 0;
 
     // FLS §10.1: If this is a method with a self parameter, spill the self
     // value from leading registers.
@@ -1397,21 +1401,52 @@ fn lower_fn(
             }
         }
 
+        let param_ty = lower_ty(&param.ty, source)?;
+
+        // FLS §4.2: f64 parameters are passed in d0–d7 (ARM64 float register bank).
+        // Spill d{freg_idx} to the stack slot and register in float_locals so that
+        // path expressions emit LoadF64Slot rather than the integer Load.
+        if param_ty == IrTy::F64 {
+            if freg_idx >= 8 {
+                return Err(LowerError::Unsupported(
+                    "functions with more than 8 float parameters (exceeds ARM64 float register window)".into(),
+                ));
+            }
+            let slot = ctx.alloc_slot()?;
+            ctx.instrs.push(Instr::StoreF64 { src: freg_idx as u8, slot });
+            ctx.float_locals.insert(param_name, slot);
+            freg_idx += 1;
+            continue;
+        }
+
+        // FLS §4.2: f32 parameters are passed in s0–s7.
+        // Spill s{freg_idx} to the stack slot and register in float32_locals.
+        if param_ty == IrTy::F32 {
+            if freg_idx >= 8 {
+                return Err(LowerError::Unsupported(
+                    "functions with more than 8 float parameters (exceeds ARM64 float register window)".into(),
+                ));
+            }
+            let slot = ctx.alloc_slot()?;
+            ctx.instrs.push(Instr::StoreF32 { src: freg_idx as u8, slot });
+            ctx.float32_locals.insert(param_name, slot);
+            freg_idx += 1;
+            continue;
+        }
+
         // FLS §9: i32 and bool parameters — one register each.
         if reg_idx >= 8 {
             return Err(LowerError::Unsupported(
                 "functions with more than 8 parameters (exceeds ARM64 register window)".into(),
             ));
         }
-        let param_ty = lower_ty(&param.ty, source)?;
-        // Only i32 and bool parameters are supported (both use integer registers).
         // FLS §4.3: bool is passed as a 32-bit integer register on ARM64.
         // FLS §4.1: i32 parameters occupy one 64-bit register (x0–x7).
         // FLS §4.1: All primitive integer types and bool are supported as
         // parameters. Each uses one 64-bit ARM64 register (x0–x7).
         if !matches!(param_ty, IrTy::I32 | IrTy::Bool | IrTy::U32 | IrTy::FnPtr) {
             return Err(LowerError::Unsupported(
-                "parameter type other than i32/bool/u32/i64/u64/usize/isize/i8/i16/u8/u16/fn ptr".into(),
+                "parameter type other than i32/bool/u32/i64/u64/usize/isize/i8/i16/u8/u16/fn ptr/f64/f32".into(),
             ));
         }
         let slot = ctx.alloc_slot()?;
@@ -7918,6 +7953,8 @@ impl<'src> LowerCtx<'src> {
                 //
                 // FLS §6.1.2:37–45: All loads are runtime instructions.
                 let mut arg_regs = Vec::with_capacity(args.len());
+                // FLS §4.2: Float arguments go in d0–d7; collected separately.
+                let mut float_arg_regs: Vec<u8> = Vec::new();
                 for arg in args {
                     // Check whether this argument is a struct variable.
                     //
@@ -8206,9 +8243,18 @@ impl<'src> LowerCtx<'src> {
                             arg_regs.push(field_reg);
                         }
                     } else {
+                        // FLS §4.2: Float arguments go in the float register bank.
+                        // Lower the arg; if it produces a float value, add it to
+                        // float_arg_regs instead of arg_regs.
                         let val = self.lower_expr(arg, &IrTy::I32)?;
-                        let reg = self.val_to_reg(val)?;
-                        arg_regs.push(reg);
+                        match val {
+                            IrValue::FReg(r) => float_arg_regs.push(r),
+                            IrValue::F32Reg(r) => float_arg_regs.push(r),
+                            _ => {
+                                let reg = self.val_to_reg(val)?;
+                                arg_regs.push(reg);
+                            }
+                        }
                     }
                 }
 
@@ -8216,7 +8262,12 @@ impl<'src> LowerCtx<'src> {
                 let dst = self.alloc_reg()?;
 
                 self.has_calls = true;
-                self.instrs.push(Instr::Call { dst, name: fn_name, args: arg_regs });
+                self.instrs.push(Instr::Call {
+                    dst,
+                    name: fn_name,
+                    args: arg_regs,
+                    float_args: float_arg_regs,
+                });
 
                 Ok(IrValue::Reg(dst))
             }
@@ -10369,7 +10420,12 @@ impl<'src> LowerCtx<'src> {
                     }
                 } else {
                     let dst = self.alloc_reg()?;
-                    self.instrs.push(Instr::Call { dst, name: mangled, args: arg_regs });
+                    self.instrs.push(Instr::Call {
+                        dst,
+                        name: mangled,
+                        args: arg_regs,
+                        float_args: vec![],
+                    });
                     Ok(IrValue::Reg(dst))
                 }
             }

@@ -440,32 +440,39 @@ pub enum Instr {
 
     /// Call a named function with arguments; result goes into a virtual register.
     ///
-    /// `Call { dst, name, args }` emits (for each arg[i] ≠ i):
+    /// `Call { dst, name, args, float_args }` emits (for each arg[i] ≠ i):
     ///   `mov x{i}, x{args[i]}`
+    /// then (for each float_args[i] ≠ i):
+    ///   `fmov d{i}, d{float_args[i]}`
     /// then:
     ///   `bl {name}`
     ///   `mov x{dst}, x0`  (omitted if dst == 0)
     ///
     /// FLS §6.12.1: Call expressions. The callee is a path expression resolved
     /// to a function item. Arguments are evaluated left-to-right (FLS §6.4:14)
-    /// and passed in x0–x7 per the ARM64 procedure call standard.
+    /// and passed in x0–x7 (integer) and d0–d7 (float) per the ARM64 ABI.
     ///
-    /// ARM64 ABI: integer/pointer args 0–7 go in x0–x7; return value in x0.
+    /// ARM64 ABI: integer/pointer args 0–7 go in x0–x7; float args 0–7 go in
+    /// d0–d7 (f64) or s0–s7 (f32); integer return value in x0.
     /// The link register (x30) is set to the return address by `bl`; the
     /// calling function must save x30 if it makes any calls (see `saves_lr`
     /// on `IrFn`).
     ///
-    /// Cache-line note: a call with N args emits at most N+2 instructions
-    /// (N moves + bl + mov for result). For the common case of 1–2 args
-    /// already in x0–x1, N moves collapse to 0.
+    /// Cache-line note: a call with N integer + M float args emits at most
+    /// N+M+2 instructions. For the common case of args already in place,
+    /// moves collapse to 0.
     Call {
         /// Destination virtual register for the return value.
         dst: u8,
         /// Name of the function to call.
         name: String,
-        /// Argument virtual registers, in left-to-right parameter order.
+        /// Integer argument virtual registers, in left-to-right parameter order.
         /// `args[i]` holds the value to place in `x{i}` before the call.
         args: Vec<u8>,
+        /// Float argument virtual registers, in left-to-right float-param order.
+        /// `float_args[i]` holds the value to place in `d{i}` before the call.
+        /// FLS §4.2: f64/f32 parameters use the ARM64 float register bank.
+        float_args: Vec<u8>,
     },
 
     /// Return from a `&mut self` method, writing modified fields back to the caller.

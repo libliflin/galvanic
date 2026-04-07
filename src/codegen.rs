@@ -624,13 +624,22 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
         // args form a cycle (e.g., args = [1, 0] would incorrectly overwrite).
         // For the current milestone all arguments are freshly materialized
         // immediates or loads, so arg[i] == i always holds in practice.
-        Instr::Call { dst, name, args } => {
-            // Move arguments to x0, x1, ... as required by the ARM64 ABI.
+        Instr::Call { dst, name, args, float_args } => {
+            // Move integer arguments to x0, x1, ... as required by the ARM64 ABI.
             for (i, &src_reg) in args.iter().enumerate() {
                 if src_reg != i as u8 {
                     writeln!(
                         out,
                         "    mov     x{i}, x{src_reg:<19} // FLS §6.12.1: arg {i}"
+                    )?;
+                }
+            }
+            // FLS §4.2: Move float arguments to d0, d1, ... (ARM64 float register bank).
+            for (i, &src_reg) in float_args.iter().enumerate() {
+                if src_reg != i as u8 {
+                    writeln!(
+                        out,
+                        "    fmov    d{i}, d{src_reg:<19} // FLS §4.2: float arg {i}"
                     )?;
                 }
             }

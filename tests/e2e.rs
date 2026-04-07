@@ -12804,7 +12804,8 @@ fn main() -> i32 {
 }
 "#;
     let Some(exit_code) = compile_and_run(src) else { return; };
-    assert_eq!(exit_code, 2, "-(2.5_f64) as i32 == 2 (truncate), got {exit_code}");
+    // -2.5 as i32 = -2; exit code is u8-wrapped on Linux: (-2 & 0xFF) = 254.
+    assert_eq!(exit_code, 254, "-(2.5_f64) as i32 == -2, exit code 254 (wrapped), got {exit_code}");
 }
 
 /// Milestone 100: negate a negative f64 (double negation back to positive).
