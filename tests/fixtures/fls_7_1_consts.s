@@ -54,7 +54,15 @@ main:
     mov     x4, x0              // FLS §6.12.1: return value → x4
     ldr     x5, [sp, #8              ] // FLS §8.1: load slot 1
     sub     x6, x5, x4          // FLS §6.5.5: sub
-    mov     x0, x6              // FLS §6.19: return reg 6 → x0
+    mov     x7, #65536               // FLS §2.4.4.1: load imm 65536
+    add     x8, x6, x7          // FLS §6.5.5: add
+    mov     x9, #65536               // FLS §2.4.4.1: load imm 65536
+    sub     x10, x8, x9          // FLS §6.5.5: sub
+    mov     x11, #5                   // FLS §2.4.4.1: load imm 5
+    add     x12, x10, x11          // FLS §6.5.5: add
+    mov     x13, #5                   // FLS §2.4.4.1: load imm 5
+    sub     x14, x12, x13          // FLS §6.5.5: sub
+    mov     x0, x14              // FLS §6.19: return reg 14 → x0
     add     sp, sp, #16             // FLS §8.1: restore stack frame
     ldr     x30, [sp], #16         // FLS §6.12.1: restore lr
     ret

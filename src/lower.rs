@@ -380,6 +380,66 @@ fn expr_contains_labeled_break_with_value(expr: &Expr, target_label: &str) -> bo
 ///
 /// FLS §18.1: A source file is a sequence of items. Each `fn` item is
 /// lowered to an `IrFn`. Struct items (FLS §14) are collected into a
+/// Evaluate a constant expression to an `i32` at compile time.
+///
+/// FLS §6.1.2:37–45: Constant initializers are evaluated at compile time.
+/// Supported forms:
+/// - Integer literals (FLS §2.4.4.1)
+/// - Arithmetic negation `-expr` (FLS §6.5.3)
+/// - Binary arithmetic: `+`, `-`, `*`, `/`, `%` (FLS §6.5.5)
+/// - Bitwise: `&`, `|`, `^`, `<<`, `>>` (FLS §6.5.6, §6.5.7)
+/// - References to already-known const names (FLS §7.1:10)
+///
+/// Returns `None` for unsupported forms (non-integer types, overflow, or
+/// division/remainder by zero). The caller silently skips const items whose
+/// initializers cannot be evaluated.
+///
+/// Cache-line note: called only during the compile-time const collection pass,
+/// not on any runtime hot path.
+fn eval_const_expr(expr: &Expr, source: &str, known: &HashMap<String, i32>) -> Option<i32> {
+    match &expr.kind {
+        // FLS §2.4.4.1: Integer literal — must fit in i32.
+        ExprKind::LitInt(n) => {
+            if *n <= i32::MAX as u128 { Some(*n as i32) } else { None }
+        }
+        // FLS §6.5.3: Arithmetic negation in const context.
+        ExprKind::Unary { op: crate::ast::UnaryOp::Neg, operand } => {
+            eval_const_expr(operand, source, known)?.checked_neg()
+        }
+        // FLS §7.1:10: A single-segment path that names a known const is
+        // replaced by its value.
+        ExprKind::Path(segs) if segs.len() == 1 => {
+            known.get(segs[0].text(source)).copied()
+        }
+        // FLS §6.5: Binary arithmetic and bitwise operators in const context.
+        ExprKind::Binary { op, lhs, rhs } => {
+            let l = eval_const_expr(lhs, source, known)?;
+            let r = eval_const_expr(rhs, source, known)?;
+            match op {
+                BinOp::Add    => l.checked_add(r),
+                BinOp::Sub    => l.checked_sub(r),
+                BinOp::Mul    => l.checked_mul(r),
+                // FLS §6.23: Division by zero is an error; skip the const.
+                BinOp::Div    => if r != 0 { l.checked_div(r) } else { None },
+                BinOp::Rem    => if r != 0 { Some(l.wrapping_rem(r)) } else { None },
+                BinOp::BitAnd => Some(l & r),
+                BinOp::BitOr  => Some(l | r),
+                BinOp::BitXor => Some(l ^ r),
+                BinOp::Shl    => if (0..32).contains(&r) { l.checked_shl(r as u32) } else { None },
+                BinOp::Shr    => if (0..32).contains(&r) { Some(l >> r) } else { None },
+                // Assign, logical, and comparison operators are not valid in
+                // const arithmetic initializers (they do not produce an integer).
+                _ => None,
+            }
+        }
+        // FLS §6.7: Parenthesized expressions — strip the grouping.
+        // The parser does not emit a separate Group node; parenthesized
+        // sub-expressions are already the inner node.  This arm is a
+        // defensive no-op but does not hurt.
+        _ => None,
+    }
+}
+
 /// definition table and used during function lowering for struct literal
 /// and field-access expressions. Enum items with unit variants (FLS §15)
 /// are collected into an enum definition table for path-expression and
@@ -523,28 +583,48 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     // Collect constant item values: maps const name → i32 value.
     //
     // FLS §7.1: Constant items are compile-time values substituted at every
-    // use site. The initializer must be a constant expression (FLS §6.1.2).
-    // At this milestone only integer literal initializers are supported.
+    // use site. The initializer must be a constant expression (FLS §6.1.2:
+    // 37–45). Galvanic evaluates const initializers via `eval_const_expr`,
+    // which handles integer literals, arithmetic, and references to other
+    // already-resolved consts.
     //
     // FLS §7.1:10: "Every use of a constant is replaced with its value
     // (or a copy of it)." Galvanic implements this by emitting `LoadImm`
     // when a path expression resolves to a known const name.
     //
+    // Multi-pass strategy: a const whose initializer references another const
+    // can only be evaluated after that other const is known. We loop until no
+    // new values are discovered (fixed-point). The loop runs at most N+1 times
+    // for N const items (with a well-founded dependency graph every pass
+    // resolves at least one new const, or we stop on no progress).
+    //
+    // FLS §7.1 AMBIGUOUS: The spec does not specify the order in which const
+    // items are evaluated relative to one another; it only requires each
+    // initializer to be a constant expression. Galvanic's fixed-point pass
+    // naturally handles forward references.
+    //
     // Cache-line note: this HashMap is built once and shared read-only
     // across all `lower_fn` calls — not on any hot runtime path.
     let mut const_vals: HashMap<String, i32> = HashMap::new();
-    for item in &src.items {
-        if let ItemKind::Const(c) = &item.kind {
-            let name = c.name.text(source).to_owned();
-            // Only integer literal initializers supported at this milestone.
-            // FLS §6.1.2:37–45: The const initializer is evaluated at compile
-            // time. Non-literal initialisers (arithmetic, other consts) are
-            // future work.
-            if let ExprKind::LitInt(n) = &c.value.kind
-                && *n <= i32::MAX as u128
-            {
-                const_vals.insert(name, *n as i32);
+    // FLS §6.1.2:37–45: Evaluate all const initializers via the compile-time
+    // evaluator. Repeat until no new consts are discovered (handles consts
+    // that reference other consts defined later in the file).
+    loop {
+        let prev_len = const_vals.len();
+        for item in &src.items {
+            if let ItemKind::Const(c) = &item.kind {
+                let name = c.name.text(source).to_owned();
+                if !const_vals.contains_key(&name)
+                    && let Some(val) = eval_const_expr(&c.value, source, &const_vals)
+                {
+                    const_vals.insert(name, val);
+                }
             }
+        }
+        // If no new consts were resolved this pass, we have reached fixed-point.
+        // Remaining unresolved consts have unsupported initializer forms.
+        if const_vals.len() == prev_len {
+            break;
         }
     }
 

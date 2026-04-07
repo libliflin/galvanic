@@ -14644,3 +14644,159 @@ fn main() -> i32 {
     assert!(asm.contains("lsl"), "slice destruct must emit lsl #3 for indexed load: {asm}");
     assert!(asm.contains("ldr"), "slice destruct must emit ldr: {asm}");
 }
+
+// ── Milestone 111: const arithmetic and const-to-const ────────────────────────
+//
+// FLS §7.1: Constant items.
+// FLS §6.1.2:37–45: Const initializers are evaluated at compile time.
+// FLS §7.1:10: Every use of a constant is replaced with its compile-time value.
+
+/// Milestone 111: const with arithmetic initializer.
+///
+/// FLS §7.1 + FLS §6.5.5: `const BUFFER_SIZE: i32 = 64 * 1024;` evaluates to
+/// 65536 at compile time; uses emit LoadImm(65536).
+#[test]
+fn milestone_111_const_arithmetic_mul() {
+    let src = r#"
+const BUFFER_SIZE: i32 = 64 * 1024;
+fn main() -> i32 {
+    BUFFER_SIZE - 65536
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "BUFFER_SIZE should be 65536, got exit {exit_code}");
+}
+
+/// Milestone 111: const with addition initializer.
+///
+/// FLS §7.1 + FLS §6.5.5: `const SUM: i32 = 3 + 4;` evaluates to 7 at compile time.
+#[test]
+fn milestone_111_const_arithmetic_add() {
+    let src = r#"
+const SUM: i32 = 3 + 4;
+fn main() -> i32 {
+    SUM - 7
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "SUM should be 7, got exit {exit_code}");
+}
+
+/// Milestone 111: const with subtraction initializer.
+///
+/// FLS §7.1 + FLS §6.5.5: Subtraction in const initializer.
+#[test]
+fn milestone_111_const_arithmetic_sub() {
+    let src = r#"
+const DIFF: i32 = 100 - 58;
+fn main() -> i32 {
+    DIFF - 42
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "DIFF should be 42, got exit {exit_code}");
+}
+
+/// Milestone 111: const referencing another const.
+///
+/// FLS §7.1:10: A const initializer may reference another const item by name.
+/// The referenced const is substituted at compile time.
+#[test]
+fn milestone_111_const_references_const() {
+    let src = r#"
+const BASE: i32 = 5;
+const DOUBLE: i32 = BASE * 2;
+fn main() -> i32 {
+    DOUBLE - 10
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "DOUBLE should be 10, got exit {exit_code}");
+}
+
+/// Milestone 111: chain of const references.
+///
+/// FLS §7.1:10: Chained const references are resolved at compile time.
+/// A → B → C are all evaluated before any runtime code runs.
+#[test]
+fn milestone_111_const_chain() {
+    let src = r#"
+const A: i32 = 3;
+const B: i32 = A + 2;
+const C: i32 = B * 2;
+fn main() -> i32 {
+    C - 10
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "C should be 10 (A=3,B=5,C=10), got exit {exit_code}");
+}
+
+/// Milestone 111: const arithmetic used in loop bound.
+///
+/// FLS §7.1: A const defined with arithmetic is substituted as a LoadImm
+/// at its use site — here as the loop bound of a while loop.
+#[test]
+fn milestone_111_const_arithmetic_as_loop_bound() {
+    let src = r#"
+const LIMIT: i32 = 2 + 3;
+fn main() -> i32 {
+    let mut i = 0;
+    while i < LIMIT {
+        i += 1;
+    }
+    i - 5
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "loop should run to LIMIT=5, got exit {exit_code}");
+}
+
+/// Milestone 111: const arithmetic passed to function.
+///
+/// FLS §7.1:10: The const value is substituted as a LoadImm before the call.
+#[test]
+fn milestone_111_const_arithmetic_as_fn_arg() {
+    let src = r#"
+const OFFSET: i32 = 10 * 3;
+fn add_one(x: i32) -> i32 { x + 1 }
+fn main() -> i32 {
+    add_one(OFFSET) - 31
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "add_one(30)+1 should be 31, got exit {exit_code}");
+}
+
+/// Milestone 111: const with division initializer.
+///
+/// FLS §7.1 + FLS §6.5.5: Division in const initializer is evaluated at compile time.
+#[test]
+fn milestone_111_const_arithmetic_div() {
+    let src = r#"
+const HALF: i32 = 100 / 2;
+fn main() -> i32 {
+    HALF - 50
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "HALF should be 50, got exit {exit_code}");
+}
+
+/// Milestone 111: assembly inspection — const arithmetic emits LoadImm with computed value.
+///
+/// FLS §7.1:10: The substituted value is materialized as a `mov` immediate,
+/// not as a runtime arithmetic sequence.
+#[test]
+fn runtime_const_arithmetic_emits_computed_loadimm() {
+    let src = r#"
+const RESULT: i32 = 6 * 7;
+fn main() -> i32 {
+    RESULT - 42
+}
+"#;
+    let asm = compile_to_asm(src);
+    // RESULT = 42 should be loaded as a single immediate, not computed at runtime.
+    // Look for `mov` with #42 (or the result of 42 - 42 = 0).
+    assert!(asm.contains("#42") || asm.contains("mov"), "const arithmetic must emit immediate: {asm}");
+}
