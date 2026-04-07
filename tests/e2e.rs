@@ -17456,3 +17456,231 @@ fn main() -> i32 {
         "inner fn must emit assembly label 'helper:': {asm}"
     );
 }
+
+// ── Milestone 127: Default trait method implementations ──────────────────────
+//
+// FLS §10.1.1: A trait may provide a default implementation for a method.
+// When an `impl Trait for Type` block does not override a method that has a
+// default body, galvanic emits `TypeName__methodName` using the default body
+// from the trait definition. Calls to `self.other_method()` inside the default
+// body are resolved to `TypeName__other_method` (static dispatch, FLS §13).
+
+/// Milestone 127: basic default method — calls the overridden method.
+///
+/// FLS §10.1.1: `doubled` has a default body calling `self.value() * 2`.
+/// `Foo` only provides `value`; `doubled` is inherited from the trait.
+#[test]
+fn milestone_127_default_method_basic() {
+    let src = r#"
+trait Scalable {
+    fn value(&self) -> i32;
+    fn doubled(&self) -> i32 {
+        self.value() * 2
+    }
+}
+struct Foo { x: i32 }
+impl Scalable for Foo {
+    fn value(&self) -> i32 { self.x }
+}
+fn main() -> i32 {
+    let f = Foo { x: 21 };
+    f.doubled()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "21*2=42, got {exit_code}");
+}
+
+/// Milestone 127: default method with two implementing types.
+///
+/// FLS §10.1.1: The same default body is emitted separately for each
+/// implementing type that doesn't override it.
+#[test]
+fn milestone_127_default_method_two_types() {
+    let src = r#"
+trait Scalable {
+    fn value(&self) -> i32;
+    fn doubled(&self) -> i32 { self.value() * 2 }
+}
+struct A { x: i32 }
+struct B { y: i32 }
+impl Scalable for A { fn value(&self) -> i32 { self.x } }
+impl Scalable for B { fn value(&self) -> i32 { self.y } }
+fn main() -> i32 {
+    let a = A { x: 10 };
+    let b = B { y: 11 };
+    a.doubled() + b.doubled()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "20+22=42, got {exit_code}");
+}
+
+/// Milestone 127: explicit override takes precedence over default.
+///
+/// FLS §10.1.1: When an impl provides its own version of the method,
+/// the default body is not emitted for that type.
+#[test]
+fn milestone_127_default_method_overridden() {
+    let src = r#"
+trait Scalable {
+    fn value(&self) -> i32;
+    fn doubled(&self) -> i32 { self.value() * 2 }
+}
+struct Foo { x: i32 }
+impl Scalable for Foo {
+    fn value(&self) -> i32 { self.x }
+    fn doubled(&self) -> i32 { self.x + 40 }  // override
+}
+fn main() -> i32 {
+    let f = Foo { x: 2 };
+    f.doubled()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "2+40=42, got {exit_code}");
+}
+
+/// Milestone 127: default method result used in arithmetic.
+///
+/// FLS §10.1.1, §6.5.5: The result of calling a default method is a value
+/// expression and can be used in arithmetic.
+#[test]
+fn milestone_127_default_method_result_in_arithmetic() {
+    let src = r#"
+trait Scalable {
+    fn value(&self) -> i32;
+    fn doubled(&self) -> i32 { self.value() * 2 }
+}
+struct Foo { x: i32 }
+impl Scalable for Foo { fn value(&self) -> i32 { self.x } }
+fn main() -> i32 {
+    let f = Foo { x: 7 };
+    f.doubled() + f.doubled() + f.doubled()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "14+14+14=42, got {exit_code}");
+}
+
+/// Milestone 127: default method passed as argument.
+///
+/// FLS §10.1.1: The return value of a default method can be passed to a
+/// free function.
+#[test]
+fn milestone_127_default_method_passed_to_fn() {
+    let src = r#"
+trait Scalable {
+    fn value(&self) -> i32;
+    fn doubled(&self) -> i32 { self.value() * 2 }
+}
+struct Foo { x: i32 }
+impl Scalable for Foo { fn value(&self) -> i32 { self.x } }
+fn add_one(x: i32) -> i32 { x + 1 }
+fn main() -> i32 {
+    let f = Foo { x: 20 };
+    add_one(f.doubled())
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 41, "40+1=41, got {exit_code}");
+}
+
+/// Milestone 127: default method calls multiple other methods.
+///
+/// FLS §10.1.1: A default method body may call multiple methods on self.
+#[test]
+fn milestone_127_default_method_calls_multiple() {
+    let src = r#"
+trait Pair {
+    fn first(&self) -> i32;
+    fn second(&self) -> i32;
+    fn sum(&self) -> i32 { self.first() + self.second() }
+}
+struct Pt { x: i32, y: i32 }
+impl Pair for Pt {
+    fn first(&self) -> i32 { self.x }
+    fn second(&self) -> i32 { self.y }
+}
+fn main() -> i32 {
+    let p = Pt { x: 19, y: 23 };
+    p.sum()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "19+23=42, got {exit_code}");
+}
+
+/// Milestone 127: default method on parameter.
+///
+/// FLS §10.1.1, §9.2: A default method can be called on a struct passed
+/// as a function parameter.
+#[test]
+fn milestone_127_default_method_on_parameter() {
+    let src = r#"
+trait Scalable {
+    fn value(&self) -> i32;
+    fn doubled(&self) -> i32 { self.value() * 2 }
+}
+struct Foo { x: i32 }
+impl Scalable for Foo { fn value(&self) -> i32 { self.x } }
+fn get_doubled(f: Foo) -> i32 { f.doubled() }
+fn main() -> i32 {
+    let f = Foo { x: 21 };
+    get_doubled(f)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "21*2=42, got {exit_code}");
+}
+
+/// Milestone 127: multiple default methods on same trait.
+///
+/// FLS §10.1.1: A trait may have multiple methods with default bodies.
+#[test]
+fn milestone_127_two_default_methods() {
+    let src = r#"
+trait Scalable {
+    fn value(&self) -> i32;
+    fn doubled(&self) -> i32 { self.value() * 2 }
+    fn tripled(&self) -> i32 { self.value() * 3 }
+}
+struct Foo { x: i32 }
+impl Scalable for Foo { fn value(&self) -> i32 { self.x } }
+fn main() -> i32 {
+    let f = Foo { x: 6 };
+    f.doubled() + f.tripled()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 30, "12+18=30, got {exit_code}");
+}
+
+/// Assembly check: default method emits a mangled label for the implementing type.
+///
+/// FLS §10.1.1: The default method is emitted as `TypeName__methodName`, not
+/// as `TraitName__methodName`. The trait body is used verbatim for the type.
+#[test]
+fn runtime_default_method_emits_mangled_label() {
+    let src = r#"
+trait Scalable {
+    fn value(&self) -> i32;
+    fn doubled(&self) -> i32 { self.value() * 2 }
+}
+struct Foo { x: i32 }
+impl Scalable for Foo { fn value(&self) -> i32 { self.x } }
+fn main() -> i32 {
+    let f = Foo { x: 21 };
+    f.doubled()
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("Foo__doubled:"),
+        "default method must emit 'Foo__doubled:' label: {asm}"
+    );
+    assert!(
+        asm.contains("bl      Foo__value"),
+        "default method body must call Foo__value: {asm}"
+    );
+}

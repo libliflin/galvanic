@@ -1,8 +1,8 @@
 // FLS §13: Traits.
 //
-// This fixture demonstrates the trait system at the level supported by
-// galvanic milestone 46: trait definitions with method signatures and
-// trait implementations via `impl Trait for Type`.
+// This fixture demonstrates the trait system including default method
+// implementations (FLS §10.1.1). When a trait method has a default body,
+// implementing types that do not override it inherit the default.
 //
 // FLS §13 AMBIGUOUS: The FLS does not provide concrete code examples for
 // trait definitions in §13 itself; this fixture is derived from the
@@ -48,12 +48,37 @@ impl Describe for Point {
     fn describe(&self) -> i32 { self.x + self.y }
 }
 
-// Entry point: exercises trait method calls via static dispatch.
+// FLS §10.1.1: Default method implementations.
+//
+// A trait may provide a default body for a method. Implementing types that
+// do not override the method inherit the default behaviour. The default body
+// may call other trait methods (via `self.method()`) — galvanic resolves
+// these to the implementing type's concrete method at compile time.
+//
+// FLS §13 AMBIGUOUS: The FLS does not provide a concrete code example for
+// default methods; this is derived from §10.1.1 semantic description.
+trait Scaled {
+    fn value(&self) -> i32;
+    // Default method: calls self.value() — resolved statically.
+    fn doubled(&self) -> i32 {
+        self.value() * 2
+    }
+}
+
+struct Half { n: i32 }
+impl Scaled for Half {
+    fn value(&self) -> i32 { self.n }
+    // `doubled` is not overridden — default implementation is used.
+}
+
+// Entry point: exercises both explicit and default trait method calls.
 //
 // FLS §6.12.2: Method call expressions. `b.describe()` resolves to
 // `Box2d__describe` at compile time (static dispatch).
 fn main() -> i32 {
     let b = Box2d { w: 3, h: 4 };
     let p = Point { x: 1, y: 2 };
-    b.describe() - p.describe() - b.area() + 9
+    let h = Half { n: 7 };
+    // b.describe()=12, p.describe()=3, b.area()=12, h.doubled()=14
+    b.describe() - p.describe() - b.area() + 9 + h.doubled() - 10
 }
