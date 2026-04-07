@@ -28,7 +28,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{BinOp, Block, Expr, ExprKind, ItemKind, Pat, SelfKind, SourceFile, Stmt, StmtKind, StructKind, TyKind};
-use crate::ir::{F64BinOp, IrBinOp, Instr, IrFn, IrTy, IrValue, Module};
+use crate::ir::{F32BinOp, F64BinOp, IrBinOp, Instr, IrFn, IrTy, IrValue, Module};
 
 /// Enum variant registry: maps enum name → (variant name → (discriminant, field_names)).
 ///
@@ -1632,7 +1632,8 @@ fn lower_fn(
     let next_label = ctx.next_label;
     let pending_closures = ctx.pending_closures;
     let float_consts = ctx.float_consts;
-    Ok((IrFn { name, ret_ty, body: body_instrs, stack_slots, saves_lr, float_consts }, pending_closures, next_label))
+    let float32_consts = ctx.float32_consts;
+    Ok((IrFn { name, ret_ty, body: body_instrs, stack_slots, saves_lr, float_consts, float32_consts }, pending_closures, next_label))
 }
 
 // ── Type lowering ────────────────────────────────────────────────────────────
@@ -1684,6 +1685,21 @@ fn parse_float_value(text: &str) -> Result<f64, LowerError> {
     let cleaned: String = nosuffix.chars().filter(|&c| c != '_').collect();
     cleaned.parse::<f64>().map_err(|_| {
         LowerError::Unsupported(format!("cannot parse float literal: `{text}`"))
+    })
+}
+
+/// Parse the text of a float literal token into an `f32` value.
+///
+/// FLS §2.4.4.2: Same syntax as f64 but with `_f32` suffix (or forced by
+/// context). Underscores are stripped from the numeric part.
+fn parse_float32_value(text: &str) -> Result<f32, LowerError> {
+    let nosuffix = text
+        .strip_suffix("_f64")
+        .or_else(|| text.strip_suffix("_f32"))
+        .unwrap_or(text);
+    let cleaned: String = nosuffix.chars().filter(|&c| c != '_').collect();
+    cleaned.parse::<f32>().map_err(|_| {
+        LowerError::Unsupported(format!("cannot parse f32 literal: `{text}`"))
     })
 }
 
@@ -1899,6 +1915,10 @@ fn lower_ty(ty: &crate::ast::Ty, source: &str) -> Result<IrTy, LowerError> {
                 // ARM64: float values live in the `d{N}` register bank.
                 // Stack slots are 8 bytes — same layout as integer/pointer types.
                 "f64" => Ok(IrTy::F64),
+                // FLS §4.2: The 32-bit floating-point type.
+                // ARM64: values live in the `s{N}` register bank.
+                // Stack slots are 8 bytes — same size, lower 4 bytes used.
+                "f32" => Ok(IrTy::F32),
                 name => Err(LowerError::Unsupported(format!("type `{name}`"))),
             }
         }
@@ -2011,6 +2031,22 @@ struct LowerCtx<'src> {
     /// via `Instr::LoadF64Const`. Moved into `IrFn::float_consts` when the
     /// function finishes lowering.
     float_consts: Vec<u64>,
+
+    /// Maps float (`f32`) local variable names to their stack slot indices.
+    ///
+    /// FLS §4.2: f32 locals use 8-byte stack slots (same as all other types)
+    /// but are loaded/stored with single-precision float-register instructions
+    /// (`ldr s{N}` / `str s{N}`). Kept separate from `float_locals` (f64) so
+    /// path-expression lowering can choose the right instruction.
+    float32_locals: HashMap<&'src str, u8>,
+
+    /// Accumulated f32 constants for the current function.
+    ///
+    /// FLS §2.4.4.2: Float literal with `_f32` suffix. Each entry is the raw
+    /// IEEE 754 bit pattern of an `f32` constant referenced by index in the
+    /// function body via `Instr::LoadF32Const`. Moved into `IrFn::float32_consts`
+    /// when the function finishes lowering.
+    float32_consts: Vec<u32>,
     /// Stack of enclosing loop contexts.
     ///
     /// Each entry corresponds to one loop currently being lowered. The top
@@ -2547,6 +2583,8 @@ impl<'src> LowerCtx<'src> {
             last_closure_captures: None,
             float_locals: HashMap::new(),
             float_consts: Vec::new(),
+            float32_locals: HashMap::new(),
+            float32_consts: Vec::new(),
         }
     }
 
@@ -2580,7 +2618,11 @@ impl<'src> LowerCtx<'src> {
     /// assumed integer-typed at this milestone.
     fn is_f64_expr(&self, expr: &crate::ast::Expr) -> bool {
         match &expr.kind {
-            crate::ast::ExprKind::LitFloat => true,
+            crate::ast::ExprKind::LitFloat => {
+                // FLS §2.4.4.2: A literal with `_f32` suffix is f32, not f64.
+                let text = expr.span.text(self.source);
+                !text.ends_with("_f32")
+            }
             crate::ast::ExprKind::Path(segs) if segs.len() == 1 => {
                 self.float_locals.contains_key(segs[0].text(self.source))
             }
@@ -2588,6 +2630,29 @@ impl<'src> LowerCtx<'src> {
             // Bitwise ops and shifts are not defined for f64 (FLS §6.5.6–§6.5.8).
             crate::ast::ExprKind::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div, lhs, rhs } => {
                 self.is_f64_expr(lhs) && self.is_f64_expr(rhs)
+            }
+            _ => false,
+        }
+    }
+
+    /// Return true if `expr` is statically known to produce an `f32` value.
+    ///
+    /// FLS §4.2: Used at cast sites to select `F32ToI32` when the source is
+    /// an f32, vs. f64 or integer otherwise.
+    ///
+    /// FLS §2.4.4.2: Float literals with `_f32` suffix are f32-typed.
+    fn is_f32_expr(&self, expr: &crate::ast::Expr) -> bool {
+        match &expr.kind {
+            crate::ast::ExprKind::LitFloat => {
+                let text = expr.span.text(self.source);
+                text.ends_with("_f32")
+            }
+            crate::ast::ExprKind::Path(segs) if segs.len() == 1 => {
+                self.float32_locals.contains_key(segs[0].text(self.source))
+            }
+            // FLS §6.5.5: A binary arithmetic expression on f32 operands produces f32.
+            crate::ast::ExprKind::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div, lhs, rhs } => {
+                self.is_f32_expr(lhs) && self.is_f32_expr(rhs)
             }
             _ => false,
         }
@@ -2714,6 +2779,10 @@ impl<'src> LowerCtx<'src> {
             // arithmetic contexts directly; F64ToI32 is required first.
             IrValue::FReg(_) => Err(LowerError::Unsupported(
                 "float register used in integer context; cast to i32 first (FLS §6.5.9)".into(),
+            )),
+            // FLS §4.2: f32 register values also require an explicit cast.
+            IrValue::F32Reg(_) => Err(LowerError::Unsupported(
+                "f32 register used in integer context; cast to i32 first (FLS §6.5.9)".into(),
             )),
         }
     }
@@ -5235,6 +5304,32 @@ impl<'src> LowerCtx<'src> {
                     return Ok(());
                 }
 
+                // FLS §4.2: If the type annotation is `f32`, use single-precision
+                // float store/load instructions and register in `float32_locals`.
+                let declared_f32 = ty.as_ref().is_some_and(|t| {
+                    matches!(&t.kind, crate::ast::TyKind::Path(segs)
+                        if segs.len() == 1 && segs[0].text(self.source) == "f32")
+                });
+
+                if declared_f32 {
+                    if let Some(init_expr) = init.as_ref() {
+                        // FLS §2.4.4.2: f32 initializer must produce an f32 reg.
+                        // FLS §6.1.2:37–45: store is a runtime instruction.
+                        let val = self.lower_expr(init_expr, &IrTy::F32)?;
+                        let src = match val {
+                            IrValue::F32Reg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "f32 let binding: initializer did not produce an f32 register".into(),
+                            )),
+                        };
+                        self.instrs.push(Instr::StoreF32 { src, slot });
+                    }
+                    // Register as an f32 local so path expressions emit
+                    // `LoadF32Slot` rather than `Load` or `LoadF64Slot`.
+                    self.float32_locals.insert(var_name, slot);
+                    return Ok(());
+                }
+
                 if let Some(init_expr) = init.as_ref() {
                     // Lower the initializer. We assume i32 for numeric
                     // expressions. Type inference is future work.
@@ -5436,13 +5531,26 @@ impl<'src> LowerCtx<'src> {
             // The constant itself is one 8-byte `.quad` in `.rodata`.
             ExprKind::LitFloat => {
                 let text = expr.span.text(self.source);
-                let val = parse_float_value(text)?;
-                let bits = val.to_bits();
-                let idx = self.float_consts.len() as u32;
-                self.float_consts.push(bits);
-                let dst = self.alloc_reg()?;
-                self.instrs.push(Instr::LoadF64Const { dst, idx });
-                Ok(IrValue::FReg(dst))
+                // FLS §2.4.4.2: A literal with `_f32` suffix, or lowered in an
+                // f32 context, produces a single-precision value in an `s`-register.
+                // All other float literals default to f64 in a `d`-register.
+                if text.ends_with("_f32") || ret_ty == &IrTy::F32 {
+                    let val = parse_float32_value(text)?;
+                    let bits = val.to_bits();
+                    let idx = self.float32_consts.len() as u32;
+                    self.float32_consts.push(bits);
+                    let dst = self.alloc_reg()?;
+                    self.instrs.push(Instr::LoadF32Const { dst, idx });
+                    Ok(IrValue::F32Reg(dst))
+                } else {
+                    let val = parse_float_value(text)?;
+                    let bits = val.to_bits();
+                    let idx = self.float_consts.len() as u32;
+                    self.float_consts.push(bits);
+                    let dst = self.alloc_reg()?;
+                    self.instrs.push(Instr::LoadF64Const { dst, idx });
+                    Ok(IrValue::FReg(dst))
+                }
             }
 
             // FLS §4.4: Unit literal `()`.
@@ -5492,8 +5600,15 @@ impl<'src> LowerCtx<'src> {
                     self.instrs.push(Instr::LoadFnAddr { dst: r, name: var_name.to_owned() });
                     return Ok(IrValue::Reg(r));
                 }
-                // Check float_locals: FLS §4.2 — float variables use float
-                // register instructions (LoadF64Slot) rather than integer loads.
+                // Check float32_locals: FLS §4.2 — f32 variables use s-register
+                // instructions (LoadF32Slot) rather than integer or d-register loads.
+                if let Some(&slot) = self.float32_locals.get(var_name) {
+                    let dst = self.alloc_reg()?;
+                    self.instrs.push(Instr::LoadF32Slot { dst, slot });
+                    return Ok(IrValue::F32Reg(dst));
+                }
+                // Check float_locals: FLS §4.2 — f64 variables use d-register
+                // instructions (LoadF64Slot) rather than integer loads.
                 if let Some(&slot) = self.float_locals.get(var_name) {
                     let dst = self.alloc_reg()?;
                     self.instrs.push(Instr::LoadF64Slot { dst, slot });
@@ -5722,6 +5837,40 @@ impl<'src> LowerCtx<'src> {
                         self.instrs.push(Instr::F64BinOp { op: f_op, dst, lhs: lhs_freg, rhs: rhs_freg });
                         Ok(IrValue::FReg(dst))
                     }
+                    // FLS §6.5.5: Float arithmetic on f32 operands.
+                    // Only Add/Sub/Mul/Div are defined for f32; bitwise ops and
+                    // shifts are integer-only (FLS §6.5.6–§6.5.8).
+                    IrTy::F32 => {
+                        if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div) {
+                            return Err(LowerError::Unsupported(
+                                "bitwise/shift/rem operators are not defined for f32 (FLS §6.5.6)".into(),
+                            ));
+                        }
+                        let lhs_val = self.lower_expr(lhs, &IrTy::F32)?;
+                        let lhs_freg = match lhs_val {
+                            IrValue::F32Reg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "f32 binary op: lhs did not produce an f32 register".into(),
+                            )),
+                        };
+                        let rhs_val = self.lower_expr(rhs, &IrTy::F32)?;
+                        let rhs_freg = match rhs_val {
+                            IrValue::F32Reg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "f32 binary op: rhs did not produce an f32 register".into(),
+                            )),
+                        };
+                        let dst = self.alloc_reg()?;
+                        let f_op = match op {
+                            BinOp::Add => F32BinOp::Add,
+                            BinOp::Sub => F32BinOp::Sub,
+                            BinOp::Mul => F32BinOp::Mul,
+                            BinOp::Div => F32BinOp::Div,
+                            _ => unreachable!("checked above"),
+                        };
+                        self.instrs.push(Instr::F32BinOp { op: f_op, dst, lhs: lhs_freg, rhs: rhs_freg });
+                        Ok(IrValue::F32Reg(dst))
+                    }
                     _ => Err(LowerError::Unsupported("bitwise/arithmetic on non-integer type".into())),
                 }
             }
@@ -5860,8 +6009,8 @@ impl<'src> LowerCtx<'src> {
 
                     // FLS §4.2: Float-producing if expressions are not yet
                     // supported (float phi slots would need StoreF64/LoadF64Slot).
-                    IrTy::F64 => Err(LowerError::Unsupported(
-                        "if expression producing f64 not yet supported (FLS §4.2)".into(),
+                    IrTy::F64 | IrTy::F32 => Err(LowerError::Unsupported(
+                        "if expression producing float type not yet supported (FLS §4.2)".into(),
                     )),
                 }
             }
@@ -6380,8 +6529,8 @@ impl<'src> LowerCtx<'src> {
                         self.instrs.push(Instr::Label(end_label));
                         Ok(IrValue::Unit)
                     }
-                    IrTy::F64 => Err(LowerError::Unsupported(
-                        "if-let expression producing f64 not yet supported (FLS §4.2)".into(),
+                    IrTy::F64 | IrTy::F32 => Err(LowerError::Unsupported(
+                        "if-let expression producing float type not yet supported (FLS §4.2)".into(),
                     )),
                 }
             }
@@ -7617,10 +7766,10 @@ impl<'src> LowerCtx<'src> {
                         self.instrs.push(Instr::Label(exit_label));
                         Ok(IrValue::Unit)
                     }
-                    // FLS §4.2: Match expressions producing f64 are not yet
+                    // FLS §4.2: Match expressions producing float types are not yet
                     // supported at this milestone.
-                    IrTy::F64 => Err(LowerError::Unsupported(
-                        "match expression producing f64 not yet supported (FLS §4.2)".into(),
+                    IrTy::F64 | IrTy::F32 => Err(LowerError::Unsupported(
+                        "match expression producing float type not yet supported (FLS §4.2)".into(),
                     )),
                 }
             }
@@ -9636,6 +9785,8 @@ impl<'src> LowerCtx<'src> {
                     "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => {
                         // FLS §6.5.9: If the inner expression is f64-typed,
                         // emit FCVTZS (float-to-signed-integer, truncating toward zero).
+                        // FLS §6.5.9: If the inner expression is f32-typed,
+                        // emit FCVTZS w{dst}, s{src}.
                         // Otherwise, re-lower as integer (identity or narrowing cast).
                         if self.is_f64_expr(inner) {
                             let val = self.lower_expr(inner, &IrTy::F64)?;
@@ -9647,6 +9798,19 @@ impl<'src> LowerCtx<'src> {
                             };
                             let dst = self.alloc_reg()?;
                             self.instrs.push(Instr::F64ToI32 { dst, src });
+                            Ok(IrValue::Reg(dst))
+                        } else if self.is_f32_expr(inner) {
+                            // FLS §6.5.9: `f32 as i32` truncates toward zero.
+                            // ARM64: `fcvtzs w{dst}, s{src}`.
+                            let val = self.lower_expr(inner, &IrTy::F32)?;
+                            let src = match val {
+                                IrValue::F32Reg(r) => r,
+                                _ => return Err(LowerError::Unsupported(
+                                    "expected f32 register for f32 cast source".into(),
+                                )),
+                            };
+                            let dst = self.alloc_reg()?;
+                            self.instrs.push(Instr::F32ToI32 { dst, src });
                             Ok(IrValue::Reg(dst))
                         } else {
                             self.lower_expr(inner, &IrTy::I32)
@@ -9683,10 +9847,9 @@ impl<'src> LowerCtx<'src> {
                         "cast to bool not yet supported (FLS §6.5.9)".into(),
                     )),
 
-                    // FLS §6.5.9: Floating-point targets not yet implemented
-                    // (galvanic has no floating-point IR type or codegen).
-                    "f32" | "f64" => Err(LowerError::Unsupported(
-                        "cast to floating-point not yet supported (FLS §6.5.9)".into(),
+                    // FLS §6.5.9: Cast to f64 target not yet implemented.
+                    "f64" => Err(LowerError::Unsupported(
+                        "cast to f64 not yet supported (FLS §6.5.9)".into(),
                     )),
 
                     other => Err(LowerError::Unsupported(format!(
@@ -10272,6 +10435,7 @@ impl<'src> LowerCtx<'src> {
                     stack_slots,
                     saves_lr,
                     float_consts: closure_ctx.float_consts,
+                    float32_consts: closure_ctx.float32_consts,
                 };
 
                 // Collect this closure and any closures defined inside it.

@@ -112,6 +112,18 @@ pub struct IrFn {
     /// to a static item. Unlike statics, float constants are read-only and
     /// share the instruction-stream locality of the function that uses them.
     pub float_consts: Vec<u64>,
+
+    /// Float (f32) constant pool for this function.
+    ///
+    /// FLS §2.4.4.2: Float literal expressions. Each entry stores the raw
+    /// IEEE 754 bits of a 32-bit float constant referenced in this function's
+    /// body via `Instr::LoadF32Const`. Constants are emitted in the `.rodata`
+    /// section with labels `{fn_name}__f32c{idx}`.
+    ///
+    /// Cache-line note: each f32 constant occupies one 4-byte `.word` — half
+    /// the footprint of an f64 constant. Two f32 constants fit in one 8-byte
+    /// cache-line slot.
+    pub float32_consts: Vec<u32>,
 }
 
 // ── Instructions ──────────────────────────────────────────────────────────────
@@ -850,6 +862,97 @@ pub enum Instr {
         /// Right operand float register (ARM64 `d{rhs}`).
         rhs: u8,
     },
+
+    // ── f32 instructions (FLS §2.4.4.2, §4.2, §6.5.5) ───────────────────────
+
+    /// Load a 32-bit float constant from `.rodata` into an `s`-register.
+    ///
+    /// `LoadF32Const { dst, idx }` emits:
+    ///   adrp  x17, {fn_name}__f32c{idx}
+    ///   add   x17, x17, :lo12:{fn_name}__f32c{idx}
+    ///   ldr   s{dst}, [x17]
+    ///
+    /// FLS §2.4.4.2: Float literal with `_f32` suffix. Stored as 4-byte
+    /// IEEE 754 bit pattern in `.rodata` (`.word` directive, `.align 2`).
+    ///
+    /// Cache-line note: same 3-instruction address materialisation as
+    /// `LoadF64Const`; the constant is 4 bytes vs 8 bytes for f64.
+    LoadF32Const {
+        /// Destination single-precision float register (ARM64 `s{dst}`).
+        dst: u8,
+        /// Index into `IrFn::float32_consts`.
+        idx: u32,
+    },
+
+    /// Store a single-precision float register to a stack slot.
+    ///
+    /// `StoreF32 { src, slot }` → `str s{src}, [sp, #{slot * 8}]`
+    ///
+    /// FLS §8.1: `let x: f32 = …` stores the value to the stack.
+    /// The slot is 8 bytes wide; only the lower 4 bytes are written.
+    ///
+    /// Cache-line note: one 4-byte instruction.
+    StoreF32 {
+        /// Source single-precision float register (ARM64 `s{src}`).
+        src: u8,
+        /// Stack slot index (byte offset = slot × 8).
+        slot: u8,
+    },
+
+    /// Load a single-precision float register from a stack slot.
+    ///
+    /// `LoadF32Slot { dst, slot }` → `ldr s{dst}, [sp, #{slot * 8}]`
+    ///
+    /// FLS §8.1: Reading a local variable bound as `f32`.
+    ///
+    /// Cache-line note: one 4-byte instruction.
+    LoadF32Slot {
+        /// Destination single-precision float register (ARM64 `s{dst}`).
+        dst: u8,
+        /// Stack slot index (byte offset = slot × 8).
+        slot: u8,
+    },
+
+    /// Convert a single-precision float register to a signed 32-bit integer.
+    ///
+    /// `F32ToI32 { dst, src }` → `fcvtzs w{dst}, s{src}`
+    ///
+    /// FLS §6.5.9: `f32 as i32` truncates toward zero.
+    ///
+    /// FLS §6.5.9 AMBIGUOUS: ARM64 FCVTZS saturates out-of-range values;
+    /// Rust requires wrapping (release) or panic (debug). Same limitation
+    /// as `F64ToI32`.
+    ///
+    /// Cache-line note: one 4-byte instruction.
+    F32ToI32 {
+        /// Destination integer register (ARM64 `w{dst}` / `x{dst}`).
+        dst: u8,
+        /// Source single-precision float register (ARM64 `s{src}`).
+        src: u8,
+    },
+
+    /// Floating-point binary arithmetic on `f32` values.
+    ///
+    /// `F32BinOp { op, dst, lhs, rhs }` emits one of:
+    ///   - `fadd  s{dst}, s{lhs}, s{rhs}` — addition
+    ///   - `fsub  s{dst}, s{lhs}, s{rhs}` — subtraction
+    ///   - `fmul  s{dst}, s{lhs}, s{rhs}` — multiplication
+    ///   - `fdiv  s{dst}, s{lhs}, s{rhs}` — division
+    ///
+    /// FLS §6.5.5: `+`, `-`, `*`, `/` on `f32` operands; IEEE 754
+    /// single-precision semantics.
+    ///
+    /// Cache-line note: one 4-byte instruction per f32 binary operation.
+    F32BinOp {
+        /// The arithmetic operation.
+        op: F32BinOp,
+        /// Destination single-precision float register (ARM64 `s{dst}`).
+        dst: u8,
+        /// Left operand (ARM64 `s{lhs}`).
+        lhs: u8,
+        /// Right operand (ARM64 `s{rhs}`).
+        rhs: u8,
+    },
 }
 
 /// Arithmetic operator for `f64` binary expressions.
@@ -866,6 +969,23 @@ pub enum F64BinOp {
     /// `fmul` — IEEE 754 double-precision multiplication.
     Mul,
     /// `fdiv` — IEEE 754 double-precision division.
+    Div,
+}
+
+/// Arithmetic operator for `f32` binary expressions.
+///
+/// FLS §6.5.5: The arithmetic operators on floating-point types.
+/// Bitwise operators, remainder, and shifts are not defined for `f32`
+/// (FLS §6.5.6, §6.5.7, §6.5.8 only cover integer types).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum F32BinOp {
+    /// `fadd` — IEEE 754 single-precision addition.
+    Add,
+    /// `fsub` — IEEE 754 single-precision subtraction.
+    Sub,
+    /// `fmul` — IEEE 754 single-precision multiplication.
+    Mul,
+    /// `fdiv` — IEEE 754 single-precision division.
     Div,
 }
 
@@ -901,7 +1021,7 @@ pub enum IrValue {
     /// small so it fits alongside other data in a cache line.
     Reg(u8),
 
-    /// A value held in float register N (ARM64 `d{N}`).
+    /// A value held in float register N (ARM64 `d{N}`, 64-bit / f64).
     ///
     /// FLS §4.2: The `f64` type is a 64-bit IEEE 754 floating-point number.
     /// ARM64 uses a separate 128-bit SIMD/FP register bank (`v0`–`v31`); the
@@ -910,6 +1030,17 @@ pub enum IrValue {
     ///
     /// Cache-line note: `u8` occupies 1 byte — same size as `Reg(u8)`.
     FReg(u8),
+
+    /// A value held in single-precision float register N (ARM64 `s{N}`, 32-bit / f32).
+    ///
+    /// FLS §4.2: The `f32` type is a 32-bit IEEE 754 floating-point number.
+    /// ARM64: `s{N}` is the 32-bit view of SIMD/FP register `v{N}`.
+    ///
+    /// Kept separate from `FReg` (f64) so lowering and codegen can choose the
+    /// correct register width (`s` vs `d`) without inspecting instruction context.
+    ///
+    /// Cache-line note: `u8` occupies 1 byte — same size as `FReg(u8)`.
+    F32Reg(u8),
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -976,4 +1107,14 @@ pub enum IrTy {
     ///
     /// Cache-line note: same 8-byte slot footprint as `IrTy::I32`.
     F64,
+
+    /// The 32-bit floating-point type `f32`. FLS §4.2.
+    ///
+    /// Values live in ARM64 single-precision float registers `s{N}`. Stack
+    /// slots are 8 bytes (same as all other types); only the lower 4 bytes
+    /// are used. Explicit `F32ToI32` conversion required for integer contexts.
+    ///
+    /// Cache-line note: same 8-byte slot footprint as `IrTy::F64`; slightly
+    /// smaller constant pool entries (`.word` vs `.quad`).
+    F32,
 }
