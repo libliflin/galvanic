@@ -3053,6 +3053,21 @@ impl<'src> LowerCtx<'src> {
             crate::ast::ExprKind::Unary { op: crate::ast::UnaryOp::Neg, operand } => {
                 self.is_f64_expr(operand)
             }
+            // FLS §6.12.1: A call to a function in `f64_return_fns` produces f64.
+            // Required so that `f64_fn(...) as i32` selects `F64ToI32` (fcvtzs)
+            // rather than falling through to the integer cast path.
+            crate::ast::ExprKind::Call { callee, .. } => {
+                if let crate::ast::ExprKind::Path(segs) = &callee.kind {
+                    if segs.len() == 1 {
+                        return self.f64_return_fns.contains(segs[0].text(self.source));
+                    }
+                    if segs.len() == 2 {
+                        let mangled = format!("{}__{}", segs[0].text(self.source), segs[1].text(self.source));
+                        return self.f64_return_fns.contains(&mangled);
+                    }
+                }
+                false
+            }
             _ => false,
         }
     }
@@ -3087,6 +3102,21 @@ impl<'src> LowerCtx<'src> {
             // FLS §6.5.4: `-expr` has the same type as `expr`.
             crate::ast::ExprKind::Unary { op: crate::ast::UnaryOp::Neg, operand } => {
                 self.is_f32_expr(operand)
+            }
+            // FLS §6.12.1: A call to a function in `f32_return_fns` produces f32.
+            // Required so that `f32_fn(...) as i32` selects `F32ToI32` (fcvtzs)
+            // rather than falling through to the integer cast path.
+            crate::ast::ExprKind::Call { callee, .. } => {
+                if let crate::ast::ExprKind::Path(segs) = &callee.kind {
+                    if segs.len() == 1 {
+                        return self.f32_return_fns.contains(segs[0].text(self.source));
+                    }
+                    if segs.len() == 2 {
+                        let mangled = format!("{}__{}", segs[0].text(self.source), segs[1].text(self.source));
+                        return self.f32_return_fns.contains(&mangled);
+                    }
+                }
+                false
             }
             _ => false,
         }
