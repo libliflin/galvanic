@@ -760,3 +760,36 @@ fn two_d_array_example() -> i32 {
     // FLS §6.9: nested indexing: grid[0][0]=1, grid[1][1]=4, sum=5.
     grid[0][0] + grid[1][1]  // 1 + 4 = 5
 }
+
+// FLS §6.15.1 + §6.8 + §6.9: for loop over an array variable.
+//
+// FLS §6.15.1: "A for loop expression evaluates its body once for each
+// element of an iterator." The desugaring is via IntoIterator::into_iter.
+//
+// FLS §6.15.1 NOTE: The spec does not provide a concrete code example for
+// iterating over an array with a for loop. This function is derived from the
+// semantic description in §6.15.1 combined with the array rules in §6.8–§6.9.
+//
+// FLS §6.15.1 AMBIGUOUS: The spec desugars `for x in arr` to
+// `IntoIterator::into_iter(arr)`, requiring trait dispatch. Galvanic
+// special-cases array variables at the IR level: a hidden index counter
+// iterates from 0 to arr_len, binding each element to the loop variable via
+// a LoadIndexed instruction. This produces correct runtime semantics without
+// a runtime IntoIterator implementation.
+//
+// Cache-line note: the for-array loop emits a counted loop: counter slot (8B)
+// + element slot (8B) + ~9 instructions in the loop skeleton (36B). The body
+// instructions follow. All fit within one or two 64-byte instruction cache lines
+// for simple bodies.
+
+fn for_array_example() -> i32 {
+    // FLS §6.8: array literal.
+    let arr = [1, 2, 3, 4, 5];
+    let mut sum = 0;
+    // FLS §6.15.1: for loop over array variable, binds each element in order.
+    // FLS §6.9: element access is an indexed load (LoadIndexed in the IR).
+    for x in arr {
+        sum += x;  // FLS §6.5.11: compound assignment.
+    }
+    sum  // 1+2+3+4+5 = 15
+}

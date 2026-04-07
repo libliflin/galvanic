@@ -250,6 +250,30 @@ fn nested_struct_param_sum(Outer { inner: Inner { a, b }, c }: Outer) -> i32 {
     a + b + c
 }
 
+// FLS §5.1.8: Slice/array pattern — `[p0, p1, ...]` matches a fixed-size array
+// and binds each element to the corresponding sub-pattern.
+//
+// FLS §5.1.8: "A slice pattern matches an array or slice type and destructures
+// its elements."
+//
+// Note: The FLS does not provide a concrete code example for slice patterns
+// in let position; this is derived from the semantic description in §5.1.8
+// and the let statement grammar in §8.1.
+fn sum_array_destruct(a: i32, b: i32, c: i32) -> i32 {
+    // FLS §5.1.8: Destructure a local array variable into three bindings.
+    let arr = [a, b, c];
+    let [x, y, z] = arr;
+    x + y + z
+}
+
+// FLS §5.1.8 + §5.1: Slice pattern with wildcard sub-patterns.
+// `_` discards an element without binding it.
+fn first_of_three(a: i32) -> i32 {
+    let arr = [a, 0, 0];
+    let [first, _, _] = arr;
+    first
+}
+
 fn main() -> i32 {
     // FLS §5.1.9: inclusive range — value 2 in [1,3] → 1.
     let a = range_inclusive(2);
@@ -296,6 +320,11 @@ fn main() -> i32 {
     let inner = Inner { a: 1, b: 2 };
     let outer = Outer { inner, c: 3 };
     let r5 = nested_struct_param_sum(outer);
-    // a=1, b=2, c=1, d=1, e=1, f=1, g=4, h=2, i=3, j=0, k=2, m=3, n2=1, n3=1, q=7, r2=12, r3=2, r4=6, r5=6 → sum=56
-    a + b + c + d + e + f + g + h + i + j + k + m + n2 + n3 + q + r2 + r3 + r4 + r5
+    // FLS §5.1.8: slice pattern — sum_array_destruct(1,2,3) = 6.
+    let s1 = sum_array_destruct(1, 2, 3);
+    // FLS §5.1.8 + §5.1: wildcard sub-pattern — first_of_three(5) = 5.
+    let s2 = first_of_three(5);
+    // a=1, b=2, c=1, d=1, e=1, f=1, g=4, h=2, i=3, j=0, k=2, m=3, n2=1, n3=1, q=7,
+    // r2=12, r3=2, r4=6, r5=6, s1=6, s2=5 → sum=67
+    a + b + c + d + e + f + g + h + i + j + k + m + n2 + n3 + q + r2 + r3 + r4 + r5 + s1 + s2
 }

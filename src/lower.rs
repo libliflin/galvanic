@@ -1590,6 +1590,41 @@ fn lower_fn(
             }
         }
 
+        // FLS §4.5, §9.2: Array type parameter — `fn f(arr: [T; N])`.
+        //
+        // An array of N elements is passed as N consecutive integer registers
+        // (x{reg_idx}..x{reg_idx+N-1}), one per element in index order.
+        // Each register is spilled to a consecutive stack slot so that
+        // `LoadIndexed` can address elements via `sp + (base_slot + i) * 8`.
+        // Registering in `local_array_lens` lets `for x in arr` iterate over
+        // the parameter exactly like a locally-bound array variable.
+        //
+        // FLS §6.1.2:37–45: All spill stores are runtime instructions.
+        // Cache-line note: N × 4-byte `str` spill instructions; for N=4
+        // all four spills fit in a single 16-byte instruction-cache slot.
+        if let TyKind::Array { len, .. } = &param.ty.kind {
+            let n = *len;
+            if n > 0 && reg_idx + n > 8 {
+                return Err(LowerError::Unsupported(
+                    "array parameter exceeds ARM64 register window (>8 total registers)".into(),
+                ));
+            }
+            let base_slot = ctx.alloc_slot()?;
+            for _ in 1..n {
+                ctx.alloc_slot()?;
+            }
+            ctx.locals.insert(param_name, base_slot);
+            ctx.local_array_lens.insert(base_slot, n);
+            for i in 0..n {
+                ctx.instrs.push(Instr::Store {
+                    src: (reg_idx + i) as u8,
+                    slot: base_slot + i as u8,
+                });
+            }
+            reg_idx += n;
+            continue;
+        }
+
         let param_ty = lower_ty(&param.ty, source, type_aliases)?;
 
         // FLS §4.2: f64 parameters are passed in d0–d7 (ARM64 float register bank).
@@ -4608,6 +4643,122 @@ impl<'src> LowerCtx<'src> {
                     ));
                 }
 
+                // FLS §5.1.8 + §8.1: Slice/array pattern in let binding.
+                //
+                // `let [a, b, c] = arr;` destructures a fixed-size array by index.
+                //
+                // Supported initializer forms:
+                //   1. Variable path — `let [a, b, c] = arr;` — load each element
+                //      by index (LoadIndexed) and store to fresh slots; zero extra
+                //      stack overhead if the pattern arity matches the array length.
+                //   2. Array literal — `let [a, b, c] = [10, 20, 30];` — evaluate
+                //      each element expression and store to fresh slots.
+                //
+                // FLS §5.1.8: Sub-patterns are matched left-to-right against array
+                //   elements at indices 0, 1, …, N-1.
+                // FLS §6.1.2:37–45: All loads and stores are runtime instructions.
+                // Cache-line note: N-element destructure emits up to 2N instructions
+                //   (N LoadIndexed + N Store = 8N bytes) — 8 elements per 64-byte line.
+                if let Pat::Slice(pats) = pat {
+                    // Case 1: init is a local array variable path.
+                    if let Some(init_expr) = init.as_ref()
+                        && let ExprKind::Path(segs) = &init_expr.kind
+                        && segs.len() == 1
+                    {
+                        let src_name = segs[0].text(self.source);
+                        if let Some(src_slot) = self.locals.get(src_name).copied()
+                            && let Some(&arr_len) = self.local_array_lens.get(&src_slot)
+                        {
+                            if arr_len != pats.len() {
+                                return Err(LowerError::Unsupported(format!(
+                                    "slice pattern has {} elements but `{src_name}` has {arr_len}",
+                                    pats.len()
+                                )));
+                            }
+                            // Emit LoadIndexed + Store for each Ident sub-pattern.
+                            // FLS §6.9: Array indexing; FLS §5.1.8: element binding.
+                            for (i, sub_pat) in pats.iter().enumerate() {
+                                match sub_pat {
+                                    Pat::Ident(span) => {
+                                        let name = span.text(self.source);
+                                        if name != "_" {
+                                            let dst = self.alloc_reg()?;
+                                            let idx_reg = self.alloc_reg()?;
+                                            self.instrs.push(Instr::LoadImm(idx_reg, i as i32));
+                                            self.instrs.push(Instr::LoadIndexed {
+                                                dst,
+                                                base_slot: src_slot,
+                                                index_reg: idx_reg,
+                                            });
+                                            let elem_slot = self.alloc_slot()?;
+                                            self.instrs.push(Instr::Store { src: dst, slot: elem_slot });
+                                            self.locals.insert(name, elem_slot);
+                                        }
+                                    }
+                                    Pat::Wildcard => {}
+                                    _ => {
+                                        return Err(LowerError::Unsupported(
+                                            "only ident and wildcard sub-patterns supported \
+                                             in slice pattern at this milestone"
+                                                .into(),
+                                        ));
+                                    }
+                                }
+                            }
+                            return Ok(());
+                        }
+                    }
+
+                    // Case 2: init is an array literal `[e0, e1, …]`.
+                    if let Some(init_expr) = init.as_ref()
+                        && let ExprKind::Array(elems) = &init_expr.kind
+                    {
+                        if elems.len() != pats.len() {
+                            return Err(LowerError::Unsupported(format!(
+                                "slice pattern has {} elements but array literal has {}",
+                                pats.len(),
+                                elems.len()
+                            )));
+                        }
+                        for (sub_pat, elem_expr) in pats.iter().zip(elems.iter()) {
+                            match sub_pat {
+                                Pat::Ident(span) => {
+                                    let name = span.text(self.source);
+                                    // Evaluate element and store to fresh slot.
+                                    // FLS §6.4:14: Elements evaluated left-to-right.
+                                    // FLS §6.1.2:37–45: Store is a runtime instruction.
+                                    let val = self.lower_expr(elem_expr, &IrTy::I32)?;
+                                    let reg = self.val_to_reg(val)?;
+                                    let slot = self.alloc_slot()?;
+                                    self.instrs.push(Instr::Store { src: reg, slot });
+                                    if name != "_" {
+                                        self.locals.insert(name, slot);
+                                    }
+                                }
+                                Pat::Wildcard => {
+                                    // Evaluate for side effects but discard.
+                                    // FLS §6.4:14: Left-to-right evaluation order preserved.
+                                    let _ = self.lower_expr(elem_expr, &IrTy::I32)?;
+                                }
+                                _ => {
+                                    return Err(LowerError::Unsupported(
+                                        "only ident and wildcard sub-patterns supported \
+                                         in slice pattern at this milestone"
+                                            .into(),
+                                    ));
+                                }
+                            }
+                        }
+                        return Ok(());
+                    }
+
+                    return Err(LowerError::Unsupported(
+                        "slice/array pattern requires a local array variable or array \
+                         literal as initializer"
+                            .into(),
+                    ));
+                }
+
                 // FLS §5.10.2 + §8.1: Struct pattern in let binding.
                 //
                 // `let StructName { field1, field2, .. } = expr;` binds each named
@@ -6898,6 +7049,11 @@ impl<'src> LowerCtx<'src> {
                             "tuple pattern in if-let not yet supported".into(),
                         ));
                     }
+                    Pat::Slice(_) => {
+                        return Err(LowerError::Unsupported(
+                            "slice/array pattern in if-let not yet supported".into(),
+                        ));
+                    }
                 }
 
                 // Install identifier binding (if any) before the then block.
@@ -8544,6 +8700,39 @@ impl<'src> LowerCtx<'src> {
                             self.instrs.push(Instr::Load { dst: reg, slot: base_slot + i as u8 });
                             arg_regs.push(reg);
                         }
+                    } else if let ExprKind::Array(elems) = &arg.kind {
+                        // FLS §6.8, §9.2: Array literal used directly as a function argument —
+                        // e.g., `sum_arr([3, 7, 2, 8])`.
+                        //
+                        // Pass each element as a separate register in index order, matching
+                        // the array parameter calling convention established in `lower_fn`
+                        // for `arr: [T; N]` parameters (N consecutive registers x{i}..x{i+N-1}).
+                        //
+                        // FLS §6.1.2:37–45: All element evaluations emit runtime instructions.
+                        // Cache-line note: N elements → N × 4-byte mov instructions.
+                        for elem in elems.iter() {
+                            let val = self.lower_expr(elem, &IrTy::I32)?;
+                            let reg = self.val_to_reg(val)?;
+                            arg_regs.push(reg);
+                        }
+                    } else if let ExprKind::Path(segs) = &arg.kind
+                        && segs.len() == 1
+                        && let Some(&base_slot) = self.locals.get(segs[0].text(self.source))
+                        && let Some(&n_elems) = self.local_array_lens.get(&base_slot)
+                    {
+                        // FLS §6.8, §9.2: Array variable used as a function argument —
+                        // e.g., `let arr = [1, 2, 3]; sum_arr(arr)`.
+                        //
+                        // Load each element from consecutive stack slots and pass as
+                        // separate registers, matching the `[T; N]` parameter convention.
+                        //
+                        // FLS §6.1.2:37–45: All loads emit runtime instructions.
+                        // Cache-line note: N × 4-byte `ldr` instructions per argument.
+                        for i in 0..n_elems {
+                            let reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst: reg, slot: base_slot + i as u8 });
+                            arg_regs.push(reg);
+                        }
                     } else if let ExprKind::Call { callee: inner_callee, args: inner_args } = &arg.kind
                         && let ExprKind::Path(inner_segs) = &inner_callee.kind
                         && inner_segs.len() == 1
@@ -9808,6 +9997,11 @@ impl<'src> LowerCtx<'src> {
                             "tuple pattern in while-let not yet supported".into(),
                         ));
                     }
+                    Pat::Slice(_) => {
+                        return Err(LowerError::Unsupported(
+                            "slice/array pattern in while-let not yet supported".into(),
+                        ));
+                    }
                 }
 
                 // Install identifier binding (if any) — in scope for body only.
@@ -9876,13 +10070,143 @@ impl<'src> LowerCtx<'src> {
             // flow skeleton (load, cmp, cbz, load, add imm, str, b) — 28 bytes, fits
             // in one 32-byte half of a 64-byte instruction cache line.
             ExprKind::For { pat, iter, body, label } => {
-                // Only integer range iterators are supported at this milestone.
+                // FLS §6.15.1: for loops desugar via IntoIterator. Galvanic handles two
+                // iterator kinds at the IR level (no runtime trait dispatch):
+                //   1. Integer range (start..end / start..=end) — FLS §6.16
+                //   2. Local array variable — FLS §6.8, §6.9
+                //
+                // Check for an array variable iterator FIRST.
+                // `for x in arr` where `arr` is a local i32 array variable.
+                // The loop desugars to a counted index loop: counter runs 0..arr_len,
+                // binding each element to the loop variable on each iteration.
+                //
+                // FLS §6.15.1 AMBIGUOUS: The spec desugars `for x in arr` to
+                // `IntoIterator::into_iter(arr)`, which requires trait dispatch.
+                // Galvanic special-cases arrays at the IR level to avoid requiring
+                // a runtime IntoIterator implementation at this milestone.
+                //
+                // Cache-line note: the array for loop emits ~9 instructions for the
+                // control flow skeleton (load, loadimm, cmp, cbz, add+ldr, str, body,
+                // load, loadimm, add, str, b) — within two 64-byte cache lines.
+                let array_iter: Option<(u8, usize)> = if let ExprKind::Path(segs) = &iter.kind {
+                    if segs.len() == 1 {
+                        let vname = segs[0].text(self.source);
+                        match self.locals.get(vname).copied() {
+                            Some(base) => self.local_array_lens.get(&base).copied().map(|len| (base, len)),
+                            None => None,
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                if let Some((arr_base, arr_len)) = array_iter {
+                    let pat_name = pat.text(self.source);
+
+                    // Allocate a hidden counter slot (0-based element index) and an
+                    // element slot that holds the loop variable on each iteration.
+                    let counter_slot = self.alloc_slot()?;
+                    let elem_slot = self.alloc_slot()?;
+
+                    // Save register watermark — same rationale as While / range For:
+                    // registers allocated inside the loop body are temporaries that do not
+                    // survive across iterations; restoring the watermark at loop exit lets
+                    // subsequent code reuse those virtual register numbers.
+                    let reg_mark = self.next_reg;
+
+                    // Initialise counter to 0.
+                    // FLS §6.15.1: The loop variable takes successive element values
+                    // starting from the first.
+                    let zero_reg = self.alloc_reg()?;
+                    self.instrs.push(Instr::LoadImm(zero_reg, 0));
+                    self.instrs.push(Instr::Store { src: zero_reg, slot: counter_slot });
+
+                    // Labels: cond (condition check), incr (increment / continue target),
+                    // exit (after loop / break target).
+                    let cond_label = self.alloc_label();
+                    let incr_label = self.alloc_label();
+                    let exit_label = self.alloc_label();
+
+                    // Push loop context for break / continue.
+                    // FLS §6.15.7: `continue` in a for loop advances to the next element,
+                    // i.e. increments the counter then re-checks the condition.
+                    // FLS §6.15.6: `for` loops do not support break-with-value.
+                    self.loop_stack.push(LoopCtx {
+                        label: label.clone(),
+                        header_label: incr_label,
+                        exit_label,
+                        break_slot: None,
+                        break_ret_ty: IrTy::Unit,
+                    });
+
+                    // Bind the loop variable so the body can load it via Path.
+                    self.locals.insert(pat_name, elem_slot);
+
+                    // ── Condition: counter < arr_len ──────────────────────────────────
+                    // FLS §6.15.1: The loop terminates when all elements have been visited.
+                    self.instrs.push(Instr::Label(cond_label));
+                    let counter_reg = self.alloc_reg()?;
+                    self.instrs.push(Instr::Load { dst: counter_reg, slot: counter_slot });
+                    let len_reg = self.alloc_reg()?;
+                    self.instrs.push(Instr::LoadImm(len_reg, arr_len as i32));
+                    let cmp_reg = self.alloc_reg()?;
+                    self.instrs.push(Instr::BinOp { op: IrBinOp::Lt, dst: cmp_reg, lhs: counter_reg, rhs: len_reg });
+                    self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: exit_label });
+
+                    // ── Bind element: elem_slot = arr[counter] ────────────────────────
+                    // FLS §6.9: Array indexing. The element at index `counter` is loaded
+                    // from the consecutive stack slots of the array literal.
+                    let elem_reg = self.alloc_reg()?;
+                    self.instrs.push(Instr::LoadIndexed {
+                        dst: elem_reg,
+                        base_slot: arr_base,
+                        index_reg: counter_reg,
+                    });
+                    self.instrs.push(Instr::Store { src: elem_reg, slot: elem_slot });
+
+                    // ── Body ──────────────────────────────────────────────────────────
+                    // FLS §6.15.1: "A for loop evaluates to the unit type."
+                    self.lower_block_to_value(body, &IrTy::Unit)?;
+
+                    // ── Increment: counter += 1 ───────────────────────────────────────
+                    // This is the `continue` target. After incrementing, execution falls
+                    // through to the back-edge Branch → cond_label.
+                    // FLS §6.15.7: `continue` transfers control to the loop increment.
+                    self.instrs.push(Instr::Label(incr_label));
+                    let counter_reg2 = self.alloc_reg()?;
+                    self.instrs.push(Instr::Load { dst: counter_reg2, slot: counter_slot });
+                    let one_reg = self.alloc_reg()?;
+                    self.instrs.push(Instr::LoadImm(one_reg, 1));
+                    let next_counter = self.alloc_reg()?;
+                    self.instrs.push(Instr::BinOp {
+                        op: IrBinOp::Add,
+                        dst: next_counter,
+                        lhs: counter_reg2,
+                        rhs: one_reg,
+                    });
+                    self.instrs.push(Instr::Store { src: next_counter, slot: counter_slot });
+
+                    // Back-edge to condition.
+                    self.instrs.push(Instr::Branch(cond_label));
+
+                    // Exit label: loop done, restore register watermark.
+                    self.instrs.push(Instr::Label(exit_label));
+                    self.loop_stack.pop();
+                    self.next_reg = reg_mark;
+
+                    // FLS §6.15.1: "The type of a for loop expression is the unit type ()."
+                    return Ok(IrValue::Unit);
+                }
+
+                // ── Range iterator (existing code) ────────────────────────────────────
                 let (start_expr, end_expr, inclusive) = match iter.as_ref() {
                     Expr { kind: ExprKind::Range { start: Some(s), end: Some(e), inclusive }, .. } => {
                         (s.as_ref(), e.as_ref(), *inclusive)
                     }
                     _ => return Err(LowerError::Unsupported(
-                        "for loop requires an integer range iterator (start..end or start..=end)".into(),
+                        "for loop requires an integer range iterator (start..end or start..=end) or a local array variable".into(),
                     )),
                 };
 
