@@ -1590,6 +1590,41 @@ fn lower_fn(
             }
         }
 
+        // FLS §4.5, §9.2: Array type parameter — `fn f(arr: [T; N])`.
+        //
+        // An array of N elements is passed as N consecutive integer registers
+        // (x{reg_idx}..x{reg_idx+N-1}), one per element in index order.
+        // Each register is spilled to a consecutive stack slot so that
+        // `LoadIndexed` can address elements via `sp + (base_slot + i) * 8`.
+        // Registering in `local_array_lens` lets `for x in arr` iterate over
+        // the parameter exactly like a locally-bound array variable.
+        //
+        // FLS §6.1.2:37–45: All spill stores are runtime instructions.
+        // Cache-line note: N × 4-byte `str` spill instructions; for N=4
+        // all four spills fit in a single 16-byte instruction-cache slot.
+        if let TyKind::Array { len, .. } = &param.ty.kind {
+            let n = *len;
+            if n > 0 && reg_idx + n > 8 {
+                return Err(LowerError::Unsupported(
+                    "array parameter exceeds ARM64 register window (>8 total registers)".into(),
+                ));
+            }
+            let base_slot = ctx.alloc_slot()?;
+            for _ in 1..n {
+                ctx.alloc_slot()?;
+            }
+            ctx.locals.insert(param_name, base_slot);
+            ctx.local_array_lens.insert(base_slot, n);
+            for i in 0..n {
+                ctx.instrs.push(Instr::Store {
+                    src: (reg_idx + i) as u8,
+                    slot: base_slot + i as u8,
+                });
+            }
+            reg_idx += n;
+            continue;
+        }
+
         let param_ty = lower_ty(&param.ty, source, type_aliases)?;
 
         // FLS §4.2: f64 parameters are passed in d0–d7 (ARM64 float register bank).
@@ -8660,6 +8695,39 @@ impl<'src> LowerCtx<'src> {
                         // matching the tuple parameter calling convention in `lower_fn`.
                         //
                         // FLS §6.1.2:37–45: All loads emit runtime instructions.
+                        for i in 0..n_elems {
+                            let reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst: reg, slot: base_slot + i as u8 });
+                            arg_regs.push(reg);
+                        }
+                    } else if let ExprKind::Array(elems) = &arg.kind {
+                        // FLS §6.8, §9.2: Array literal used directly as a function argument —
+                        // e.g., `sum_arr([3, 7, 2, 8])`.
+                        //
+                        // Pass each element as a separate register in index order, matching
+                        // the array parameter calling convention established in `lower_fn`
+                        // for `arr: [T; N]` parameters (N consecutive registers x{i}..x{i+N-1}).
+                        //
+                        // FLS §6.1.2:37–45: All element evaluations emit runtime instructions.
+                        // Cache-line note: N elements → N × 4-byte mov instructions.
+                        for elem in elems.iter() {
+                            let val = self.lower_expr(elem, &IrTy::I32)?;
+                            let reg = self.val_to_reg(val)?;
+                            arg_regs.push(reg);
+                        }
+                    } else if let ExprKind::Path(segs) = &arg.kind
+                        && segs.len() == 1
+                        && let Some(&base_slot) = self.locals.get(segs[0].text(self.source))
+                        && let Some(&n_elems) = self.local_array_lens.get(&base_slot)
+                    {
+                        // FLS §6.8, §9.2: Array variable used as a function argument —
+                        // e.g., `let arr = [1, 2, 3]; sum_arr(arr)`.
+                        //
+                        // Load each element from consecutive stack slots and pass as
+                        // separate registers, matching the `[T; N]` parameter convention.
+                        //
+                        // FLS §6.1.2:37–45: All loads emit runtime instructions.
+                        // Cache-line note: N × 4-byte `ldr` instructions per argument.
                         for i in 0..n_elems {
                             let reg = self.alloc_reg()?;
                             self.instrs.push(Instr::Load { dst: reg, slot: base_slot + i as u8 });
