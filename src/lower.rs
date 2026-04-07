@@ -3437,17 +3437,22 @@ impl<'src> LowerCtx<'src> {
             // FLS §6.12.2, §4.2: A method call `var.method(...)` returns f64 if the
             // method is registered in `f64_return_fns` (mangled as `Type__method`).
             // Required so that `p.sum() as i32` selects `F64ToI32` (fcvtzs).
+            // FLS §14.2: Tuple struct receivers are registered in `local_tuple_struct_types`,
+            // not `local_struct_types` — check both.
             crate::ast::ExprKind::MethodCall { receiver, method, .. } => {
                 if let crate::ast::ExprKind::Path(segs) = &receiver.kind
                     && segs.len() == 1
                 {
                     let var_name = segs[0].text(self.source);
-                    if let Some(&slot) = self.locals.get(var_name)
-                        && let Some(struct_name) = self.local_struct_types.get(&slot).cloned()
-                    {
-                        let method_name = method.text(self.source);
-                        let mangled = format!("{struct_name}__{method_name}");
-                        return self.f64_return_fns.contains(&mangled);
+                    if let Some(&slot) = self.locals.get(var_name) {
+                        let struct_name = self.local_struct_types.get(&slot)
+                            .or_else(|| self.local_tuple_struct_types.get(&slot))
+                            .cloned();
+                        if let Some(struct_name) = struct_name {
+                            let method_name = method.text(self.source);
+                            let mangled = format!("{struct_name}__{method_name}");
+                            return self.f64_return_fns.contains(&mangled);
+                        }
                     }
                 }
                 false
@@ -3544,17 +3549,22 @@ impl<'src> LowerCtx<'src> {
             // FLS §6.12.2, §4.2: A method call `var.method(...)` returns f32 if the
             // method is registered in `f32_return_fns` (mangled as `Type__method`).
             // Required so that `p.sum() as i32` selects `F32ToI32` (fcvtzs).
+            // FLS §14.2: Tuple struct receivers are registered in `local_tuple_struct_types`,
+            // not `local_struct_types` — check both.
             crate::ast::ExprKind::MethodCall { receiver, method, .. } => {
                 if let crate::ast::ExprKind::Path(segs) = &receiver.kind
                     && segs.len() == 1
                 {
                     let var_name = segs[0].text(self.source);
-                    if let Some(&slot) = self.locals.get(var_name)
-                        && let Some(struct_name) = self.local_struct_types.get(&slot).cloned()
-                    {
-                        let method_name = method.text(self.source);
-                        let mangled = format!("{struct_name}__{method_name}");
-                        return self.f32_return_fns.contains(&mangled);
+                    if let Some(&slot) = self.locals.get(var_name) {
+                        let struct_name = self.local_struct_types.get(&slot)
+                            .or_else(|| self.local_tuple_struct_types.get(&slot))
+                            .cloned();
+                        if let Some(struct_name) = struct_name {
+                            let method_name = method.text(self.source);
+                            let mangled = format!("{struct_name}__{method_name}");
+                            return self.f32_return_fns.contains(&mangled);
+                        }
                     }
                 }
                 false
