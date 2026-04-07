@@ -136,6 +136,37 @@ pub enum ItemKind {
     /// only a single MOV (4 bytes). This is the primary cache-line tradeoff
     /// documented in galvanic's design.
     Static(Box<StaticDef>),
+    /// A type alias. FLS §4.10.
+    ///
+    /// `type Alias = Type;` — introduces a new name for an existing type.
+    /// Every use of the alias is equivalent to using the aliased type directly.
+    /// FLS §4.10: "A type alias defines a new name for an existing type."
+    TypeAlias(Box<TypeAliasDef>),
+}
+
+/// A type alias declaration.
+///
+/// FLS §4.10: Type aliases.
+///
+/// Grammar:
+/// ```text
+/// TypeAlias ::= "type" Identifier "=" Type ";"
+/// ```
+///
+/// FLS §4.10: "A type alias defines a new name for an existing type."
+/// Every occurrence of the alias name in a type position is interchangeable
+/// with the aliased type — there is no distinct type identity.
+///
+/// Cache-line note: `TypeAliasDef` is only allocated during parsing;
+/// it is consumed in the lowering first pass and not kept at runtime.
+#[derive(Debug)]
+pub struct TypeAliasDef {
+    /// The alias name.
+    pub name: Span,
+    /// The aliased type.
+    pub ty: Ty,
+    /// Span of the entire declaration.
+    pub span: Span,
 }
 
 /// A static item declaration.

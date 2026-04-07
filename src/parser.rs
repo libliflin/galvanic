@@ -33,7 +33,7 @@
 use crate::ast::{
     BinOp, Block, EnumDef, EnumVariant, EnumVariantKind, Expr, ExprKind, FnDef, Item, ItemKind,
     NamedField, Param, ParamKind, Pat, SourceFile, Span, Stmt, StmtKind, StructDef, StructKind,
-    Ty, TyKind, TupleField, UnaryOp, Visibility, ImplDef, TraitDef, ConstDef, StaticDef,
+    Ty, TyKind, TupleField, UnaryOp, Visibility, ImplDef, TraitDef, ConstDef, StaticDef, TypeAliasDef,
 };
 use crate::lexer::{Token, TokenKind};
 
@@ -238,8 +238,13 @@ impl<'src> Parser<'src> {
                 let span = start.to(static_def.span);
                 Ok(Item { kind: ItemKind::Static(Box::new(static_def)), span })
             }
+            TokenKind::KwType => {
+                let type_alias_def = self.parse_type_alias_def(vis)?;
+                let span = start.to(type_alias_def.span);
+                Ok(Item { kind: ItemKind::TypeAlias(Box::new(type_alias_def)), span })
+            }
             kind => Err(self.error(format!(
-                "expected item (fn, struct, enum, impl, trait, const, static, …), found {kind:?}"
+                "expected item (fn, struct, enum, impl, trait, const, static, type, …), found {kind:?}"
             ))),
         }
     }
@@ -537,6 +542,27 @@ impl<'src> Parser<'src> {
         let end = self.current_span();
         self.expect(TokenKind::Semi)?;
         Ok(StaticDef { name, ty, value, mutable, span: start.to(end) })
+    }
+
+    /// Parse a type alias declaration.
+    ///
+    /// FLS §4.10: Type aliases.
+    ///
+    /// Grammar:
+    /// ```text
+    /// TypeAlias ::= "type" Identifier "=" Type ";"
+    /// ```
+    ///
+    /// FLS §4.10: "A type alias defines a new name for an existing type."
+    fn parse_type_alias_def(&mut self, _vis: Visibility) -> Result<TypeAliasDef, ParseError> {
+        let start = self.current_span();
+        self.expect(TokenKind::KwType)?;
+        let name = self.expect(TokenKind::Ident)?;
+        self.expect(TokenKind::Eq)?;
+        let ty = self.parse_ty()?;
+        let end = self.current_span();
+        self.expect(TokenKind::Semi)?;
+        Ok(TypeAliasDef { name, ty, span: start.to(end) })
     }
 
     /// Parse a struct definition.
