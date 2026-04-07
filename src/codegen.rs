@@ -501,6 +501,31 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
             )?;
         }
 
+        // `fneg d{dst}, d{src}` — IEEE 754 double-precision sign flip.
+        //
+        // FLS §6.5.4: The unary `-` on an `f64` value negates it. ARM64 FNEG
+        // flips the sign bit without touching the mantissa/exponent.
+        //
+        // FLS §6.1.2:37–45: Runtime instruction — no constant folding.
+        // Cache-line note: one 4-byte instruction.
+        Instr::FNegF64 { dst, src } => {
+            writeln!(
+                out,
+                "    fneg    d{dst}, d{src}               // FLS §6.5.4: f64 negate d{src}"
+            )?;
+        }
+
+        // `fneg s{dst}, s{src}` — IEEE 754 single-precision sign flip.
+        //
+        // FLS §6.5.4: The unary `-` on an `f32` value negates it.
+        // Cache-line note: one 4-byte instruction.
+        Instr::FNegF32 { dst, src } => {
+            writeln!(
+                out,
+                "    fneg    s{dst}, s{src}               // FLS §6.5.4: f32 negate s{src}"
+            )?;
+        }
+
         // FLS §6.5.4: Bitwise NOT `!operand` — complement all bits.
         // ARM64: `mvn x{dst}, x{src}` (alias for `orn xD, xzr, xS`).
         // The GNU assembler accepts `mvn` directly; it encodes as a 4-byte instruction.

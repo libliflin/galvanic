@@ -2639,6 +2639,10 @@ impl<'src> LowerCtx<'src> {
                     false
                 }
             }
+            // FLS §6.5.4: `-expr` has the same type as `expr`.
+            crate::ast::ExprKind::Unary { op: crate::ast::UnaryOp::Neg, operand } => {
+                self.is_f64_expr(operand)
+            }
             _ => false,
         }
     }
@@ -2669,6 +2673,10 @@ impl<'src> LowerCtx<'src> {
                 } else {
                     false
                 }
+            }
+            // FLS §6.5.4: `-expr` has the same type as `expr`.
+            crate::ast::ExprKind::Unary { op: crate::ast::UnaryOp::Neg, operand } => {
+                self.is_f32_expr(operand)
             }
             _ => false,
         }
@@ -9626,24 +9634,49 @@ impl<'src> LowerCtx<'src> {
                 Ok(IrValue::Reg(result_reg))
             }
 
-            // FLS §6.5.4: Unary negation `-operand` — arithmetic two's complement negation.
+            // FLS §6.5.4: Unary negation `-operand`.
             //
-            // Lowering:
-            //   1. Lower the operand to a register.
-            //   2. Emit `Instr::Neg { dst, src }` → `neg x{dst}, x{src}` on ARM64.
+            // Three cases depending on operand type:
+            //   - f64 operand: emit `fneg d{dst}, d{src}` (Instr::FNegF64)
+            //   - f32 operand: emit `fneg s{dst}, s{src}` (Instr::FNegF32)
+            //   - integer operand: emit `neg x{dst}, x{src}` (Instr::Neg)
             //
-            // FLS §6.1.2:37–45: Even `-5` in a non-const context emits a runtime `neg`
-            // instruction — no compile-time folding to a negative immediate.
+            // FLS §6.1.2:37–45: Even `-5` or `-2.5_f64` in a non-const context
+            // must emit a runtime instruction — no compile-time folding.
             //
             // FLS §6.5.4: "The type of a negation expression is the type of the operand."
             //
-            // Cache-line note: `neg` is 4 bytes (alias for `sub xD, xzr, xS`).
+            // Cache-line note: all three ARM64 instructions are 4 bytes.
             ExprKind::Unary { op: crate::ast::UnaryOp::Neg, operand } => {
-                let val = self.lower_expr(operand, &IrTy::I32)?;
-                let src = self.val_to_reg(val)?;
-                let dst = self.alloc_reg()?;
-                self.instrs.push(Instr::Neg { dst, src });
-                Ok(IrValue::Reg(dst))
+                if self.is_f64_expr(operand) {
+                    let val = self.lower_expr(operand, &IrTy::F64)?;
+                    let src = match val {
+                        IrValue::FReg(r) => r,
+                        _ => return Err(LowerError::Unsupported(
+                            "f64 negation: expected float register".into(),
+                        )),
+                    };
+                    let dst = self.alloc_reg()?;
+                    self.instrs.push(Instr::FNegF64 { dst, src });
+                    Ok(IrValue::FReg(dst))
+                } else if self.is_f32_expr(operand) {
+                    let val = self.lower_expr(operand, &IrTy::F32)?;
+                    let src = match val {
+                        IrValue::F32Reg(r) => r,
+                        _ => return Err(LowerError::Unsupported(
+                            "f32 negation: expected f32 register".into(),
+                        )),
+                    };
+                    let dst = self.alloc_reg()?;
+                    self.instrs.push(Instr::FNegF32 { dst, src });
+                    Ok(IrValue::F32Reg(dst))
+                } else {
+                    let val = self.lower_expr(operand, &IrTy::I32)?;
+                    let src = self.val_to_reg(val)?;
+                    let dst = self.alloc_reg()?;
+                    self.instrs.push(Instr::Neg { dst, src });
+                    Ok(IrValue::Reg(dst))
+                }
             }
 
             // FLS §6.5.4: Negation operator `!operand` — two cases:

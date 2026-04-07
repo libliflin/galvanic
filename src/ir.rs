@@ -358,6 +358,39 @@ pub enum Instr {
         src: u8,
     },
 
+    /// IEEE 754 double-precision negation.
+    ///
+    /// `FNegF64 { dst, src }` → `fneg d{dst}, d{src}` on ARM64.
+    ///
+    /// FLS §6.5.4: The unary `-` applied to an `f64` value produces its
+    /// arithmetic negation, flipping the IEEE 754 sign bit.
+    ///
+    /// FLS §6.1.2:37–45: Even `-2.5_f64` in a non-const context must emit
+    /// a runtime `fneg` instruction.
+    ///
+    /// Cache-line note: one 4-byte ARM64 FNEG instruction.
+    FNegF64 {
+        /// Destination float register (ARM64 `d{dst}`).
+        dst: u8,
+        /// Source float register (ARM64 `d{src}`).
+        src: u8,
+    },
+
+    /// IEEE 754 single-precision negation.
+    ///
+    /// `FNegF32 { dst, src }` → `fneg s{dst}, s{src}` on ARM64.
+    ///
+    /// FLS §6.5.4: The unary `-` applied to an `f32` value produces its
+    /// arithmetic negation, flipping the IEEE 754 sign bit.
+    ///
+    /// Cache-line note: one 4-byte ARM64 FNEG instruction.
+    FNegF32 {
+        /// Destination single-precision float register (ARM64 `s{dst}`).
+        dst: u8,
+        /// Source single-precision float register (ARM64 `s{src}`).
+        src: u8,
+    },
+
     /// Bitwise NOT: `dst = !src` (complement all bits).
     ///
     /// `Not { dst, src }` → `mvn x{dst}, x{src}` on ARM64.

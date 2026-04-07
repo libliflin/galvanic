@@ -12784,3 +12784,125 @@ fn main() -> i32 {
         "expected `fcvtzs` (f64→int) in assembly:\n{asm}"
     );
 }
+
+// ── Milestone 100: float negation (`-x` for f64 and f32) ───────────────────
+//
+// FLS §6.5.4: The unary `-` operator applied to a floating-point value
+// produces its arithmetic negation (IEEE 754 sign-flip).
+// ARM64: `fneg d{dst}, d{src}` for f64; `fneg s{dst}, s{src}` for f32.
+
+/// Milestone 100: negate an f64 let binding, cast to i32 for exit code.
+///
+/// FLS §6.5.4: Unary negation on f64. `-2.5_f64` negated → `2.5`, as i32 → 2.
+#[test]
+fn milestone_100_f64_neg_positive() {
+    let src = r#"
+fn main() -> i32 {
+    let x: f64 = 2.5;
+    let y: f64 = -x;
+    y as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2, "-(2.5_f64) as i32 == 2 (truncate), got {exit_code}");
+}
+
+/// Milestone 100: negate a negative f64 (double negation back to positive).
+///
+/// FLS §6.5.4: `-(-x)` restores the original value.
+#[test]
+fn milestone_100_f64_neg_of_neg() {
+    let src = r#"
+fn main() -> i32 {
+    let x: f64 = -3.0;
+    let y: f64 = -x;
+    y as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "-(-3.0_f64) as i32 == 3, got {exit_code}");
+}
+
+/// Milestone 100: f64 negation of a function parameter.
+///
+/// FLS §6.5.4: Negation works on values not statically known at compile time.
+#[test]
+fn milestone_100_f64_neg_param() {
+    let src = r#"
+fn negate(x: f64) -> i32 {
+    (-x) as i32
+}
+fn main() -> i32 {
+    negate(4.7)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    // -4.7 as i32 truncates toward zero → -4 (exit code wraps: 256 - 4 = 252)
+    assert_eq!(exit_code, 252, "negate(4.7) → -4 (wrapped) == 252, got {exit_code}");
+}
+
+/// Milestone 100: f64 negation in arithmetic expression.
+///
+/// FLS §6.5.4 + §6.5.5: Negated float participates in further arithmetic.
+#[test]
+fn milestone_100_f64_neg_in_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    let x: f64 = 1.5;
+    ((-x) + 5.0) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "(-1.5 + 5.0) as i32 == 3, got {exit_code}");
+}
+
+/// Milestone 100: negate an f32 let binding.
+///
+/// FLS §6.5.4: Unary negation on f32. ARM64: `fneg s{dst}, s{src}`.
+#[test]
+fn milestone_100_f32_neg_positive() {
+    let src = r#"
+fn main() -> i32 {
+    let x: f32 = 6.0_f32;
+    let y: f32 = -x;
+    y as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    // -6.0_f32 as i32 = -6 → exit code wraps: 256 - 6 = 250
+    assert_eq!(exit_code, 250, "-(6.0_f32) as i32 == -6 (wrapped to 250), got {exit_code}");
+}
+
+/// Milestone 100: f32 negation of a negative value.
+///
+/// FLS §6.5.4: `-(-x)` returns the original value for f32.
+#[test]
+fn milestone_100_f32_neg_of_neg() {
+    let src = r#"
+fn main() -> i32 {
+    let x: f32 = -5.0_f32;
+    let y: f32 = -x;
+    y as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "-(-5.0_f32) as i32 == 5, got {exit_code}");
+}
+
+/// Assembly check: `-x` where x is f64 emits `fneg d{N}, d{M}`.
+///
+/// FLS §6.5.4: FNEG is the ARM64 instruction for IEEE 754 sign-flip.
+#[test]
+fn runtime_f64_neg_emits_fneg_dreg() {
+    let src = r#"
+fn main() -> i32 {
+    let x: f64 = 2.5;
+    (-x) as i32
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("fneg    d"),
+        "expected `fneg d` (f64 negate) in assembly:\n{asm}"
+    );
+}
