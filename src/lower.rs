@@ -245,6 +245,11 @@ fn expr_contains_break_with_value(expr: &Expr) -> bool {
         }
         // Do NOT recurse into nested loops — their `break` belongs to them.
         ExprKind::Loop { .. } | ExprKind::While { .. } | ExprKind::WhileLet { .. } | ExprKind::For { .. } => false,
+        // Named blocks do NOT consume unlabeled breaks — an unlabeled `break` inside
+        // a named block targets the innermost enclosing LOOP. So we recurse into the
+        // named block body to find unlabeled breaks destined for an outer loop.
+        // FLS §6.4.3, §6.15.6.
+        ExprKind::NamedBlock { body, .. } => block_contains_break_with_value(body),
         // A closure body is a separate function — its `break` expressions belong to loops
         // inside the closure, not to any enclosing loop of the closure expression itself.
         ExprKind::Closure { .. } => false,
@@ -368,6 +373,15 @@ fn expr_contains_labeled_break_with_value(expr: &Expr, target_label: &str) -> bo
         }
         ExprKind::For { body, label, .. } => {
             if label.as_deref() == Some(target_label) {
+                false
+            } else {
+                block_contains_labeled_break_with_value(body, target_label)
+            }
+        }
+        // Named block expression (FLS §6.4.3): recurse into body, but stop if
+        // this block's own label shadows the target (same rule as nested loops).
+        ExprKind::NamedBlock { label, body } => {
+            if label.as_str() == target_label {
                 false
             } else {
                 block_contains_labeled_break_with_value(body, target_label)
@@ -3113,17 +3127,24 @@ struct LoopCtx {
     /// rather than the innermost one. FLS §6.15.6, §6.15.7.
     label: Option<String>,
     /// Label at the top of the loop. Target for `continue` and the back-edge.
+    /// For named blocks (FLS §6.4.3), this equals `exit_label` — there is no
+    /// back-edge. `continue` targeting a named block is an error.
     header_label: u32,
     /// Label immediately after the loop. Target for `break`.
     exit_label: u32,
     /// Stack slot for the loop's result value, allocated when the loop body
-    /// contains a `break <value>` expression. Only `loop` expressions support
-    /// break-with-value (FLS §6.15.6). `None` for `while` and `for` loops.
+    /// contains a `break <value>` expression. Only `loop` expressions and
+    /// named blocks support break-with-value (FLS §6.15.6, §6.4.3).
+    /// `None` for `while` and `for` loops.
     break_slot: Option<u8>,
     /// The expected result type of the loop expression. Needed so that
     /// `break <expr>` can lower the value with the correct type context.
     /// Matches the `ret_ty` passed to `lower_expr` for the `loop` node.
     break_ret_ty: IrTy,
+    /// `true` for named block expressions (FLS §6.4.3): `'label: { … }`.
+    /// Named blocks do not support `continue` — attempting `continue 'label`
+    /// targeting a named block is a lowering error.
+    is_named_block: bool,
 }
 
 // ── Lowering context ─────────────────────────────────────────────────────────
@@ -11801,7 +11822,7 @@ impl<'src> LowerCtx<'src> {
                 // can resolve to the correct labels.
                 // FLS §6.15.3, §6.15.6, §6.15.7.
                 // `while` loops do not support break-with-value (FLS §6.15.6).
-                self.loop_stack.push(LoopCtx { label: label.clone(), header_label, exit_label, break_slot: None, break_ret_ty: IrTy::Unit });
+                self.loop_stack.push(LoopCtx { label: label.clone(), header_label, exit_label, break_slot: None, break_ret_ty: IrTy::Unit, is_named_block: false });
 
                 // Loop top: the branch target for the back-edge.
                 self.instrs.push(Instr::Label(header_label));
@@ -11913,6 +11934,7 @@ impl<'src> LowerCtx<'src> {
                     exit_label,
                     break_slot: None,
                     break_ret_ty: IrTy::Unit,
+                    is_named_block: false,
                 });
 
                 self.instrs.push(Instr::Label(header_label));
@@ -12480,6 +12502,7 @@ impl<'src> LowerCtx<'src> {
                         exit_label,
                         break_slot: None,
                         break_ret_ty: IrTy::Unit,
+                        is_named_block: false,
                     });
 
                     // FLS §4.5, §4.2: Detect whether the array holds f64 or f32 elements.
@@ -12619,7 +12642,7 @@ impl<'src> LowerCtx<'src> {
                 // FLS §6.15.7: `continue` in a for loop advances to the next iteration.
                 // For a range-based for loop, the "next iteration" is the increment step.
                 // `for` loops do not support break-with-value (FLS §6.15.6).
-                self.loop_stack.push(LoopCtx { label: label.clone(), header_label: incr_label, exit_label, break_slot: None, break_ret_ty: IrTy::Unit });
+                self.loop_stack.push(LoopCtx { label: label.clone(), header_label: incr_label, exit_label, break_slot: None, break_ret_ty: IrTy::Unit, is_named_block: false });
 
                 // Bind the loop variable name so body can load it via Path.
                 self.locals.insert(pat_name, i_slot);
@@ -12730,7 +12753,7 @@ impl<'src> LowerCtx<'src> {
                 // and BEFORE any register allocations inside the body.
                 let reg_mark = self.next_reg;
 
-                self.loop_stack.push(LoopCtx { label: label.clone(), header_label, exit_label, break_slot, break_ret_ty: *ret_ty });
+                self.loop_stack.push(LoopCtx { label: label.clone(), header_label, exit_label, break_slot, break_ret_ty: *ret_ty, is_named_block: false });
 
                 // Loop top: the branch-back target.
                 self.instrs.push(Instr::Label(header_label));
@@ -12768,6 +12791,109 @@ impl<'src> LowerCtx<'src> {
                     Ok(IrValue::Reg(result_reg))
                 } else {
                     Ok(IrValue::Unit)
+                }
+            }
+
+            // FLS §6.4.3: Named block expression — `'label: { stmts... }`.
+            //
+            // A named block executes exactly once (no back-edge). It can be
+            // exited early via `break 'label` or `break 'label value`. The
+            // block evaluates to the break value if one was provided, or to the
+            // tail expression of the block if no break was taken.
+            //
+            // FLS §6.4.3: "A named block expression evaluates to the value of
+            // its block expression, unless control flow was transferred away
+            // from it via a break expression targeting its label."
+            //
+            // FLS §6.1.2:37–45: All instructions in the body are emitted as
+            // runtime code — named blocks are not const contexts.
+            //
+            // Lowering strategy:
+            //   1. Allocate an exit label and (if needed) a break_slot.
+            //   2. Push a LoopCtx (with is_named_block=true) so labeled `break`
+            //      can find the exit label. header_label = exit_label (no back-edge).
+            //   3. Lower the body as unit — break arms store to break_slot.
+            //   4. Emit exit label; pop the context.
+            //   5. If break_slot exists, load and return the result; else Unit.
+            //
+            // Cache-line note: one store (break-with-value) + one load (result)
+            // = two 4-byte instructions at the boundary. Same pattern as `loop`
+            // break-with-value.
+            ExprKind::NamedBlock { label, body } => {
+                let exit_label = self.alloc_label();
+
+                // Determine if the body contains `break 'label value` targeting
+                // this named block. If so, allocate a break_slot to hold the result.
+                //
+                // FLS §6.4.3: A named block yields its value via `break 'label value`.
+                // Only LABELED breaks targeting this specific label are relevant —
+                // unlabeled breaks target the innermost enclosing LOOP, not this block.
+                let has_break_value =
+                    block_contains_labeled_break_with_value(body, label.as_str());
+                let break_slot = if has_break_value {
+                    Some(self.alloc_slot()?)
+                } else {
+                    None
+                };
+
+                // Push a LoopCtx so that `break 'label` inside the body can find
+                // the exit label. Named blocks use header_label = exit_label because
+                // there is no back-edge; `continue 'label` targeting a named block
+                // is rejected by the Continue handler.
+                self.loop_stack.push(LoopCtx {
+                    label: Some(label.clone()),
+                    header_label: exit_label, // no back-edge
+                    exit_label,
+                    break_slot,
+                    break_ret_ty: *ret_ty,
+                    is_named_block: true,
+                });
+
+                // Lower the block body with the named block's expected return type
+                // (not Unit). The tail expression is the fall-through result value.
+                //
+                // FLS §6.4.3: if no break is taken, the block evaluates to its tail
+                // expression. We need to lower the tail with the correct type context.
+                // FLS §6.1.2:37–45: All body instructions are emitted as runtime code.
+                let tail_val = self.lower_block_to_value(body, ret_ty)?;
+
+                // If there is a break_slot, store the tail value into it. This covers
+                // the fall-through case (no break taken) — the tail is the result.
+                //
+                // If the tail value is Unit, the body either ended in a break (which
+                // already stored to break_slot and branched) or has no meaningful tail
+                // (dead code after a break). No store needed in that case.
+                if let Some(slot) = break_slot {
+                    match tail_val {
+                        IrValue::Unit => {
+                            // Body ended via break (or has no tail) — break path already
+                            // stored to break_slot. Fall-through store is dead code.
+                        }
+                        _ => {
+                            let tail_reg = self.val_to_reg(tail_val)?;
+                            self.instrs.push(Instr::Store { src: tail_reg, slot });
+                        }
+                    }
+                }
+
+                // Exit label: where `break 'label` branches to.
+                // Fall-through also arrives here after the optional tail store above.
+                self.instrs.push(Instr::Label(exit_label));
+
+                self.loop_stack.pop();
+
+                // FLS §6.4.3: yield the break value (if any) or the tail value.
+                if let Some(slot) = break_slot {
+                    // Allocate a result register from the current position and load
+                    // from the break_slot. Both the break path and the fall-through
+                    // path stored their value to break_slot above.
+                    let result_reg = self.alloc_reg()?;
+                    self.instrs.push(Instr::Load { dst: result_reg, slot });
+                    Ok(IrValue::Reg(result_reg))
+                } else {
+                    // No break_slot: return the tail value directly.
+                    // Registers allocated in the body remain live.
+                    Ok(tail_val)
                 }
             }
 
@@ -12816,16 +12942,21 @@ impl<'src> LowerCtx<'src> {
                 // bottom for a LoopCtx whose label matches. Otherwise use the
                 // innermost (top) context.
                 let (exit_label, break_slot, break_ret_ty) = if let Some(lbl) = label {
-                    // Labeled break: find matching loop on the stack.
+                    // Labeled break: find matching loop OR named block on the stack.
+                    // FLS §6.15.6: a labeled break can target a named block (FLS §6.4.3)
+                    // as well as a loop expression.
                     self.loop_stack.iter().rev()
                         .find(|ctx| ctx.label.as_deref() == Some(lbl.as_str()))
                         .map(|ctx| (ctx.exit_label, ctx.break_slot, ctx.break_ret_ty))
                         .ok_or_else(|| LowerError::Unsupported(
-                            format!("break label `'{lbl}` not found in enclosing loops")
+                            format!("break label `'{lbl}` not found in enclosing loops or named blocks")
                         ))?
                 } else {
-                    // Unlabeled break: use innermost loop.
-                    self.loop_stack.last()
+                    // Unlabeled break: use innermost LOOP, skipping named blocks.
+                    // FLS §6.15.6: an unlabeled break exits the innermost enclosing loop,
+                    // not a named block (FLS §6.4.3). Named blocks require a label to exit.
+                    self.loop_stack.iter().rev()
+                        .find(|ctx| !ctx.is_named_block)
                         .map(|ctx| (ctx.exit_label, ctx.break_slot, ctx.break_ret_ty))
                         .ok_or_else(|| LowerError::Unsupported(
                             "break expression outside of a loop".into()
@@ -12837,7 +12968,7 @@ impl<'src> LowerCtx<'src> {
                     // Use the loop's break_ret_ty (not the break statement's ret_ty,
                     // which is Unit in the body context) to lower the value correctly.
                     let slot = break_slot.ok_or_else(|| LowerError::Unsupported(
-                        "break with value is only valid in a `loop` expression (FLS §6.15.6)".into(),
+                        "break with value is only valid in a `loop` or named block expression (FLS §6.15.6, §6.4.3)".into(),
                     ))?;
                     let v = self.lower_expr(val_expr, &break_ret_ty)?;
                     let r = self.val_to_reg(v)?;
@@ -12865,16 +12996,28 @@ impl<'src> LowerCtx<'src> {
             // Cache-line note: `b .L{header}` is 4 bytes — same cost as `break`.
             ExprKind::Continue { label } => {
                 // Resolve the header label from the target loop context.
+                // FLS §6.15.7: continue is only valid for loop expressions, not named blocks.
                 let header_label = if let Some(lbl) = label {
                     // Labeled continue: find matching loop on the stack.
-                    self.loop_stack.iter().rev()
+                    // Error if the match is a named block — named blocks do not support
+                    // continue. FLS §6.4.3: "A named block expression does not support
+                    // continue expressions targeting its label."
+                    let ctx = self.loop_stack.iter().rev()
                         .find(|ctx| ctx.label.as_deref() == Some(lbl.as_str()))
-                        .map(|ctx| ctx.header_label)
                         .ok_or_else(|| LowerError::Unsupported(
                             format!("continue label `'{lbl}` not found in enclosing loops")
-                        ))?
+                        ))?;
+                    if ctx.is_named_block {
+                        return Err(LowerError::Unsupported(format!(
+                            "`continue '{lbl}` is not valid — `'{lbl}` labels a named block, \
+                             not a loop (FLS §6.4.3, §6.15.7)"
+                        )));
+                    }
+                    ctx.header_label
                 } else {
-                    self.loop_stack.last()
+                    // Unlabeled continue: use innermost loop, skipping named blocks.
+                    self.loop_stack.iter().rev()
+                        .find(|ctx| !ctx.is_named_block)
                         .map(|ctx| ctx.header_label)
                         .ok_or_else(|| LowerError::Unsupported(
                             "continue expression outside of a loop".into()

@@ -1249,6 +1249,31 @@ pub enum ExprKind {
         index: Box<Expr>,
     },
 
+    /// A named block expression. FLS §6.4.3.
+    ///
+    /// `'label: { ... }` — a block that can be exited early via `break 'label value`.
+    ///
+    /// FLS §6.4.3: "A named block expression is a block expression with a label.
+    /// A named block expression evaluates to the value of its block expression,
+    /// unless control flow was transferred away from it via a break expression
+    /// targeting its label."
+    ///
+    /// Unlike a `loop`, the block executes exactly once — there is no back-edge.
+    /// `break 'label` exits the block; `break 'label value` provides its result.
+    /// `continue 'label` is not valid for named blocks (FLS §6.15.7).
+    ///
+    /// FLS §6.4.3 NOTE: The spec specifies that a named block expression requires
+    /// an explicit label. This implementation enforces that constraint at the parser.
+    ///
+    /// Cache-line note: the break-value is stored to a stack slot (8 bytes), same
+    /// as a loop break-with-value result (FLS §6.15.6).
+    NamedBlock {
+        /// The block label (`'name` before `{`). Required — unnamed blocks are
+        /// just `ExprKind::Block` and don't support break-with-value.
+        label: String,
+        body: Box<Block>,
+    },
+
     /// A closure expression. FLS §6.14.
     ///
     /// `|params| body` or `|params| -> RetTy { body }` or `|| body`.

@@ -18289,3 +18289,204 @@ fn main() -> i32 {
         "trait method with assoc type must emit mangled label Box__get_val: {asm}"
     );
 }
+
+// ── Milestone 130: Named block expressions (FLS §6.4.3) ──────────────────────
+
+/// Milestone 130: basic named block — `'block: { break 'block value; }`.
+///
+/// FLS §6.4.3: A named block expression can be exited via `break 'label value`,
+/// yielding the value as the result of the block.
+#[test]
+fn milestone_130_named_block_basic() {
+    let src = r#"
+fn main() -> i32 {
+    let x = 'block: {
+        break 'block 42;
+    };
+    x
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "named block should yield 42, got {exit_code}");
+}
+
+/// Milestone 130: named block with a conditional break.
+///
+/// FLS §6.4.3: The break exits the named block early; the tail expression
+/// is not reached when the break is taken.
+#[test]
+fn milestone_130_named_block_conditional_break() {
+    let src = r#"
+fn main() -> i32 {
+    let x = 5;
+    let result = 'outer: {
+        if x > 3 {
+            break 'outer x * 2;
+        }
+        0
+    };
+    result
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "named block with conditional break: 5*2=10, got {exit_code}");
+}
+
+/// Milestone 130: named block where the break is NOT taken.
+///
+/// FLS §6.4.3: When no break is taken, the block evaluates to its tail expression.
+#[test]
+fn milestone_130_named_block_no_break() {
+    let src = r#"
+fn main() -> i32 {
+    let x = 1;
+    let result = 'outer: {
+        if x > 100 {
+            break 'outer 99;
+        }
+        x + 41
+    };
+    result
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "named block no-break: 1+41=42, got {exit_code}");
+}
+
+/// Milestone 130: named block with break value from a function parameter.
+///
+/// FLS §6.1.2 (Constraint 1): the break value is computed at runtime from a
+/// parameter — the named block cannot be constant-folded.
+#[test]
+fn milestone_130_named_block_from_param() {
+    let src = r#"
+fn compute(n: i32) -> i32 {
+    'work: {
+        if n < 0 {
+            break 'work 0;
+        }
+        n * 3
+    }
+}
+fn main() -> i32 { compute(7) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 21, "named block from param: 7*3=21, got {exit_code}");
+}
+
+/// Milestone 130: named block result used in arithmetic.
+///
+/// FLS §6.4.3: The yielded value participates in surrounding expressions.
+#[test]
+fn milestone_130_named_block_in_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    let a = 'b1: { break 'b1 3; };
+    let b = 'b2: { break 'b2 4; };
+    a * b + 2
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 14, "3*4+2=14, got {exit_code}");
+}
+
+/// Milestone 130: named block nested inside a loop.
+///
+/// FLS §6.4.3, §6.15.6: `break 'block` exits the named block, not the loop.
+/// The loop continues executing after the named block exits.
+#[test]
+fn milestone_130_named_block_nested_in_loop() {
+    let src = r#"
+fn main() -> i32 {
+    let mut sum = 0;
+    let mut i = 0;
+    while i < 3 {
+        let v = 'pick: {
+            if i == 1 { break 'pick 10; }
+            i
+        };
+        sum = sum + v;
+        i = i + 1;
+    }
+    sum
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    // i=0: v=0 (no break), i=1: v=10 (break), i=2: v=2 (no break) → sum=12
+    assert_eq!(exit_code, 12, "nested named block in loop: 0+10+2=12, got {exit_code}");
+}
+
+/// Milestone 130: named block result passed to a function.
+///
+/// FLS §6.4.3: the yielded value is a first-class i32, same as any other expression.
+#[test]
+fn milestone_130_named_block_result_passed_to_fn() {
+    let src = r#"
+fn double(x: i32) -> i32 { x * 2 }
+fn main() -> i32 {
+    double('pick: { break 'pick 21; })
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "named block result passed to fn: double(21)=42, got {exit_code}");
+}
+
+/// Milestone 130: named block with break targeting outer block from inner if.
+///
+/// FLS §6.4.3: break can target any enclosing named block, not just the
+/// innermost one — matching labeled loop semantics.
+#[test]
+fn milestone_130_named_block_labeled_break_in_if() {
+    let src = r#"
+fn classify(n: i32) -> i32 {
+    'label: {
+        if n < 0 {
+            break 'label 0;
+        }
+        if n < 10 {
+            break 'label 1;
+        }
+        2
+    }
+}
+fn main() -> i32 { classify(5) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "classify(5) should return 1, got {exit_code}");
+}
+
+/// Assembly check: named block with `break 'label value` must emit a branch
+/// instruction (not a direct return), and must not constant-fold the value.
+///
+/// FLS §6.4.3, §6.1.2 (Constraint 1): The break-value is computed at runtime
+/// from a function parameter — constant folding is forbidden.
+#[test]
+fn runtime_named_block_emits_branch_not_folded() {
+    let src = r#"
+fn compute(n: i32) -> i32 {
+    'work: {
+        if n < 0 {
+            break 'work 0;
+        }
+        n * 3
+    }
+}
+fn main() -> i32 { compute(7) }
+"#;
+    let asm = compile_to_asm(src);
+    // Must emit a branch to the exit label (the break).
+    assert!(
+        asm.contains('b'),
+        "named block must emit a branch instruction for break: {asm}"
+    );
+    // Must emit mul for n*3 (runtime computation).
+    assert!(
+        asm.contains("mul"),
+        "named block body n*3 must emit mul instruction: {asm}"
+    );
+    // Must not fold compute(7) = 21 to a constant.
+    assert!(
+        !asm.contains("mov     x0, #21") && !asm.contains("mov x0, #21"),
+        "named block result must not be constant-folded to 21: {asm}"
+    );
+}
