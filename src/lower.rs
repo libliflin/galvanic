@@ -2133,6 +2133,14 @@ fn lower_ty(ty: &crate::ast::Ty, source: &str) -> Result<IrTy, LowerError> {
         // FLS §4.9: Function pointer types `fn(T1, ...) -> R`.
         // A function pointer is a 64-bit address — one register, like a scalar.
         TyKind::FnPtr { .. } => Ok(IrTy::FnPtr),
+        // FLS §4.5: Array types `[T; N]`.
+        // An array is not a scalar — it occupies N consecutive 8-byte slots.
+        // In a scalar context (e.g. function parameter `a: [T; N]`) we return
+        // the element type as a best-effort hint; the let-binding path handles
+        // the full array allocation via `local_array_lens` and does not consult
+        // `lower_ty` for the array case (it returns early on the array literal
+        // initializer). Aggregate array parameters are deferred.
+        TyKind::Array { elem, .. } => lower_ty(elem, source),
         _ => Err(LowerError::Unsupported("complex type".into())),
     }
 }

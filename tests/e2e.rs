@@ -13787,3 +13787,168 @@ fn main() -> i32 {
         "expected at least 3 str instructions for [5; 3], got {str_count}:\n{asm}"
     );
 }
+
+// ── Milestone 106: array type annotations `[T; N]` (FLS §4.5) ─────────────────
+
+/// Milestone 106: `let a: [i32; 3] = [1, 2, 3];` — type annotation accepted.
+///
+/// FLS §4.5: An array type `[T; N]` is a statically-sized sequence of N
+/// elements of type T. Type annotation on a let binding with an array
+/// literal initializer should compile to the same code as an unannotated bind.
+///
+/// FLS §8.1: A LetStatement may have an optional type annotation.
+/// FLS §6.1.2:37–45: Each element store is a runtime instruction.
+#[test]
+fn milestone_106_annotated_array_literal() {
+    let src = r#"
+fn main() -> i32 {
+    let a: [i32; 3] = [10, 20, 30];
+    a[1]
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 20, "expected a[1]=20, got {exit_code}");
+}
+
+/// Milestone 106: `let a: [i32; 3] = [1, 2, 3]; a[0]` — first element.
+///
+/// FLS §4.5, §6.9: Index 0 of an annotated array literal should load element 0.
+#[test]
+fn milestone_106_annotated_array_first_element() {
+    let src = r#"
+fn main() -> i32 {
+    let a: [i32; 3] = [5, 6, 7];
+    a[0]
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "expected a[0]=5, got {exit_code}");
+}
+
+/// Milestone 106: `let a: [i32; 3] = [1, 2, 3]; a[2]` — last element.
+///
+/// FLS §4.5, §6.9: Index N-1 of an annotated array literal should load
+/// the last element.
+#[test]
+fn milestone_106_annotated_array_last_element() {
+    let src = r#"
+fn main() -> i32 {
+    let a: [i32; 3] = [5, 6, 7];
+    a[2]
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected a[2]=7, got {exit_code}");
+}
+
+/// Milestone 106: type-annotated array repeat `let a: [i32; 5] = [0; 5];`.
+///
+/// FLS §4.5, §6.8: The repeat expression `[value; N]` fills N slots with
+/// `value`. Type annotation `[i32; 5]` should be accepted without error.
+#[test]
+fn milestone_106_annotated_repeat_zeros() {
+    let src = r#"
+fn main() -> i32 {
+    let a: [i32; 5] = [0; 5];
+    a[3]
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected a[3]=0, got {exit_code}");
+}
+
+/// Milestone 106: type-annotated repeat with non-zero fill.
+///
+/// FLS §4.5, §6.8: Fill value and annotation length must be consistent.
+#[test]
+fn milestone_106_annotated_repeat_nonzero_fill() {
+    let src = r#"
+fn main() -> i32 {
+    let a: [i32; 4] = [7; 4];
+    a[2]
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected a[2]=7, got {exit_code}");
+}
+
+/// Milestone 106: type-annotated array in arithmetic.
+///
+/// FLS §4.5, §6.5.5: Elements of an annotated array can be used in arithmetic.
+#[test]
+fn milestone_106_annotated_array_in_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    let a: [i32; 2] = [3, 4];
+    a[0] + a[1]
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected 3+4=7, got {exit_code}");
+}
+
+/// Milestone 106: type annotation with variable index into annotated array.
+///
+/// FLS §4.5, §6.9: Variable index access on an annotated array should work
+/// the same as on an unannotated array.
+#[test]
+fn milestone_106_annotated_array_variable_index() {
+    let src = r#"
+fn main() -> i32 {
+    let a: [i32; 4] = [10, 20, 30, 40];
+    let i = 2;
+    a[i]
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 30, "expected a[2]=30, got {exit_code}");
+}
+
+/// Milestone 106: annotated array summed in a loop.
+///
+/// FLS §4.5, §6.15.3, §6.9: A while loop can iterate over elements of an
+/// annotated array using variable indexing.
+#[test]
+fn milestone_106_annotated_array_summed_in_loop() {
+    let src = r#"
+fn main() -> i32 {
+    let a: [i32; 4] = [1, 2, 3, 4];
+    let mut sum = 0;
+    let mut i = 0;
+    while i < 4 {
+        sum += a[i];
+        i += 1;
+    }
+    sum
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "expected 1+2+3+4=10, got {exit_code}");
+}
+
+/// Assembly inspection: annotated array emits same instructions as unannotated.
+///
+/// FLS §4.5: The type annotation `[i32; 3]` is a hint — it does not change
+/// the emitted code. The stores and loads should be identical to the unannotated case.
+/// FLS §6.1.2:37–45: All stores are runtime instructions.
+#[test]
+fn runtime_annotated_array_emits_same_as_unannotated() {
+    let annotated = r#"
+fn main() -> i32 {
+    let a: [i32; 3] = [1, 2, 3];
+    a[1]
+}
+"#;
+    let unannotated = r#"
+fn main() -> i32 {
+    let a = [1, 2, 3];
+    a[1]
+}
+"#;
+    let asm_ann = compile_to_asm(annotated);
+    let asm_unann = compile_to_asm(unannotated);
+    assert_eq!(
+        asm_ann, asm_unann,
+        "annotated and unannotated array should emit identical assembly"
+    );
+}

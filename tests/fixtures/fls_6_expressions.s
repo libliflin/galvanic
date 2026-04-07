@@ -1198,6 +1198,32 @@ array_repeat_example:
     add     sp, sp, #96             // FLS §8.1: restore stack frame
     ret
 
+    // fn array_type_annotation_example — FLS §9
+    .global array_type_annotation_example
+array_type_annotation_example:
+    sub     sp, sp, #64             // FLS §8.1: frame for 7 slot(s)
+    mov     x0, #10                  // FLS §2.4.4.1: load imm 10
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    mov     x1, #20                  // FLS §2.4.4.1: load imm 20
+    str     x1, [sp, #8              ] // FLS §8.1: store slot 1
+    mov     x2, #30                  // FLS §2.4.4.1: load imm 30
+    str     x2, [sp, #16             ] // FLS §8.1: store slot 2
+    mov     x3, #5                   // FLS §2.4.4.1: load imm 5
+    str     x3, [sp, #24             ] // FLS §8.1: store slot 3
+    str     x3, [sp, #32             ] // FLS §8.1: store slot 4
+    str     x3, [sp, #40             ] // FLS §8.1: store slot 5
+    str     x3, [sp, #48             ] // FLS §8.1: store slot 6
+    mov     x4, #1                   // FLS §2.4.4.1: load imm 1
+    add     x5, sp, #0               // FLS §6.9: address of arr[0]
+    ldr     x5, [x5, x4, lsl #3] // FLS §6.9: load arr[index]
+    mov     x6, #0                   // FLS §2.4.4.1: load imm 0
+    add     x7, sp, #24              // FLS §6.9: address of arr[0]
+    ldr     x7, [x7, x6, lsl #3] // FLS §6.9: load arr[index]
+    add     x8, x5, x7          // FLS §6.5.5: add
+    mov     x0, x8              // FLS §6.19: return reg 8 → x0
+    add     sp, sp, #64             // FLS §8.1: restore stack frame
+    ret
+
     // ELF entry point — FLS §18.1
     .global _start
 _start:
