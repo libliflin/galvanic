@@ -880,24 +880,46 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     // Collect static item names and their data-section entries.
     //
     // FLS §7.2: Static items are allocated in the data section with a fixed
-    // address. Every use of a static emits a LoadStatic (ADRP + ADD + LDR)
-    // rather than a LoadImm, because FLS §7.2:15 requires all references
-    // to go through the same memory address.
+    // address. Every use of a static emits a LoadStatic / LoadStaticF64 /
+    // LoadStaticF32 (ADRP + ADD + LDR) rather than a LoadImm, because
+    // FLS §7.2:15 requires all references to go through the same memory address.
     //
-    // At this milestone only integer literal initializers are supported.
-    //
-    // Cache-line note: each StaticData entry will become a `.quad` in the
-    // `.data` section — 8 bytes per static.
+    // Cache-line note: each StaticData entry will become a `.quad` (f64/int,
+    // 8 bytes) or `.word` (f32, 4 bytes) in the `.data` section.
     let mut static_data: Vec<crate::ir::StaticData> = Vec::new();
     let mut static_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut static_f64_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut static_f32_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     for item in &src.items {
         if let ItemKind::Static(s) = &item.kind {
             let name = s.name.text(source).to_owned();
             if let ExprKind::LitInt(n) = &s.value.kind
                 && *n <= i32::MAX as u128
             {
-                static_data.push(crate::ir::StaticData { name: name.clone(), value: *n as i32 });
+                static_data.push(crate::ir::StaticData {
+                    name: name.clone(),
+                    value: crate::ir::StaticValue::Int(*n as i32),
+                });
                 static_names.insert(name);
+            } else if matches!(&s.value.kind, ExprKind::LitFloat) {
+                // FLS §7.2, §4.2: f64/f32 float literal static initializers.
+                // Determine type from optional suffix; default to f64.
+                let text = s.value.span.text(source);
+                if text.ends_with("f32") {
+                    let val: f32 = text.trim_end_matches("f32").parse().unwrap_or(0.0);
+                    static_data.push(crate::ir::StaticData {
+                        name: name.clone(),
+                        value: crate::ir::StaticValue::F32(val),
+                    });
+                    static_f32_names.insert(name);
+                } else {
+                    let val: f64 = text.trim_end_matches("f64").parse().unwrap_or(0.0);
+                    static_data.push(crate::ir::StaticData {
+                        name: name.clone(),
+                        value: crate::ir::StaticValue::F64(val),
+                    });
+                    static_f64_names.insert(name);
+                }
             }
         }
     }
@@ -1261,7 +1283,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     for item in &src.items {
         match &item.kind {
             ItemKind::Fn(fn_def) => {
-                let (ir_fn, closure_fns, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &tuple_struct_float_field_types, &enum_defs, &enum_variant_float_field_types, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &const_f64_vals, &const_f32_vals, &static_names, &fn_names, &struct_raw_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, None, label_base)?;
+                let (ir_fn, closure_fns, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &tuple_struct_float_field_types, &enum_defs, &enum_variant_float_field_types, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &const_f64_vals, &const_f32_vals, &static_names, &static_f64_names, &static_f32_names, &fn_names, &struct_raw_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, None, label_base)?;
                 label_base = next_label;
                 fns.push(ir_fn);
                 fns.extend(closure_fns);
@@ -1308,6 +1330,8 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         &const_f64_vals,
                         &const_f32_vals,
                         &static_names,
+                        &static_f64_names,
+                        &static_f32_names,
                         &fn_names,
                         &struct_raw_field_types,
                         &struct_field_offsets,
@@ -1430,6 +1454,8 @@ fn lower_fn(
     const_f64_vals: &HashMap<String, f64>,
     const_f32_vals: &HashMap<String, f32>,
     static_names: &std::collections::HashSet<String>,
+    static_f64_names: &std::collections::HashSet<String>,
+    static_f32_names: &std::collections::HashSet<String>,
     fn_names: &std::collections::HashSet<String>,
     struct_field_types: &HashMap<String, Vec<Option<String>>>,
     struct_field_offsets: &HashMap<String, Vec<usize>>,
@@ -1508,7 +1534,7 @@ fn lower_fn(
         Some(block) => block,
     };
 
-    let mut ctx = LowerCtx::new(source, &name, ret_ty, struct_defs, tuple_struct_defs, tuple_struct_float_field_types, enum_defs, enum_variant_float_field_types, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, f64_return_fns, f32_return_fns, const_vals, const_f64_vals, const_f32_vals, static_names, fn_names, struct_field_types, struct_field_offsets, struct_sizes, type_aliases, struct_float_field_types, start_label);
+    let mut ctx = LowerCtx::new(source, &name, ret_ty, struct_defs, tuple_struct_defs, tuple_struct_float_field_types, enum_defs, enum_variant_float_field_types, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, f64_return_fns, f32_return_fns, const_vals, const_f64_vals, const_f32_vals, static_names, static_f64_names, static_f32_names, fn_names, struct_field_types, struct_field_offsets, struct_sizes, type_aliases, struct_float_field_types, start_label);
 
     // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
     // to stack slots. Each parameter slot is allocated in parameter order
@@ -3147,7 +3173,7 @@ struct LowerCtx<'src> {
     /// Cache-line note: read-only during lowering; not on any hot path.
     const_f32_vals: &'src HashMap<String, f32>,
 
-    /// Static variable names: the set of names declared as `static` items.
+    /// Static variable names: the set of names declared as integer `static` items.
     ///
     /// FLS §7.2: Static items. When a path expression `FOO` resolves to a known
     /// static name, `LoadStatic { dst, name }` is emitted instead of `Load { slot }`.
@@ -3158,6 +3184,18 @@ struct LowerCtx<'src> {
     ///
     /// Cache-line note: read-only during lowering; not on any hot path.
     static_names: &'src std::collections::HashSet<String>,
+
+    /// Names of f64 `static` items. Used to emit `LoadStaticF64` instead of
+    /// `LoadStatic` when a path expression resolves to a float static.
+    ///
+    /// FLS §7.2, §4.2: f64 static items.
+    static_f64_names: &'src std::collections::HashSet<String>,
+
+    /// Names of f32 `static` items. Used to emit `LoadStaticF32` instead of
+    /// `LoadStatic` when a path expression resolves to an f32 static.
+    ///
+    /// FLS §7.2, §4.2: f32 static items.
+    static_f32_names: &'src std::collections::HashSet<String>,
 
     /// Per-field struct type names for nested struct support.
     ///
@@ -3435,6 +3473,8 @@ impl<'src> LowerCtx<'src> {
         const_f64_vals: &'src HashMap<String, f64>,
         const_f32_vals: &'src HashMap<String, f32>,
         static_names: &'src std::collections::HashSet<String>,
+        static_f64_names: &'src std::collections::HashSet<String>,
+        static_f32_names: &'src std::collections::HashSet<String>,
         fn_names: &'src std::collections::HashSet<String>,
         struct_field_types: &'src HashMap<String, Vec<Option<String>>>,
         struct_field_offsets: &'src HashMap<String, Vec<usize>>,
@@ -3474,6 +3514,8 @@ impl<'src> LowerCtx<'src> {
             const_f64_vals,
             const_f32_vals,
             static_names,
+            static_f64_names,
+            static_f32_names,
             fn_names,
             struct_field_types,
             struct_field_offsets,
@@ -3569,7 +3611,9 @@ impl<'src> LowerCtx<'src> {
             }
             crate::ast::ExprKind::Path(segs) if segs.len() == 1 => {
                 let name = segs[0].text(self.source);
-                self.float_locals.contains_key(name) || self.const_f64_vals.contains_key(name)
+                self.float_locals.contains_key(name)
+                    || self.const_f64_vals.contains_key(name)
+                    || self.static_f64_names.contains(name)
             }
             // FLS §6.5.5: A binary arithmetic expression on f64 operands produces f64.
             // Bitwise ops and shifts are not defined for f64 (FLS §6.5.6–§6.5.8).
@@ -3683,7 +3727,9 @@ impl<'src> LowerCtx<'src> {
             }
             crate::ast::ExprKind::Path(segs) if segs.len() == 1 => {
                 let name = segs[0].text(self.source);
-                self.float32_locals.contains_key(name) || self.const_f32_vals.contains_key(name)
+                self.float32_locals.contains_key(name)
+                    || self.const_f32_vals.contains_key(name)
+                    || self.static_f32_names.contains(name)
             }
             // FLS §6.5.5: A binary arithmetic expression on f32 operands produces f32.
             crate::ast::ExprKind::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div, lhs, rhs } => {
@@ -7317,6 +7363,20 @@ impl<'src> LowerCtx<'src> {
                     let r = self.alloc_reg()?;
                     self.instrs.push(Instr::LoadStatic { dst: r, name: var_name.to_owned() });
                     return Ok(IrValue::Reg(r));
+                }
+                // Check f64 static items: FLS §7.2, §4.2 — f64 statics load into
+                // float registers via ADRP + ADD + LDR d{dst}.
+                if self.static_f64_names.contains(var_name) {
+                    let dst = self.alloc_reg()?;
+                    self.instrs.push(Instr::LoadStaticF64 { dst, name: var_name.to_owned() });
+                    return Ok(IrValue::FReg(dst));
+                }
+                // Check f32 static items: FLS §7.2, §4.2 — f32 statics load into
+                // float registers via ADRP + ADD + LDR s{dst}.
+                if self.static_f32_names.contains(var_name) {
+                    let dst = self.alloc_reg()?;
+                    self.instrs.push(Instr::LoadStaticF32 { dst, name: var_name.to_owned() });
+                    return Ok(IrValue::F32Reg(dst));
                 }
                 // Check fn_names: FLS §4.9 — a path that names a function item
                 // (and is not a local variable) materializes the function's address
@@ -13323,6 +13383,8 @@ impl<'src> LowerCtx<'src> {
                     self.const_f64_vals,
                     self.const_f32_vals,
                     self.static_names,
+                    self.static_f64_names,
+                    self.static_f32_names,
                     self.fn_names,
                     self.struct_field_types,
                     self.struct_field_offsets,

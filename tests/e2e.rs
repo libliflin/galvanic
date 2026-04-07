@@ -16648,3 +16648,165 @@ fn main() -> i32 { (HALF + 0.5_f32) as i32 }
         "f32 const load must emit `ldr s{{n}}`: {asm}"
     );
 }
+
+// ── Milestone 122: f64/f32 static items ──────────────────────────────────────
+//
+// FLS §7.2: Static items have a fixed memory address. All references to a static
+// go through that address (unlike const substitution). f64/f32 statics are emitted
+// as raw IEEE 754 bits in the .data section and loaded via ADRP + ADD + LDR d/s.
+//
+// FLS §4.2: f64 and f32 types.
+
+/// Milestone 122: f64 static used as return value.
+///
+/// FLS §7.2: Static reference loads from data section at runtime.
+/// FLS §4.2: f64 static must load into a float (d) register.
+#[test]
+fn milestone_122_f64_static_as_return_value() {
+    let src = r#"
+static PI: f64 = 3.0;
+fn main() -> i32 { PI as i32 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "expected exit 3, got {exit_code}");
+}
+
+/// Milestone 122: f64 static used in arithmetic.
+///
+/// FLS §7.2: Each reference to a static is a runtime load.
+/// FLS §6.5.5: Addition of two f64 values.
+#[test]
+fn milestone_122_f64_static_in_arithmetic() {
+    let src = r#"
+static BASE: f64 = 2.5;
+fn main() -> i32 { (BASE + 1.5) as i32 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 4, "expected exit 4, got {exit_code}");
+}
+
+/// Milestone 122: f64 static passed as function argument.
+///
+/// FLS §7.2: The static value is loaded at the call site.
+/// FLS §6.12.1: The loaded value is passed as a runtime argument.
+#[test]
+fn milestone_122_f64_static_as_fn_arg() {
+    let src = r#"
+static SCALE: f64 = 5.0;
+fn double(x: f64) -> i32 { (x * 2.0) as i32 }
+fn main() -> i32 { double(SCALE) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "expected exit 10, got {exit_code}");
+}
+
+/// Milestone 122: two f64 statics used together.
+///
+/// FLS §7.2: Multiple static items coexist in the data section.
+#[test]
+fn milestone_122_two_f64_statics() {
+    let src = r#"
+static A: f64 = 3.0;
+static B: f64 = 4.0;
+fn main() -> i32 { (A + B) as i32 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected exit 7, got {exit_code}");
+}
+
+/// Milestone 122: f64 static used in an if condition.
+///
+/// FLS §7.2: Static loaded at runtime; the comparison is a runtime instruction.
+/// FLS §6.17: If expression with boolean condition.
+#[test]
+fn milestone_122_f64_static_in_if_condition() {
+    let src = r#"
+static THRESHOLD: f64 = 5.0;
+fn main() -> i32 {
+    let x: f64 = 6.0;
+    if x > THRESHOLD { 1 } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected exit 1, got {exit_code}");
+}
+
+/// Milestone 122: f64 static referenced in a let binding.
+///
+/// FLS §7.2, §8.1: Static loaded into a local variable via let binding.
+#[test]
+fn milestone_122_f64_static_in_let_binding() {
+    let src = r#"
+static WEIGHT: f64 = 7.0;
+fn main() -> i32 {
+    let x = WEIGHT;
+    x as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected exit 7, got {exit_code}");
+}
+
+/// Milestone 122: f32 static used as return value.
+///
+/// FLS §7.2: Static reference loads from data section at runtime.
+/// FLS §4.2: f32 static must load into an s-register.
+#[test]
+fn milestone_122_f32_static_as_return_value() {
+    let src = r#"
+static HALF: f32 = 2.0_f32;
+fn main() -> i32 { HALF as i32 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2, "expected exit 2, got {exit_code}");
+}
+
+/// Milestone 122: f32 static used in arithmetic.
+///
+/// FLS §7.2, §6.5.5: f32 static loaded then used in float addition.
+#[test]
+fn milestone_122_f32_static_in_arithmetic() {
+    let src = r#"
+static BASE: f32 = 2.5_f32;
+fn main() -> i32 { (BASE + 0.5_f32) as i32 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "expected exit 3, got {exit_code}");
+}
+
+/// Milestone 122: f64 static emits LoadStaticF64 (ADRP + ADD + ldr d-register).
+///
+/// FLS §7.2, §4.2: f64 static reference must use float (d) register load.
+/// Cache-line note: ADRP + ADD + LDR d is 12 bytes (same as integer LoadStatic).
+#[test]
+fn runtime_f64_static_emits_ldr_dreg() {
+    let src = r#"
+static PI: f64 = 3.14159;
+fn main() -> i32 { PI as i32 }
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("ldr     d"),
+        "f64 static load must emit `ldr d{{n}}`: {asm}"
+    );
+    assert!(
+        asm.contains("adrp"),
+        "f64 static load must emit `adrp`: {asm}"
+    );
+}
+
+/// Milestone 122: f32 static emits LoadStaticF32 (ADRP + ADD + ldr s-register).
+///
+/// FLS §7.2, §4.2: f32 static reference must use s-register load.
+#[test]
+fn runtime_f32_static_emits_ldr_sreg() {
+    let src = r#"
+static HALF: f32 = 0.5_f32;
+fn main() -> i32 { (HALF + 1.5_f32) as i32 }
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("ldr     s"),
+        "f32 static load must emit `ldr s{{n}}`: {asm}"
+    );
+}
