@@ -2585,6 +2585,24 @@ struct LowerCtx<'src> {
     /// Cache-line note: populated once per 2D array let binding. Not on a hot path.
     local_array_inner_lens: HashMap<u8, usize>,
 
+    /// Set of base slots for arrays whose elements are `f64`.
+    ///
+    /// FLS §4.5, §4.2: `[f64; N]` arrays store IEEE 754 doubles in each slot.
+    /// Index expressions (`arr[i]`) and for-loop element loads emit `LoadIndexedF64`
+    /// instead of `LoadIndexed` when the base slot is in this set.
+    ///
+    /// Cache-line note: populated once per f64 array let binding. Not on a hot path.
+    local_f64_array_slots: std::collections::HashSet<u8>,
+
+    /// Set of base slots for arrays whose elements are `f32`.
+    ///
+    /// FLS §4.5, §4.2: `[f32; N]` arrays store IEEE 754 singles in each slot.
+    /// Index expressions and for-loop element loads emit `LoadIndexedF32` when
+    /// the base slot is in this set.
+    ///
+    /// Cache-line note: populated once per f32 array let binding. Not on a hot path.
+    local_f32_array_slots: std::collections::HashSet<u8>,
+
     /// Maps a tuple variable's base stack slot to its field count.
     ///
     /// FLS §6.10: Tuple values occupy N consecutive 8-byte stack slots where
@@ -2984,6 +3002,8 @@ impl<'src> LowerCtx<'src> {
             local_enum_types: HashMap::new(),
             local_array_lens: HashMap::new(),
             local_array_inner_lens: HashMap::new(),
+            local_f64_array_slots: std::collections::HashSet::new(),
+            local_f32_array_slots: std::collections::HashSet::new(),
             local_tuple_lens: HashMap::new(),
             local_tuple_struct_types: HashMap::new(),
             local_fn_ptr_slots: std::collections::HashSet::new(),
@@ -5791,14 +5811,61 @@ impl<'src> LowerCtx<'src> {
                     for _ in 1..n {
                         self.alloc_slot()?;
                     }
+
+                    // FLS §4.5, §4.2: Detect f64/f32 element type from the let
+                    // annotation (`[f64; N]` / `[f32; N]`) or the first element.
+                    // Type annotation takes priority over element inference.
+                    let is_f64_arr = ty.as_ref().is_some_and(|t| {
+                        matches!(&t.kind, crate::ast::TyKind::Array { elem, .. }
+                            if matches!(&elem.kind, crate::ast::TyKind::Path(segs)
+                                if segs.len() == 1 && segs[0].text(self.source) == "f64"))
+                    }) || (!elems.is_empty() && self.is_f64_expr(&elems[0]));
+                    let is_f32_arr = !is_f64_arr && (ty.as_ref().is_some_and(|t| {
+                        matches!(&t.kind, crate::ast::TyKind::Array { elem, .. }
+                            if matches!(&elem.kind, crate::ast::TyKind::Path(segs)
+                                if segs.len() == 1 && segs[0].text(self.source) == "f32"))
+                    }) || (!elems.is_empty() && self.is_f32_expr(&elems[0])));
+
                     self.locals.insert(var_name, base_slot);
                     self.local_array_lens.insert(base_slot, n);
-                    // Evaluate and store each element.
-                    // FLS §6.8: Elements are evaluated left-to-right.
-                    for (i, elem_expr) in elems.iter().enumerate() {
-                        let val = self.lower_expr(elem_expr, &IrTy::I32)?;
-                        let src = self.val_to_reg(val)?;
-                        self.instrs.push(Instr::Store { src, slot: base_slot + i as u8 });
+
+                    if is_f64_arr {
+                        // FLS §4.5: `[f64; N]` — store each element as an f64.
+                        // FLS §4.2: d-registers hold IEEE 754 double-precision values.
+                        // FLS §6.1.2:37–45: All stores are runtime instructions.
+                        self.local_f64_array_slots.insert(base_slot);
+                        for (i, elem_expr) in elems.iter().enumerate() {
+                            let val = self.lower_expr(elem_expr, &IrTy::F64)?;
+                            let src = match val {
+                                IrValue::FReg(r) => r,
+                                _ => return Err(LowerError::Unsupported(
+                                    "f64 array element did not produce a float value".into(),
+                                )),
+                            };
+                            self.instrs.push(Instr::StoreF64 { src, slot: base_slot + i as u8 });
+                        }
+                    } else if is_f32_arr {
+                        // FLS §4.5: `[f32; N]` — store each element as an f32.
+                        // FLS §4.2: s-registers hold IEEE 754 single-precision values.
+                        self.local_f32_array_slots.insert(base_slot);
+                        for (i, elem_expr) in elems.iter().enumerate() {
+                            let val = self.lower_expr(elem_expr, &IrTy::F32)?;
+                            let src = match val {
+                                IrValue::F32Reg(r) => r,
+                                _ => return Err(LowerError::Unsupported(
+                                    "f32 array element did not produce a float value".into(),
+                                )),
+                            };
+                            self.instrs.push(Instr::StoreF32 { src, slot: base_slot + i as u8 });
+                        }
+                    } else {
+                        // Integer/boolean element array (existing path).
+                        // FLS §6.8: Elements are evaluated left-to-right.
+                        for (i, elem_expr) in elems.iter().enumerate() {
+                            let val = self.lower_expr(elem_expr, &IrTy::I32)?;
+                            let src = self.val_to_reg(val)?;
+                            self.instrs.push(Instr::Store { src, slot: base_slot + i as u8 });
+                        }
                     }
                     return Ok(());
                 }
@@ -5864,16 +5931,57 @@ impl<'src> LowerCtx<'src> {
                     self.locals.insert(var_name, base_slot);
                     self.local_array_lens.insert(base_slot, n);
 
+                    // FLS §4.5, §4.2: Detect f64/f32 fill value type.
+                    // Check type annotation first, then fall back to expression type.
+                    let is_f64_rep = ty.as_ref().is_some_and(|t| {
+                        matches!(&t.kind, crate::ast::TyKind::Array { elem, .. }
+                            if matches!(&elem.kind, crate::ast::TyKind::Path(segs)
+                                if segs.len() == 1 && segs[0].text(self.source) == "f64"))
+                    }) || self.is_f64_expr(val_expr);
+                    let is_f32_rep = !is_f64_rep && (ty.as_ref().is_some_and(|t| {
+                        matches!(&t.kind, crate::ast::TyKind::Array { elem, .. }
+                            if matches!(&elem.kind, crate::ast::TyKind::Path(segs)
+                                if segs.len() == 1 && segs[0].text(self.source) == "f32"))
+                    }) || self.is_f32_expr(val_expr));
+
                     // Evaluate the fill value once.
                     // FLS §6.8: The element expression is evaluated exactly once
                     // and then copied N times (for Copy types). Here we lower
                     // the expression once and store it into each slot.
                     //
                     // FLS §6.1.2:37–45: All stores are runtime instructions.
-                    let val = self.lower_expr(val_expr, &IrTy::I32)?;
-                    let src = self.val_to_reg(val)?;
-                    for i in 0..n {
-                        self.instrs.push(Instr::Store { src, slot: base_slot + i as u8 });
+                    if is_f64_rep {
+                        // FLS §4.5: `[f64; N]` repeat — store each slot as f64.
+                        self.local_f64_array_slots.insert(base_slot);
+                        let val = self.lower_expr(val_expr, &IrTy::F64)?;
+                        let src = match val {
+                            IrValue::FReg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "f64 array repeat fill did not produce a float value".into(),
+                            )),
+                        };
+                        for i in 0..n {
+                            self.instrs.push(Instr::StoreF64 { src, slot: base_slot + i as u8 });
+                        }
+                    } else if is_f32_rep {
+                        // FLS §4.5: `[f32; N]` repeat — store each slot as f32.
+                        self.local_f32_array_slots.insert(base_slot);
+                        let val = self.lower_expr(val_expr, &IrTy::F32)?;
+                        let src = match val {
+                            IrValue::F32Reg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "f32 array repeat fill did not produce a float value".into(),
+                            )),
+                        };
+                        for i in 0..n {
+                            self.instrs.push(Instr::StoreF32 { src, slot: base_slot + i as u8 });
+                        }
+                    } else {
+                        let val = self.lower_expr(val_expr, &IrTy::I32)?;
+                        let src = self.val_to_reg(val)?;
+                        for i in 0..n {
+                            self.instrs.push(Instr::Store { src, slot: base_slot + i as u8 });
+                        }
                     }
                     return Ok(());
                 }
@@ -10434,8 +10542,22 @@ impl<'src> LowerCtx<'src> {
                         break_ret_ty: IrTy::Unit,
                     });
 
+                    // FLS §4.5, §4.2: Detect whether the array holds f64 or f32 elements.
+                    // This drives the element load instruction and the loop variable
+                    // registration (float_locals vs. locals).
+                    let is_f64_arr_loop = self.local_f64_array_slots.contains(&arr_base);
+                    let is_f32_arr_loop = self.local_f32_array_slots.contains(&arr_base);
+
                     // Bind the loop variable so the body can load it via Path.
-                    self.locals.insert(pat_name, elem_slot);
+                    // FLS §4.2: f64/f32 loop variables use float_locals so path
+                    // expressions emit LoadF64Slot / LoadF32Slot instead of Load.
+                    if is_f64_arr_loop {
+                        self.float_locals.insert(pat_name, elem_slot);
+                    } else if is_f32_arr_loop {
+                        self.float32_locals.insert(pat_name, elem_slot);
+                    } else {
+                        self.locals.insert(pat_name, elem_slot);
+                    }
 
                     // ── Condition: counter < arr_len ──────────────────────────────────
                     // FLS §6.15.1: The loop terminates when all elements have been visited.
@@ -10450,14 +10572,34 @@ impl<'src> LowerCtx<'src> {
 
                     // ── Bind element: elem_slot = arr[counter] ────────────────────────
                     // FLS §6.9: Array indexing. The element at index `counter` is loaded
-                    // from the consecutive stack slots of the array literal.
+                    // from the consecutive stack slots of the array.
+                    // FLS §4.2: Float arrays use d/s-registers for element loads.
                     let elem_reg = self.alloc_reg()?;
-                    self.instrs.push(Instr::LoadIndexed {
-                        dst: elem_reg,
-                        base_slot: arr_base,
-                        index_reg: counter_reg,
-                    });
-                    self.instrs.push(Instr::Store { src: elem_reg, slot: elem_slot });
+                    if is_f64_arr_loop {
+                        // FLS §4.5: `[f64; N]` element — load into d-register, store as f64.
+                        self.instrs.push(Instr::LoadIndexedF64 {
+                            dst: elem_reg,
+                            base_slot: arr_base,
+                            index_reg: counter_reg,
+                        });
+                        self.instrs.push(Instr::StoreF64 { src: elem_reg, slot: elem_slot });
+                    } else if is_f32_arr_loop {
+                        // FLS §4.5: `[f32; N]` element — load into s-register, store as f32.
+                        self.instrs.push(Instr::LoadIndexedF32 {
+                            dst: elem_reg,
+                            base_slot: arr_base,
+                            index_reg: counter_reg,
+                        });
+                        self.instrs.push(Instr::StoreF32 { src: elem_reg, slot: elem_slot });
+                    } else {
+                        // Integer/boolean element — integer load and store.
+                        self.instrs.push(Instr::LoadIndexed {
+                            dst: elem_reg,
+                            base_slot: arr_base,
+                            index_reg: counter_reg,
+                        });
+                        self.instrs.push(Instr::Store { src: elem_reg, slot: elem_slot });
+                    }
 
                     // ── Body ──────────────────────────────────────────────────────────
                     // FLS §6.15.1: "A for loop evaluates to the unit type."
@@ -11824,10 +11966,22 @@ impl<'src> LowerCtx<'src> {
                 let idx_val = self.lower_expr(index, &IrTy::I32)?;
                 let index_reg = self.val_to_reg(idx_val)?;
 
-                // Emit LoadIndexed: adds base_slot*8 to sp, then indexed ldr.
+                // FLS §4.5, §4.2: Emit float-typed indexed load for f64/f32 arrays.
+                // The base slot's element type was recorded during array literal lowering.
                 let dst = self.alloc_reg()?;
-                self.instrs.push(Instr::LoadIndexed { dst, base_slot, index_reg });
-                Ok(IrValue::Reg(dst))
+                if self.local_f64_array_slots.contains(&base_slot) {
+                    // FLS §4.5: `[f64; N]` — load element into a d-register.
+                    self.instrs.push(Instr::LoadIndexedF64 { dst, base_slot, index_reg });
+                    Ok(IrValue::FReg(dst))
+                } else if self.local_f32_array_slots.contains(&base_slot) {
+                    // FLS §4.5: `[f32; N]` — load element into an s-register.
+                    self.instrs.push(Instr::LoadIndexedF32 { dst, base_slot, index_reg });
+                    Ok(IrValue::F32Reg(dst))
+                } else {
+                    // Integer/boolean array: load into an x-register.
+                    self.instrs.push(Instr::LoadIndexed { dst, base_slot, index_reg });
+                    Ok(IrValue::Reg(dst))
+                }
             }
 
             // FLS §6.10: Tuple expression as a value (not as a let initializer).

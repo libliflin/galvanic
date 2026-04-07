@@ -775,6 +775,52 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
             )?;
         }
 
+        // FLS §6.9 + §4.5 + §4.2: Load an f64 element from a `[f64; N]` array.
+        //
+        // Two-instruction sequence:
+        //   add x9, sp, #{base_slot*8}            — base address of arr[0]
+        //   ldr d{dst}, [x9, x{index_reg}, lsl #3] — load arr[index] into d-register
+        //
+        // The `lsl #3` scales the index by 8 (bytes per 64-bit slot), matching
+        // the element layout of float arrays (each f64 occupies one 8-byte slot).
+        //
+        // FLS §4.2: f64 values are in d-registers (IEEE 754 double-precision).
+        // FLS §6.1.2:37–45: Instructions emitted at runtime.
+        //
+        // Cache-line note: add + ldr = two 4-byte instructions = 8 bytes,
+        // identical footprint to integer `LoadIndexed`.
+        Instr::LoadIndexedF64 { dst, base_slot, index_reg } => {
+            let base_offset = *base_slot as u32 * 8;
+            writeln!(
+                out,
+                "    add     x9, sp, #{base_offset:<15} // FLS §6.9: address of f64 arr[0]"
+            )?;
+            writeln!(
+                out,
+                "    ldr     d{dst}, [x9, x{index_reg}, lsl #3] // FLS §6.9: load f64 arr[index]"
+            )?;
+        }
+
+        // FLS §6.9 + §4.5 + §4.2: Load an f32 element from a `[f32; N]` array.
+        //
+        // Two-instruction sequence:
+        //   add x9, sp, #{base_slot*8}            — base address of arr[0]
+        //   ldr s{dst}, [x9, x{index_reg}, lsl #3] — load arr[index] into s-register
+        //
+        // FLS §4.2: f32 values are in s-registers (IEEE 754 single-precision).
+        // Cache-line note: add + ldr = two 4-byte instructions = 8 bytes.
+        Instr::LoadIndexedF32 { dst, base_slot, index_reg } => {
+            let base_offset = *base_slot as u32 * 8;
+            writeln!(
+                out,
+                "    add     x9, sp, #{base_offset:<15} // FLS §6.9: address of f32 arr[0]"
+            )?;
+            writeln!(
+                out,
+                "    ldr     s{dst}, [x9, x{index_reg}, lsl #3] // FLS §6.9: load f32 arr[index]"
+            )?;
+        }
+
         // FLS §6.12.2 + §10.1: Call a `&mut self` method and write modified fields back.
         //
         // After the `bl`, x0..x{N-1} hold the method's modified field values
