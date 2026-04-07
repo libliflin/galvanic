@@ -1291,6 +1291,40 @@ pub enum ExprKind {
     /// identical footprint to a named constant reference. No stack slot needed.
     ConstBlock(Box<Block>),
 
+    /// An unsafe block expression. FLS §6.4.4.
+    ///
+    /// `unsafe { stmts... expr? }`
+    ///
+    /// An unsafe block is a block expression preceded by the keyword `unsafe`.
+    /// It marks the enclosed code as a context where operations restricted by
+    /// the safety model (raw pointer dereferences, calls to `unsafe fn`,
+    /// access to mutable statics, union field access) are permitted.
+    ///
+    /// In galvanic at this milestone, unsafe blocks compile identically to
+    /// regular blocks — the semantic distinction is not yet enforced because
+    /// galvanic does not implement raw pointers, unsafe functions, or unions.
+    /// The `unsafe` marker is parsed and accepted but has no codegen effect
+    /// beyond lowering the block body as runtime instructions.
+    ///
+    /// FLS §6.4.4: "An unsafe block expression is a block expression preceded
+    /// by keyword unsafe."
+    ///
+    /// FLS §6.4.4 AMBIGUOUS: The spec states that an unsafe block expression
+    /// "allows calling unsafe functions, dereferencing raw pointer types,
+    /// accessing fields of unions, and accessing or modifying mutable statics."
+    /// The spec does not specify whether a conforming compiler must *reject*
+    /// these operations outside an unsafe block (a safety checker requirement)
+    /// or merely *permit* them inside one. Galvanic accepts the syntax but
+    /// does not yet enforce the safety boundary.
+    ///
+    /// FLS §6.1.2 (Constraint 1): Unsafe blocks are NOT const contexts —
+    /// the enclosed code runs at runtime. Runtime instructions are emitted.
+    ///
+    /// Cache-line note: identical footprint to a regular block — no extra
+    /// instructions emitted for the `unsafe` marker itself. The block body
+    /// emits the same instructions it would in a safe context.
+    UnsafeBlock(Box<Block>),
+
     /// A closure expression. FLS §6.14.
     ///
     /// `|params| body` or `|params| -> RetTy { body }` or `|| body`.

@@ -82,3 +82,8 @@ fn fls_10_2_assoc_types() {
 fn fls_6_4_2_const_block() {
     assert_galvanic_accepts("fls_6_4_2_const_block.rs");
 }
+
+#[test]
+fn fls_6_4_4_unsafe_block() {
+    assert_galvanic_accepts("fls_6_4_4_unsafe_block.rs");
+}
