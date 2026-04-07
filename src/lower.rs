@@ -1396,14 +1396,16 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     // We pass a monotonically increasing `label_base` to each `lower_fn` call
     // so that every function's labels are globally unique.
     let mut fns = Vec::new();
+    let mut trampolines: Vec<crate::ir::ClosureTrampoline> = Vec::new();
     let mut label_base: u32 = 0;
     for item in &src.items {
         match &item.kind {
             ItemKind::Fn(fn_def) => {
-                let (ir_fn, closure_fns, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &tuple_struct_float_field_types, &enum_defs, &enum_variant_float_field_types, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &const_f64_vals, &const_f32_vals, &static_names, &static_f64_names, &static_f32_names, &fn_names, &struct_raw_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, None, label_base)?;
+                let (ir_fn, closure_fns, fn_trampolines, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &tuple_struct_float_field_types, &enum_defs, &enum_variant_float_field_types, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &const_f64_vals, &const_f32_vals, &static_names, &static_f64_names, &static_f32_names, &fn_names, &struct_raw_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, None, label_base)?;
                 label_base = next_label;
                 fns.push(ir_fn);
                 fns.extend(closure_fns);
+                trampolines.extend(fn_trampolines);
             }
             ItemKind::Impl(impl_def) => {
                 // FLS §11: Inherent impl and trait impl. Each method becomes a
@@ -1426,7 +1428,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         mangled_name: &mangled,
                         self_kind: method.self_param,
                     });
-                    let (ir_fn, closure_fns, next_label) = lower_fn(
+                    let (ir_fn, closure_fns, fn_trampolines, next_label) = lower_fn(
                         method,
                         source,
                         &struct_defs,
@@ -1461,6 +1463,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                     label_base = next_label;
                     fns.push(ir_fn);
                     fns.extend(closure_fns);
+                    trampolines.extend(fn_trampolines);
                 }
             }
             ItemKind::Struct(_) | ItemKind::Enum(_) => {} // already processed above
@@ -1479,7 +1482,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         }
     }
 
-    Ok(Module { fns, statics: static_data })
+    Ok(Module { fns, statics: static_data, trampolines })
 }
 
 // ── Function lowering ────────────────────────────────────────────────────────
@@ -1581,7 +1584,7 @@ fn lower_fn(
     struct_float_field_types: &HashMap<String, Vec<Option<IrTy>>>,
     method: Option<MethodCtx<'_>>,
     start_label: u32,
-) -> Result<(IrFn, Vec<IrFn>, u32), LowerError> {
+) -> Result<(IrFn, Vec<IrFn>, Vec<crate::ir::ClosureTrampoline>, u32), LowerError> {
     // For associated functions, impl_type = None and self_kind = None.
     let impl_type = method.as_ref().and_then(|m| m.impl_type);
     let override_name = method.as_ref().map(|m| m.mangled_name);
@@ -2527,9 +2530,10 @@ fn lower_fn(
     let saves_lr = ctx.has_calls;
     let next_label = ctx.next_label;
     let pending_closures = ctx.pending_closures;
+    let pending_trampolines = ctx.pending_trampolines;
     let float_consts = ctx.float_consts;
     let float32_consts = ctx.float32_consts;
-    Ok((IrFn { name, ret_ty, body: body_instrs, stack_slots, saves_lr, float_consts, float32_consts }, pending_closures, next_label))
+    Ok((IrFn { name, ret_ty, body: body_instrs, stack_slots, saves_lr, float_consts, float32_consts }, pending_closures, pending_trampolines, next_label))
 }
 
 // ── Type lowering ────────────────────────────────────────────────────────────
@@ -3254,6 +3258,33 @@ struct LowerCtx<'src> {
     /// Cache-line note: `Option<Vec<u8>>` = 24 bytes (None = 0 heap allocation).
     last_closure_captures: Option<Vec<u8>>,
 
+    /// Side-channel: the name of the most recently lowered capturing closure.
+    ///
+    /// FLS §6.22, §4.13: Set alongside `last_closure_captures` when a closure
+    /// with captures is lowered. The call-arg handler uses this to generate the
+    /// trampoline name (`{closure_name}_trampoline`) and tail-call target.
+    ///
+    /// Cleared when consumed (by either the let-binding handler or the call-arg
+    /// trampoline generator). `None` if no capturing closure was recently lowered.
+    last_closure_name: Option<String>,
+
+    /// Side-channel: the number of explicit parameters of the last capturing closure.
+    ///
+    /// FLS §6.22: The trampoline needs to shift `n_explicit` argument registers
+    /// up by `n_caps` positions before inserting the captured values at the front.
+    ///
+    /// Cleared alongside `last_closure_name`.
+    last_closure_n_explicit: Option<usize>,
+
+    /// Trampolines generated by this function when capturing closures are passed
+    /// as `impl Fn` arguments.
+    ///
+    /// FLS §6.22, §4.13: Collected here during lowering and propagated up through
+    /// `lower_fn`'s return value to the module-level `Module::trampolines` list.
+    ///
+    /// Cache-line note: typically empty or very small (0–2 entries per function).
+    pending_trampolines: Vec<crate::ir::ClosureTrampoline>,
+
     /// Names of all free functions visible in the current scope.
     ///
     /// FLS §4.9: Used to detect when a single-segment path expression refers to a
@@ -3657,6 +3688,9 @@ impl<'src> LowerCtx<'src> {
             local_str_slots: std::collections::HashSet::new(),
             local_capture_args: HashMap::new(),
             last_closure_captures: None,
+            last_closure_name: None,
+            last_closure_n_explicit: None,
+            pending_trampolines: Vec::new(),
             float_locals: HashMap::new(),
             float_consts: Vec::new(),
             float32_locals: HashMap::new(),
@@ -7257,6 +7291,9 @@ impl<'src> LowerCtx<'src> {
                         if let Some(cap_slots) = self.last_closure_captures.take() {
                             self.local_capture_args.insert(slot, cap_slots);
                         }
+                        // Clear trampoline side-channels (consumed by let, not by call-arg path).
+                        self.last_closure_name = None;
+                        self.last_closure_n_explicit = None;
                     }
                     // FLS §2.4.6: String literal stored in a let binding —
                     // mark the slot so that `.len()` can load the byte-length
@@ -10697,12 +10734,53 @@ impl<'src> LowerCtx<'src> {
                         // Lower the arg; if it produces a float value, add it to
                         // float_arg_regs instead of arg_regs.
                         let val = self.lower_expr(arg, &IrTy::I32)?;
-                        match val {
-                            IrValue::FReg(r) => float_arg_regs.push(r),
-                            IrValue::F32Reg(r) => float_arg_regs.push(r),
-                            _ => {
-                                let reg = self.val_to_reg(val)?;
-                                arg_regs.push(reg);
+
+                        // FLS §6.22, §4.13: If the arg was a capturing closure, we
+                        // cannot pass the closure address directly because the callee
+                        // (e.g., `apply(f: impl Fn, …)`) calls `f` with only the
+                        // explicit arguments, unaware of the captured values.
+                        //
+                        // Fix: generate a trampoline that (1) has the correct arity
+                        // for the `impl Fn` position, (2) reads captures from ARM64
+                        // callee-saved registers x27/x26/… set by the caller before
+                        // `bl apply`, and (3) tail-calls the actual closure.
+                        //
+                        // Cache-line note: trampoline is 3–6 instructions (12–24 bytes).
+                        if let Some(cap_slots) = self.last_closure_captures.take() {
+                            let closure_name = self.last_closure_name.take()
+                                .expect("last_closure_name set when last_closure_captures is set");
+                            let n_explicit = self.last_closure_n_explicit.take().unwrap_or(0);
+
+                            // Emit loads of each capture into callee-saved registers
+                            // x27 (cap 0), x26 (cap 1), x25 (cap 2), …
+                            // These precede the Call instruction, so they execute
+                            // before `bl apply` and are preserved through it.
+                            for (cap_idx, &cap_slot) in cap_slots.iter().enumerate() {
+                                let dest_reg = 27u8.saturating_sub(cap_idx as u8);
+                                self.instrs.push(Instr::Load { dst: dest_reg, slot: cap_slot });
+                            }
+
+                            // Record the trampoline to be emitted.
+                            let trampoline_name = format!("{closure_name}_trampoline");
+                            self.pending_trampolines.push(crate::ir::ClosureTrampoline {
+                                name: trampoline_name.clone(),
+                                closure_name,
+                                n_caps: cap_slots.len(),
+                                n_explicit,
+                            });
+
+                            // Load the trampoline address instead of the closure address.
+                            let tramp_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::LoadFnAddr { dst: tramp_reg, name: trampoline_name });
+                            arg_regs.push(tramp_reg);
+                        } else {
+                            match val {
+                                IrValue::FReg(r) => float_arg_regs.push(r),
+                                IrValue::F32Reg(r) => float_arg_regs.push(r),
+                                _ => {
+                                    let reg = self.val_to_reg(val)?;
+                                    arg_regs.push(reg);
+                                }
                             }
                         }
                     }
@@ -13741,16 +13819,22 @@ impl<'src> LowerCtx<'src> {
 
                 // Collect this closure and any closures defined inside it.
                 // FLS §6.14: Nested closures compile to additional hidden functions.
+                // Also propagate any trampolines generated inside the closure.
                 self.pending_closures.push(closure_fn);
                 self.pending_closures.extend(closure_ctx.pending_closures);
+                self.pending_trampolines.extend(closure_ctx.pending_trampolines);
 
                 // Record the captured outer-scope slots so the let-binding handler
                 // can register them for the call site.
                 // FLS §6.22: The enclosing `lower_stmt(Let)` drains `last_closure_captures`
                 // after allocating a stack slot for the closure variable.
+                // Also record the closure name and explicit parameter count for the
+                // call-arg trampoline generator (FLS §6.22, §4.13).
                 if !captures.is_empty() {
                     let outer_slots: Vec<u8> = captures.iter().map(|(_, s)| *s).collect();
                     self.last_closure_captures = Some(outer_slots);
+                    self.last_closure_name = Some(closure_name.clone());
+                    self.last_closure_n_explicit = Some(params.len());
                 }
 
                 // Materialise the closure's address as a function pointer value.

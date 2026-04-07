@@ -74,6 +74,43 @@ pub struct Module {
     /// FLS §7.2: Static items. Populated during lowering when the source
     /// file contains `static` declarations.
     pub statics: Vec<StaticData>,
+    /// Trampoline functions generated when capturing closures are passed as
+    /// `impl Fn` arguments.
+    ///
+    /// FLS §6.22, §4.13: A capturing closure has signature
+    /// `(cap0, cap1, …, arg0, arg1, …) -> R`, which differs from the
+    /// `impl Fn(arg0, …) -> R` signature the callee expects. A trampoline
+    /// bridges the gap: it has the expected arity, reads captured values
+    /// from ARM64 callee-saved registers (x27, x26, …) that the caller
+    /// loaded before the `bl`, and tail-calls the actual closure function.
+    ///
+    /// Cache-line note: each trampoline is 3–6 instructions (12–24 bytes),
+    /// fitting in less than half a 64-byte cache line.
+    pub trampolines: Vec<ClosureTrampoline>,
+}
+
+/// A trampoline for passing a capturing closure as an `impl Fn` argument.
+///
+/// FLS §6.22, §4.13: When a capturing closure `move |x| x + offset` is
+/// passed to a function `apply(f: impl Fn(i32) -> i32, …)`, `apply` calls
+/// `f(x)` with only the explicit argument. The trampoline sits between
+/// `apply` and the closure: it receives the explicit argument in x0, reads
+/// the captures from callee-saved registers x27/x26/… (set by the original
+/// caller before `bl apply`), and tail-calls the closure with captures first.
+///
+/// ARM64 callee-saved registers are preserved across function calls
+/// (x19–x28), so x27 set in `main` before `bl apply` is still valid when
+/// `apply` calls the trampoline via `blr x9`.
+pub struct ClosureTrampoline {
+    /// Unique name for this trampoline function (e.g., `__closure_main_0_trampoline`).
+    pub name: String,
+    /// Name of the actual closure function this trampoline forwards to.
+    pub closure_name: String,
+    /// Number of captured variables. Each capture occupies one callee-saved
+    /// register: cap 0 → x27, cap 1 → x26, cap 2 → x25, etc.
+    pub n_caps: usize,
+    /// Number of explicit arguments the closure expects (its parameter count).
+    pub n_explicit: usize,
 }
 
 // ── Functions ─────────────────────────────────────────────────────────────────

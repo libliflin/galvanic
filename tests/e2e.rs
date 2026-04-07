@@ -17272,6 +17272,39 @@ fn main() -> i32 {
     assert!(asm.contains("__closure_"), "move closure must emit hidden closure function: {asm}");
 }
 
+/// Assembly check: capturing closure passed as `impl Fn` emits a trampoline.
+///
+/// FLS §6.22, §4.13: When a capturing closure is passed as an `impl Fn`
+/// argument, a trampoline is generated that reads captures from callee-saved
+/// registers (x27, x26, …) and tail-calls the actual closure. The caller
+/// loads the captures into those registers before `bl apply`.
+#[test]
+fn runtime_capturing_closure_as_impl_fn_emits_trampoline() {
+    let src = r#"
+fn apply(f: impl Fn(i32) -> i32, x: i32) -> i32 { f(x) }
+fn main() -> i32 {
+    let offset = 1;
+    apply(move |x| x + offset, 41)
+}
+"#;
+    let asm = compile_to_asm(src);
+    // A trampoline for the closure must be emitted.
+    assert!(
+        asm.contains("_trampoline"),
+        "capturing closure as impl Fn must emit a trampoline: {asm}"
+    );
+    // The trampoline must read from x27 (cap[0]).
+    assert!(
+        asm.contains("x27"),
+        "trampoline must read capture from x27: {asm}"
+    );
+    // The caller (main) must load x27 before bl apply.
+    assert!(
+        asm.contains("ldr     x27"),
+        "caller must load capture into x27 before bl: {asm}"
+    );
+}
+
 // ── Milestone 126: Inner function definitions in block bodies ─────────────────
 //
 // FLS §9: Function items. FLS §3: Items (including functions) may appear as

@@ -80,6 +80,25 @@ pub fn emit_asm(module: &Module) -> Result<String, CodegenError> {
         emit_fn(&mut out, func)?;
     }
 
+    // Emit trampoline functions for capturing closures passed as `impl Fn`.
+    //
+    // FLS §6.22, §4.13: Each trampoline bridges the gap between an `impl Fn`
+    // caller (which passes only explicit arguments) and a capturing closure
+    // (which expects captured values as leading register arguments).
+    //
+    // ARM64 design: captures are loaded into callee-saved registers x27/x26/…
+    // by the caller before `bl apply`. The trampoline reads them from there,
+    // shifts the explicit arguments up, and tail-calls the closure via `b`.
+    // Because `b` is a tail call (not `bl`), x30 from `apply`'s `blr x9`
+    // is preserved for the closure's `ret` to return directly to `apply`.
+    //
+    // Cache-line note: each trampoline is 3–6 instructions (12–24 bytes),
+    // fitting comfortably within a 64-byte instruction cache line.
+    for trampoline in &module.trampolines {
+        writeln!(out)?;
+        emit_trampoline(&mut out, trampoline)?;
+    }
+
     // Emit the bare _start entry point.
     writeln!(out)?;
     emit_start(&mut out)?;
@@ -1370,6 +1389,68 @@ fn emit_load_x0(out: &mut String, value: &IrValue) -> Result<(), CodegenError> {
             // If r == 0, result is already in s0.
         }
     }
+    Ok(())
+}
+
+// ── Trampoline emission ───────────────────────────────────────────────────────
+
+/// Emit a trampoline function for passing a capturing closure as `impl Fn`.
+///
+/// FLS §6.22, §4.13: The trampoline has the signature expected by the `impl Fn`
+/// caller (only explicit arguments in x0..x{n_explicit-1}). It reads captured
+/// values from ARM64 callee-saved registers x27/x26/… (which the original
+/// caller loaded before `bl apply`), shifts the explicit arguments to make room,
+/// and tail-calls the actual closure via `b` (preserving x30 for the closure's `ret`).
+///
+/// Assembly pattern for n_caps=1, n_explicit=1:
+/// ```asm
+/// __trampoline:
+///     mov  x1, x0      // shift explicit arg[0] to position 1
+///     mov  x0, x27     // cap[0] → position 0
+///     b    __closure   // tail call (x30 unchanged → closure ret goes to apply)
+/// ```
+///
+/// Cache-line note: 3–6 instructions (12–24 bytes) per trampoline, well under
+/// one 64-byte instruction cache line.
+fn emit_trampoline(
+    out: &mut String,
+    t: &crate::ir::ClosureTrampoline,
+) -> Result<(), CodegenError> {
+    writeln!(out, "    // trampoline for {} — FLS §6.22, §4.13", t.closure_name)?;
+    writeln!(out, "    .global {}", t.name)?;
+    writeln!(out, "{}:", t.name)?;
+
+    // Shift explicit args up by n_caps positions (in reverse order to avoid
+    // clobbering). Explicit arg i arrives in x{i} and must move to x{n_caps+i}.
+    //
+    // Cache-line note: one `mov` per explicit arg = 4 bytes each.
+    for i in (0..t.n_explicit).rev() {
+        let src = i;
+        let dst = t.n_caps + i;
+        if src != dst {
+            writeln!(
+                out,
+                "    mov     x{dst}, x{src:<24} // shift explicit arg {i} to position {dst}"
+            )?;
+        }
+    }
+
+    // Move captures from callee-saved registers into their final positions.
+    // cap[j] lives in x{27-j} (x27, x26, x25, …) and must go to x{j}.
+    //
+    // Cache-line note: one `mov` per capture = 4 bytes each.
+    for j in 0..t.n_caps {
+        let src_phys = 27usize.saturating_sub(j);
+        let dst = j;
+        writeln!(
+            out,
+            "    mov     x{dst}, x{src_phys:<24} // cap[{j}] from x{src_phys}"
+        )?;
+    }
+
+    // Tail-call the actual closure. Using `b` (not `bl`) preserves x30 so the
+    // closure's `ret` returns directly to the `impl Fn` caller's call site.
+    writeln!(out, "    b       {}              // tail call closure", t.closure_name)?;
     Ok(())
 }
 
