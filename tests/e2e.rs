@@ -17115,6 +17115,27 @@ fn main() -> i32 { apply(|v| v + 1, 41) }
     assert!(asm.contains("blr"), "impl Fn call must emit blr instruction: {asm}");
 }
 
+/// Anti-fold check: `impl Fn` call with a runtime-unknown argument must not fold.
+///
+/// FLS §6.1.2 (Constraint 1): `double(x)` where `x` is a function parameter is
+/// NOT a const context — the `blr` must execute at runtime, not be replaced by
+/// `mov x0, #42`. If galvanic sees `apply(|v| v + v, 21)` and folds to 42, it
+/// is interpreting, not compiling.
+#[test]
+fn runtime_impl_fn_call_emits_blr_not_folded() {
+    let src = r#"
+fn apply(f: impl Fn(i32) -> i32, x: i32) -> i32 { f(x) }
+fn double(x: i32) -> i32 { apply(|v| v + v, x) }
+fn main() -> i32 { double(21) }
+"#;
+    let asm = compile_to_asm(src);
+    assert!(asm.contains("blr"), "impl Fn call must emit blr instruction: {asm}");
+    assert!(
+        !asm.contains("mov     x0, #42"),
+        "impl Fn result must not be constant-folded to mov x0, #42: {asm}"
+    );
+}
+
 // ── Milestone 125: move closures (FLS §6.14, §6.22) ─────────────────────────
 
 /// Milestone 125: basic `move` closure captures an integer by value.
@@ -17270,6 +17291,29 @@ fn main() -> i32 {
     let asm = compile_to_asm(src);
     // The captured value is passed as an extra register argument — same as non-move.
     assert!(asm.contains("__closure_"), "move closure must emit hidden closure function: {asm}");
+}
+
+/// Anti-fold check: `move` closure with a runtime-unknown captured value must not fold.
+///
+/// FLS §6.1.2 (Constraint 1): when the captured value comes from a function
+/// parameter (unknown at compile time), the closure body must emit runtime `add`
+/// instructions — never `mov x0, #42`. An interpreter could fold `add_offset(1, 41)`
+/// to 42 at compile time; a compiler must not.
+#[test]
+fn runtime_move_closure_capture_emits_add_not_folded() {
+    let src = r#"
+fn add_offset(n: i32, x: i32) -> i32 {
+    let f = move |v| v + n;
+    f(x)
+}
+fn main() -> i32 { add_offset(1, 41) }
+"#;
+    let asm = compile_to_asm(src);
+    assert!(asm.contains("add"), "move closure must emit add instruction: {asm}");
+    assert!(
+        !asm.contains("mov     x0, #42"),
+        "move closure result must not be constant-folded to mov x0, #42: {asm}"
+    );
 }
 
 /// Assembly check: capturing closure passed as `impl Fn` emits a trampoline.
