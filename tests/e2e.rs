@@ -13245,3 +13245,57 @@ fn main() -> i32 {
         "expected `fcvt s{{n}}, d{{m}}` (f64→f32 narrow) in assembly:\n{asm}"
     );
 }
+
+/// Assembly check: f64-returning function emits `fmov d0` for return and captures return via `fmov d{n}, d0`.
+///
+/// FLS §4.2: ARM64 float ABI — f64 return value in d0.
+/// FLS §6.5.9: `f32 as f64` widens via FCVT.
+#[test]
+fn runtime_f32_as_f64_param_emits_fmov_return_and_capture() {
+    let src = r#"
+fn widen(x: f32) -> f64 {
+    x as f64
+}
+fn main() -> i32 {
+    let y: f64 = widen(2.0_f32);
+    y as i32
+}
+"#;
+    let asm = compile_to_asm(src);
+    // The widen function must return via d0 (fmov d0 or d0 already in place).
+    // main must capture via fmov d{n}, d0 after the bl.
+    assert!(
+        asm.contains("fcvt    d"),
+        "expected `fcvt d{{n}}, s{{m}}` in widen body:\n{asm}"
+    );
+    assert!(
+        asm.contains("fmov    d0"),
+        "expected `fmov d0, d{{n}}` or `fmov d{{n}}, d0` for float return/capture:\n{asm}"
+    );
+}
+
+/// Assembly check: f32-returning function emits `fmov s0` for return and captures return via `fmov s{n}, s0`.
+///
+/// FLS §4.2: ARM64 float ABI — f32 return value in s0.
+/// FLS §6.5.9: `f64 as f32` narrows via FCVT.
+#[test]
+fn runtime_f64_as_f32_param_emits_fmov_return_and_capture() {
+    let src = r#"
+fn narrow(x: f64) -> f32 {
+    x as f32
+}
+fn main() -> i32 {
+    let y: f32 = narrow(3.0);
+    y as i32
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("fcvt    s"),
+        "expected `fcvt s{{n}}, d{{m}}` in narrow body:\n{asm}"
+    );
+    assert!(
+        asm.contains("fmov    s0"),
+        "expected `fmov s0, s{{n}}` or `fmov s{{n}}, s0` for float return/capture:\n{asm}"
+    );
+}

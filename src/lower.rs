@@ -594,6 +594,31 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         }
     }
 
+    // Build float-returning free function registries.
+    //
+    // FLS §4.2: Functions that return f64 or f32 use the float register bank
+    // for their return value: f64 in d0, f32 in s0. The call site must capture
+    // from the float register rather than x0.
+    //
+    // Cache-line note: populated once at compile time, not on any hot path.
+    let mut f64_return_fns: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut f32_return_fns: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for item in &src.items {
+        if let ItemKind::Fn(fn_def) = &item.kind {
+            let fn_name = fn_def.name.text(source);
+            if let Some(ret_ty) = &fn_def.ret_ty
+                && let TyKind::Path(segs) = &ret_ty.kind
+                && segs.len() == 1
+            {
+                match segs[0].text(source) {
+                    "f64" => { f64_return_fns.insert(fn_name.to_owned()); }
+                    "f32" => { f32_return_fns.insert(fn_name.to_owned()); }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     // Build enum-returning free function registry: fn name → enum type name.
     //
     // FLS §9, §15: Free functions that return an enum type use a write-back
@@ -730,7 +755,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     for item in &src.items {
         match &item.kind {
             ItemKind::Fn(fn_def) => {
-                let (ir_fn, closure_fns, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &enum_defs, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &const_vals, &static_names, &fn_names, &struct_raw_field_types, &struct_field_offsets, &struct_sizes, None, label_base)?;
+                let (ir_fn, closure_fns, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &enum_defs, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &static_names, &fn_names, &struct_raw_field_types, &struct_field_offsets, &struct_sizes, None, label_base)?;
                 label_base = next_label;
                 fns.push(ir_fn);
                 fns.extend(closure_fns);
@@ -769,6 +794,8 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         &enum_return_fns,
                         &struct_return_methods,
                         &tuple_return_free_fns,
+                        &f64_return_fns,
+                        &f32_return_fns,
                         &const_vals,
                         &static_names,
                         &fn_names,
@@ -880,6 +907,8 @@ fn lower_fn(
     enum_return_fns: &HashMap<String, String>,
     struct_return_methods: &HashMap<String, String>,
     tuple_return_free_fns: &HashMap<String, usize>,
+    f64_return_fns: &std::collections::HashSet<String>,
+    f32_return_fns: &std::collections::HashSet<String>,
     const_vals: &HashMap<String, i32>,
     static_names: &std::collections::HashSet<String>,
     fn_names: &std::collections::HashSet<String>,
@@ -958,7 +987,7 @@ fn lower_fn(
         Some(block) => block,
     };
 
-    let mut ctx = LowerCtx::new(source, &name, ret_ty, struct_defs, tuple_struct_defs, enum_defs, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, const_vals, static_names, fn_names, struct_field_types, struct_field_offsets, struct_sizes, start_label);
+    let mut ctx = LowerCtx::new(source, &name, ret_ty, struct_defs, tuple_struct_defs, enum_defs, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, f64_return_fns, f32_return_fns, const_vals, static_names, fn_names, struct_field_types, struct_field_offsets, struct_sizes, start_label);
 
     // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
     // to stack slots. Each parameter slot is allocated in parameter order
@@ -2206,6 +2235,22 @@ struct LowerCtx<'src> {
     /// Cache-line note: read-only during lowering; not on any hot path.
     tuple_return_free_fns: &'src HashMap<String, usize>,
 
+    /// f64-returning free function registry.
+    ///
+    /// FLS §4.2: Functions that return f64 place the result in d0.
+    /// The call site must capture from d0 (not x0) into a float register.
+    ///
+    /// Cache-line note: read-only during lowering; not on any hot path.
+    f64_return_fns: &'src std::collections::HashSet<String>,
+
+    /// f32-returning free function registry.
+    ///
+    /// FLS §4.2: Functions that return f32 place the result in s0.
+    /// The call site must capture from s0 (not x0) into a float register.
+    ///
+    /// Cache-line note: read-only during lowering; not on any hot path.
+    f32_return_fns: &'src std::collections::HashSet<String>,
+
     /// Maps a struct variable's base stack slot to its struct type name.
     ///
     /// FLS §6.13: Field access expressions need the struct type to compute
@@ -2570,6 +2615,8 @@ impl<'src> LowerCtx<'src> {
         enum_return_fns: &'src HashMap<String, String>,
         struct_return_methods: &'src HashMap<String, String>,
         tuple_return_free_fns: &'src HashMap<String, usize>,
+        f64_return_fns: &'src std::collections::HashSet<String>,
+        f32_return_fns: &'src std::collections::HashSet<String>,
         const_vals: &'src HashMap<String, i32>,
         static_names: &'src std::collections::HashSet<String>,
         fn_names: &'src std::collections::HashSet<String>,
@@ -2601,6 +2648,8 @@ impl<'src> LowerCtx<'src> {
             enum_return_fns,
             struct_return_methods,
             tuple_return_free_fns,
+            f64_return_fns,
+            f32_return_fns,
             const_vals,
             static_names,
             fn_names,
@@ -8261,15 +8310,32 @@ impl<'src> LowerCtx<'src> {
                 // Allocate the destination register for the return value.
                 let dst = self.alloc_reg()?;
 
+                // FLS §4.2: Determine whether the callee returns a float.
+                // Float-returning functions place the result in d0 (f64) or s0 (f32)
+                // rather than x0. The call site must capture from the correct register.
+                let float_ret = if self.f64_return_fns.contains(&fn_name) {
+                    Some(true)
+                } else if self.f32_return_fns.contains(&fn_name) {
+                    Some(false)
+                } else {
+                    None
+                };
+
                 self.has_calls = true;
                 self.instrs.push(Instr::Call {
                     dst,
                     name: fn_name,
                     args: arg_regs,
                     float_args: float_arg_regs,
+                    float_ret,
                 });
 
-                Ok(IrValue::Reg(dst))
+                // FLS §4.2: Return value type depends on the callee's return type.
+                match float_ret {
+                    Some(true) => Ok(IrValue::FReg(dst)),
+                    Some(false) => Ok(IrValue::F32Reg(dst)),
+                    None => Ok(IrValue::Reg(dst)),
+                }
             }
 
             // FLS §6.5.10: Assignment expression `place = value`.
@@ -10482,13 +10548,26 @@ impl<'src> LowerCtx<'src> {
                     }
                 } else {
                     let dst = self.alloc_reg()?;
+                    // FLS §4.2: Method calls may return f64/f32; check the mangled name.
+                    let float_ret = if self.f64_return_fns.contains(&mangled) {
+                        Some(true)
+                    } else if self.f32_return_fns.contains(&mangled) {
+                        Some(false)
+                    } else {
+                        None
+                    };
                     self.instrs.push(Instr::Call {
                         dst,
                         name: mangled,
                         args: arg_regs,
                         float_args: vec![],
+                        float_ret,
                     });
-                    Ok(IrValue::Reg(dst))
+                    match float_ret {
+                        Some(true) => Ok(IrValue::FReg(dst)),
+                        Some(false) => Ok(IrValue::F32Reg(dst)),
+                        None => Ok(IrValue::Reg(dst)),
+                    }
                 }
             }
 
@@ -10631,6 +10710,8 @@ impl<'src> LowerCtx<'src> {
                     self.enum_return_fns,
                     self.struct_return_methods,
                     self.tuple_return_free_fns,
+                    self.f64_return_fns,
+                    self.f32_return_fns,
                     self.const_vals,
                     self.static_names,
                     self.fn_names,

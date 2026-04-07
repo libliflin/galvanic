@@ -473,6 +473,11 @@ pub enum Instr {
         /// `float_args[i]` holds the value to place in `d{i}` before the call.
         /// FLS §4.2: f64/f32 parameters use the ARM64 float register bank.
         float_args: Vec<u8>,
+        /// FLS §4.2: float return type.
+        /// `None` = integer/unit return (captured from x0).
+        /// `Some(true)` = f64 return (captured from d0 into d{dst}).
+        /// `Some(false)` = f32 return (captured from s0 into s{dst}).
+        float_ret: Option<bool>,
     },
 
     /// Return from a `&mut self` method, writing modified fields back to the caller.
