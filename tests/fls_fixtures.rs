@@ -87,3 +87,8 @@ fn fls_6_4_2_const_block() {
 fn fls_6_4_4_unsafe_block() {
     assert_galvanic_accepts("fls_6_4_4_unsafe_block.rs");
 }
+
+#[test]
+fn fls_12_1_generic_fns() {
+    assert_galvanic_accepts("fls_12_1_generic_fns.rs");
+}

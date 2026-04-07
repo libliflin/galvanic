@@ -1008,6 +1008,34 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         })
         .collect();
 
+    // FLS §12.1: Collect generic function definitions.
+    //
+    // Generic functions (those with at least one type parameter) are NOT lowered
+    // directly in the second pass. Instead, they are monomorphized on demand at
+    // each call site. This map allows `lower_expr` to look up the type parameter
+    // count when emitting a mangled call target.
+    //
+    // FLS §12.1: "A generic function may declare one or more type parameters."
+    // Galvanic implements monomorphization: each unique concrete instantiation
+    // produces a separate labelled function in the assembly output.
+    //
+    // Limitation: only scalar (integer/bool) type parameters are supported at
+    // this milestone. Float generics (T = f64 or f32) are deferred.
+    //
+    // Cache-line note: built once; read-only during lowering. Not on any hot path.
+    let generic_fn_defs: HashMap<String, &crate::ast::FnDef> = src
+        .items
+        .iter()
+        .filter_map(|item| {
+            if let ItemKind::Fn(fn_def) = &item.kind
+                && !fn_def.generic_params.is_empty()
+            {
+                return Some((fn_def.name.text(source).to_owned(), fn_def.as_ref()));
+            }
+            None
+        })
+        .collect();
+
     let mut const_vals: HashMap<String, i32> = HashMap::new();
     // FLS §6.1.2:37–45: Evaluate all const initializers via the compile-time
     // evaluator. Repeat until no new consts are discovered (handles consts
@@ -1193,6 +1221,19 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
             fn_names.insert(fn_def.name.text(source).to_owned());
         }
     }
+
+    // Build generic function type-parameter-count registry.
+    //
+    // FLS §12.1: When a call site calls a generic function, galvanic mangles
+    // the callee name to `funcname__i32` (one `i32` segment per type param,
+    // joined by `_`). This registry provides the type param count so the
+    // mangled name can be generated without re-parsing the FnDef.
+    //
+    // Cache-line note: built once; read-only during lowering. Not on any hot path.
+    let generic_fn_param_counts: HashMap<String, usize> = generic_fn_defs
+        .iter()
+        .map(|(name, fn_def)| (name.clone(), fn_def.generic_params.len()))
+        .collect();
 
     // Build method self-kind registry: mangled name → SelfKind.
     //
@@ -1612,14 +1653,27 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     let mut fns = Vec::new();
     let mut trampolines: Vec<crate::ir::ClosureTrampoline> = Vec::new();
     let mut label_base: u32 = 0;
+    // FLS §12.1: Accumulated monomorphization requests from call sites.
+    // Each entry is a base function name (e.g. "identity"). After the main
+    // second pass, each unique name is instantiated with T = i32 and appended
+    // to `fns` under the mangled label (e.g. "identity__i32").
+    let mut pending_monos: Vec<String> = Vec::new();
+    // Track which mangled names have already been generated to avoid duplicates.
+    let mut seen_mono_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     for item in &src.items {
         match &item.kind {
             ItemKind::Fn(fn_def) => {
-                let (ir_fn, closure_fns, fn_trampolines, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &tuple_struct_float_field_types, &enum_defs, &enum_variant_float_field_types, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &const_f64_vals, &const_f32_vals, &assoc_const_vals, &static_names, &static_f64_names, &static_f32_names, &fn_names, &struct_raw_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, None, label_base)?;
+                // FLS §12.1: Generic functions are monomorphized at call sites.
+                // Skip them here — they are lowered in the post-pass loop below.
+                if !fn_def.generic_params.is_empty() {
+                    continue;
+                }
+                let (ir_fn, closure_fns, fn_trampolines, next_label, needed) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &tuple_struct_float_field_types, &enum_defs, &enum_variant_float_field_types, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &const_f64_vals, &const_f32_vals, &assoc_const_vals, &static_names, &static_f64_names, &static_f32_names, &fn_names, &struct_raw_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, &generic_fn_param_counts, &HashMap::new(), None, label_base)?;
                 label_base = next_label;
                 fns.push(ir_fn);
                 fns.extend(closure_fns);
                 trampolines.extend(fn_trampolines);
+                pending_monos.extend(needed);
             }
             ItemKind::Impl(impl_def) => {
                 // FLS §11: Inherent impl and trait impl. Each method becomes a
@@ -1642,7 +1696,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         mangled_name: &mangled,
                         self_kind: method.self_param,
                     });
-                    let (ir_fn, closure_fns, fn_trampolines, next_label) = lower_fn(
+                    let (ir_fn, closure_fns, fn_trampolines, next_label, needed) = lower_fn(
                         method,
                         source,
                         &struct_defs,
@@ -1672,6 +1726,8 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         &struct_sizes,
                         &type_alias_irtys,
                         &struct_float_field_types,
+                        &generic_fn_param_counts,
+                        &HashMap::new(),
                         mctx,
                         label_base,
                     )?;
@@ -1679,6 +1735,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                     fns.push(ir_fn);
                     fns.extend(closure_fns);
                     trampolines.extend(fn_trampolines);
+                    pending_monos.extend(needed);
                 }
                 // FLS §10.1.1: Emit default trait methods that are not overridden.
                 //
@@ -1708,7 +1765,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                                 mangled_name: &mangled,
                                 self_kind: default_method.self_param,
                             });
-                            let (ir_fn, closure_fns, fn_trampolines, next_label) = lower_fn(
+                            let (ir_fn, closure_fns, fn_trampolines, next_label, needed) = lower_fn(
                                 default_method,
                                 source,
                                 &struct_defs,
@@ -1738,6 +1795,8 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                                 &struct_sizes,
                                 &type_alias_irtys,
                                 &struct_float_field_types,
+                                &generic_fn_param_counts,
+                                &HashMap::new(),
                                 mctx,
                                 label_base,
                             )?;
@@ -1745,6 +1804,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                             fns.push(ir_fn);
                             fns.extend(closure_fns);
                             trampolines.extend(fn_trampolines);
+                            pending_monos.extend(needed);
                         }
                     }
                 }
@@ -1763,6 +1823,92 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
             // They produce no runtime code.
             ItemKind::TypeAlias(_) => {}
         }
+    }
+
+    // FLS §12.1: Post-pass monomorphization.
+    //
+    // Each unique base function name in `pending_monos` requires a specialization
+    // with all type parameters substituted by `IrTy::I32`. The mangled name is
+    // `funcname__i32` (single type param) or `funcname__i32_i32` (two params), etc.
+    //
+    // A worklist loop handles transitive monomorphizations (a generic function
+    // calling another generic function). For this milestone only direct calls
+    // to generic free functions are supported.
+    let mut mono_idx = 0;
+    while mono_idx < pending_monos.len() {
+        let base_name = pending_monos[mono_idx].clone();
+        mono_idx += 1;
+
+        // Build the substitution: all type params → IrTy::I32.
+        let fn_def = match generic_fn_defs.get(&base_name) {
+            Some(d) => *d,
+            None => continue, // should not happen
+        };
+        let n_params = fn_def.generic_params.len();
+        let suffix = std::iter::repeat_n("i32", n_params).collect::<Vec<_>>().join("_");
+        let mangled = format!("{base_name}__{suffix}");
+
+        if !seen_mono_names.insert(mangled.clone()) {
+            continue; // already generated
+        }
+
+        // Build the generic substitution: each type param name → IrTy::I32.
+        // FLS §12.1: all type parameters are substituted with their concrete type.
+        // At this milestone, all scalar type params default to i32.
+        let mut generic_subst: HashMap<String, IrTy> = HashMap::new();
+        for param_span in &fn_def.generic_params {
+            generic_subst.insert(param_span.text(source).to_owned(), IrTy::I32);
+        }
+
+        // Create a MethodCtx with the mangled name (override_name) to emit
+        // the specialisation under `mangled` rather than the original name.
+        // impl_type = None, self_kind = None — free function.
+        let mctx = Some(MethodCtx {
+            impl_type: None,
+            mangled_name: &mangled,
+            self_kind: None,
+        });
+
+        let (ir_fn, closure_fns, fn_trampolines, next_label, more_needed) = lower_fn(
+            fn_def,
+            source,
+            &struct_defs,
+            &tuple_struct_defs,
+            &tuple_struct_float_field_types,
+            &enum_defs,
+            &enum_variant_float_field_types,
+            &method_self_kinds,
+            &mut_self_scalar_return_fns,
+            &struct_return_fns,
+            &struct_return_free_fns,
+            &enum_return_fns,
+            &struct_return_methods,
+            &tuple_return_free_fns,
+            &f64_return_fns,
+            &f32_return_fns,
+            &const_vals,
+            &const_f64_vals,
+            &const_f32_vals,
+            &assoc_const_vals,
+            &static_names,
+            &static_f64_names,
+            &static_f32_names,
+            &fn_names,
+            &struct_raw_field_types,
+            &struct_field_offsets,
+            &struct_sizes,
+            &type_alias_irtys,
+            &struct_float_field_types,
+            &generic_fn_param_counts,
+            &generic_subst,
+            mctx,
+            label_base,
+        )?;
+        label_base = next_label;
+        fns.push(ir_fn);
+        fns.extend(closure_fns);
+        trampolines.extend(fn_trampolines);
+        pending_monos.extend(more_needed);
     }
 
     Ok(Module { fns, statics: static_data, trampolines })
@@ -1835,6 +1981,14 @@ fn collect_tuple_param_leaves(pats: &[Pat]) -> Result<Vec<Option<&crate::ast::Sp
     Ok(leaves)
 }
 
+/// Return type of `lower_fn`: the lowered function, any closure and trampoline
+/// functions it generated, the next fresh label counter, and the list of
+/// generic base names that were called and need monomorphization.
+type LowerFnResult = Result<
+    (IrFn, Vec<IrFn>, Vec<crate::ir::ClosureTrampoline>, u32, Vec<String>),
+    LowerError,
+>;
+
 #[allow(clippy::too_many_arguments)]
 fn lower_fn(
     fn_def: &crate::ast::FnDef,
@@ -1866,9 +2020,23 @@ fn lower_fn(
     struct_sizes: &HashMap<String, usize>,
     type_aliases: &HashMap<String, IrTy>,
     struct_float_field_types: &HashMap<String, Vec<Option<IrTy>>>,
+    generic_fn_param_counts: &HashMap<String, usize>,
+    // Substitution for generic type parameters, e.g. `{"T" -> IrTy::I32}`.
+    // FLS §12.1: Each call to `lower_fn` for a monomorphized generic function
+    // supplies the concrete types here. Empty for non-generic functions.
+    generic_subst: &HashMap<String, IrTy>,
     method: Option<MethodCtx<'_>>,
     start_label: u32,
-) -> Result<(IrFn, Vec<IrFn>, Vec<crate::ir::ClosureTrampoline>, u32), LowerError> {
+) -> LowerFnResult {
+    // FLS §12.1: Merge generic type parameter substitutions into the type alias
+    // map. Type params like `T` then resolve to their concrete `IrTy` via the
+    // normal `lower_ty` path (which checks type_aliases as a fallback).
+    let mut effective_aliases = type_aliases.clone();
+    for (name, irt) in generic_subst {
+        effective_aliases.insert(name.clone(), *irt);
+    }
+    let type_aliases = &effective_aliases;
+
     // For associated functions, impl_type = None and self_kind = None.
     let impl_type = method.as_ref().and_then(|m| m.impl_type);
     let override_name = method.as_ref().map(|m| m.mangled_name);
@@ -1938,7 +2106,7 @@ fn lower_fn(
         Some(block) => block,
     };
 
-    let mut ctx = LowerCtx::new(source, &name, ret_ty, struct_defs, tuple_struct_defs, tuple_struct_float_field_types, enum_defs, enum_variant_float_field_types, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, f64_return_fns, f32_return_fns, const_vals, const_f64_vals, const_f32_vals, assoc_const_vals, static_names, static_f64_names, static_f32_names, fn_names, struct_field_types, struct_field_offsets, struct_sizes, type_aliases, struct_float_field_types, start_label);
+    let mut ctx = LowerCtx::new(source, &name, ret_ty, struct_defs, tuple_struct_defs, tuple_struct_float_field_types, enum_defs, enum_variant_float_field_types, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, f64_return_fns, f32_return_fns, const_vals, const_f64_vals, const_f32_vals, assoc_const_vals, static_names, static_f64_names, static_f32_names, fn_names, struct_field_types, struct_field_offsets, struct_sizes, type_aliases, struct_float_field_types, generic_fn_param_counts.clone(), start_label);
 
     // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
     // to stack slots. Each parameter slot is allocated in parameter order
@@ -2817,7 +2985,8 @@ fn lower_fn(
     let pending_trampolines = ctx.pending_trampolines;
     let float_consts = ctx.float_consts;
     let float32_consts = ctx.float32_consts;
-    Ok((IrFn { name, ret_ty, body: body_instrs, stack_slots, saves_lr, float_consts, float32_consts }, pending_closures, pending_trampolines, next_label))
+    let needed_monos = ctx.needed_monos;
+    Ok((IrFn { name, ret_ty, body: body_instrs, stack_slots, saves_lr, float_consts, float32_consts }, pending_closures, pending_trampolines, next_label, needed_monos))
 }
 
 // ── Type lowering ────────────────────────────────────────────────────────────
@@ -3753,6 +3922,25 @@ struct LowerCtx<'src> {
     /// Cache-line note: populated at struct literal construction; read at field
     /// access. Not on any critical-path loop.
     slot_float_ty: HashMap<u8, IrTy>,
+
+    /// Maps generic function name → number of type parameters.
+    ///
+    /// FLS §12.1: When a call site calls a generic function `foo<T, U>`,
+    /// galvanic mangles the call target to `foo__i32_i32`. This registry
+    /// provides the type parameter count to build the correct mangled name.
+    ///
+    /// Cache-line note: read-only during lowering; not on any hot path.
+    generic_fn_param_counts: HashMap<String, usize>,
+
+    /// Names of generic base functions whose monomorphizations are needed.
+    ///
+    /// FLS §12.1: Collected at call sites during lowering of a function body.
+    /// Each entry is the original (non-mangled) name of a generic function that
+    /// was called and needs to be instantiated. Propagated back through
+    /// `lower_fn`'s return value to the outer monomorphization loop.
+    ///
+    /// Cache-line note: typically empty or very small. Not on a hot path.
+    needed_monos: Vec<String>,
 }
 
 /// Collect all free variables in `expr` that are present in `outer_locals`
@@ -3955,6 +4143,7 @@ impl<'src> LowerCtx<'src> {
         struct_sizes: &'src HashMap<String, usize>,
         type_aliases: &'src HashMap<String, IrTy>,
         struct_float_field_types: &'src HashMap<String, Vec<Option<IrTy>>>,
+        generic_fn_param_counts: HashMap<String, usize>,
         start_label: u32,
     ) -> Self {
         LowerCtx {
@@ -4017,6 +4206,8 @@ impl<'src> LowerCtx<'src> {
             type_aliases,
             struct_float_field_types,
             slot_float_ty: HashMap::new(),
+            generic_fn_param_counts,
+            needed_monos: Vec::new(),
         }
     }
 
@@ -7752,6 +7943,7 @@ impl<'src> LowerCtx<'src> {
                     self.struct_sizes,
                     self.type_aliases,
                     self.struct_float_field_types,
+                    self.generic_fn_param_counts.clone(),
                     inner_start_label,
                 );
 
@@ -10752,6 +10944,26 @@ impl<'src> LowerCtx<'src> {
                             "call expression with non-path callee".into(),
                         ));
                     }
+                };
+
+                // FLS §12.1: If calling a generic function, remap the base name to
+                // the mangled specialisation name (`identity` → `identity__i32`)
+                // and record it so the outer monomorphisation loop can emit the
+                // specialised function body.  All type parameters default to i32
+                // because galvanic has no type checker yet.
+                let fn_name = if let Some(&n_params) =
+                    self.generic_fn_param_counts.get(&fn_name)
+                {
+                    let suffix = std::iter::repeat_n("i32", n_params)
+                        .collect::<Vec<_>>()
+                        .join("_");
+                    let mangled = format!("{fn_name}__{suffix}");
+                    if !self.needed_monos.contains(&fn_name) {
+                        self.needed_monos.push(fn_name.clone());
+                    }
+                    mangled
+                } else {
+                    fn_name
                 };
 
                 if args.len() > 8 {
@@ -14334,6 +14546,7 @@ impl<'src> LowerCtx<'src> {
                     self.struct_sizes,
                     self.type_aliases,
                     self.struct_float_field_types,
+                    self.generic_fn_param_counts.clone(),
                     closure_start_label,
                 );
 

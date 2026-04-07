@@ -18812,3 +18812,174 @@ fn main() -> i32 { triple(4) }
         "unsafe block result must not be constant-folded to 12: {asm}"
     );
 }
+
+// ── Milestone 133: Generic free functions (FLS §12.1) ──────────────────────
+//
+// A generic function declares type parameters in angle brackets after the
+// function name.  galvanic monomorphizes each reachable specialisation as a
+// separate function labelled with a mangled name (e.g. `identity__i32`).
+
+/// Milestone 133: identity<T>(x: T) -> T called with i32.
+///
+/// FLS §12.1: The simplest generic function — a type parameter appears in
+/// both the parameter and return position. Calling `identity(42)` must
+/// monomorphize to `identity__i32` and return 42.
+#[test]
+fn milestone_133_identity_i32() {
+    let src = r#"
+fn identity<T>(x: T) -> T { x }
+fn main() -> i32 { identity(42) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "identity(42) = 42, got {exit_code}");
+}
+
+/// Milestone 133: identity called with small literal.
+///
+/// FLS §12.1: Verifies a second distinct call-site value.
+#[test]
+fn milestone_133_identity_small_literal() {
+    let src = r#"
+fn identity<T>(x: T) -> T { x }
+fn main() -> i32 { identity(7) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "identity(7) = 7, got {exit_code}");
+}
+
+/// Milestone 133: identity used in arithmetic.
+///
+/// FLS §12.1: The return value of a generic function may be used in a
+/// larger expression.
+#[test]
+fn milestone_133_identity_in_arithmetic() {
+    let src = r#"
+fn identity<T>(x: T) -> T { x }
+fn main() -> i32 { identity(3) + identity(4) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "identity(3)+identity(4) = 7, got {exit_code}");
+}
+
+/// Milestone 133: generic function with two type parameters.
+///
+/// FLS §12.1: A generic function may have multiple type parameters. The
+/// `first` function returns its first argument regardless of type.
+#[test]
+fn milestone_133_first_two_params() {
+    let src = r#"
+fn first<T>(a: T, b: T) -> T { a }
+fn main() -> i32 { first(10, 20) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "first(10, 20) = 10, got {exit_code}");
+}
+
+/// Milestone 133: generic function called through a non-generic wrapper.
+///
+/// FLS §12.1: A non-generic function may call a generic function.  The
+/// monomorphized specialisation must be reachable and correct.
+#[test]
+fn milestone_133_generic_called_from_non_generic() {
+    let src = r#"
+fn identity<T>(x: T) -> T { x }
+fn wrap(n: i32) -> i32 { identity(n) }
+fn main() -> i32 { wrap(13) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 13, "wrap(13) = 13, got {exit_code}");
+}
+
+/// Milestone 133: generic function called multiple times in one function.
+///
+/// FLS §12.1: Multiple call sites to the same generic function in the same
+/// caller all resolve to the same monomorphized specialisation.
+#[test]
+fn milestone_133_multiple_calls_same_function() {
+    let src = r#"
+fn identity<T>(x: T) -> T { x }
+fn main() -> i32 {
+    let a = identity(3);
+    let b = identity(4);
+    a + b
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "identity(3)+identity(4) = 7, got {exit_code}");
+}
+
+/// Milestone 133: generic function body contains arithmetic on T.
+///
+/// FLS §12.1: When T is substituted with i32, arithmetic within the generic
+/// body must work correctly.
+#[test]
+fn milestone_133_generic_body_arithmetic() {
+    let src = r#"
+fn double<T>(x: T) -> T { x + x }
+fn main() -> i32 { double(6) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 12, "double(6) = 12, got {exit_code}");
+}
+
+/// Milestone 133: generic function returning zero.
+///
+/// FLS §12.1: Edge case — generic function that ignores its argument and
+/// returns a literal.  Monomorphization must still succeed.
+#[test]
+fn milestone_133_generic_returns_literal() {
+    let src = r#"
+fn always_zero<T>(x: T) -> i32 { 0 }
+fn main() -> i32 { always_zero(99) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "always_zero(99) = 0, got {exit_code}");
+}
+
+/// Assembly inspection: generic function call must emit `bl identity__i32`.
+///
+/// FLS §12.1: The monomorphized specialisation must be called by its mangled
+/// name — not by the generic base name `identity`.
+#[test]
+fn runtime_generic_fn_emits_mangled_call() {
+    let src = r#"
+fn identity<T>(x: T) -> T { x }
+fn main() -> i32 { identity(5) }
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("bl      identity__i32") || asm.contains("bl identity__i32"),
+        "call to generic identity must use mangled label `identity__i32`: {asm}"
+    );
+    assert!(
+        asm.contains("identity__i32:"),
+        "monomorphized specialisation `identity__i32` must be emitted: {asm}"
+    );
+}
+
+/// Assembly inspection: generic call must not be constant-folded.
+///
+/// FLS §12.1: A generic function called with a runtime value (function
+/// parameter) must emit a real `bl` instruction — not fold the result.
+///
+/// Anti-fold assertion: `identity(n)` where `n` is a parameter must produce
+/// a `bl identity__i32` in the assembly, not a compile-time constant.
+#[test]
+fn runtime_generic_fn_not_folded() {
+    let src = r#"
+fn identity<T>(x: T) -> T { x }
+fn use_identity(n: i32) -> i32 { identity(n) }
+fn main() -> i32 { use_identity(7) }
+"#;
+    let asm = compile_to_asm(src);
+    // Must emit the call — not fold away.
+    assert!(
+        asm.contains("bl      identity__i32") || asm.contains("bl identity__i32"),
+        "generic call identity(n) must emit bl identity__i32 (not folded): {asm}"
+    );
+    // Must not fold use_identity(7) = 7 to a constant.
+    assert!(
+        !asm.contains("mov     x0, #7") || asm.contains("ldr"),
+        "generic call result must not be constant-folded to 7: {asm}"
+    );
+}

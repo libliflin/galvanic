@@ -305,6 +305,40 @@ impl<'src> Parser<'src> {
         let name = self.current_span();
         self.advance();
 
+        // Optional generic type parameter list: `<T>`, `<T, U>`, etc.
+        //
+        // FLS §12.1: A generic function may declare type parameters in
+        // angle brackets after the function name: `fn foo<T, U>(...)`.
+        // Each type parameter is an identifier. Bounds (`T: Trait`) and
+        // where clauses are not yet supported (future milestone).
+        //
+        // FLS §12.1 AMBIGUOUS: The FLS does not specify the disambiguation
+        // rule for `<` in this position (generic list vs. less-than). In
+        // practice, `<` immediately after a function name always starts a
+        // generic parameter list in both the FLS grammar and rustc.
+        let mut generic_params = Vec::new();
+        if self.peek_kind() == TokenKind::Lt {
+            self.advance(); // eat `<`
+            loop {
+                if self.peek_kind() == TokenKind::Gt {
+                    self.advance(); // eat `>`
+                    break;
+                }
+                if self.peek_kind() != TokenKind::Ident {
+                    return Err(self.error(format!(
+                        "expected type parameter name or `>`, found {:?}",
+                        self.peek_kind()
+                    )));
+                }
+                generic_params.push(self.current_span());
+                self.advance();
+                if !self.eat(TokenKind::Comma) {
+                    self.expect(TokenKind::Gt)?;
+                    break;
+                }
+            }
+        }
+
         // Parameter list enclosed in `( )`.
         self.expect(TokenKind::OpenParen)?;
 
@@ -335,7 +369,7 @@ impl<'src> Parser<'src> {
             Some(self.parse_block()?)
         };
 
-        Ok(FnDef { vis, is_const, name, self_param, params, ret_ty, body })
+        Ok(FnDef { vis, is_const, name, generic_params, self_param, params, ret_ty, body })
     }
 
     /// Parse an inherent impl block.
