@@ -12160,3 +12160,162 @@ fn runtime_raw_byte_str_backslash_emits_unescaped_len() {
         "expected immediate 7 (raw: backslash+n = 2 bytes) in assembly:\n{asm}"
     );
 }
+
+// ── Milestone 96: f64 float literals compile to runtime ARM64 ────────────────
+//
+// FLS §2.4.4.2: Float literals. Each `f64` value is stored as raw IEEE 754
+// bits in the .rodata section and loaded at runtime via ADRP+ADD+LDR into a
+// float register. Conversion to i32 uses FCVTZS (truncation toward zero).
+//
+// FLS §6.5.9: Numeric cast `f64 as i32` truncates toward zero.
+// FLS §6.1.2:37–45: Even a float literal emits runtime instructions.
+
+/// Milestone 96: float literal cast directly to i32.
+///
+/// FLS §2.4.4.2: Float literal `3.0` loaded from .rodata into d{N},
+/// then converted to i32 via FCVTZS. Result = 3.
+#[test]
+fn milestone_96_float_literal_direct_cast() {
+    let src = r#"
+fn main() -> i32 {
+    3.0_f64 as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "3.0_f64 as i32 = 3, got {exit_code}");
+}
+
+/// Milestone 96: float literal bound to let, then cast.
+///
+/// FLS §8.1: `let x: f64 = 2.5` stores d{N} to a stack slot via StoreF64.
+/// FLS §6.5.9: `x as i32` truncates toward zero → 2.
+#[test]
+fn milestone_96_float_let_binding_then_cast() {
+    let src = r#"
+fn main() -> i32 {
+    let x: f64 = 2.5;
+    x as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2, "2.5_f64 as i32 = 2 (truncate), got {exit_code}");
+}
+
+/// Milestone 96: truncation rounds toward zero (not floor).
+///
+/// FLS §6.5.9: `f64 as i32` truncates toward zero.
+/// 3.9 → 3 (not 4).
+#[test]
+fn milestone_96_float_truncation_toward_zero() {
+    let src = r#"
+fn main() -> i32 {
+    let x: f64 = 3.9;
+    x as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "3.9_f64 as i32 = 3 (truncate not floor), got {exit_code}");
+}
+
+/// Milestone 96: float suffix _f64 is stripped correctly.
+///
+/// FLS §2.4.4.2: Suffix `_f64` specifies the type but does not affect the value.
+#[test]
+fn milestone_96_float_with_f64_suffix() {
+    let src = r#"
+fn main() -> i32 {
+    4.0_f64 as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 4, "4.0_f64 as i32 = 4, got {exit_code}");
+}
+
+/// Milestone 96: float without suffix defaults to f64.
+///
+/// FLS §2.4.4.2: A float literal without suffix has the contextual type;
+/// here it is an f64 inferred from the `as i32` context.
+#[test]
+fn milestone_96_float_without_suffix() {
+    let src = r#"
+fn main() -> i32 {
+    let x: f64 = 1.0;
+    x as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "1.0 (no suffix) as i32 = 1, got {exit_code}");
+}
+
+/// Milestone 96: float cast result used in integer arithmetic.
+///
+/// FLS §6.5.9: The i32 result of `f64 as i32` can be used in integer expressions.
+#[test]
+fn milestone_96_float_cast_in_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    let x: f64 = 3.0;
+    let y = x as i32;
+    y + 2
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "(3.0 as i32) + 2 = 5, got {exit_code}");
+}
+
+/// Milestone 96: two float let bindings, sum their i32 casts.
+///
+/// FLS §8.1: Multiple float bindings use separate stack slots.
+/// FLS §6.5.9: Each `as i32` truncates independently.
+#[test]
+fn milestone_96_two_float_bindings_summed() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f64 = 2.0;
+    let b: f64 = 3.0;
+    (a as i32) + (b as i32)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "2.0 + 3.0 as i32 = 5, got {exit_code}");
+}
+
+/// Milestone 96: float in arithmetic expression (inline literal).
+///
+/// FLS §2.4.4.2: Float literals can appear directly in cast expressions.
+#[test]
+fn milestone_96_float_inline_in_expr() {
+    let src = r#"
+fn main() -> i32 {
+    (1.5_f64 as i32) + (2.5_f64 as i32)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "1.5+2.5 as i32 = 1+2 = 3, got {exit_code}");
+}
+
+/// Assembly check: float literal emits ADRP + ADD + LDR into d{N}.
+///
+/// FLS §2.4.4.2: Float constants are loaded from .rodata at runtime.
+/// The sequence uses x17 (ip1) as scratch for address computation.
+#[test]
+fn runtime_float_literal_emits_ldr_into_dreg() {
+    let src = r#"
+fn main() -> i32 {
+    3.0_f64 as i32
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("ldr     d"),
+        "expected `ldr d` (float load) in assembly:\n{asm}"
+    );
+    assert!(
+        asm.contains("fcvtzs"),
+        "expected `fcvtzs` (float-to-int) in assembly:\n{asm}"
+    );
+    assert!(
+        asm.contains("main__fc0"),
+        "expected float constant label main__fc0 in assembly:\n{asm}"
+    );
+}

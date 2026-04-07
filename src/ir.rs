@@ -100,6 +100,18 @@ pub struct IrFn {
     /// Cache-line note: the lr save/restore pair adds 2 instructions (8 bytes)
     /// to the function prologue/epilogue — one half of a 16-byte aligned pair.
     pub saves_lr: bool,
+
+    /// Float (f64) constant pool for this function.
+    ///
+    /// FLS §2.4.4.2: Float literal expressions. Each entry stores the raw
+    /// IEEE 754 bits of a 64-bit float constant referenced in this function's
+    /// body via `Instr::LoadF64Const`. Constants are emitted in the `.rodata`
+    /// section with labels `{fn_name}__fc{idx}`.
+    ///
+    /// Cache-line note: each constant occupies one 8-byte `.quad` — identical
+    /// to a static item. Unlike statics, float constants are read-only and
+    /// share the instruction-stream locality of the function that uses them.
+    pub float_consts: Vec<u64>,
 }
 
 // ── Instructions ──────────────────────────────────────────────────────────────
@@ -732,6 +744,84 @@ pub enum Instr {
         /// Address register — holds the pointer (memory address to write to).
         addr: u8,
     },
+
+    /// Load a 64-bit float constant from the per-function constant pool.
+    ///
+    /// `LoadF64Const { dst, idx }` emits:
+    ///   `adrp x17, {fn}__fc{idx}`
+    ///   `add  x17, x17, :lo12:{fn}__fc{idx}`
+    ///   `ldr  d{dst}, [x17]`
+    ///
+    /// `x17` (ARM64 `ip1`) is used as a scratch register for the address
+    /// computation. `ip1` is caller-saved and reserved for intra-procedure
+    /// call scratch use; using it avoids consuming a general-purpose virtual
+    /// register for the address operand.
+    ///
+    /// The constant label `{fn}__fc{idx}` is emitted in `.rodata` by codegen.
+    ///
+    /// FLS §2.4.4.2: Float literal expressions. The float value is materialised
+    /// at runtime via a load from read-only data, not a constant fold.
+    /// FLS §6.1.2:37–45: Even a float literal emits runtime instructions.
+    ///
+    /// Cache-line note: three 4-byte instructions (ADRP + ADD + LDR) = 12 bytes.
+    /// The constant itself is one 8-byte `.quad` in `.rodata`.
+    LoadF64Const {
+        /// Destination float register (ARM64 `d{dst}`).
+        dst: u8,
+        /// Index into the function's `float_consts` pool.
+        idx: u32,
+    },
+
+    /// Store a float register to an 8-byte stack slot.
+    ///
+    /// `StoreF64 { src, slot }` → `str d{src}, [sp, #{slot * 8}]` on ARM64.
+    ///
+    /// FLS §8.1: Float let bindings require stack storage like integer bindings.
+    /// The slot occupies 8 bytes — same layout as integer slots.
+    ///
+    /// Cache-line note: ARM64 `str` (float) is 4 bytes, same as integer `str`.
+    StoreF64 {
+        /// Source float register holding the value to store.
+        src: u8,
+        /// Destination stack slot index (byte offset = slot * 8).
+        slot: u8,
+    },
+
+    /// Load an 8-byte stack slot into a float register.
+    ///
+    /// `LoadF64Slot { dst, slot }` → `ldr d{dst}, [sp, #{slot * 8}]` on ARM64.
+    ///
+    /// FLS §8.1: Reading a float local variable accesses its stack slot.
+    ///
+    /// Cache-line note: ARM64 `ldr` (float) is 4 bytes, same as integer `ldr`.
+    LoadF64Slot {
+        /// Destination float register.
+        dst: u8,
+        /// Source stack slot index (byte offset = slot * 8).
+        slot: u8,
+    },
+
+    /// Convert a 64-bit float register to a signed 32-bit integer, truncating
+    /// toward zero.
+    ///
+    /// `F64ToI32 { dst, src }` → `fcvtzs w{dst}, d{src}` on ARM64.
+    ///
+    /// FLS §6.5.9: Numeric cast `f64 as i32`. Conversion truncates toward zero
+    /// (C-style truncation, same as IEEE 754 `trunc`). Out-of-range values
+    /// saturate to `i32::MIN` or `i32::MAX` on ARM64 hardware.
+    ///
+    /// FLS §6.5.9 AMBIGUOUS: The spec requires "panics if the value is not
+    /// representable" in debug mode. Galvanic does not emit a range check at
+    /// this milestone — saturation behaviour differs from the spec's panic
+    /// requirement.
+    ///
+    /// Cache-line note: one 4-byte instruction (FCVTZS).
+    F64ToI32 {
+        /// Destination integer register (ARM64 `w{dst}` / `x{dst}`).
+        dst: u8,
+        /// Source float register (ARM64 `d{src}`).
+        src: u8,
+    },
 }
 
 // ── Values ────────────────────────────────────────────────────────────────────
@@ -765,6 +855,16 @@ pub enum IrValue {
     /// Cache-line note: `u8` occupies 1 byte; the discriminant keeps `IrValue`
     /// small so it fits alongside other data in a cache line.
     Reg(u8),
+
+    /// A value held in float register N (ARM64 `d{N}`).
+    ///
+    /// FLS §4.2: The `f64` type is a 64-bit IEEE 754 floating-point number.
+    /// ARM64 uses a separate 128-bit SIMD/FP register bank (`v0`–`v31`); the
+    /// 64-bit alias is `d{N}`. Float and integer register banks are independent:
+    /// `x0` and `d0` are physically separate.
+    ///
+    /// Cache-line note: `u8` occupies 1 byte — same size as `Reg(u8)`.
+    FReg(u8),
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -820,4 +920,15 @@ pub enum IrTy {
     ///
     /// Cache-line note: same register/slot footprint as `IrTy::I32`.
     FnPtr,
+
+    /// The 64-bit floating-point type `f64`. FLS §4.2.
+    ///
+    /// Values live in ARM64 float registers `d{N}`. Stack slots are 8 bytes —
+    /// the same size as integer slots — so mixed integer/float functions share
+    /// the same slot-allocation logic. Float and integer registers are distinct
+    /// physical banks on ARM64, so no moves between them occur at this level;
+    /// explicit `F64ToI32` / `I32ToF64` conversions are required (FLS §6.5.9).
+    ///
+    /// Cache-line note: same 8-byte slot footprint as `IrTy::I32`.
+    F64,
 }
