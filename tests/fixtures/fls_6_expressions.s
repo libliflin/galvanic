@@ -1255,6 +1255,49 @@ two_d_array_example:
     add     sp, sp, #32             // FLS §8.1: restore stack frame
     ret
 
+    // fn for_array_example — FLS §9
+    .global for_array_example
+for_array_example:
+    sub     sp, sp, #64             // FLS §8.1: frame for 8 slot(s)
+    mov     x0, #1                   // FLS §2.4.4.1: load imm 1
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    mov     x1, #2                   // FLS §2.4.4.1: load imm 2
+    str     x1, [sp, #8              ] // FLS §8.1: store slot 1
+    mov     x2, #3                   // FLS §2.4.4.1: load imm 3
+    str     x2, [sp, #16             ] // FLS §8.1: store slot 2
+    mov     x3, #4                   // FLS §2.4.4.1: load imm 4
+    str     x3, [sp, #24             ] // FLS §8.1: store slot 3
+    mov     x4, #5                   // FLS §2.4.4.1: load imm 5
+    str     x4, [sp, #32             ] // FLS §8.1: store slot 4
+    mov     x5, #0                   // FLS §2.4.4.1: load imm 0
+    str     x5, [sp, #40             ] // FLS §8.1: store slot 5
+    mov     x6, #0                   // FLS §2.4.4.1: load imm 0
+    str     x6, [sp, #48             ] // FLS §8.1: store slot 6
+.L49:                              // FLS §6.17: branch target
+    ldr     x7, [sp, #48             ] // FLS §8.1: load slot 6
+    mov     x8, #5                   // FLS §2.4.4.1: load imm 5
+    cmp     x7, x8               // FLS §6.5.3: compare (signed)
+    cset    x9, lt                    // FLS §6.5.3: x9 = (x7 < x8)
+    cbz     x9, .L51                    // FLS §6.17: branch if false
+    add     x10, sp, #0               // FLS §6.9: address of arr[0]
+    ldr     x10, [x10, x7, lsl #3] // FLS §6.9: load arr[index]
+    str     x10, [sp, #56             ] // FLS §8.1: store slot 7
+    ldr     x11, [sp, #40             ] // FLS §8.1: load slot 5
+    ldr     x12, [sp, #56             ] // FLS §8.1: load slot 7
+    add     x13, x11, x12          // FLS §6.5.5: add
+    str     x13, [sp, #40             ] // FLS §8.1: store slot 5
+.L50:                              // FLS §6.17: branch target
+    ldr     x14, [sp, #48             ] // FLS §8.1: load slot 6
+    mov     x15, #1                   // FLS §2.4.4.1: load imm 1
+    add     x16, x14, x15          // FLS §6.5.5: add
+    str     x16, [sp, #48             ] // FLS §8.1: store slot 6
+    b       .L49                       // FLS §6.17: branch to end
+.L51:                              // FLS §6.17: branch target
+    ldr     x6, [sp, #40             ] // FLS §8.1: load slot 5
+    mov     x0, x6              // FLS §6.19: return reg 6 → x0
+    add     sp, sp, #64             // FLS §8.1: restore stack frame
+    ret
+
     // ELF entry point — FLS §18.1
     .global _start
 _start:
