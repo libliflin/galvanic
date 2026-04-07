@@ -1405,6 +1405,41 @@ f64_tuple_struct_example:
     add     sp, sp, #16             // FLS §8.1: restore stack frame
     ret
 
+    // fn move_closure_example — FLS §9
+    .global move_closure_example
+move_closure_example:
+    str     x30, [sp, #-16]!      // FLS §6.12.1: save lr (non-leaf)
+    sub     sp, sp, #16             // FLS §8.1: frame for 2 slot(s)
+    mov     x0, #6                   // FLS §2.4.4.1: load imm 6
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    adrp    x1, __closure_move_closure_example_0              // FLS §4.9: fn ptr addr (page)
+    add     x1, x1, :lo12:__closure_move_closure_example_0  // FLS §4.9: fn ptr addr (offset)
+    str     x1, [sp, #8              ] // FLS §8.1: store slot 1
+    ldr     x2, [sp, #0              ] // FLS §8.1: load slot 0
+    mov     x3, #36                  // FLS §2.4.4.1: load imm 36
+    mov     x0, x2                        // FLS §4.9: arg 0
+    mov     x1, x3                        // FLS §4.9: arg 1
+    ldr     x9, [sp, #8                     ] // FLS §4.9: load fn ptr
+    blr     x9                       // FLS §4.9: indirect call
+    mov     x4, x0               // FLS §4.9: capture return
+    mov     x0, x4              // FLS §6.19: return reg 4 → x0
+    add     sp, sp, #16             // FLS §8.1: restore stack frame
+    ldr     x30, [sp], #16         // FLS §6.12.1: restore lr
+    ret
+
+    // fn __closure_move_closure_example_0 — FLS §9
+    .global __closure_move_closure_example_0
+__closure_move_closure_example_0:
+    sub     sp, sp, #16             // FLS §8.1: frame for 2 slot(s)
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    str     x1, [sp, #8              ] // FLS §8.1: store slot 1
+    ldr     x0, [sp, #8              ] // FLS §8.1: load slot 1
+    ldr     x1, [sp, #0              ] // FLS §8.1: load slot 0
+    add     x2, x0, x1          // FLS §6.5.5: add
+    mov     x0, x2              // FLS §6.19: return reg 2 → x0
+    add     sp, sp, #16             // FLS §8.1: restore stack frame
+    ret
+
     // ELF entry point — FLS §18.1
     .global _start
 _start:

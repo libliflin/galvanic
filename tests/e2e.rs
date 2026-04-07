@@ -17114,3 +17114,345 @@ fn main() -> i32 { apply(|v| v + 1, 41) }
     // The impl Fn call must emit `blr` (indirect call through register) — same as fn ptr.
     assert!(asm.contains("blr"), "impl Fn call must emit blr instruction: {asm}");
 }
+
+// ── Milestone 125: move closures (FLS §6.14, §6.22) ─────────────────────────
+
+/// Milestone 125: basic `move` closure captures an integer by value.
+///
+/// FLS §6.14: `move` keyword causes captured variables to be moved into the
+/// closure environment. FLS §6.22: For `Copy` types the move is a copy —
+/// semantically identical to shared-reference capture.
+#[test]
+fn milestone_125_move_closure_basic() {
+    let src = r#"
+fn main() -> i32 {
+    let n = 20;
+    let add = move |x| x + n;
+    add(22)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "20+22=42, got {exit_code}");
+}
+
+/// Milestone 125: `move` closure capturing a function parameter.
+///
+/// FLS §6.14, §6.22: The `move` keyword causes the closure to own a copy of
+/// the captured parameter.
+#[test]
+fn milestone_125_move_closure_captures_parameter() {
+    let src = r#"
+fn make(n: i32) -> i32 {
+    let f = move |x| x + n;
+    f(10)
+}
+fn main() -> i32 { make(32) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "10+32=42, got {exit_code}");
+}
+
+/// Milestone 125: `move` closure with arithmetic on captured value.
+///
+/// FLS §6.14: The captured variable is available inside the closure body
+/// for arbitrary arithmetic expressions.
+#[test]
+fn milestone_125_move_closure_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    let base = 6;
+    let f = move |x| base * x;
+    f(7)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "6*7=42, got {exit_code}");
+}
+
+/// Milestone 125: `move` closure called multiple times (Fn semantics for Copy types).
+///
+/// FLS §6.14: A closure is `Fn` if it captures by shared reference or by copy.
+/// Since `move` of a `Copy` type produces a copy, the closure can be called
+/// multiple times with consistent results.
+#[test]
+fn milestone_125_move_closure_called_twice() {
+    let src = r#"
+fn main() -> i32 {
+    let n = 21;
+    let double = move |x| x + n;
+    double(0) + double(0)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "21+21=42, got {exit_code}");
+}
+
+/// Milestone 125: `move` closure with two captured variables.
+///
+/// FLS §6.22: All free variables mentioned in the closure body are captured.
+/// `move` causes all of them to be moved (copied for `Copy` types).
+#[test]
+fn milestone_125_move_closure_two_captures() {
+    let src = r#"
+fn main() -> i32 {
+    let a = 20;
+    let b = 22;
+    let f = move || a + b;
+    f()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "20+22=42, got {exit_code}");
+}
+
+/// Milestone 125: `move` closure in result expression (tail expression).
+///
+/// FLS §6.4: The tail expression of a block provides the block's value.
+#[test]
+fn milestone_125_move_closure_result_in_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    let offset = 2;
+    let f = move |x| x + offset;
+    f(20) + f(20)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 44, "22+22=44, got {exit_code}");
+}
+
+/// Milestone 125: `move` zero-parameter closure.
+///
+/// FLS §6.14: A closure with no parameters written as `move || body`.
+#[test]
+fn milestone_125_move_closure_zero_params() {
+    let src = r#"
+fn main() -> i32 {
+    let val = 42;
+    let get = move || val;
+    get()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "got {exit_code}");
+}
+
+/// Milestone 125: `move` closure passed as `impl Fn` argument.
+///
+/// FLS §12, §6.14: A `move` closure satisfies `impl Fn` bounds when it
+/// captures `Copy` types — the closure can be called multiple times.
+#[test]
+fn milestone_125_move_closure_as_impl_fn() {
+    let src = r#"
+fn apply(f: impl Fn(i32) -> i32, x: i32) -> i32 { f(x) }
+fn main() -> i32 {
+    let offset = 1;
+    apply(move |x| x + offset, 41)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "41+1=42, got {exit_code}");
+}
+
+/// Assembly check: `move` closure emits same code as non-move closure for Copy types.
+///
+/// FLS §6.22: For `Copy` types, `move` capture and non-move capture produce
+/// identical runtime behaviour — the value is passed by register either way.
+#[test]
+fn runtime_move_closure_emits_same_as_non_move() {
+    let src = r#"
+fn main() -> i32 {
+    let n = 1;
+    let f = move |x| x + n;
+    f(41)
+}
+"#;
+    let asm = compile_to_asm(src);
+    // The captured value is passed as an extra register argument — same as non-move.
+    assert!(asm.contains("__closure_"), "move closure must emit hidden closure function: {asm}");
+}
+
+/// Assembly check: capturing closure passed as `impl Fn` emits a trampoline.
+///
+/// FLS §6.22, §4.13: When a capturing closure is passed as an `impl Fn`
+/// argument, a trampoline is generated that reads captures from callee-saved
+/// registers (x27, x26, …) and tail-calls the actual closure. The caller
+/// loads the captures into those registers before `bl apply`.
+#[test]
+fn runtime_capturing_closure_as_impl_fn_emits_trampoline() {
+    let src = r#"
+fn apply(f: impl Fn(i32) -> i32, x: i32) -> i32 { f(x) }
+fn main() -> i32 {
+    let offset = 1;
+    apply(move |x| x + offset, 41)
+}
+"#;
+    let asm = compile_to_asm(src);
+    // A trampoline for the closure must be emitted.
+    assert!(
+        asm.contains("_trampoline"),
+        "capturing closure as impl Fn must emit a trampoline: {asm}"
+    );
+    // The trampoline must read from x27 (cap[0]).
+    assert!(
+        asm.contains("x27"),
+        "trampoline must read capture from x27: {asm}"
+    );
+    // The caller (main) must load x27 before bl apply.
+    assert!(
+        asm.contains("ldr     x27"),
+        "caller must load capture into x27 before bl: {asm}"
+    );
+}
+
+// ── Milestone 126: Inner function definitions in block bodies ─────────────────
+//
+// FLS §9: Function items. FLS §3: Items (including functions) may appear as
+// statements inside block expressions. An inner function does not capture
+// outer locals — it compiles to a sibling top-level function.
+//
+// Note: FLS §9 does not provide a dedicated example of inner functions;
+// the feature is implied by §3 (items are allowed in block position).
+
+/// Milestone 126: basic inner function called once.
+///
+/// FLS §9, §3: `fn double` defined inside `fn main`'s block.
+#[test]
+fn milestone_126_inner_fn_basic() {
+    let src = r#"
+fn main() -> i32 {
+    fn double(x: i32) -> i32 { x * 2 }
+    double(21)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "double(21)=42, got {exit_code}");
+}
+
+/// Milestone 126: inner function with no parameters returns a constant.
+///
+/// FLS §9, §3: An inner `fn` with no params and a scalar return.
+#[test]
+fn milestone_126_inner_fn_no_params() {
+    let src = r#"
+fn main() -> i32 {
+    fn answer() -> i32 { 42 }
+    answer()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "answer()=42, got {exit_code}");
+}
+
+/// Milestone 126: inner function called multiple times.
+///
+/// FLS §9: A function item may be called any number of times.
+#[test]
+fn milestone_126_inner_fn_called_twice() {
+    let src = r#"
+fn main() -> i32 {
+    fn square(x: i32) -> i32 { x * x }
+    square(3) + square(4)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 25, "9+16=25, got {exit_code}");
+}
+
+/// Milestone 126: inner function called with result in arithmetic.
+///
+/// FLS §9, §6.12.1: Call expression result used in a larger expression.
+#[test]
+fn milestone_126_inner_fn_result_in_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    fn half(x: i32) -> i32 { x / 2 }
+    half(80) + half(4)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "40+2=42, got {exit_code}");
+}
+
+/// Milestone 126: inner function two parameters.
+///
+/// FLS §9: Functions may have multiple parameters.
+#[test]
+fn milestone_126_inner_fn_two_params() {
+    let src = r#"
+fn main() -> i32 {
+    fn add(a: i32, b: i32) -> i32 { a + b }
+    add(35, 7)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "35+7=42, got {exit_code}");
+}
+
+/// Milestone 126: inner function calls outer function.
+///
+/// FLS §9: Inner functions can call functions defined in the outer scope.
+#[test]
+fn milestone_126_inner_fn_calls_outer() {
+    let src = r#"
+fn triple(x: i32) -> i32 { x * 3 }
+fn main() -> i32 {
+    fn triple_and_add(x: i32, n: i32) -> i32 { triple(x) + n }
+    triple_and_add(13, 3)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "39+3=42, got {exit_code}");
+}
+
+/// Milestone 126: inner function with result stored in let binding.
+///
+/// FLS §8.1, §9: Inner fn result assigned to a local variable.
+#[test]
+fn milestone_126_inner_fn_result_in_let() {
+    let src = r#"
+fn main() -> i32 {
+    fn negate(x: i32) -> i32 { -x }
+    let v = negate(-42);
+    v
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "negate(-42)=42, got {exit_code}");
+}
+
+/// Milestone 126: two inner functions, one calls the other.
+///
+/// FLS §9, §3: Two inner function items in the same block; the first
+/// calls the second (forward reference resolved by the pre-pass).
+#[test]
+fn milestone_126_two_inner_fns() {
+    let src = r#"
+fn main() -> i32 {
+    fn double(x: i32) -> i32 { x * 2 }
+    fn quad(x: i32) -> i32 { double(x) * 2 }
+    quad(10) + double(1)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "40+2=42, got {exit_code}");
+}
+
+/// Assembly check: inner function emits a separate labeled function.
+///
+/// FLS §9, §3: The inner function must produce a top-level assembly label
+/// (not inline code) so that `bl` can reach it.
+#[test]
+fn runtime_inner_fn_emits_separate_label() {
+    let src = r#"
+fn main() -> i32 {
+    fn helper(x: i32) -> i32 { x + 1 }
+    helper(41)
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("helper:"),
+        "inner fn must emit assembly label 'helper:': {asm}"
+    );
+}

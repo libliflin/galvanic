@@ -184,3 +184,17 @@ fn apply_impl(f: impl Fn(i32) -> i32, x: i32) -> i32 {
 fn apply_twice_impl(f: impl Fn(i32) -> i32, x: i32) -> i32 {
     f(f(x))
 }
+
+// FLS §9, §3: Inner function definitions in block bodies.
+//
+// FLS §3: Items (including functions) may appear as statements inside block
+// expressions. An inner function does not capture outer locals — it compiles
+// to a top-level function with its declared name.
+//
+// NOTE: The FLS §9 does not provide a dedicated example of inner functions.
+// This feature is implied by §3 (items are allowed in block position) and
+// §9 (function items may appear wherever items are allowed).
+fn uses_inner_fn() -> i32 {
+    fn helper(x: i32) -> i32 { x + 1 }
+    helper(41)
+}

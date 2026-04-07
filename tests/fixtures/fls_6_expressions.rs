@@ -883,3 +883,23 @@ fn f64_tuple_struct_example() -> i32 {
     // FLS §6.10: Positional field access.
     (p.0 + p.1) as i32  // must return 4
 }
+
+// ── FLS §6.14, §6.22: move closure expressions ───────────────────────────────
+//
+// FLS §6.14: "A closure expression defines a closure type and evaluates to a
+// value of that type. The optional move keyword causes all captured variables
+// to be captured by move."
+// FLS §6.22: "move closures capture by move (or copy for Copy types)"
+//
+// FLS does not provide a standalone code example for move closures specifically;
+// this is derived from §6.14 (ClosureExpression grammar) and §6.22 (Capturing).
+//
+// Cache-line note: a move closure that captures one i32 passes one extra
+// register argument — same cost as a non-move closure.
+
+fn move_closure_example() -> i32 {
+    // FLS §6.14: `move` closure — captures `base` by value (copy for i32).
+    let base = 6;
+    let f = move |x| x + base;
+    f(36)  // 36+6=42
+}
