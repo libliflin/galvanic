@@ -2382,10 +2382,16 @@ impl<'src> Parser<'src> {
 
             // Labeled loop expression — FLS §6.15.6.
             // `'label: loop { … }` / `'label: while … { … }` / `'label: for … in … { … }`
+            //
+            // Named block expression — FLS §6.4.3.
+            // `'label: { … }` — a block that can be exited via `break 'label value`.
             TokenKind::Lifetime if self.peek_nth(1) == TokenKind::Colon
                 && matches!(
                     self.peek_nth(2),
-                    TokenKind::KwLoop | TokenKind::KwWhile | TokenKind::KwFor
+                    TokenKind::KwLoop
+                        | TokenKind::KwWhile
+                        | TokenKind::KwFor
+                        | TokenKind::OpenBrace
                 ) =>
             {
                 let label = self.parse_opt_label().expect("just checked Lifetime+Colon");
@@ -2398,6 +2404,13 @@ impl<'src> Parser<'src> {
                     }
                     TokenKind::KwWhile => self.parse_while_expr(Some(label)),
                     TokenKind::KwFor => self.parse_for_expr(Some(label)),
+                    // Named block expression — FLS §6.4.3.
+                    // `'label: { stmts... }` — block with an early-exit label.
+                    TokenKind::OpenBrace => {
+                        let body = Box::new(self.parse_block()?);
+                        let span = start.to(body.span);
+                        Ok(Expr { kind: ExprKind::NamedBlock { label, body }, span })
+                    }
                     _ => unreachable!(),
                 }
             }
