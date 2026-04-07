@@ -14800,3 +14800,156 @@ fn main() -> i32 {
     // Look for `mov` with #42 (or the result of 42 - 42 = 0).
     assert!(asm.contains("#42") || asm.contains("mov"), "const arithmetic must emit immediate: {asm}");
 }
+
+// ── Milestone 112: Array `.len()` method (FLS §4.5, §6.12.2) ─────────────────
+
+/// Milestone 112: Array literal `.len()` inline.
+///
+/// FLS §4.5: Array types `[T; N]` have a fixed element count N.
+/// FLS §6.12.2: Method call expressions — `receiver.method(args)`.
+/// `.len()` on a three-element array literal must return 3.
+#[test]
+fn milestone_112_array_literal_len() {
+    let src = r#"
+fn main() -> i32 {
+    [10, 20, 30].len() as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "[10,20,30].len()=3, got {exit_code}");
+}
+
+/// Milestone 112: Array variable `.len()` via `let` binding.
+///
+/// FLS §4.5: The length N is part of the array type and known at compile time.
+/// FLS §8.1: Let bindings; FLS §6.12.2: Method call expressions.
+#[test]
+fn milestone_112_array_let_binding_len() {
+    let src = r#"
+fn main() -> i32 {
+    let arr = [1, 2, 3, 4, 5];
+    arr.len() as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "arr.len()=5, got {exit_code}");
+}
+
+/// Milestone 112: Array with one element, `.len()` returns 1.
+///
+/// FLS §4.5: A singleton array `[T; 1]` has length 1.
+#[test]
+fn milestone_112_array_len_one() {
+    let src = r#"
+fn main() -> i32 {
+    let arr = [42];
+    arr.len() as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "single-element arr.len()=1, got {exit_code}");
+}
+
+/// Milestone 112: `.len()` used in arithmetic.
+///
+/// FLS §4.5, §6.5.2: Array length as an operand in arithmetic expressions.
+#[test]
+fn milestone_112_array_len_in_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    let arr = [1, 2, 3, 4];
+    (arr.len() as i32) * 3
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 12, "4 * 3 = 12, got {exit_code}");
+}
+
+/// Milestone 112: `.len()` used as the upper bound of a `for` range loop.
+///
+/// FLS §4.5, §6.15.1: `for i in 0..arr.len()` iterates arr.len() times.
+#[test]
+fn milestone_112_array_len_as_loop_bound() {
+    let src = r#"
+fn main() -> i32 {
+    let arr = [10, 20, 30];
+    let mut sum = 0;
+    let mut i = 0;
+    while i < arr.len() {
+        sum += arr[i];
+        i += 1;
+    }
+    sum
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 60, "10+20+30=60, got {exit_code}");
+}
+
+/// Milestone 112: Array function parameter `.len()`.
+///
+/// FLS §4.5: Array parameters carry their length in the type.
+/// FLS §9.2: Function parameters; §6.12.2: Method call expressions.
+#[test]
+fn milestone_112_array_param_len() {
+    let src = r#"
+fn array_len(arr: [i32; 6]) -> i32 {
+    arr.len() as i32
+}
+fn main() -> i32 {
+    array_len([0, 0, 0, 0, 0, 0])
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "array parameter len=6, got {exit_code}");
+}
+
+/// Milestone 112: `.len()` result passed to a function.
+///
+/// FLS §6.12.1: Call expressions; §6.12.2: Method call expressions.
+#[test]
+fn milestone_112_array_len_passed_to_fn() {
+    let src = r#"
+fn double(x: i32) -> i32 { x * 2 }
+fn main() -> i32 {
+    let arr = [5, 10, 15, 20];
+    double(arr.len() as i32)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 8, "double(4)=8, got {exit_code}");
+}
+
+/// Milestone 112: Two arrays in same scope, each `.len()` returns its own length.
+///
+/// FLS §4.5: Each array variable has its own independent length.
+#[test]
+fn milestone_112_two_array_lens() {
+    let src = r#"
+fn main() -> i32 {
+    let a = [1, 2, 3];
+    let b = [4, 5, 6, 7, 8];
+    (a.len() as i32) + (b.len() as i32)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 8, "3+5=8, got {exit_code}");
+}
+
+/// Milestone 112: assembly inspection — array `.len()` emits `LoadImm`, not a runtime load.
+///
+/// FLS §4.5: The length is part of the array type and is a compile-time constant.
+/// The emitted assembly must contain `mov` with the compile-time length, not
+/// a `ldr` from the stack.
+#[test]
+fn runtime_array_len_emits_loadimm() {
+    let src = r#"
+fn main() -> i32 {
+    let arr = [1, 2, 3, 4];
+    arr.len() as i32
+}
+"#;
+    let asm = compile_to_asm(src);
+    // The length 4 must appear as an immediate in the assembly.
+    assert!(asm.contains("#4"), "arr.len() must emit LoadImm #4: {asm}");
+}

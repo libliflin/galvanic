@@ -11272,6 +11272,43 @@ impl<'src> LowerCtx<'src> {
                                 return Ok(IrValue::Reg(r));
                             }
                     }
+                    // Case C: `[e0, e1, ...].len()` — array literal receiver.
+                    //
+                    // FLS §4.5: An array type `[T; N]` has a fixed element count N
+                    // encoded at compile time. `.len()` on an array literal is a
+                    // compile-time constant equal to the number of elements.
+                    // FLS §6.12.2: Method call expressions.
+                    //
+                    // Cache-line note: emits one `LoadImm` — identical cost to an
+                    // integer literal. No runtime memory access.
+                    if let ExprKind::Array(elems) = &receiver.kind {
+                        let n = elems.len();
+                        let r = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(r, n as i32));
+                        return Ok(IrValue::Reg(r));
+                    }
+                    // Case D: `arr.len()` where `arr` is a known array variable.
+                    //
+                    // FLS §4.5: The element count N is part of the array type and
+                    // is recorded in `local_array_lens` when the variable is
+                    // bound (let binding or function parameter). `.len()` is a
+                    // compile-time constant — no runtime load required.
+                    // FLS §6.12.2: Method call expressions.
+                    //
+                    // Cache-line note: emits one `LoadImm` — no heap or stack
+                    // access, identical to reading a `const`.
+                    if let ExprKind::Path(segs) = &receiver.kind
+                        && segs.len() == 1
+                    {
+                        let var_name = segs[0].text(self.source);
+                        if let Some(&slot) = self.locals.get(var_name)
+                            && let Some(&arr_len) = self.local_array_lens.get(&slot)
+                        {
+                            let r = self.alloc_reg()?;
+                            self.instrs.push(Instr::LoadImm(r, arr_len as i32));
+                            return Ok(IrValue::Reg(r));
+                        }
+                    }
                 }
 
                 // Resolve the receiver to a struct or enum variable's base slot and type.
