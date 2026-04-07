@@ -165,3 +165,22 @@ const fn const_add(a: i32, b: i32) -> i32 {
 // Verify that a const fn can be called from a const item initializer.
 // FLS §7.1: Constant items.
 const CONST_SUM: i32 = const_add(3, 4);
+
+// FLS §12: Argument-position impl Trait (APIT) — anonymous type parameter with
+// a closure trait bound. FLS §4.13: `Fn`, `FnMut`, and `FnOnce` are the closure
+// traits. `impl Fn(T) -> R` in a parameter position is syntactic sugar for an
+// anonymous type parameter bounded by `Fn(T) -> R`.
+//
+// NOTE: The FLS §12 provides a general description of impl Trait syntax but
+// does not give a specific code example for `impl Fn`. This example is derived
+// from the section's semantic description and the Fn trait's definition in §4.13.
+//
+// Galvanic maps `impl Fn(T1, ...) -> R` to the same IR as `fn(T1, ...) -> R`
+// (a function pointer). Non-capturing closures can be coerced at the call site.
+fn apply_impl(f: impl Fn(i32) -> i32, x: i32) -> i32 {
+    f(x)
+}
+
+fn apply_twice_impl(f: impl Fn(i32) -> i32, x: i32) -> i32 {
+    f(f(x))
+}

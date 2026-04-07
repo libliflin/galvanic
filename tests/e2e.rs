@@ -16969,3 +16969,148 @@ fn main() -> i32 { SUM }
         "const fn call in const context must emit LoadImm(42): {asm}"
     );
 }
+
+// ── Milestone 124: `impl Fn` / `impl FnMut` / `impl FnOnce` in parameter position ──────────────
+
+/// Milestone 124: `impl Fn(i32) -> i32` parameter — basic apply.
+///
+/// FLS §12: Argument-position impl Trait is syntactic sugar for an anonymous
+/// type parameter with a trait bound. FLS §4.13: `Fn` is the callable closure
+/// trait. A non-capturing closure `|x| x + 1` can be passed as `impl Fn(i32) -> i32`.
+#[test]
+fn milestone_124_impl_fn_basic() {
+    let src = r#"
+fn apply(f: impl Fn(i32) -> i32, x: i32) -> i32 { f(x) }
+fn main() -> i32 {
+    apply(|x| x + 1, 41)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "41+1=42, got {exit_code}");
+}
+
+/// Milestone 124: `impl Fn` applied twice (apply_twice pattern).
+///
+/// FLS §12: Demonstrates that the impl Fn parameter can be called multiple
+/// times — consistent with the `Fn` trait (not `FnOnce`).
+#[test]
+fn milestone_124_impl_fn_apply_twice() {
+    let src = r#"
+fn apply_twice(f: impl Fn(i32) -> i32, x: i32) -> i32 { f(f(x)) }
+fn main() -> i32 {
+    apply_twice(|x| x + 1, 40)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "40+1+1=42, got {exit_code}");
+}
+
+/// Milestone 124: `impl Fn(i32) -> i32` with a multiply closure.
+///
+/// FLS §12, §6.14: Non-capturing closure `|x| x * 2` passed as `impl Fn`.
+#[test]
+fn milestone_124_impl_fn_multiply() {
+    let src = r#"
+fn apply(f: impl Fn(i32) -> i32, x: i32) -> i32 { f(x) }
+fn main() -> i32 {
+    apply(|x| x * 2, 21)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "21*2=42, got {exit_code}");
+}
+
+/// Milestone 124: `impl Fn` result used in arithmetic.
+///
+/// FLS §12: The value returned by calling an `impl Fn` parameter can be used
+/// in further arithmetic expressions.
+#[test]
+fn milestone_124_impl_fn_result_in_arithmetic() {
+    let src = r#"
+fn apply(f: impl Fn(i32) -> i32, x: i32) -> i32 { f(x) }
+fn main() -> i32 {
+    apply(|x| x + 10, 10) + apply(|x| x * 2, 11)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "20+22=42, got {exit_code}");
+}
+
+/// Milestone 124: `impl Fn` with zero parameters.
+///
+/// FLS §12, §4.13: `impl Fn() -> i32` — the closure takes no arguments.
+#[test]
+fn milestone_124_impl_fn_zero_params() {
+    let src = r#"
+fn invoke(f: impl Fn() -> i32) -> i32 { f() }
+fn main() -> i32 {
+    invoke(|| 42)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "|| 42 returns 42, got {exit_code}");
+}
+
+/// Milestone 124: `impl Fn` with two parameters.
+///
+/// FLS §12: An `impl Fn(i32, i32) -> i32` parameter accepts a binary closure.
+#[test]
+fn milestone_124_impl_fn_two_params() {
+    let src = r#"
+fn apply2(f: impl Fn(i32, i32) -> i32, a: i32, b: i32) -> i32 { f(a, b) }
+fn main() -> i32 {
+    apply2(|a, b| a + b, 20, 22)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "20+22=42, got {exit_code}");
+}
+
+/// Milestone 124: `impl Fn` forwarded through another function.
+///
+/// FLS §12: The `impl Fn` parameter is passed through to another function
+/// expecting the same type.
+#[test]
+fn milestone_124_impl_fn_forwarded() {
+    let src = r#"
+fn apply(f: impl Fn(i32) -> i32, x: i32) -> i32 { f(x) }
+fn transform(g: impl Fn(i32) -> i32, n: i32) -> i32 { apply(g, n) }
+fn main() -> i32 {
+    transform(|x| x * 3, 14)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "14*3=42, got {exit_code}");
+}
+
+/// Milestone 124: regular named function passed as `impl Fn` argument.
+///
+/// FLS §12: Any function that matches the signature can satisfy an `impl Fn`
+/// bound. A function-pointer coercion happens at the call site.
+#[test]
+fn milestone_124_impl_fn_named_fn_arg() {
+    let src = r#"
+fn double(x: i32) -> i32 { x * 2 }
+fn apply(f: impl Fn(i32) -> i32, x: i32) -> i32 { f(x) }
+fn main() -> i32 {
+    apply(double, 21)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "double(21)=42, got {exit_code}");
+}
+
+/// Assembly check: `impl Fn` parameter is lowered as a function pointer call site.
+///
+/// FLS §12: `impl Fn(i32) -> i32` compiles to the same `blr xN` call sequence
+/// as `fn(i32) -> i32` — the IR representation is identical.
+#[test]
+fn runtime_impl_fn_emits_blr_like_fn_ptr() {
+    let src = r#"
+fn apply(f: impl Fn(i32) -> i32, x: i32) -> i32 { f(x) }
+fn main() -> i32 { apply(|v| v + 1, 41) }
+"#;
+    let asm = compile_to_asm(src);
+    // The impl Fn call must emit `blr` (indirect call through register) — same as fn ptr.
+    assert!(asm.contains("blr"), "impl Fn call must emit blr instruction: {asm}");
+}
