@@ -259,6 +259,17 @@ pub struct FnDef {
     pub is_const: bool,
     /// The function's name (span of the identifier token).
     pub name: Span,
+    /// Generic type parameter names (e.g. `T`, `U` in `fn foo<T, U>(...)`).
+    ///
+    /// FLS §12.1: A generic function declares one or more type parameters in
+    /// angle brackets after the name: `fn foo<T>(x: T) -> T`. Each call site
+    /// is monomorphized with the concrete types inferred from the arguments.
+    ///
+    /// Empty for non-generic functions.
+    ///
+    /// Cache-line note: `Vec<Span>` on the heap, but only accessed during the
+    /// lowering first pass; not on any hot runtime path.
+    pub generic_params: Vec<Span>,
     /// The optional `self` parameter (present in methods only).
     ///
     /// FLS §10.1: Methods are functions that have a `self` parameter.
