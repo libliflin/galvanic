@@ -491,7 +491,32 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                 }
                 enum_defs.insert(enum_name, variants);
             }
-            ItemKind::Fn(_) | ItemKind::Impl(_) | ItemKind::Trait(_) | ItemKind::Const(_) | ItemKind::Static(_) => {}
+            ItemKind::Fn(_) | ItemKind::Impl(_) | ItemKind::Trait(_) | ItemKind::Const(_) | ItemKind::Static(_) | ItemKind::TypeAlias(_) => {}
+        }
+    }
+
+    // Collect type alias IrTy mappings: maps alias name → resolved IrTy.
+    //
+    // FLS §4.10: A type alias defines a new name for an existing type.
+    // Every occurrence of the alias in a type position is replaced by the
+    // aliased type. Galvanic resolves aliases to their IrTy during this
+    // first pass so that later type resolution calls (lower_ty) can handle
+    // aliased names the same as primitive type names.
+    //
+    // Limitation: only aliases that expand to primitive types are resolved
+    // here. Aliases to struct or enum types are not yet supported (future
+    // milestone).
+    //
+    // Cache-line note: the alias map is populated once during the first pass
+    // and read-only during the second pass. Not on any hot path.
+    let mut type_alias_irtys: HashMap<String, IrTy> = HashMap::new();
+    for item in &src.items {
+        if let ItemKind::TypeAlias(ta) = &item.kind {
+            let alias_name = ta.name.text(source).to_owned();
+            // Resolve using already-accumulated aliases (handles chained aliases).
+            if let Ok(irt) = lower_ty(&ta.ty, source, &type_alias_irtys) {
+                type_alias_irtys.insert(alias_name, irt);
+            }
         }
     }
 
@@ -885,7 +910,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     for item in &src.items {
         match &item.kind {
             ItemKind::Fn(fn_def) => {
-                let (ir_fn, closure_fns, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &enum_defs, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &static_names, &fn_names, &struct_raw_field_types, &struct_field_offsets, &struct_sizes, None, label_base)?;
+                let (ir_fn, closure_fns, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &enum_defs, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &static_names, &fn_names, &struct_raw_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, None, label_base)?;
                 label_base = next_label;
                 fns.push(ir_fn);
                 fns.extend(closure_fns);
@@ -932,6 +957,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         &struct_raw_field_types,
                         &struct_field_offsets,
                         &struct_sizes,
+                        &type_alias_irtys,
                         mctx,
                         label_base,
                     )?;
@@ -950,6 +976,9 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
             // FLS §7.2: Static items are collected in the first pass above.
             // They produce no function code — only data section entries.
             ItemKind::Static(_) => {}
+            // FLS §4.10: Type aliases are resolved in the first pass above.
+            // They produce no runtime code.
+            ItemKind::TypeAlias(_) => {}
         }
     }
 
@@ -1045,6 +1074,7 @@ fn lower_fn(
     struct_field_types: &HashMap<String, Vec<Option<String>>>,
     struct_field_offsets: &HashMap<String, Vec<usize>>,
     struct_sizes: &HashMap<String, usize>,
+    type_aliases: &HashMap<String, IrTy>,
     method: Option<MethodCtx<'_>>,
     start_label: u32,
 ) -> Result<(IrFn, Vec<IrFn>, u32), LowerError> {
@@ -1065,7 +1095,7 @@ fn lower_fn(
     let (ret_ty, struct_ret_name, enum_ret_name, tuple_ret_n) = match &fn_def.ret_ty {
         None => (IrTy::Unit, None, None, None),
         Some(ty) => {
-            match lower_ty(ty, source) {
+            match lower_ty(ty, source, type_aliases) {
                 Ok(t) => (t, None, None, None),
                 Err(_) => {
                     // FLS §6.10, §9: Tuple return type — elements returned in x0..x{N-1}.
@@ -1117,7 +1147,7 @@ fn lower_fn(
         Some(block) => block,
     };
 
-    let mut ctx = LowerCtx::new(source, &name, ret_ty, struct_defs, tuple_struct_defs, enum_defs, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, f64_return_fns, f32_return_fns, const_vals, static_names, fn_names, struct_field_types, struct_field_offsets, struct_sizes, start_label);
+    let mut ctx = LowerCtx::new(source, &name, ret_ty, struct_defs, tuple_struct_defs, enum_defs, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, f64_return_fns, f32_return_fns, const_vals, static_names, fn_names, struct_field_types, struct_field_offsets, struct_sizes, type_aliases, start_label);
 
     // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
     // to stack slots. Each parameter slot is allocated in parameter order
@@ -1560,7 +1590,7 @@ fn lower_fn(
             }
         }
 
-        let param_ty = lower_ty(&param.ty, source)?;
+        let param_ty = lower_ty(&param.ty, source, type_aliases)?;
 
         // FLS §4.2: f64 parameters are passed in d0–d7 (ARM64 float register bank).
         // Spill d{freg_idx} to the stack slot and register in float_locals so that
@@ -2072,7 +2102,11 @@ fn parse_str_byte_len(text: &str) -> Result<usize, LowerError> {
     Ok(bytes)
 }
 
-fn lower_ty(ty: &crate::ast::Ty, source: &str) -> Result<IrTy, LowerError> {
+fn lower_ty(
+    ty: &crate::ast::Ty,
+    source: &str,
+    type_aliases: &HashMap<String, IrTy>,
+) -> Result<IrTy, LowerError> {
     match &ty.kind {
         TyKind::Unit => Ok(IrTy::Unit),
         TyKind::Path(segments) if segments.len() == 1 => {
@@ -2113,7 +2147,14 @@ fn lower_ty(ty: &crate::ast::Ty, source: &str) -> Result<IrTy, LowerError> {
                 // ARM64: values live in the `s{N}` register bank.
                 // Stack slots are 8 bytes — same size, lower 4 bytes used.
                 "f32" => Ok(IrTy::F32),
-                name => Err(LowerError::Unsupported(format!("type `{name}`"))),
+                // FLS §4.10: Type aliases. If the name is a registered alias,
+                // return the alias's resolved IrTy directly.
+                name => {
+                    if let Some(&irt) = type_aliases.get(name) {
+                        return Ok(irt);
+                    }
+                    Err(LowerError::Unsupported(format!("type `{name}`")))
+                }
             }
         }
         // FLS §4.8: Reference types `&T` and `&mut T`. A reference is a pointer —
@@ -2124,7 +2165,7 @@ fn lower_ty(ty: &crate::ast::Ty, source: &str) -> Result<IrTy, LowerError> {
         //
         // FLS §4.8: "A reference type is a kind of pointer type."
         // Cache-line note: references occupy one 8-byte register slot — same as i32/i64.
-        TyKind::Ref { inner, .. } => lower_ty(inner, source),
+        TyKind::Ref { inner, .. } => lower_ty(inner, source, type_aliases),
         // FLS §4.4: Tuple types — used only in parameter position for tuple patterns.
         // A tuple type as a scalar return/local is not yet supported.
         TyKind::Tuple(_) => Err(LowerError::Unsupported(
@@ -2140,7 +2181,7 @@ fn lower_ty(ty: &crate::ast::Ty, source: &str) -> Result<IrTy, LowerError> {
         // the full array allocation via `local_array_lens` and does not consult
         // `lower_ty` for the array case (it returns early on the array literal
         // initializer). Aggregate array parameters are deferred.
-        TyKind::Array { elem, .. } => lower_ty(elem, source),
+        TyKind::Array { elem, .. } => lower_ty(elem, source, type_aliases),
         _ => Err(LowerError::Unsupported("complex type".into())),
     }
 }
@@ -2595,6 +2636,15 @@ struct LowerCtx<'src> {
     ///
     /// Cache-line note: Vec header is 24 bytes; elements are heap-allocated.
     pending_closures: Vec<IrFn>,
+
+    /// Resolved type alias map: maps alias name → IrTy.
+    ///
+    /// FLS §4.10: Type aliases introduce a new name for an existing type.
+    /// This map is populated during the first pass of `lower()` and enables
+    /// `lower_ty` to resolve aliased type names that are not built-in primitives.
+    ///
+    /// Cache-line note: read-only during lowering; not on any hot path.
+    type_aliases: &'src HashMap<String, IrTy>,
 }
 
 /// Collect all free variables in `expr` that are present in `outer_locals`
@@ -2781,6 +2831,7 @@ impl<'src> LowerCtx<'src> {
         struct_field_types: &'src HashMap<String, Vec<Option<String>>>,
         struct_field_offsets: &'src HashMap<String, Vec<usize>>,
         struct_sizes: &'src HashMap<String, usize>,
+        type_aliases: &'src HashMap<String, IrTy>,
         start_label: u32,
     ) -> Self {
         LowerCtx {
@@ -2828,6 +2879,7 @@ impl<'src> LowerCtx<'src> {
             float_consts: Vec::new(),
             float32_locals: HashMap::new(),
             float32_consts: Vec::new(),
+            type_aliases,
         }
     }
 
@@ -11171,7 +11223,7 @@ impl<'src> LowerCtx<'src> {
                 // FLS §6.14: The return type is either annotated or inferred.
                 // Galvanic defaults to i32 when the annotation is absent.
                 let closure_ret_ty = match ret_ty {
-                    Some(ty) => lower_ty(ty, self.source)?,
+                    Some(ty) => lower_ty(ty, self.source, self.type_aliases)?,
                     None => IrTy::I32,
                 };
 
@@ -11216,6 +11268,7 @@ impl<'src> LowerCtx<'src> {
                     self.struct_field_types,
                     self.struct_field_offsets,
                     self.struct_sizes,
+                    self.type_aliases,
                     closure_start_label,
                 );
 
@@ -11263,7 +11316,7 @@ impl<'src> LowerCtx<'src> {
                     }
                     // Register fn-ptr params so indirect call emits `blr`.
                     if let Some(ty) = &param.ty
-                        && matches!(lower_ty(ty, self.source), Ok(IrTy::FnPtr))
+                        && matches!(lower_ty(ty, self.source, self.type_aliases), Ok(IrTy::FnPtr))
                     {
                         closure_ctx.local_fn_ptr_slots.insert(slot);
                     }

@@ -14113,6 +14113,166 @@ fn main() -> i32 {
     assert_eq!(exit_code, 0, "double(7) should be 14, got exit {exit_code}");
 }
 
+// ── Milestone 108: type aliases compile to runtime ARM64 (FLS §4.10) ─────────
+//
+// FLS §4.10: "A type alias defines a new name for an existing type."
+// A type alias is purely a compile-time name substitution — no code is
+// generated for the alias declaration itself. Every use of the alias name
+// in a type position is equivalent to using the aliased type.
+//
+// FLS §4.10 AMBIGUOUS: The spec does not specify whether a type alias can
+// be used as a cast target (e.g. `5 as MyInt`). Galvanic does not support
+// aliased cast targets in this milestone; only type annotations in let
+// bindings, function parameters, and return types are supported.
+//
+// FLS §6.1.2:37–45: All code in non-const functions emits runtime instructions
+// regardless of whether types are named via aliases.
+//
+// These test programs derive from FLS §4.10 semantics. The spec provides
+// no worked code examples; programs are derived from the section description.
+
+/// Milestone 108: type alias as function return type and let binding annotation.
+///
+/// FLS §4.10: `type MyInt = i32;` introduces MyInt as an alias for i32.
+/// Both the return type and the let binding type annotation resolve via the alias.
+#[test]
+fn milestone_108_alias_return_type_and_let() {
+    let src = r#"
+type MyInt = i32;
+fn answer() -> MyInt {
+    let x: MyInt = 42;
+    x
+}
+fn main() -> i32 {
+    answer() - 42
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "answer() should return 42, got exit {exit_code}");
+}
+
+/// Milestone 108: type alias used as function parameter type.
+///
+/// FLS §4.10: An alias in a parameter type position is interchangeable with
+/// the aliased type — the function accepts the same values.
+#[test]
+fn milestone_108_alias_parameter_type() {
+    let src = r#"
+type Score = i32;
+fn double(n: Score) -> i32 { n * 2 }
+fn main() -> i32 {
+    double(21) - 42
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "double(21) should return 42, got exit {exit_code}");
+}
+
+/// Milestone 108: type alias for bool.
+///
+/// FLS §4.10: An alias can name any primitive type, including bool.
+#[test]
+fn milestone_108_alias_bool() {
+    let src = r#"
+type Flag = bool;
+fn check(f: Flag) -> i32 {
+    if f { 1 } else { 0 }
+}
+fn main() -> i32 {
+    check(true) - 1
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "check(true) should return 1, got exit {exit_code}");
+}
+
+/// Milestone 108: type alias for u32.
+///
+/// FLS §4.10: An alias for an unsigned integer type is resolved to u32 IR type.
+#[test]
+fn milestone_108_alias_u32() {
+    let src = r#"
+type Count = u32;
+fn main() -> i32 {
+    let c: Count = 10;
+    c as i32 - 10
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "c should be 10, got exit {exit_code}");
+}
+
+/// Milestone 108: chained type alias (alias of alias).
+///
+/// FLS §4.10: Aliases can refer to other aliases. Resolution is transitive.
+#[test]
+fn milestone_108_chained_alias() {
+    let src = r#"
+type Base = i32;
+type Derived = Base;
+fn foo(x: Derived) -> i32 { x }
+fn main() -> i32 {
+    foo(7) - 7
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "foo(7) should return 7, got exit {exit_code}");
+}
+
+/// Milestone 108: type alias used alongside non-aliased types.
+///
+/// FLS §4.10: Aliases and primitive type names are interchangeable.
+/// A function may mix alias and non-alias parameter names freely.
+#[test]
+fn milestone_108_alias_in_arithmetic() {
+    let src = r#"
+type Offset = i32;
+fn shift(x: i32, off: Offset) -> i32 { x + off }
+fn main() -> i32 {
+    shift(35, 7) - 42
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "shift(35, 7) should return 42, got exit {exit_code}");
+}
+
+/// Milestone 108: type alias used in multiple functions.
+///
+/// FLS §4.10: A type alias declared at crate scope is visible to all items
+/// in the same file.
+#[test]
+fn milestone_108_alias_multiple_fns() {
+    let src = r#"
+type Val = i32;
+fn inc(x: Val) -> Val { x + 1 }
+fn dec(x: Val) -> Val { x - 1 }
+fn main() -> i32 {
+    inc(dec(42)) - 42
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "inc(dec(42)) should return 42, got exit {exit_code}");
+}
+
+/// Milestone 108: type alias returned from a conditional.
+///
+/// FLS §4.10: The return type alias is transparent — the if/else branches
+/// produce values of the aliased type, which is the same as the alias.
+#[test]
+fn milestone_108_alias_in_if_return() {
+    let src = r#"
+type Result = i32;
+fn clamp(x: i32) -> Result {
+    if x < 0 { 0 } else if x > 10 { 10 } else { x }
+}
+fn main() -> i32 {
+    clamp(15) - 10
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "clamp(15) should return 10, got exit {exit_code}");
+}
+
 /// Assembly inspection: 2D indexing emits linear index computation.
 ///
 /// FLS §6.9: `grid[i][j]` with known dimensions M emits:
