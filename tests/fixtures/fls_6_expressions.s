@@ -1313,6 +1313,78 @@ array_len_example:
     add     sp, sp, #32             // FLS §8.1: restore stack frame
     ret
 
+    // fn f64_array_index_example — FLS §9
+    .global f64_array_index_example
+f64_array_index_example:
+    sub     sp, sp, #32             // FLS §8.1: frame for 3 slot(s)
+    adrp    x17, f64_array_index_example__fc0              // FLS §2.4.4.2: f64 const addr (page)
+    add     x17, x17, :lo12:f64_array_index_example__fc0  // FLS §2.4.4.2: f64 const addr (offset)
+    ldr     d0, [x17]             // FLS §2.4.4.2: load f64 into d0
+    str     d0, [sp, #0             ] // FLS §8.1: store f64 slot 0
+    adrp    x17, f64_array_index_example__fc1              // FLS §2.4.4.2: f64 const addr (page)
+    add     x17, x17, :lo12:f64_array_index_example__fc1  // FLS §2.4.4.2: f64 const addr (offset)
+    ldr     d1, [x17]             // FLS §2.4.4.2: load f64 into d1
+    str     d1, [sp, #8             ] // FLS §8.1: store f64 slot 1
+    adrp    x17, f64_array_index_example__fc2              // FLS §2.4.4.2: f64 const addr (page)
+    add     x17, x17, :lo12:f64_array_index_example__fc2  // FLS §2.4.4.2: f64 const addr (offset)
+    ldr     d2, [x17]             // FLS §2.4.4.2: load f64 into d2
+    str     d2, [sp, #16            ] // FLS §8.1: store f64 slot 2
+    mov     x3, #1                   // FLS §2.4.4.1: load imm 1
+    add     x9, sp, #0               // FLS §6.9: address of f64 arr[0]
+    ldr     d4, [x9, x3, lsl #3] // FLS §6.9: load f64 arr[index]
+    fcvtzs  w5, d4              // FLS §6.5.9: f64→i32 truncate
+    mov     x0, x5              // FLS §6.19: return reg 5 → x0
+    add     sp, sp, #32             // FLS §8.1: restore stack frame
+    ret
+
+    // fn for_f64_array_example — FLS §9
+    .global for_f64_array_example
+for_f64_array_example:
+    sub     sp, sp, #48             // FLS §8.1: frame for 6 slot(s)
+    adrp    x17, for_f64_array_example__fc0              // FLS §2.4.4.2: f64 const addr (page)
+    add     x17, x17, :lo12:for_f64_array_example__fc0  // FLS §2.4.4.2: f64 const addr (offset)
+    ldr     d0, [x17]             // FLS §2.4.4.2: load f64 into d0
+    str     d0, [sp, #0             ] // FLS §8.1: store f64 slot 0
+    adrp    x17, for_f64_array_example__fc1              // FLS §2.4.4.2: f64 const addr (page)
+    add     x17, x17, :lo12:for_f64_array_example__fc1  // FLS §2.4.4.2: f64 const addr (offset)
+    ldr     d1, [x17]             // FLS §2.4.4.2: load f64 into d1
+    str     d1, [sp, #8             ] // FLS §8.1: store f64 slot 1
+    adrp    x17, for_f64_array_example__fc2              // FLS §2.4.4.2: f64 const addr (page)
+    add     x17, x17, :lo12:for_f64_array_example__fc2  // FLS §2.4.4.2: f64 const addr (offset)
+    ldr     d2, [x17]             // FLS §2.4.4.2: load f64 into d2
+    str     d2, [sp, #16            ] // FLS §8.1: store f64 slot 2
+    adrp    x17, for_f64_array_example__fc3              // FLS §2.4.4.2: f64 const addr (page)
+    add     x17, x17, :lo12:for_f64_array_example__fc3  // FLS §2.4.4.2: f64 const addr (offset)
+    ldr     d3, [x17]             // FLS §2.4.4.2: load f64 into d3
+    str     d3, [sp, #24            ] // FLS §8.1: store f64 slot 3
+    mov     x4, #0                   // FLS §2.4.4.1: load imm 0
+    str     x4, [sp, #32             ] // FLS §8.1: store slot 4
+.L52:                              // FLS §6.17: branch target
+    ldr     x5, [sp, #32             ] // FLS §8.1: load slot 4
+    mov     x6, #3                   // FLS §2.4.4.1: load imm 3
+    cmp     x5, x6               // FLS §6.5.3: compare (signed)
+    cset    x7, lt                    // FLS §6.5.3: x7 = (x5 < x6)
+    cbz     x7, .L54                    // FLS §6.17: branch if false
+    add     x9, sp, #0               // FLS §6.9: address of f64 arr[0]
+    ldr     d8, [x9, x5, lsl #3] // FLS §6.9: load f64 arr[index]
+    str     d8, [sp, #40            ] // FLS §8.1: store f64 slot 5
+    ldr     d9, [sp, #24            ] // FLS §8.1: load f64 slot 3
+    ldr     d10, [sp, #40            ] // FLS §8.1: load f64 slot 5
+    fadd    d11, d9, d10           // FLS §6.5.5: f64 fadd
+    str     d11, [sp, #24            ] // FLS §8.1: store f64 slot 3
+.L53:                              // FLS §6.17: branch target
+    ldr     x12, [sp, #32             ] // FLS §8.1: load slot 4
+    mov     x13, #1                   // FLS §2.4.4.1: load imm 1
+    add     x14, x12, x13          // FLS §6.5.5: add
+    str     x14, [sp, #32             ] // FLS §8.1: store slot 4
+    b       .L52                       // FLS §6.17: branch to end
+.L54:                              // FLS §6.17: branch target
+    ldr     d4, [sp, #24            ] // FLS §8.1: load f64 slot 3
+    fcvtzs  w5, d4              // FLS §6.5.9: f64→i32 truncate
+    mov     x0, x5              // FLS §6.19: return reg 5 → x0
+    add     sp, sp, #48             // FLS §8.1: restore stack frame
+    ret
+
     // ELF entry point — FLS §18.1
     .global _start
 _start:
@@ -1320,3 +1392,26 @@ _start:
     // x0 = main()'s return value
     mov     x8, #93         // __NR_exit (ARM64 Linux)
     svc     #0              // exit(x0)
+
+    .section .rodata
+    .align 3
+f64_array_index_example__fc0:
+    .quad 0x4024000000000000          // f64 10 (FLS §2.4.4.2)
+    .align 3
+f64_array_index_example__fc1:
+    .quad 0x4034000000000000          // f64 20 (FLS §2.4.4.2)
+    .align 3
+f64_array_index_example__fc2:
+    .quad 0x403e000000000000          // f64 30 (FLS §2.4.4.2)
+    .align 3
+for_f64_array_example__fc0:
+    .quad 0x3ff0000000000000          // f64 1 (FLS §2.4.4.2)
+    .align 3
+for_f64_array_example__fc1:
+    .quad 0x4000000000000000          // f64 2 (FLS §2.4.4.2)
+    .align 3
+for_f64_array_example__fc2:
+    .quad 0x4008000000000000          // f64 3 (FLS §2.4.4.2)
+    .align 3
+for_f64_array_example__fc3:
+    .quad 0x0000000000000000          // f64 0 (FLS §2.4.4.2)

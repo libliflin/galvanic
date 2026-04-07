@@ -15123,3 +15123,428 @@ fn main() -> i32 {
     assert!(asm.contains("str     d"), "if-else f64 must emit str d<N>: {asm}");
     assert!(asm.contains("ldr     d"), "if-else f64 must emit ldr d<N>: {asm}");
 }
+
+// ── Milestone 114: f64/f32 array literals, indexing, and for loops ─────────
+//
+// FLS §4.5: Array types `[T; N]` where T is f64 or f32.
+// FLS §6.8: Array expressions — literal and repeat forms.
+// FLS §6.9: Indexing expressions — `arr[i]` for float arrays.
+// FLS §6.15.1: For-loop expressions over float arrays (AMBIGUOUS: desugared at IR level).
+// FLS §4.2: f64 values in d-registers; f32 values in s-registers.
+// FLS §6.1.2:37–45: All instructions are runtime.
+
+/// Milestone 114: f64 array literal — access first element.
+///
+/// FLS §6.8: Array literal `[1.0, 2.0, 3.0]` stores three f64 values.
+/// FLS §6.9: `arr[0]` loads the first element from the stack.
+/// FLS §4.2: Element is in a d-register; cast to i32 via FCVTZS.
+#[test]
+fn milestone_114_f64_array_first_element() {
+    let src = r#"
+fn main() -> i32 {
+    let arr: [f64; 3] = [1.0, 2.0, 3.0];
+    arr[0] as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "arr[0]=1.0, got {exit_code}");
+}
+
+/// Milestone 114: f64 array literal — access last element.
+///
+/// FLS §6.9: Index 2 accesses the third (last) element of a 3-element array.
+#[test]
+fn milestone_114_f64_array_last_element() {
+    let src = r#"
+fn main() -> i32 {
+    let arr: [f64; 3] = [1.0, 2.0, 3.0];
+    arr[2] as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "arr[2]=3.0, got {exit_code}");
+}
+
+/// Milestone 114: f64 array with variable index.
+///
+/// FLS §6.9: Index expression can be a runtime variable.
+/// FLS §6.1.2:37–45: Index loaded from stack; not constant-folded.
+#[test]
+fn milestone_114_f64_array_variable_index() {
+    let src = r#"
+fn main() -> i32 {
+    let arr: [f64; 3] = [10.0, 20.0, 30.0];
+    let i = 1;
+    arr[i] as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 20, "arr[1]=20.0, got {exit_code}");
+}
+
+/// Milestone 114: f64 array element used in arithmetic.
+///
+/// FLS §6.5.5: Binary arithmetic on f64 operands produces f64.
+/// FLS §6.9: Index loads an f64; the result participates in arithmetic.
+#[test]
+fn milestone_114_f64_array_in_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    let arr: [f64; 3] = [1.0, 2.0, 3.0];
+    (arr[0] + arr[1] + arr[2]) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "1.0+2.0+3.0=6.0, got {exit_code}");
+}
+
+/// Milestone 114: f64 array element passed to function.
+///
+/// FLS §9: Function call with f64 argument sourced from array index.
+/// FLS §4.2: f64 argument passed in d0.
+#[test]
+fn milestone_114_f64_array_element_to_fn() {
+    let src = r#"
+fn double(x: f64) -> f64 { x * 2.0 }
+fn main() -> i32 {
+    let arr: [f64; 3] = [1.0, 5.0, 3.0];
+    double(arr[1]) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "double(5.0)=10.0, got {exit_code}");
+}
+
+/// Milestone 114: sum of f64 array via for loop.
+///
+/// FLS §6.15.1: For loop over array (AMBIGUOUS: desugared at IR level).
+/// FLS §6.5.11: Compound assignment `sum += x` on f64.
+/// FLS §4.2: Loop variable `x` in d-register.
+#[test]
+fn milestone_114_for_f64_array_sum() {
+    let src = r#"
+fn main() -> i32 {
+    let arr: [f64; 4] = [1.0, 2.0, 3.0, 4.0];
+    let mut sum: f64 = 0.0;
+    for x in arr {
+        sum += x;
+    }
+    sum as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "1+2+3+4=10, got {exit_code}");
+}
+
+/// Milestone 114: for loop over f64 array — single element.
+///
+/// FLS §6.15.1: Loop over 1-element array executes body once.
+#[test]
+fn milestone_114_for_f64_array_single_element() {
+    let src = r#"
+fn main() -> i32 {
+    let arr: [f64; 1] = [7.0];
+    let mut acc: f64 = 0.0;
+    for x in arr {
+        acc += x;
+    }
+    acc as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "arr=[7.0], acc=7.0, got {exit_code}");
+}
+
+/// Milestone 114: for loop — body uses f64 element in expression.
+///
+/// FLS §6.15.1: Loop variable available in body; each element passed to fn.
+#[test]
+fn milestone_114_for_f64_array_element_to_fn() {
+    let src = r#"
+fn add_one(x: f64) -> i32 { (x + 1.0) as i32 }
+fn main() -> i32 {
+    let arr: [f64; 3] = [1.0, 2.0, 3.0];
+    let mut total = 0;
+    for x in arr {
+        total += add_one(x);
+    }
+    total
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 9, "add_one(1)+add_one(2)+add_one(3)=2+3+4=9, got {exit_code}");
+}
+
+/// Milestone 114: f64 array parameter.
+///
+/// FLS §9: Array passed by value as function parameter.
+/// FLS §4.5: `[f64; 3]` type annotation on parameter.
+#[test]
+fn milestone_114_f64_array_param() {
+    let src = r#"
+fn first(arr: [f64; 3]) -> f64 { arr[0] }
+fn main() -> i32 {
+    let a: [f64; 3] = [5.0, 2.0, 1.0];
+    first(a) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "first([5,2,1])=5, got {exit_code}");
+}
+
+/// Milestone 114: f32 array literal — access element.
+///
+/// FLS §4.5: `[f32; 3]` stores IEEE 754 singles.
+/// FLS §4.2: f32 in s-registers.
+#[test]
+fn milestone_114_f32_array_element() {
+    let src = r#"
+fn main() -> i32 {
+    let arr: [f32; 3] = [1.0_f32, 2.0_f32, 3.0_f32];
+    arr[1] as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2, "arr[1]=2.0_f32, got {exit_code}");
+}
+
+/// Milestone 114: for loop over f32 array — sum.
+///
+/// FLS §6.15.1: For loop over `[f32; N]`.
+/// FLS §4.2: Loop variable `x` in an s-register.
+#[test]
+fn milestone_114_for_f32_array_sum() {
+    let src = r#"
+fn main() -> i32 {
+    let arr: [f32; 3] = [1.0_f32, 3.0_f32, 5.0_f32];
+    let mut sum: f32 = 0.0_f32;
+    for x in arr {
+        sum += x;
+    }
+    sum as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 9, "1+3+5=9, got {exit_code}");
+}
+
+/// Milestone 114: runtime — f64 array literal emits `str d{N}` instructions.
+///
+/// FLS §6.8: Array literal stores. FLS §4.2: f64 stored with `str d{N}`.
+/// FLS §6.1.2:37–45: Instructions are runtime.
+#[test]
+fn runtime_f64_array_literal_emits_str_dreg() {
+    let src = r#"
+fn main() -> i32 {
+    let arr: [f64; 2] = [1.0, 2.0];
+    arr[0] as i32
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("str     d"),
+        "f64 array literal must emit `str d<N>`: {asm}"
+    );
+}
+
+/// Milestone 114: runtime — f64 array indexing emits `ldr d{N}`.
+///
+/// FLS §6.9: Indexed load from `[f64; N]` uses `LoadIndexedF64`.
+/// ARM64: `add x9, sp, #base; ldr d{dst}, [x9, x{idx}, lsl #3]`.
+#[test]
+fn runtime_f64_array_index_emits_ldr_dreg() {
+    let src = r#"
+fn main() -> i32 {
+    let arr: [f64; 2] = [1.0, 2.0];
+    arr[0] as i32
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("ldr     d"),
+        "f64 array index must emit `ldr d<N>`: {asm}"
+    );
+}
+
+// ── Milestone 115: struct literals with f64/f32 fields ────────────────────────
+//
+// FLS §6.11: Struct expression. FLS §4.2: f64/f32 storage.
+// FLS §6.13: Field access expression.
+// FLS §6.1.2:37–45: All stores and loads are runtime instructions.
+//
+// These tests verify that struct literals with floating-point fields compile
+// to ARM64 `str d{N}` / `str s{N}` instructions, and that field accesses
+// produce `ldr d{N}` / `ldr s{N}` loads.
+
+/// Milestone 115: access first f64 field of a struct literal.
+///
+/// FLS §6.11: struct expression. FLS §6.13: field access. FLS §4.2: f64.
+/// FLS §6.5.9: `as i32` truncates toward zero.
+#[test]
+fn milestone_115_f64_struct_first_field() {
+    let src = r#"
+struct Point { x: f64, y: f64 }
+fn main() -> i32 {
+    let p = Point { x: 3.0, y: 4.0 };
+    p.x as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "p.x=3.0, got {exit_code}");
+}
+
+/// Milestone 115: access second f64 field of a struct literal.
+///
+/// FLS §6.11, §6.13, §4.2.
+#[test]
+fn milestone_115_f64_struct_second_field() {
+    let src = r#"
+struct Point { x: f64, y: f64 }
+fn main() -> i32 {
+    let p = Point { x: 3.0, y: 4.0 };
+    p.y as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 4, "p.y=4.0, got {exit_code}");
+}
+
+/// Milestone 115: sum two f64 struct fields.
+///
+/// FLS §6.11, §6.13, §4.2, §6.5.5 (f64 arithmetic).
+#[test]
+fn milestone_115_f64_struct_field_sum() {
+    let src = r#"
+struct Point { x: f64, y: f64 }
+fn main() -> i32 {
+    let p = Point { x: 1.5, y: 2.5 };
+    (p.x + p.y) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 4, "1.5+2.5=4, got {exit_code}");
+}
+
+/// Milestone 115: f64 field in arithmetic with integer result.
+///
+/// FLS §6.11, §6.13, §4.2, §6.5.5, §6.5.9.
+#[test]
+fn milestone_115_f64_struct_field_in_arithmetic() {
+    let src = r#"
+struct Rect { w: f64, h: f64 }
+fn main() -> i32 {
+    let r = Rect { w: 6.0, h: 7.0 };
+    (r.w * r.h) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "6*7=42, got {exit_code}");
+}
+
+/// Milestone 115: f64 field passed to a function.
+///
+/// FLS §6.11, §6.13, §4.2. Float fields are passed via float arg registers.
+#[test]
+fn milestone_115_f64_struct_field_passed_to_fn() {
+    let src = r#"
+struct Val { v: f64 }
+fn double(x: f64) -> i32 {
+    (x * 2.0) as i32
+}
+fn main() -> i32 {
+    let s = Val { v: 5.0 };
+    double(s.v)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "5*2=10, got {exit_code}");
+}
+
+/// Milestone 115: three-field struct with f64 fields.
+///
+/// FLS §6.11, §6.13, §4.2.
+#[test]
+fn milestone_115_f64_struct_three_fields() {
+    let src = r#"
+struct Vec3 { x: f64, y: f64, z: f64 }
+fn main() -> i32 {
+    let v = Vec3 { x: 1.0, y: 2.0, z: 3.0 };
+    (v.x + v.y + v.z) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "1+2+3=6, got {exit_code}");
+}
+
+/// Milestone 115: f64 struct field in if expression.
+///
+/// FLS §6.11, §6.13, §4.2, §6.17.
+#[test]
+fn milestone_115_f64_struct_field_in_if() {
+    let src = r#"
+struct Threshold { limit: f64 }
+fn main() -> i32 {
+    let t = Threshold { limit: 5.0 };
+    if t.limit > 3.0 { 1 } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "5.0>3.0 should be true, got {exit_code}");
+}
+
+/// Milestone 115: f64 field with other locals present.
+///
+/// FLS §6.11, §6.13, §4.2. Verifies slot numbering is correct when
+/// other local variables precede the struct in the frame.
+#[test]
+fn milestone_115_f64_struct_with_other_locals() {
+    let src = r#"
+struct Pair { a: f64, b: f64 }
+fn main() -> i32 {
+    let offset = 10;
+    let p = Pair { a: 1.5, b: 2.5 };
+    (p.a + p.b) as i32 + offset
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 14, "1.5+2.5+10=14, got {exit_code}");
+}
+
+/// Milestone 115: runtime — struct literal with f64 fields emits `str d{N}`.
+///
+/// FLS §6.11: struct literal. FLS §4.2: f64 stored with `str d{N}`.
+/// FLS §6.1.2:37–45: Stores are runtime instructions.
+#[test]
+fn runtime_f64_struct_field_store_emits_str_dreg() {
+    let src = r#"
+struct Point { x: f64, y: f64 }
+fn main() -> i32 {
+    let p = Point { x: 1.0, y: 2.0 };
+    p.x as i32
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("str     d"),
+        "f64 struct field store must emit `str d<N>`: {asm}"
+    );
+}
+
+/// Milestone 115: runtime — f64 struct field access emits `ldr d{N}`.
+///
+/// FLS §6.13: field access. FLS §4.2: f64 loaded with `ldr d{N}`.
+#[test]
+fn runtime_f64_struct_field_access_emits_ldr_dreg() {
+    let src = r#"
+struct Point { x: f64, y: f64 }
+fn main() -> i32 {
+    let p = Point { x: 1.0, y: 2.0 };
+    p.x as i32
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("ldr     d"),
+        "f64 struct field access must emit `ldr d<N>`: {asm}"
+    );
+}

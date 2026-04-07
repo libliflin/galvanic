@@ -818,3 +818,46 @@ fn array_len_example() -> i32 {
     // FLS §6.12.2: method call on an array variable.
     arr.len() as i32  // must return 3
 }
+
+// FLS §6.8 + §6.9 + §4.5: f64 array literal and indexing.
+//
+// FLS §4.5: "An array type is a sequence type with a statically known length."
+// `[f64; 3]` stores three IEEE 754 double-precision values in consecutive 8-byte slots.
+//
+// FLS §6.8: Array expression `[1.0, 2.0, 3.0]` — elements evaluated left-to-right
+// (FLS §6.4:14). No FLS code example provided for float arrays specifically; this
+// example is derived from §6.8 (array expressions) and §4.5 (array type rules).
+//
+// FLS §6.9: Indexing expression `arr[i]` loads element at index `i`.
+// FLS §4.2: f64 result is in a d-register; cast to i32 via FLS §6.5.9.
+//
+// Cache-line note: a `[f64; 4]` array (4 × 8 bytes = 32 bytes) occupies
+// half a 64-byte cache line on the stack.
+
+fn f64_array_index_example() -> i32 {
+    // FLS §6.8: float array literal — three f64 elements.
+    let arr: [f64; 3] = [10.0, 20.0, 30.0];
+    // FLS §6.9: index with a constant — loads second element.
+    arr[1] as i32  // must return 20
+}
+
+// FLS §6.15.1 + §6.8: For loop over f64 array.
+//
+// FLS §6.15.1: "A for loop expression iterates over an iterator."
+// FLS §6.15.1 AMBIGUOUS: The spec desugars `for x in arr` via `IntoIterator`.
+// Galvanic special-cases arrays at the IR level (no runtime trait dispatch).
+//
+// No FLS code example for iterating over a float array specifically; derived
+// from §6.15.1 (for expressions) and §4.5 (array types).
+//
+// Cache-line note: loop body emits `LoadIndexedF64` (add + ldr d = 8 bytes)
+// plus `StoreF64` (4 bytes) per iteration — 12 bytes total per element load.
+
+fn for_f64_array_example() -> i32 {
+    let arr: [f64; 3] = [1.0, 2.0, 3.0];
+    let mut sum: f64 = 0.0;
+    for x in arr {
+        sum += x;
+    }
+    sum as i32  // must return 6
+}

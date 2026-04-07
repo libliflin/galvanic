@@ -575,6 +575,45 @@ pub enum Instr {
         scratch: u8,
     },
 
+    /// Load an f64 element from a float array: `dst = arr[index]` where arr is `[f64; N]`.
+    ///
+    /// `LoadIndexedF64 { dst, base_slot, index_reg }` emits:
+    ///   `add x9, sp, #{base_slot*8}`                   // base address of arr[0]
+    ///   `ldr d{dst}, [x9, x{index_reg}, lsl #3]`       // load f64 arr[index]
+    ///
+    /// FLS §6.9: Indexing expressions. FLS §4.5: Array types. FLS §4.2: f64 in d-registers.
+    /// FLS §6.1.2:37–45: All instructions are runtime.
+    ///
+    /// Cache-line note: add + ldr = two 4-byte instructions = 8 bytes,
+    /// matching the integer `LoadIndexed` footprint.
+    LoadIndexedF64 {
+        /// Destination d-register for the loaded f64 element.
+        dst: u8,
+        /// Stack slot index of the first array element (slot 0).
+        base_slot: u8,
+        /// Register holding the runtime array index (0-based).
+        index_reg: u8,
+    },
+
+    /// Load an f32 element from a float array: `dst = arr[index]` where arr is `[f32; N]`.
+    ///
+    /// `LoadIndexedF32 { dst, base_slot, index_reg }` emits:
+    ///   `add x9, sp, #{base_slot*8}`                   // base address of arr[0]
+    ///   `ldr s{dst}, [x9, x{index_reg}, lsl #3]`       // load f32 arr[index]
+    ///
+    /// FLS §6.9: Indexing expressions. FLS §4.5: Array types. FLS §4.2: f32 in s-registers.
+    /// FLS §6.1.2:37–45: All instructions are runtime.
+    ///
+    /// Cache-line note: add + ldr = two 4-byte instructions = 8 bytes.
+    LoadIndexedF32 {
+        /// Destination s-register for the loaded f32 element.
+        dst: u8,
+        /// Stack slot index of the first array element (slot 0).
+        base_slot: u8,
+        /// Register holding the runtime array index (0-based).
+        index_reg: u8,
+    },
+
     /// Load from a static variable in the data section.
     ///
     /// `LoadStatic { dst, name }` emits:
