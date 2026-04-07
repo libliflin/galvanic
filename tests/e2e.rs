@@ -19003,15 +19003,17 @@ fn use_identity(n: i32) -> i32 { identity(n) }
 fn main() -> i32 { use_identity(7) }
 "#;
     let asm = compile_to_asm(src);
-    // Must emit the call — not fold away.
+    // Must emit the inner generic call — identity(n) must call identity__i32 at runtime.
     assert!(
         asm.contains("bl      identity__i32") || asm.contains("bl identity__i32"),
         "generic call identity(n) must emit bl identity__i32 (not folded): {asm}"
     );
-    // Must not fold use_identity(7) = 7 to a constant.
+    // Must emit the outer call — use_identity(7) must call use_identity at runtime.
+    // If galvanic folded use_identity(7) = 7 by inlining + constant propagation, this bl
+    // would be absent. This is the load-bearing anti-fold check: the whole call chain runs.
     assert!(
-        !asm.contains("mov     x0, #7") || asm.contains("ldr"),
-        "generic call result must not be constant-folded to 7: {asm}"
+        asm.contains("bl      use_identity") || asm.contains("bl use_identity"),
+        "call use_identity(7) must emit bl use_identity — must not be folded away: {asm}"
     );
 }
 
@@ -19193,14 +19195,16 @@ fn use_wrapper(n: i32) -> i32 {
 fn main() -> i32 { use_wrapper(7) }
 "#;
     let asm = compile_to_asm(src);
-    // Must emit the call, not fold.
+    // Must emit the inner generic method call at runtime.
     assert!(
         asm.contains("bl      Wrapper__apply__i32") || asm.contains("bl Wrapper__apply__i32"),
         "generic method call must emit bl Wrapper__apply__i32 (not folded): {asm}"
     );
-    // Must not fold use_wrapper(7) = 7 to a constant without loading from a register.
+    // Must emit the outer call — use_wrapper(7) must call use_wrapper at runtime.
+    // If galvanic folded use_wrapper(7) = 7 by inlining + constant propagation, this bl
+    // would be absent. This is the load-bearing anti-fold check for generic method paths.
     assert!(
-        !asm.contains("mov     x0, #7") || asm.contains("ldr"),
-        "generic method result must not be constant-folded to 7: {asm}"
+        asm.contains("bl      use_wrapper") || asm.contains("bl use_wrapper"),
+        "call use_wrapper(7) must emit bl use_wrapper — must not be folded away: {asm}"
     );
 }
