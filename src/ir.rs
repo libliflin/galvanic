@@ -473,6 +473,11 @@ pub enum Instr {
         /// `float_args[i]` holds the value to place in `d{i}` before the call.
         /// FLS §4.2: f64/f32 parameters use the ARM64 float register bank.
         float_args: Vec<u8>,
+        /// FLS §4.2: float return type.
+        /// `None` = integer/unit return (captured from x0).
+        /// `Some(true)` = f64 return (captured from d0 into d{dst}).
+        /// `Some(false)` = f32 return (captured from s0 into s{dst}).
+        float_ret: Option<bool>,
     },
 
     /// Return from a `&mut self` method, writing modified fields back to the caller.
@@ -1000,6 +1005,38 @@ pub enum Instr {
         /// Destination single-precision float register (ARM64 `s{dst}`).
         dst: u8,
         /// Source integer register (ARM64 `w{src}`).
+        src: u8,
+    },
+
+    /// Convert a 32-bit float register to a 64-bit float register.
+    ///
+    /// `F32ToF64 { dst, src }` → `fcvt d{dst}, s{src}` on ARM64.
+    ///
+    /// FLS §6.5.9: Numeric cast `f32 as f64`. Converts a single-precision
+    /// float to double-precision. The conversion is exact for finite values
+    /// (every f32 value is representable as f64).
+    ///
+    /// Cache-line note: one 4-byte instruction (FCVT).
+    F32ToF64 {
+        /// Destination double-precision float register (ARM64 `d{dst}`).
+        dst: u8,
+        /// Source single-precision float register (ARM64 `s{src}`).
+        src: u8,
+    },
+
+    /// Convert a 64-bit float register to a 32-bit float register.
+    ///
+    /// `F64ToF32 { dst, src }` → `fcvt s{dst}, d{src}` on ARM64.
+    ///
+    /// FLS §6.5.9: Numeric cast `f64 as f32`. Converts a double-precision
+    /// float to single-precision. Values that cannot be exactly represented
+    /// are rounded to nearest-even (IEEE 754 default rounding mode).
+    ///
+    /// Cache-line note: one 4-byte instruction (FCVT).
+    F64ToF32 {
+        /// Destination single-precision float register (ARM64 `s{dst}`).
+        dst: u8,
+        /// Source double-precision float register (ARM64 `d{src}`).
         src: u8,
     },
 

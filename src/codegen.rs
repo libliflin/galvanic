@@ -624,7 +624,7 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
         // args form a cycle (e.g., args = [1, 0] would incorrectly overwrite).
         // For the current milestone all arguments are freshly materialized
         // immediates or loads, so arg[i] == i always holds in practice.
-        Instr::Call { dst, name, args, float_args } => {
+        Instr::Call { dst, name, args, float_args, float_ret } => {
             // Move integer arguments to x0, x1, ... as required by the ARM64 ABI.
             for (i, &src_reg) in args.iter().enumerate() {
                 if src_reg != i as u8 {
@@ -644,12 +644,36 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
                 }
             }
             writeln!(out, "    bl      {name:<24} // FLS §6.12.1: call {name}")?;
-            // Capture return value from x0 into the destination register.
-            if *dst != 0 {
-                writeln!(
-                    out,
-                    "    mov     x{dst}, x0              // FLS §6.12.1: return value → x{dst}"
-                )?;
+            // FLS §4.2: Capture return value from the appropriate register.
+            // Integer returns come back in x0; f64 in d0; f32 in s0.
+            match float_ret {
+                None => {
+                    // Integer/unit return: capture from x0.
+                    if *dst != 0 {
+                        writeln!(
+                            out,
+                            "    mov     x{dst}, x0              // FLS §6.12.1: return value → x{dst}"
+                        )?;
+                    }
+                }
+                Some(true) => {
+                    // f64 return: capture from d0.
+                    if *dst != 0 {
+                        writeln!(
+                            out,
+                            "    fmov    d{dst}, d0              // FLS §4.2: f64 return value → d{dst}"
+                        )?;
+                    }
+                }
+                Some(false) => {
+                    // f32 return: capture from s0.
+                    if *dst != 0 {
+                        writeln!(
+                            out,
+                            "    fmov    s{dst}, s0              // FLS §4.2: f32 return value → s{dst}"
+                        )?;
+                    }
+                }
             }
         }
 
@@ -1098,6 +1122,32 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
             )?;
         }
 
+        // `fcvt d{dst}, s{src}` — FCVT (Floating-point ConVerT), single-to-double.
+        //
+        // FLS §6.5.9: `f32 as f64`. The conversion is exact: every finite f32
+        // value is representable as f64. NaN payloads are preserved.
+        //
+        // Cache-line note: one 4-byte instruction.
+        Instr::F32ToF64 { dst, src } => {
+            writeln!(
+                out,
+                "    fcvt    d{dst}, s{src}              // FLS §6.5.9: f32→f64 widen"
+            )?;
+        }
+
+        // `fcvt s{dst}, d{src}` — FCVT (Floating-point ConVerT), double-to-single.
+        //
+        // FLS §6.5.9: `f64 as f32`. Values that cannot be exactly represented
+        // are rounded to nearest-even (IEEE 754 default rounding mode).
+        //
+        // Cache-line note: one 4-byte instruction.
+        Instr::F64ToF32 { dst, src } => {
+            writeln!(
+                out,
+                "    fcvt    s{dst}, d{src}              // FLS §6.5.9: f64→f32 narrow"
+            )?;
+        }
+
         // FLS §6.5.5: Float arithmetic — fadd/fsub/fmul/fdiv on s-registers.
         //
         // Same mnemonics as F64BinOp but operands use `s{N}` (single-precision).
@@ -1193,18 +1243,25 @@ fn emit_load_x0(out: &mut String, value: &IrValue) -> Result<(), CodegenError> {
                 )?;
             }
         }
-        // FLS §4.2: Returning a raw float register is not yet supported.
-        // Float functions must be cast to an integer type before returning.
-        IrValue::FReg(_) => {
-            return Err(CodegenError::Unsupported(
-                "returning a float value directly is not yet supported; cast to i32 first".into(),
-            ));
+        // FLS §4.2: f64 return value — place in d0 per the ARM64 float ABI.
+        IrValue::FReg(r) => {
+            if *r != 0 {
+                writeln!(
+                    out,
+                    "    fmov    d0, d{r}              // FLS §4.2: f64 return reg {r} → d0"
+                )?;
+            }
+            // If r == 0, result is already in d0.
         }
-        // FLS §4.2: Same for f32 — cast to i32 first.
-        IrValue::F32Reg(_) => {
-            return Err(CodegenError::Unsupported(
-                "returning an f32 value directly is not yet supported; cast to i32 first".into(),
-            ));
+        // FLS §4.2: f32 return value — place in s0 per the ARM64 float ABI.
+        IrValue::F32Reg(r) => {
+            if *r != 0 {
+                writeln!(
+                    out,
+                    "    fmov    s0, s{r}              // FLS §4.2: f32 return reg {r} → s0"
+                )?;
+            }
+            // If r == 0, result is already in s0.
         }
     }
     Ok(())
