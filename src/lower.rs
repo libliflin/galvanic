@@ -3053,6 +3053,21 @@ impl<'src> LowerCtx<'src> {
             crate::ast::ExprKind::Unary { op: crate::ast::UnaryOp::Neg, operand } => {
                 self.is_f64_expr(operand)
             }
+            // FLS §6.12.1: A call to a function in `f64_return_fns` produces f64.
+            // Required so that `f64_fn(...) as i32` selects `F64ToI32` (fcvtzs)
+            // rather than falling through to the integer cast path.
+            crate::ast::ExprKind::Call { callee, .. } => {
+                if let crate::ast::ExprKind::Path(segs) = &callee.kind {
+                    if segs.len() == 1 {
+                        return self.f64_return_fns.contains(segs[0].text(self.source));
+                    }
+                    if segs.len() == 2 {
+                        let mangled = format!("{}__{}", segs[0].text(self.source), segs[1].text(self.source));
+                        return self.f64_return_fns.contains(&mangled);
+                    }
+                }
+                false
+            }
             _ => false,
         }
     }
@@ -3087,6 +3102,21 @@ impl<'src> LowerCtx<'src> {
             // FLS §6.5.4: `-expr` has the same type as `expr`.
             crate::ast::ExprKind::Unary { op: crate::ast::UnaryOp::Neg, operand } => {
                 self.is_f32_expr(operand)
+            }
+            // FLS §6.12.1: A call to a function in `f32_return_fns` produces f32.
+            // Required so that `f32_fn(...) as i32` selects `F32ToI32` (fcvtzs)
+            // rather than falling through to the integer cast path.
+            crate::ast::ExprKind::Call { callee, .. } => {
+                if let crate::ast::ExprKind::Path(segs) = &callee.kind {
+                    if segs.len() == 1 {
+                        return self.f32_return_fns.contains(segs[0].text(self.source));
+                    }
+                    if segs.len() == 2 {
+                        let mangled = format!("{}__{}", segs[0].text(self.source), segs[1].text(self.source));
+                        return self.f32_return_fns.contains(&mangled);
+                    }
+                }
+                false
             }
             _ => false,
         }
@@ -6671,11 +6701,110 @@ impl<'src> LowerCtx<'src> {
                         Ok(IrValue::Unit)
                     }
 
-                    // FLS §4.2: Float-producing if expressions are not yet
-                    // supported (float phi slots would need StoreF64/LoadF64Slot).
-                    IrTy::F64 | IrTy::F32 => Err(LowerError::Unsupported(
-                        "if expression producing float type not yet supported (FLS §4.2)".into(),
-                    )),
+                    // FLS §6.17: If expressions returning f64.
+                    //
+                    // Same phi-slot strategy as the I32 case, but using
+                    // `StoreF64`/`LoadF64Slot` so the stack slot holds an
+                    // 8-byte IEEE 754 double-precision value.
+                    //
+                    // FLS §4.2: Both branches must have type f64.
+                    // FLS §6.1.2:37–45: All instructions emitted at runtime.
+                    //
+                    // Cache-line note: phi slot is one 8-byte entry; the
+                    // `str d{r}` / `ldr d{r}` pair occupies 8 bytes total in
+                    // the instruction stream (2 × 4-byte ARM64 instructions).
+                    IrTy::F64 => {
+                        let else_label = self.alloc_label();
+                        let end_label = self.alloc_label();
+                        let phi_slot = self.alloc_slot()?;
+
+                        let cond_val = self.lower_expr(cond, &IrTy::Bool)?;
+                        let cond_reg = self.val_to_reg(cond_val)?;
+                        self.instrs.push(Instr::CondBranch { reg: cond_reg, label: else_label });
+
+                        // Then branch.
+                        let then_val = self.lower_block_to_value(then_block, &IrTy::F64)?;
+                        let then_freg = match then_val {
+                            IrValue::FReg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "if then-branch did not produce an f64 register".into(),
+                            )),
+                        };
+                        self.instrs.push(Instr::StoreF64 { src: then_freg, slot: phi_slot });
+                        self.instrs.push(Instr::Branch(end_label));
+
+                        // Else branch.
+                        self.instrs.push(Instr::Label(else_label));
+                        let else_val = match else_expr {
+                            Some(e) => self.lower_expr(e, &IrTy::F64)?,
+                            None => return Err(LowerError::Unsupported(
+                                "if expression without else in f64 context".into(),
+                            )),
+                        };
+                        let else_freg = match else_val {
+                            IrValue::FReg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "if else-branch did not produce an f64 register".into(),
+                            )),
+                        };
+                        self.instrs.push(Instr::StoreF64 { src: else_freg, slot: phi_slot });
+
+                        self.instrs.push(Instr::Label(end_label));
+                        let result_freg = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadF64Slot { dst: result_freg, slot: phi_slot });
+                        Ok(IrValue::FReg(result_freg))
+                    }
+
+                    // FLS §6.17: If expressions returning f32.
+                    //
+                    // Same strategy as F64 but uses `StoreF32`/`LoadF32Slot`
+                    // (4-byte slot values, same 8-byte slot alignment).
+                    //
+                    // FLS §4.2: Both branches must have type f32.
+                    // FLS §6.1.2:37–45: All instructions emitted at runtime.
+                    //
+                    // Cache-line note: same 8-byte slot footprint as F64.
+                    IrTy::F32 => {
+                        let else_label = self.alloc_label();
+                        let end_label = self.alloc_label();
+                        let phi_slot = self.alloc_slot()?;
+
+                        let cond_val = self.lower_expr(cond, &IrTy::Bool)?;
+                        let cond_reg = self.val_to_reg(cond_val)?;
+                        self.instrs.push(Instr::CondBranch { reg: cond_reg, label: else_label });
+
+                        // Then branch.
+                        let then_val = self.lower_block_to_value(then_block, &IrTy::F32)?;
+                        let then_freg = match then_val {
+                            IrValue::F32Reg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "if then-branch did not produce an f32 register".into(),
+                            )),
+                        };
+                        self.instrs.push(Instr::StoreF32 { src: then_freg, slot: phi_slot });
+                        self.instrs.push(Instr::Branch(end_label));
+
+                        // Else branch.
+                        self.instrs.push(Instr::Label(else_label));
+                        let else_val = match else_expr {
+                            Some(e) => self.lower_expr(e, &IrTy::F32)?,
+                            None => return Err(LowerError::Unsupported(
+                                "if expression without else in f32 context".into(),
+                            )),
+                        };
+                        let else_freg = match else_val {
+                            IrValue::F32Reg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "if else-branch did not produce an f32 register".into(),
+                            )),
+                        };
+                        self.instrs.push(Instr::StoreF32 { src: else_freg, slot: phi_slot });
+
+                        self.instrs.push(Instr::Label(end_label));
+                        let result_freg = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadF32Slot { dst: result_freg, slot: phi_slot });
+                        Ok(IrValue::F32Reg(result_freg))
+                    }
                 }
             }
 
@@ -7198,9 +7327,93 @@ impl<'src> LowerCtx<'src> {
                         self.instrs.push(Instr::Label(end_label));
                         Ok(IrValue::Unit)
                     }
-                    IrTy::F64 | IrTy::F32 => Err(LowerError::Unsupported(
-                        "if-let expression producing float type not yet supported (FLS §4.2)".into(),
-                    )),
+                    // FLS §6.17: If-let expressions returning f64.
+                    //
+                    // Same phi-slot strategy as I32 but using float store/load.
+                    // FLS §4.2: Both branches must have type f64.
+                    // FLS §6.1.2:37–45: All instructions emitted at runtime.
+                    IrTy::F64 => {
+                        let phi_slot = self.alloc_slot()?;
+
+                        // Then branch.
+                        let then_val = self.lower_block_to_value(then_block, &IrTy::F64)?;
+                        for name in &bound_names {
+                            self.locals.remove(*name);
+                        }
+                        let then_freg = match then_val {
+                            IrValue::FReg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "if-let then-branch did not produce an f64 register".into(),
+                            )),
+                        };
+                        self.instrs.push(Instr::StoreF64 { src: then_freg, slot: phi_slot });
+                        self.instrs.push(Instr::Branch(end_label));
+
+                        // Else branch.
+                        self.instrs.push(Instr::Label(else_label));
+                        let else_val = match else_expr {
+                            Some(e) => self.lower_expr(e, &IrTy::F64)?,
+                            None => return Err(LowerError::Unsupported(
+                                "if-let without else in f64 context".into(),
+                            )),
+                        };
+                        let else_freg = match else_val {
+                            IrValue::FReg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "if-let else-branch did not produce an f64 register".into(),
+                            )),
+                        };
+                        self.instrs.push(Instr::StoreF64 { src: else_freg, slot: phi_slot });
+
+                        self.instrs.push(Instr::Label(end_label));
+                        let result_freg = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadF64Slot { dst: result_freg, slot: phi_slot });
+                        Ok(IrValue::FReg(result_freg))
+                    }
+
+                    // FLS §6.17: If-let expressions returning f32.
+                    //
+                    // Same phi-slot strategy as F64 but using f32 store/load.
+                    // FLS §4.2: Both branches must have type f32.
+                    // FLS §6.1.2:37–45: All instructions emitted at runtime.
+                    IrTy::F32 => {
+                        let phi_slot = self.alloc_slot()?;
+
+                        // Then branch.
+                        let then_val = self.lower_block_to_value(then_block, &IrTy::F32)?;
+                        for name in &bound_names {
+                            self.locals.remove(*name);
+                        }
+                        let then_freg = match then_val {
+                            IrValue::F32Reg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "if-let then-branch did not produce an f32 register".into(),
+                            )),
+                        };
+                        self.instrs.push(Instr::StoreF32 { src: then_freg, slot: phi_slot });
+                        self.instrs.push(Instr::Branch(end_label));
+
+                        // Else branch.
+                        self.instrs.push(Instr::Label(else_label));
+                        let else_val = match else_expr {
+                            Some(e) => self.lower_expr(e, &IrTy::F32)?,
+                            None => return Err(LowerError::Unsupported(
+                                "if-let without else in f32 context".into(),
+                            )),
+                        };
+                        let else_freg = match else_val {
+                            IrValue::F32Reg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "if-let else-branch did not produce an f32 register".into(),
+                            )),
+                        };
+                        self.instrs.push(Instr::StoreF32 { src: else_freg, slot: phi_slot });
+
+                        self.instrs.push(Instr::Label(end_label));
+                        let result_freg = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadF32Slot { dst: result_freg, slot: phi_slot });
+                        Ok(IrValue::F32Reg(result_freg))
+                    }
                 }
             }
 

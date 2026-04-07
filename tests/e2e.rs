@@ -14953,3 +14953,173 @@ fn main() -> i32 {
     // The length 4 must appear as an immediate in the assembly.
     assert!(asm.contains("#4"), "arr.len() must emit LoadImm #4: {asm}");
 }
+
+// ── Milestone 113: if expressions returning f64/f32 (FLS §6.17, §4.2) ────────
+
+/// Milestone 113: if-else expression returns f64 — basic clamp.
+///
+/// FLS §6.17: If expressions whose both branches have the same type
+/// produce a value of that type.
+/// FLS §4.2: f64 is a floating-point type; the result is stored in a
+/// float register and returned via a phi stack slot.
+/// FLS §6.1.2:37–45: Condition check emits a runtime `cbz`.
+#[test]
+fn milestone_113_if_else_f64_basic() {
+    let src = r#"
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+fn main() -> i32 {
+    abs_f64(-5.0) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "abs_f64(-5.0)=5.0, got {exit_code}");
+}
+
+/// Milestone 113: if-else f64 — true branch taken.
+///
+/// FLS §6.17: When the condition is true the then-branch value is used.
+/// FLS §4.2: The then-branch result is stored via `StoreF64` to the phi slot.
+#[test]
+fn milestone_113_if_else_f64_true_branch() {
+    let src = r#"
+fn main() -> i32 {
+    let x: f64 = 3.0;
+    let y: f64 = if x > 0.0 { 1.0 } else { 2.0 };
+    y as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "if x>0 {{1.0}} else {{2.0}} = 1.0, got {exit_code}");
+}
+
+/// Milestone 113: if-else f64 — false branch taken.
+///
+/// FLS §6.17: When the condition is false the else-branch value is used.
+/// FLS §4.2: The else-branch result is stored via `StoreF64` to the phi slot.
+#[test]
+fn milestone_113_if_else_f64_false_branch() {
+    let src = r#"
+fn main() -> i32 {
+    let x: f64 = -1.0;
+    let y: f64 = if x > 0.0 { 1.0 } else { 2.0 };
+    y as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2, "if x>0 {{1.0}} else {{2.0}} = 2.0, got {exit_code}");
+}
+
+/// Milestone 113: if-else f64 result used in arithmetic.
+///
+/// FLS §6.17: The result of an if expression has the type of its branches.
+/// FLS §6.5.5: Arithmetic on f64 values.
+#[test]
+fn milestone_113_if_else_f64_in_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    let flag: bool = true;
+    let v: f64 = if flag { 3.0 } else { 7.0 };
+    (v + 2.0) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "3.0 + 2.0 = 5.0, got {exit_code}");
+}
+
+/// Milestone 113: if-else f64 result passed to function.
+///
+/// FLS §6.17: The if expression value can be used as a function argument.
+/// FLS §6.12.1: Call expressions.
+#[test]
+fn milestone_113_if_else_f64_passed_to_fn() {
+    let src = r#"
+fn double(x: f64) -> f64 {
+    x * 2.0
+}
+fn main() -> i32 {
+    let flag: bool = false;
+    let v: f64 = if flag { 3.0 } else { 4.0 };
+    double(v) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 8, "double(4.0)=8.0, got {exit_code}");
+}
+
+/// Milestone 113: nested if-else chain returning f64 (clamp pattern).
+///
+/// FLS §6.17: An if expression's else branch can itself be an if expression.
+/// This is the canonical clamp pattern in Rust.
+#[test]
+fn milestone_113_if_else_chain_f64() {
+    let src = r#"
+fn clamp(x: f64, lo: f64, hi: f64) -> f64 {
+    if x < lo { lo } else if x > hi { hi } else { x }
+}
+fn main() -> i32 {
+    clamp(5.0, 0.0, 10.0) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "clamp(5.0, 0.0, 10.0)=5.0, got {exit_code}");
+}
+
+/// Milestone 113: clamp — below lower bound.
+///
+/// FLS §6.17: The first matching branch is evaluated; later branches are skipped.
+#[test]
+fn milestone_113_if_else_chain_f64_lower_bound() {
+    let src = r#"
+fn clamp(x: f64, lo: f64, hi: f64) -> f64 {
+    if x < lo { lo } else if x > hi { hi } else { x }
+}
+fn main() -> i32 {
+    clamp(-3.0, 0.0, 10.0) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "clamp(-3.0, 0.0, 10.0)=0.0, got {exit_code}");
+}
+
+/// Milestone 113: if-else expression returns f32.
+///
+/// FLS §6.17: Both branches must have the same type; here f32.
+/// FLS §4.2: f32 results use `StoreF32`/`LoadF32Slot` phi slots.
+#[test]
+fn milestone_113_if_else_f32_basic() {
+    let src = r#"
+fn main() -> i32 {
+    let flag: bool = true;
+    let v: f32 = if flag { 9.0_f32 } else { 1.0_f32 };
+    v as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 9, "if true {{9_f32}} = 9, got {exit_code}");
+}
+
+/// Milestone 113: runtime — if-else f64 emits `str d{r}` (StoreF64) and
+/// `ldr d{r}` (LoadF64Slot) for the phi slot.
+///
+/// FLS §6.17: The phi-slot store/load must be float instructions, not integer.
+/// FLS §6.1.2:37–45: Instructions emitted at runtime.
+#[test]
+fn runtime_if_else_f64_emits_float_store_and_load() {
+    let src = r#"
+fn abs_val(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+fn main() -> i32 {
+    abs_val(3.0) as i32
+}
+"#;
+    let asm = compile_to_asm(src);
+    // The phi-slot store and load must use float (d-register) instructions.
+    // ARM64 `str d{r}, [sp, ...]` and `ldr d{r}, [sp, ...]`.
+    // ARM64 float store: `str     d{N}, [sp, ...]` — phi-slot write.
+    // ARM64 float load:  `ldr     d{N}, [sp, ...]` — phi-slot read.
+    assert!(asm.contains("str     d"), "if-else f64 must emit str d<N>: {asm}");
+    assert!(asm.contains("ldr     d"), "if-else f64 must emit ldr d<N>: {asm}");
+}
