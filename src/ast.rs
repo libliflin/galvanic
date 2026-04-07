@@ -326,6 +326,33 @@ pub struct AssocConst {
     pub span: Span,
 }
 
+/// An associated type declaration. FLS §10.2: Associated Types.
+///
+/// Grammar:
+/// ```text
+/// AssocTypeDecl ::= "type" Identifier ("=" Type)? ";"
+/// ```
+///
+/// In a trait body: `type Item;` (abstract, implementors must provide a concrete type)
+/// or `type Item = i32;` (optional default — galvanic records but does not yet use defaults).
+/// In an impl block: `type Item = i32;` (concrete binding — required for abstract assoc types).
+///
+/// FLS §10.2: "An associated type is a type alias declared in a trait."
+/// "Each implementation of the trait must provide a type binding for each
+/// abstract associated type."
+///
+/// Cache-line note: `AssocTypeDef` is only allocated during parsing and consumed
+/// in the lowering first pass to build the assoc-type registry. Not on any hot path.
+#[derive(Debug)]
+pub struct AssocTypeDef {
+    /// The type alias name (e.g., `Item` in `type Item = i32;`).
+    pub name: Span,
+    /// The concrete type. `None` for abstract declarations in trait bodies.
+    pub ty: Option<Ty>,
+    /// Span of the entire declaration including the trailing semicolon.
+    pub span: Span,
+}
+
 /// FLS §11: Implementations. `impl Type { methods }` defines inherent methods
 /// on a named type. `impl Trait for Type { methods }` implements a trait.
 ///
@@ -349,6 +376,11 @@ pub struct ImplDef {
     pub methods: Vec<Box<FnDef>>,
     /// Associated constants defined in this impl block. FLS §10.3.
     pub assoc_consts: Vec<AssocConst>,
+    /// Associated type bindings in this impl block. FLS §10.2.
+    ///
+    /// Each entry is a concrete binding for an abstract associated type declared
+    /// in the trait. E.g., `type Item = i32;` inside `impl Trait for Type`.
+    pub assoc_types: Vec<AssocTypeDef>,
     /// Span of the entire impl block.
     pub span: Span,
 }
@@ -381,6 +413,11 @@ pub struct TraitDef {
     /// Required consts (`const N: i32;`) have `value: None`.
     /// Default consts (`const N: i32 = 0;`) have `value: Some(expr)`.
     pub assoc_consts: Vec<AssocConst>,
+    /// Associated type declarations in this trait body. FLS §10.2.
+    ///
+    /// Abstract types (`type Item;`) have `ty: None`.
+    /// Types with defaults (`type Item = i32;`) have `ty: Some(...)`.
+    pub assoc_types: Vec<AssocTypeDef>,
     /// Span of the entire trait definition.
     pub span: Span,
 }

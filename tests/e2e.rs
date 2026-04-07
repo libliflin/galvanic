@@ -18028,3 +18028,264 @@ fn main() -> i32 { compute(5) }
         "assoc const in computation must not be folded to constant 15: {asm}"
     );
 }
+
+// ── Milestone 129: Associated types (FLS §10.2) ───────────────────────────────
+//
+// FLS §10.2: "An associated type is a type alias declared in a trait."
+// Associated types allow a trait to name a type that implementors supply.
+// The key codegen property: the type binding itself is compile-time metadata;
+// the method body must still emit runtime ARM64 instructions.
+
+/// Milestone 129: basic associated type — trait with `type Area;`, impl with
+/// `type Area = i32;`, method uses `scale` parameter so result is not foldable.
+#[test]
+fn milestone_129_assoc_type_basic() {
+    let src = r#"
+trait Shape {
+    type Area;
+    fn scaled_area(&self, scale: i32) -> i32;
+}
+struct Square { side: i32 }
+impl Shape for Square {
+    type Area = i32;
+    fn scaled_area(&self, scale: i32) -> i32 { self.side * self.side * scale }
+}
+fn main() -> i32 {
+    let s = Square { side: 3 };
+    s.scaled_area(5)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 45); // 3*3*5
+}
+
+/// Milestone 129: two types implementing the same trait with `type Item;`.
+#[test]
+fn milestone_129_assoc_type_two_impls() {
+    let src = r#"
+trait Container {
+    type Item;
+    fn get_val(&self) -> i32;
+}
+struct Wrapper { val: i32 }
+struct Doubler { val: i32 }
+impl Container for Wrapper {
+    type Item = i32;
+    fn get_val(&self) -> i32 { self.val }
+}
+impl Container for Doubler {
+    type Item = i32;
+    fn get_val(&self) -> i32 { self.val * 2 }
+}
+fn main() -> i32 {
+    let w = Wrapper { val: 7 };
+    let d = Doubler { val: 3 };
+    w.get_val() + d.get_val()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 13); // 7 + 3*2
+}
+
+/// Milestone 129: associated type alongside associated constant in same trait.
+#[test]
+fn milestone_129_assoc_type_with_assoc_const() {
+    let src = r#"
+trait Scalable {
+    type Value;
+    const FACTOR: i32;
+    fn compute(&self, x: i32) -> i32;
+}
+struct Unit;
+impl Scalable for Unit {
+    type Value = i32;
+    const FACTOR: i32 = 4;
+    fn compute(&self, x: i32) -> i32 { x * Unit::FACTOR }
+}
+fn main() -> i32 {
+    let u = Unit;
+    u.compute(6)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 24); // 6 * 4
+}
+
+/// Milestone 129: result passed to another function.
+#[test]
+fn milestone_129_assoc_type_result_passed_to_fn() {
+    let src = r#"
+trait Measurable {
+    type Measure;
+    fn length(&self) -> i32;
+}
+struct Segment { len: i32 }
+impl Measurable for Segment {
+    type Measure = i32;
+    fn length(&self) -> i32 { self.len }
+}
+fn double(x: i32) -> i32 { x * 2 }
+fn main() -> i32 {
+    let s = Segment { len: 11 };
+    double(s.length())
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 22);
+}
+
+/// Milestone 129: result used in arithmetic.
+#[test]
+fn milestone_129_assoc_type_result_in_arithmetic() {
+    let src = r#"
+trait Valued {
+    type Output;
+    fn value(&self) -> i32;
+}
+struct Item { x: i32 }
+impl Valued for Item {
+    type Output = i32;
+    fn value(&self) -> i32 { self.x + 1 }
+}
+fn main() -> i32 {
+    let it = Item { x: 9 };
+    it.value() * 3
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 30); // (9+1)*3
+}
+
+/// Milestone 129: associated type on parameter.
+#[test]
+fn milestone_129_assoc_type_on_parameter() {
+    let src = r#"
+trait Getter {
+    type Data;
+    fn get(&self) -> i32;
+}
+struct Holder { data: i32 }
+impl Getter for Holder {
+    type Data = i32;
+    fn get(&self) -> i32 { self.data }
+}
+fn extract(h: Holder) -> i32 { h.get() }
+fn main() -> i32 {
+    let h = Holder { data: 17 };
+    extract(h)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 17);
+}
+
+/// Milestone 129: trait with multiple associated types.
+#[test]
+fn milestone_129_multiple_assoc_types() {
+    let src = r#"
+trait Pair {
+    type First;
+    type Second;
+    fn first_val(&self) -> i32;
+    fn second_val(&self) -> i32;
+}
+struct TwoInts { a: i32, b: i32 }
+impl Pair for TwoInts {
+    type First = i32;
+    type Second = i32;
+    fn first_val(&self) -> i32 { self.a }
+    fn second_val(&self) -> i32 { self.b }
+}
+fn main() -> i32 {
+    let t = TwoInts { a: 5, b: 8 };
+    t.first_val() + t.second_val()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 13);
+}
+
+/// Milestone 129: method result in if expression.
+#[test]
+fn milestone_129_assoc_type_result_in_if() {
+    let src = r#"
+trait Checkable {
+    type Result;
+    fn check(&self) -> i32;
+}
+struct Value { n: i32 }
+impl Checkable for Value {
+    type Result = i32;
+    fn check(&self) -> i32 { self.n }
+}
+fn main() -> i32 {
+    let v = Value { n: 10 };
+    if v.check() > 5 { 1 } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1);
+}
+
+// ── Assembly inspection: milestone 129 ───────────────────────────────────────
+
+/// Assembly check: method via trait with associated type must emit `mul`
+/// (not fold the product to a constant).
+///
+/// FLS §10.2, §6.1.2:37–45: `scale` is a runtime parameter — `side * side * scale`
+/// cannot be folded. The compiler must emit `mul` instructions.
+#[test]
+fn runtime_assoc_type_method_emits_mul_not_folded() {
+    let src = r#"
+trait Shape {
+    type Area;
+    fn scaled_area(&self, scale: i32) -> i32;
+}
+struct Square { side: i32 }
+impl Shape for Square {
+    type Area = i32;
+    fn scaled_area(&self, scale: i32) -> i32 { self.side * self.side * scale }
+}
+fn main() -> i32 {
+    let s = Square { side: 3 };
+    s.scaled_area(5)
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("mul"),
+        "method with assoc type must emit mul instruction: {asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #45") && !asm.contains("mov x0, #45"),
+        "method with assoc type must not fold 3*3*5=45 to constant: {asm}"
+    );
+}
+
+/// Assembly check: the impl method emits a mangled label, same as any trait method.
+///
+/// FLS §10.2, §13: Static dispatch for trait methods with associated types
+/// uses the same `TypeName__method_name` mangling.
+#[test]
+fn runtime_assoc_type_emits_mangled_label() {
+    let src = r#"
+trait Container {
+    type Item;
+    fn get_val(&self) -> i32;
+}
+struct Box { val: i32 }
+impl Container for Box {
+    type Item = i32;
+    fn get_val(&self) -> i32 { self.val }
+}
+fn main() -> i32 {
+    let b = Box { val: 42 };
+    b.get_val()
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("Box__get_val"),
+        "trait method with assoc type must emit mangled label Box__get_val: {asm}"
+    );
+}

@@ -869,6 +869,34 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         }
     }
 
+    // Collect associated type bindings from impl blocks. FLS §10.2: Associated Types.
+    //
+    // Each `impl TypeName { type Item = ConcreteType; }` is added to the type alias
+    // map under TWO keys:
+    //   - `"TypeName::Item"` → for calls from outside (e.g. function return type annotations)
+    //   - `"Self::Item"` is NOT added globally — it is added per-impl below when lowering
+    //     methods, so that `Self` resolves correctly only within each impl's scope.
+    //
+    // FLS §10.2: "Each use of an associated type is substituted with the concrete type
+    // provided in the implementation."
+    //
+    // Cache-line note: the assoc-type map is built once and shared read-only.
+    // Not on any hot runtime path.
+    for item in &src.items {
+        if let ItemKind::Impl(impl_def) = &item.kind {
+            let type_name = impl_def.ty.text(source);
+            for at in &impl_def.assoc_types {
+                if let Some(ty) = &at.ty {
+                    let at_name = at.name.text(source);
+                    let key = format!("{type_name}::{at_name}");
+                    if let Ok(irt) = lower_ty(ty, source, &type_alias_irtys) {
+                        type_alias_irtys.insert(key, irt);
+                    }
+                }
+            }
+        }
+    }
+
     // Collect constant item values: maps const name → i32 value.
     //
     // FLS §7.1: Constant items are compile-time values substituted at every
@@ -2976,6 +3004,18 @@ fn lower_ty(
 ) -> Result<IrTy, LowerError> {
     match &ty.kind {
         TyKind::Unit => Ok(IrTy::Unit),
+        // FLS §10.2: Associated types as two-segment paths, e.g. `TypeName::Item` or
+        // `Self::Item`. When inside a method on impl type `T`, `Self::X` resolves to
+        // the concrete type stored under the key `"T::X"` in `type_aliases` (which
+        // is populated from the assoc-type registry built during the first lowering pass).
+        TyKind::Path(segments) if segments.len() == 2 => {
+            let key = format!("{}::{}", segments[0].text(source), segments[1].text(source));
+            if let Some(&irt) = type_aliases.get(&key) {
+                Ok(irt)
+            } else {
+                Err(LowerError::Unsupported(format!("associated type `{key}` (not found in registry)")))
+            }
+        }
         TyKind::Path(segments) if segments.len() == 1 => {
             match segments[0].text(source) {
                 // FLS §4.1: Signed integer types. i8/i16/i64/isize all use
