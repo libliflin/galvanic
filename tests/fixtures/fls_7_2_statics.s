@@ -135,7 +135,7 @@ GRAVITY:
     .align 2
     .global SCALE_F32
 SCALE_F32:
-    .word 0x00000000          // f32 0 (FLS §7.2, §4.2)
+    .word 0x40000000          // f32 2 (FLS §7.2, §4.2)
 
     .section .rodata
     .align 2
