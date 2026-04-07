@@ -531,12 +531,22 @@ pub enum Visibility {
 /// name resolution in a well-defined way for all contexts. This
 /// implementation records visibility but defers enforcement to a future
 /// name-resolution phase.
+/// A struct definition.
+///
+/// FLS §12.1: A struct may declare type parameters: `struct Pair<T> { first: T, second: T }`.
+/// Type parameters are substituted with concrete types at each use site (monomorphization).
+/// Galvanic currently supports only scalar (integer/bool) type parameters.
 #[derive(Debug)]
 pub struct StructDef {
     /// The struct's visibility.
     pub vis: Visibility,
     /// The struct's name.
     pub name: Span,
+    /// Generic type parameter spans (e.g., `T`, `U` in `struct Foo<T, U>`).
+    ///
+    /// FLS §12.1: Type parameters are declared in angle brackets after the struct name.
+    /// Empty if the struct is not generic.
+    pub generic_params: Vec<Span>,
     /// The struct's shape.
     pub kind: StructKind,
     /// The span of the entire struct definition.
