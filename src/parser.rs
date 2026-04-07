@@ -2198,14 +2198,39 @@ impl<'src> Parser<'src> {
             // stack slots; a 8-element array exactly fills one 64-byte cache line.
             TokenKind::OpenBracket => {
                 self.advance(); // eat `[`
-                let mut elems: Vec<Expr> = Vec::new();
-                while self.peek_kind() != TokenKind::CloseBracket
+
+                // If the bracket is empty, produce an empty array.
+                if self.eat(TokenKind::CloseBracket) {
+                    return Ok(Expr {
+                        kind: ExprKind::Array(vec![]),
+                        span: start.to(self.current_span()),
+                    });
+                }
+
+                // Parse the first element expression.
+                let first = self.parse_expr()?;
+
+                // Detect the repeat form `[value; N]` (FLS §6.8).
+                if self.eat(TokenKind::Semi) {
+                    let count = self.parse_expr()?;
+                    let end = self.current_span();
+                    self.expect(TokenKind::CloseBracket)?;
+                    return Ok(Expr {
+                        kind: ExprKind::ArrayRepeat {
+                            value: Box::new(first),
+                            count: Box::new(count),
+                        },
+                        span: start.to(end),
+                    });
+                }
+
+                // List form `[e0, e1, ...]`.
+                let mut elems: Vec<Expr> = vec![first];
+                while self.eat(TokenKind::Comma)
+                    && self.peek_kind() != TokenKind::CloseBracket
                     && self.peek_kind() != TokenKind::Eof
                 {
                     elems.push(self.parse_expr()?);
-                    if !self.eat(TokenKind::Comma) {
-                        break;
-                    }
                 }
                 let end = self.current_span();
                 self.expect(TokenKind::CloseBracket)?;
@@ -5180,6 +5205,26 @@ impl Area for Square { fn area(&self) -> i32 { self.side * self.side } }
         assert!(matches!(elems[0].kind, ExprKind::LitInt(10)));
         assert!(matches!(elems[1].kind, ExprKind::LitInt(20)));
         assert!(matches!(elems[2].kind, ExprKind::LitInt(30)));
+    }
+
+    #[test]
+    fn array_repeat_expression() {
+        // FLS §6.8: `[0; 5]` is an array repeat expression.
+        // The fill value is `0` and the count is `5`.
+        let src = "fn f() -> i32 { let a = [0_i32; 5]; a[0] }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!() };
+        let body = f.body.as_ref().unwrap();
+        let StmtKind::Let { init: Some(ref init), .. } = body.stmts[0].kind else {
+            panic!("expected let binding");
+        };
+        let ExprKind::ArrayRepeat { ref value, ref count } = init.kind else {
+            panic!("expected ArrayRepeat, got {:?}", init.kind);
+        };
+        // Value is `0_i32` — a LitInt with value 0.
+        assert!(matches!(value.kind, ExprKind::LitInt(0)), "expected fill 0");
+        // Count is `5` — a LitInt with value 5.
+        assert!(matches!(count.kind, ExprKind::LitInt(5)), "expected count 5");
     }
 
     #[test]

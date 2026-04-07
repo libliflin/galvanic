@@ -691,3 +691,28 @@ fn capturing_closure_example() -> i32 {
     // FLS §6.22: Each call passes `offset` as a hidden leading argument.
     shifted(5) + shifted(7)   // 15 + 17 = 32
 }
+
+// ── FLS §6.8: Array repeat expression ─────────────────────────────────────
+
+// FLS §6.8: "An array expression can be written with the syntax
+// `[operand; repetition_operand]`."
+//
+// The fill value (`operand`) is evaluated once and stored into every
+// element. The count (`repetition_operand`) must be a constant expression
+// (FLS §6.1.2:37–45). No FLS §6.8 code example exists for the repeat form;
+// this function is derived from the semantic description.
+//
+// FLS §6.1.2:37–45: Stores at runtime — not const-evaluated even though
+// the fill value is a literal.
+//
+// Cache-line note: 8 elements × 8-byte slots = 64 bytes, exactly one cache
+// line. The repeat form enables aligned array allocation by construction.
+
+fn array_repeat_example() -> i32 {
+    // FLS §6.8: [0; 8] — eight zeros.
+    let zeros = [0_i32; 8];
+    // FLS §6.8: [1; 4] — four ones.
+    let ones = [1_i32; 4];
+    // Sum: 0+0+0+0+0+0+0+0 + 1+1+1+1 = 4
+    zeros[0] + zeros[7] + ones[0] + ones[1] + ones[2] + ones[3]
+}
