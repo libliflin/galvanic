@@ -15548,3 +15548,189 @@ fn main() -> i32 {
         "f64 struct field access must emit `ldr d<N>`: {asm}"
     );
 }
+
+// ── Milestone 116: f64/f32 methods on structs compile to runtime ARM64 ────────
+//
+// FLS §6.12.2: Method call expressions. FLS §10.1: Methods on struct types.
+// FLS §4.2: f64 fields passed in float register bank (d0-d7).
+// FLS §6.1.2:37–45: All instructions are runtime.
+
+/// Milestone 116: method returns first f64 field.
+///
+/// FLS §6.12.2, §10.1: &self method with f64 return type.
+/// FLS §4.2: return value in d0.
+#[test]
+fn milestone_116_f64_method_get_first_field() {
+    let src = r#"
+struct Point { x: f64, y: f64 }
+impl Point {
+    fn get_x(&self) -> f64 { self.x }
+}
+fn main() -> i32 {
+    let p = Point { x: 3.0, y: 1.0 };
+    p.get_x() as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "get_x() returns 3.0 → 3, got {exit_code}");
+}
+
+/// Milestone 116: method returns second f64 field.
+///
+/// FLS §6.12.2, §10.1: &self method selecting non-first field.
+#[test]
+fn milestone_116_f64_method_get_second_field() {
+    let src = r#"
+struct Point { x: f64, y: f64 }
+impl Point {
+    fn get_y(&self) -> f64 { self.y }
+}
+fn main() -> i32 {
+    let p = Point { x: 1.0, y: 4.0 };
+    p.get_y() as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 4, "get_y() returns 4.0 → 4, got {exit_code}");
+}
+
+/// Milestone 116: method performs f64 arithmetic on self fields.
+///
+/// FLS §6.12.2, §10.1: method body contains BinOp on f64 fields.
+/// FLS §6.5.5: float arithmetic.
+#[test]
+fn milestone_116_f64_method_field_sum() {
+    let src = r#"
+struct Point { x: f64, y: f64 }
+impl Point {
+    fn sum(&self) -> f64 { self.x + self.y }
+}
+fn main() -> i32 {
+    let p = Point { x: 1.5, y: 2.5 };
+    p.sum() as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 4, "1.5+2.5=4.0 → 4, got {exit_code}");
+}
+
+/// Milestone 116: f64 method result used in arithmetic.
+///
+/// FLS §6.12.2: method result as sub-expression.
+#[test]
+fn milestone_116_f64_method_result_in_arithmetic() {
+    let src = r#"
+struct Counter { value: f64 }
+impl Counter {
+    fn get(&self) -> f64 { self.value }
+}
+fn main() -> i32 {
+    let c = Counter { value: 3.0 };
+    (c.get() * 2.0) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "3.0*2.0=6.0 → 6, got {exit_code}");
+}
+
+/// Milestone 116: f64 method result passed to function.
+///
+/// FLS §6.12.2: method return used as function argument.
+#[test]
+fn milestone_116_f64_method_result_passed_to_fn() {
+    let src = r#"
+struct Scalar { v: f64 }
+impl Scalar {
+    fn get(&self) -> f64 { self.v }
+}
+fn double(x: f64) -> i32 { (x * 2.0) as i32 }
+fn main() -> i32 {
+    let s = Scalar { v: 2.5 };
+    double(s.get())
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "double(2.5)=5.0 → 5, got {exit_code}");
+}
+
+/// Milestone 116: multiple f64 methods.
+///
+/// FLS §10.1: multiple method definitions in an impl block.
+#[test]
+fn milestone_116_multiple_f64_methods() {
+    let src = r#"
+struct Rect { w: f64, h: f64 }
+impl Rect {
+    fn area(&self) -> f64 { self.w * self.h }
+    fn perimeter(&self) -> f64 { (self.w + self.h) * 2.0 }
+}
+fn main() -> i32 {
+    let r = Rect { w: 3.0, h: 2.0 };
+    r.area() as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "3.0*2.0=6.0 → 6, got {exit_code}");
+}
+
+/// Milestone 116: f64 method on parameter struct.
+///
+/// FLS §10.1: method called on a struct passed as function parameter.
+#[test]
+fn milestone_116_f64_method_on_parameter() {
+    let src = r#"
+struct Point { x: f64, y: f64 }
+impl Point {
+    fn get_x(&self) -> f64 { self.x }
+}
+fn extract(p: Point) -> i32 { p.get_x() as i32 }
+fn main() -> i32 {
+    let p = Point { x: 5.0, y: 1.0 };
+    extract(p)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "extract returns x=5.0 → 5, got {exit_code}");
+}
+
+/// Milestone 116: f64 method result in if expression.
+///
+/// FLS §6.17: if expression with method call condition.
+#[test]
+fn milestone_116_f64_method_result_in_if() {
+    let src = r#"
+struct Threshold { limit: f64 }
+impl Threshold {
+    fn get(&self) -> f64 { self.limit }
+}
+fn main() -> i32 {
+    let t = Threshold { limit: 5.0 };
+    if t.get() > 3.0 { 1 } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "5.0>3.0 → 1, got {exit_code}");
+}
+
+/// Milestone 116: runtime — f64 method call emits float spill instructions.
+///
+/// FLS §4.2, §10.1: f64 struct fields arrive in d-registers; method body
+/// spills them with `str d{N}`.
+#[test]
+fn runtime_f64_method_emits_float_spill() {
+    let src = r#"
+struct Point { x: f64, y: f64 }
+impl Point {
+    fn sum(&self) -> f64 { self.x + self.y }
+}
+fn main() -> i32 {
+    let p = Point { x: 1.0, y: 2.0 };
+    p.sum() as i32
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("fadd"),
+        "f64 method arithmetic must emit `fadd`: {asm}"
+    );
+}

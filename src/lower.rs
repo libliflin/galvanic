@@ -875,6 +875,28 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
             }
         }
     }
+    // FLS §10.1, §4.2: Methods (both &self and &mut self) that return f64 or
+    // f32 also use the float register bank for the return value. Register their
+    // mangled names so the call site captures from d0/s0.
+    for item in &src.items {
+        if let ItemKind::Impl(impl_def) = &item.kind {
+            let type_name = impl_def.ty.text(source);
+            for method in &impl_def.methods {
+                let method_name = method.name.text(source);
+                let mangled = format!("{type_name}__{method_name}");
+                if let Some(ret_ty) = &method.ret_ty
+                    && let TyKind::Path(segs) = &ret_ty.kind
+                    && segs.len() == 1
+                {
+                    match segs[0].text(source) {
+                        "f64" => { f64_return_fns.insert(mangled); }
+                        "f32" => { f32_return_fns.insert(mangled); }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
 
     // Build enum-returning free function registry: fn name → enum type name.
     //
@@ -1292,7 +1314,23 @@ fn lower_fn(
             // Struct self parameter: one register per field.
             let n_fields = field_names.len();
             if n_fields > 0 {
-                if reg_idx + n_fields > 8 {
+                // FLS §4.2, §10.1: f64/f32 struct fields arrive in the float
+                // register bank (d0-d7 / s0-s7); integer fields arrive in x0-x7.
+                // Count them separately to check register window limits.
+                let float_field_tys = struct_float_field_types
+                    .get(type_name)
+                    .cloned()
+                    .unwrap_or_default();
+                let n_int_fields = float_field_tys
+                    .iter()
+                    .filter(|t| t.is_none())
+                    .count()
+                    .max(n_fields.saturating_sub(float_field_tys.len()));
+                let n_float_fields = float_field_tys
+                    .iter()
+                    .filter(|t| t.is_some())
+                    .count();
+                if reg_idx + n_int_fields > 8 || freg_idx + n_float_fields > 8 {
                     return Err(LowerError::Unsupported(
                         "self fields exceed ARM64 register window".into(),
                     ));
@@ -1301,17 +1339,45 @@ fn lower_fn(
                 for _ in 1..n_fields {
                     ctx.alloc_slot()?;
                 }
+                let mut self_int = 0usize;
+                let mut self_float = 0usize;
                 for fi in 0..n_fields {
-                    ctx.instrs.push(Instr::Store {
-                        src: (reg_idx + fi) as u8,
-                        slot: base_slot + fi as u8,
-                    });
+                    let slot = base_slot + fi as u8;
+                    match float_field_tys.get(fi).copied().flatten() {
+                        Some(IrTy::F64) => {
+                            // FLS §4.2: f64 self field arrives in d{freg_idx+self_float}.
+                            ctx.instrs.push(Instr::StoreF64 {
+                                src: (freg_idx + self_float) as u8,
+                                slot,
+                            });
+                            ctx.slot_float_ty.insert(slot, IrTy::F64);
+                            self_float += 1;
+                        }
+                        Some(IrTy::F32) => {
+                            // FLS §4.2: f32 self field arrives in s{freg_idx+self_float}.
+                            ctx.instrs.push(Instr::StoreF32 {
+                                src: (freg_idx + self_float) as u8,
+                                slot,
+                            });
+                            ctx.slot_float_ty.insert(slot, IrTy::F32);
+                            self_float += 1;
+                        }
+                        _ => {
+                            // Integer/bool/pointer field arrives in x{reg_idx+self_int}.
+                            ctx.instrs.push(Instr::Store {
+                                src: (reg_idx + self_int) as u8,
+                                slot,
+                            });
+                            self_int += 1;
+                        }
+                    }
                 }
                 // Register `self` as a struct variable pointing to base_slot.
                 // `self` is a keyword but &'static str coerces to &'src str.
                 ctx.locals.insert("self", base_slot);
                 ctx.local_struct_types.insert(base_slot, type_name.to_owned());
-                reg_idx += n_fields;
+                reg_idx += self_int;
+                freg_idx += self_float;
             } else {
                 // Unit struct: no fields to pass. Register `self` with a dummy slot.
                 let base_slot = ctx.alloc_slot()?;
@@ -11926,17 +11992,34 @@ impl<'src> LowerCtx<'src> {
                 // FLS §6.1.2:37–45: All loads are runtime instructions.
                 // Cache-line note: N loads = N × 4-byte `ldr` instructions.
                 let mut arg_regs: Vec<u8> = Vec::with_capacity(8);
+                let mut float_self_regs: Vec<u8> = Vec::new();
                 let n_self_regs: usize;
 
                 if let Some(field_names) = self.struct_defs.get(recv_type_name.as_str()).cloned() {
                     // Struct receiver: load each field.
+                    // FLS §4.2, §10.1: f64/f32 fields arrive in the float register bank;
+                    // integer fields arrive in x0-x7. Match the spill order in lower_fn.
                     let n_fields = field_names.len();
                     n_self_regs = n_fields;
                     for fi in 0..n_fields {
                         let slot = recv_base_slot + fi as u8;
-                        let reg = self.alloc_reg()?;
-                        self.instrs.push(Instr::Load { dst: reg, slot });
-                        arg_regs.push(reg);
+                        match self.slot_float_ty.get(&slot).copied() {
+                            Some(IrTy::F64) => {
+                                let reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::LoadF64Slot { dst: reg, slot });
+                                float_self_regs.push(reg);
+                            }
+                            Some(IrTy::F32) => {
+                                let reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::LoadF32Slot { dst: reg, slot });
+                                float_self_regs.push(reg);
+                            }
+                            _ => {
+                                let reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::Load { dst: reg, slot });
+                                arg_regs.push(reg);
+                            }
+                        }
                     }
                 } else if let Some(variants) = self.enum_defs.get(recv_type_name.as_str()).cloned() {
                     // Enum receiver: load discriminant then field registers.
@@ -12055,11 +12138,13 @@ impl<'src> LowerCtx<'src> {
                     } else {
                         None
                     };
+                    // FLS §4.2: Pass f64/f32 self fields in the float register bank.
+                    // float_self_regs contains d-register indices for float fields.
                     self.instrs.push(Instr::Call {
                         dst,
                         name: mangled,
                         args: arg_regs,
-                        float_args: vec![],
+                        float_args: float_self_regs,
                         float_ret,
                     });
                     match float_ret {
