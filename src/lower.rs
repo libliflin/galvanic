@@ -906,14 +906,19 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                 // Determine type from optional suffix; default to f64.
                 let text = s.value.span.text(source);
                 if text.ends_with("f32") {
-                    let val: f32 = text.trim_end_matches("f32").parse().unwrap_or(0.0);
+                    // Strip the "f32" suffix and any preceding underscore separator
+                    // (e.g. "2.0_f32" → "2.0_" → "2.0"). FLS §2.4.4.2 permits an
+                    // optional `_` between the numeric part and the type suffix.
+                    let raw = text.trim_end_matches("f32").trim_end_matches('_');
+                    let val: f32 = raw.parse().unwrap_or(0.0);
                     static_data.push(crate::ir::StaticData {
                         name: name.clone(),
                         value: crate::ir::StaticValue::F32(val),
                     });
                     static_f32_names.insert(name);
                 } else {
-                    let val: f64 = text.trim_end_matches("f64").parse().unwrap_or(0.0);
+                    let raw = text.trim_end_matches("f64").trim_end_matches('_');
+                    let val: f64 = raw.parse().unwrap_or(0.0);
                     static_data.push(crate::ir::StaticData {
                         name: name.clone(),
                         value: crate::ir::StaticValue::F64(val),
