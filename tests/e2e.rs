@@ -13952,3 +13952,181 @@ fn main() -> i32 {
         "annotated and unannotated array should emit identical assembly"
     );
 }
+
+// ─── Milestone 107: 2D array literals and indexing (FLS §6.8, §6.9) ──────────
+//
+// A 2D array `[[T; M]; N]` occupies N×M consecutive 8-byte stack slots
+// stored in row-major order. `grid[i][j]` computes linear slot i*M + j.
+//
+// FLS §6.8: Array expressions. FLS §6.9: Indexing expressions.
+// FLS §6.1.2:37–45: All stores and loads are runtime instructions.
+//
+// The test programs below are derived from the FLS §6.8 and §6.9 semantics.
+// No FLS-provided code examples exist for 2D arrays specifically;
+// examples are constructed from the section's type and expression rules.
+
+/// `grid[0][0]` returns the top-left element.
+///
+/// FLS §6.9: Indexing evaluates the base (outer) index then the element index.
+#[test]
+fn milestone_107_2d_array_first_element() {
+    let src = r#"
+fn main() -> i32 {
+    let grid = [[10, 20], [30, 40]];
+    grid[0][0] - 10
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "grid[0][0] should be 10, got exit {exit_code}");
+}
+
+/// `grid[0][1]` returns the second element of the first row.
+///
+/// FLS §6.9: Column index selects within a row.
+#[test]
+fn milestone_107_2d_array_second_col() {
+    let src = r#"
+fn main() -> i32 {
+    let grid = [[10, 20], [30, 40]];
+    grid[0][1] - 20
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "grid[0][1] should be 20, got exit {exit_code}");
+}
+
+/// `grid[1][0]` returns the first element of the second row.
+///
+/// FLS §6.9: Row index selects the row; column index selects within it.
+#[test]
+fn milestone_107_2d_array_second_row() {
+    let src = r#"
+fn main() -> i32 {
+    let grid = [[10, 20], [30, 40]];
+    grid[1][0] - 30
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "grid[1][0] should be 30, got exit {exit_code}");
+}
+
+/// `grid[1][1]` returns the bottom-right element.
+///
+/// FLS §6.9: Linear index for [1][1] in a 2×2 grid is 1*2+1 = 3.
+#[test]
+fn milestone_107_2d_array_last_element() {
+    let src = r#"
+fn main() -> i32 {
+    let grid = [[1, 2], [3, 4]];
+    grid[1][1] - 4
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "grid[1][1] should be 4, got exit {exit_code}");
+}
+
+/// 2D array with type annotation compiles identically to unannotated.
+///
+/// FLS §4.5: `[[i32; 2]; 2]` is a type annotation only; does not change codegen.
+#[test]
+fn milestone_107_2d_annotated_array() {
+    let src = r#"
+fn main() -> i32 {
+    let grid: [[i32; 2]; 2] = [[5, 6], [7, 8]];
+    grid[1][0] - 7
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "grid[1][0] should be 7, got exit {exit_code}");
+}
+
+/// Variable indices into a 2D array (runtime values).
+///
+/// FLS §6.9: Indices are value expressions evaluated at runtime.
+#[test]
+fn milestone_107_2d_array_variable_index() {
+    let src = r#"
+fn main() -> i32 {
+    let grid = [[1, 2, 3], [4, 5, 6], [7, 8, 9]];
+    let r = 2;
+    let c = 1;
+    grid[r][c] - 8
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "grid[2][1] should be 8, got exit {exit_code}");
+}
+
+/// 2D array element used in arithmetic.
+///
+/// FLS §6.5.5: Arithmetic uses the indexed value as an operand.
+#[test]
+fn milestone_107_2d_array_in_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    let grid = [[1, 2], [3, 4]];
+    grid[0][0] + grid[1][1] - 5
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "1 + 4 - 5 should be 0, got exit {exit_code}");
+}
+
+/// 2D array sum via nested loops.
+///
+/// FLS §6.8, §6.9, §6.15.3: Nested while loops iterate over rows and columns.
+#[test]
+fn milestone_107_2d_array_sum_in_loop() {
+    let src = r#"
+fn main() -> i32 {
+    let grid = [[1, 2], [3, 4]];
+    let mut sum = 0;
+    let mut i = 0;
+    while i < 2 {
+        let mut j = 0;
+        while j < 2 {
+            sum += grid[i][j];
+            j += 1;
+        }
+        i += 1;
+    }
+    sum - 10
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "1+2+3+4=10, got exit {exit_code}");
+}
+
+/// 2D array passed to function (by indexing caller-side).
+///
+/// FLS §9: Functions take scalar arguments; caller indexes the 2D array.
+#[test]
+fn milestone_107_2d_array_element_passed_to_fn() {
+    let src = r#"
+fn double(x: i32) -> i32 { x * 2 }
+fn main() -> i32 {
+    let grid = [[3, 7], [11, 13]];
+    double(grid[0][1]) - 14
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "double(7) should be 14, got exit {exit_code}");
+}
+
+/// Assembly inspection: 2D indexing emits linear index computation.
+///
+/// FLS §6.9: `grid[i][j]` with known dimensions M emits:
+/// LoadImm(M) + mul(i*M) + add(i*M+j) + LoadIndexed.
+/// FLS §6.1.2:37–45: All instructions are runtime.
+#[test]
+fn runtime_2d_array_index_emits_mul_and_add_for_linear_index() {
+    let src = r#"
+fn main() -> i32 {
+    let grid = [[1, 2], [3, 4]];
+    grid[1][1]
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(asm.contains("mul"), "2D index must emit mul for row stride: {asm}");
+    assert!(asm.contains("ldr"), "2D index must emit ldr: {asm}");
+}

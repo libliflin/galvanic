@@ -1224,6 +1224,37 @@ array_type_annotation_example:
     add     sp, sp, #64             // FLS §8.1: restore stack frame
     ret
 
+    // fn two_d_array_example — FLS §9
+    .global two_d_array_example
+two_d_array_example:
+    sub     sp, sp, #32             // FLS §8.1: frame for 4 slot(s)
+    mov     x0, #1                   // FLS §2.4.4.1: load imm 1
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    mov     x1, #2                   // FLS §2.4.4.1: load imm 2
+    str     x1, [sp, #8              ] // FLS §8.1: store slot 1
+    mov     x2, #3                   // FLS §2.4.4.1: load imm 3
+    str     x2, [sp, #16             ] // FLS §8.1: store slot 2
+    mov     x3, #4                   // FLS §2.4.4.1: load imm 4
+    str     x3, [sp, #24             ] // FLS §8.1: store slot 3
+    mov     x4, #0                   // FLS §2.4.4.1: load imm 0
+    mov     x5, #0                   // FLS §2.4.4.1: load imm 0
+    mov     x6, #2                   // FLS §2.4.4.1: load imm 2
+    mul     x7, x4, x6          // FLS §6.5.5: mul
+    add     x8, x7, x5          // FLS §6.5.5: add
+    add     x9, sp, #0               // FLS §6.9: address of arr[0]
+    ldr     x9, [x9, x8, lsl #3] // FLS §6.9: load arr[index]
+    mov     x10, #1                   // FLS §2.4.4.1: load imm 1
+    mov     x11, #1                   // FLS §2.4.4.1: load imm 1
+    mov     x12, #2                   // FLS §2.4.4.1: load imm 2
+    mul     x13, x10, x12          // FLS §6.5.5: mul
+    add     x14, x13, x11          // FLS §6.5.5: add
+    add     x15, sp, #0               // FLS §6.9: address of arr[0]
+    ldr     x15, [x15, x14, lsl #3] // FLS §6.9: load arr[index]
+    add     x16, x9, x15          // FLS §6.5.5: add
+    mov     x0, x16              // FLS §6.19: return reg 16 → x0
+    add     sp, sp, #32             // FLS §8.1: restore stack frame
+    ret
+
     // ELF entry point — FLS §18.1
     .global _start
 _start:

@@ -2420,6 +2420,15 @@ struct LowerCtx<'src> {
     /// index expression. Not on a hot path.
     local_array_lens: HashMap<u8, usize>,
 
+    /// Maps a 2D array variable's base stack slot to its inner (row) element count.
+    ///
+    /// FLS §6.8: A 2D array `[[T; M]; N]` occupies N×M consecutive 8-byte stack
+    /// slots. `local_array_lens[slot] = N` (outer count); `local_array_inner_lens[slot] = M`
+    /// (inner count). Index expression `arr[i][j]` computes linear index `i*M + j`.
+    ///
+    /// Cache-line note: populated once per 2D array let binding. Not on a hot path.
+    local_array_inner_lens: HashMap<u8, usize>,
+
     /// Maps a tuple variable's base stack slot to its field count.
     ///
     /// FLS §6.10: Tuple values occupy N consecutive 8-byte stack slots where
@@ -2808,6 +2817,7 @@ impl<'src> LowerCtx<'src> {
             local_struct_types: HashMap::new(),
             local_enum_types: HashMap::new(),
             local_array_lens: HashMap::new(),
+            local_array_inner_lens: HashMap::new(),
             local_tuple_lens: HashMap::new(),
             local_tuple_struct_types: HashMap::new(),
             local_fn_ptr_slots: std::collections::HashSet::new(),
@@ -5423,6 +5433,45 @@ impl<'src> LowerCtx<'src> {
                 if let Some(init_expr) = init.as_ref()
                     && let ExprKind::Array(elems) = &init_expr.kind
                 {
+                    // FLS §6.8: 2D array literal `let grid = [[r0c0, r0c1], [r1c0, r1c1]]`.
+                    //
+                    // Detected when every element of the outer array is itself an array
+                    // literal. The result is a flattened contiguous allocation of N×M slots,
+                    // stored row-major (row 0 first, then row 1, etc.).
+                    //
+                    // FLS §6.8: Elements are evaluated left-to-right within each row and
+                    // rows are evaluated top-to-bottom (FLS §6.4:14).
+                    //
+                    // Cache-line note: a 4×4 i32 grid (16 slots × 8 bytes) spans two
+                    // 64-byte cache lines.
+                    if !elems.is_empty()
+                        && elems.iter().all(|e| matches!(&e.kind, ExprKind::Array(_)))
+                    {
+                        let outer_n = elems.len();
+                        let inner_n = match &elems[0].kind {
+                            ExprKind::Array(row) => row.len(),
+                            _ => unreachable!(),
+                        };
+                        let total = outer_n * inner_n;
+                        let base_slot = self.alloc_slot()?;
+                        for _ in 1..total {
+                            self.alloc_slot()?;
+                        }
+                        self.locals.insert(var_name, base_slot);
+                        self.local_array_lens.insert(base_slot, outer_n);
+                        self.local_array_inner_lens.insert(base_slot, inner_n);
+                        for (i, row_expr) in elems.iter().enumerate() {
+                            let ExprKind::Array(cols) = &row_expr.kind else { unreachable!() };
+                            for (j, elem_expr) in cols.iter().enumerate() {
+                                let val = self.lower_expr(elem_expr, &IrTy::I32)?;
+                                let src = self.val_to_reg(val)?;
+                                let slot = base_slot + (i * inner_n + j) as u8;
+                                self.instrs.push(Instr::Store { src, slot });
+                            }
+                        }
+                        return Ok(());
+                    }
+
                     let n = elems.len();
                     // Allocate N consecutive slots.
                     let base_slot = self.alloc_slot()?;
@@ -8667,6 +8716,63 @@ impl<'src> LowerCtx<'src> {
                     // expressions are valid LHS for assignment. We restrict the base
                     // to a simple variable path (consistent with plain assignment).
                     ExprKind::Index { base, index } => {
+                        // FLS §6.9: 2D index store `grid[i][j] = val` where `grid` is `[[T; M]; N]`.
+                        //
+                        // Detected when `base` is itself an index expression with a variable base.
+                        // Linear slot = base_slot + i * M + j. Emits LoadImm + Mul + Add + StoreIndexed.
+                        // FLS §6.1.2:37–45: All instructions are runtime.
+                        if let ExprKind::Index { base: inner_base, index: i_expr } = &base.kind
+                            && let ExprKind::Path(segs) = &inner_base.kind
+                            && segs.len() == 1
+                        {
+                            let var_name = segs[0].text(self.source);
+                            let base_slot =
+                                self.locals.get(var_name).copied().ok_or_else(|| {
+                                    LowerError::Unsupported(format!(
+                                        "undefined variable `{var_name}` in 2D index assignment"
+                                    ))
+                                })?;
+                            let inner_len =
+                                *self.local_array_inner_lens.get(&base_slot).ok_or_else(|| {
+                                    LowerError::Unsupported(format!(
+                                        "variable `{var_name}` is not a 2D array"
+                                    ))
+                                })?;
+                            // Lower RHS first.
+                            let rhs_val = self.lower_expr(rhs, &IrTy::I32)?;
+                            let src_reg = self.val_to_reg(rhs_val)?;
+                            // Lower indices.
+                            let i_val = self.lower_expr(i_expr, &IrTy::I32)?;
+                            let i_reg = self.val_to_reg(i_val)?;
+                            let j_val = self.lower_expr(index, &IrTy::I32)?;
+                            let j_reg = self.val_to_reg(j_val)?;
+                            // Compute linear index.
+                            let m_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::LoadImm(m_reg, inner_len as i32));
+                            let prod_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::BinOp {
+                                op: IrBinOp::Mul,
+                                dst: prod_reg,
+                                lhs: i_reg,
+                                rhs: m_reg,
+                            });
+                            let linear_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::BinOp {
+                                op: IrBinOp::Add,
+                                dst: linear_reg,
+                                lhs: prod_reg,
+                                rhs: j_reg,
+                            });
+                            let scratch = self.alloc_reg()?;
+                            self.instrs.push(Instr::StoreIndexed {
+                                src: src_reg,
+                                base_slot,
+                                index_reg: linear_reg,
+                                scratch,
+                            });
+                            return Ok(IrValue::Unit);
+                        }
+
                         // Resolve base array variable to its stack slot.
                         let base_slot = match &base.kind {
                             ExprKind::Path(segs) if segs.len() == 1 => {
@@ -10926,6 +11032,63 @@ impl<'src> LowerCtx<'src> {
             // Cache-line note: `LoadIndexed` emits two 4-byte instructions (add + ldr),
             // so an indexed read costs 8 bytes of instruction cache.
             ExprKind::Index { base, index } => {
+                // FLS §6.9: 2D indexing `grid[i][j]` where `grid` is `[[T; M]; N]`.
+                //
+                // The outer `Index { base: Inner, index: j }` has an inner base that
+                // is itself an `Index { base: Path("grid"), index: i }`. The linear
+                // slot is `base_slot_of_grid + i * M + j` where M is the inner length.
+                //
+                // Runtime code emitted: LoadImm(M) + Mul(i*M) + Add(i*M+j) + LoadIndexed.
+                // FLS §6.1.2:37–45: All instructions are runtime.
+                // Cache-line note: 4 instructions (16 bytes) for a 2D index read.
+                if let ExprKind::Index { base: inner_base, index: i_expr } = &base.kind
+                    && let ExprKind::Path(segs) = &inner_base.kind
+                    && segs.len() == 1
+                {
+                    let var_name = segs[0].text(self.source);
+                    let base_slot = *self.locals.get(var_name).ok_or_else(|| {
+                        LowerError::Unsupported(format!(
+                            "undefined variable `{var_name}` in 2D index expression"
+                        ))
+                    })?;
+                    let inner_len =
+                        *self.local_array_inner_lens.get(&base_slot).ok_or_else(|| {
+                            LowerError::Unsupported(format!(
+                                "variable `{var_name}` is not a 2D array (nested indexing requires [[T; M]; N])"
+                            ))
+                        })?;
+                    // Lower outer (row) index i.
+                    let i_val = self.lower_expr(i_expr, &IrTy::I32)?;
+                    let i_reg = self.val_to_reg(i_val)?;
+                    // Lower inner (column) index j.
+                    let j_val = self.lower_expr(index, &IrTy::I32)?;
+                    let j_reg = self.val_to_reg(j_val)?;
+                    // Compute linear index: i * inner_len + j.
+                    let m_reg = self.alloc_reg()?;
+                    self.instrs.push(Instr::LoadImm(m_reg, inner_len as i32));
+                    let prod_reg = self.alloc_reg()?;
+                    self.instrs.push(Instr::BinOp {
+                        op: IrBinOp::Mul,
+                        dst: prod_reg,
+                        lhs: i_reg,
+                        rhs: m_reg,
+                    });
+                    let linear_reg = self.alloc_reg()?;
+                    self.instrs.push(Instr::BinOp {
+                        op: IrBinOp::Add,
+                        dst: linear_reg,
+                        lhs: prod_reg,
+                        rhs: j_reg,
+                    });
+                    let dst = self.alloc_reg()?;
+                    self.instrs.push(Instr::LoadIndexed {
+                        dst,
+                        base_slot,
+                        index_reg: linear_reg,
+                    });
+                    return Ok(IrValue::Reg(dst));
+                }
+
                 // Resolve the base to an array variable's stack slot.
                 let base_slot = match &base.kind {
                     ExprKind::Path(segs) if segs.len() == 1 => {
