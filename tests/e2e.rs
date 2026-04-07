@@ -14290,3 +14290,199 @@ fn main() -> i32 {
     assert!(asm.contains("mul"), "2D index must emit mul for row stride: {asm}");
     assert!(asm.contains("ldr"), "2D index must emit ldr: {asm}");
 }
+
+// ── Milestone 109: for loops over array variables (FLS §6.15.1, §6.8, §6.9) ──
+
+/// Milestone 109: sum elements of an array with a for-in loop.
+///
+/// FLS §6.15.1: for loops visit each element in sequence.
+/// FLS §6.8: Array literals occupy consecutive stack slots.
+/// FLS §6.9: Each element is loaded via indexed access.
+///
+/// FLS §6.15.1 AMBIGUOUS: The spec desugars `for x in arr` to
+/// `IntoIterator::into_iter(arr)`. Galvanic special-cases arrays at the IR
+/// level since no runtime trait dispatch is available at this milestone.
+#[test]
+fn milestone_109_for_array_sum() {
+    let src = r#"
+fn main() -> i32 {
+    let arr = [10, 20, 30, 40, 50];
+    let mut sum = 0;
+    for x in arr {
+        sum += x;
+    }
+    sum - 150
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "sum should be 150, got exit {exit_code}");
+}
+
+/// Milestone 109: first element accessed via for-in loop.
+///
+/// FLS §6.15.1: The loop variable is bound to each element in order.
+/// The first element should be bound on the first iteration.
+#[test]
+fn milestone_109_for_array_first_element() {
+    let src = r#"
+fn main() -> i32 {
+    let arr = [7, 2, 3];
+    let mut first = 0;
+    for x in arr {
+        first = x;
+        break;
+    }
+    first - 7
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "first element should be 7, got exit {exit_code}");
+}
+
+/// Milestone 109: for-array loop with element passed to a function.
+///
+/// FLS §6.12.1: Call expressions. The loop variable is a valid argument.
+/// FLS §6.15.1: Each iteration binds the next element.
+#[test]
+fn milestone_109_for_array_element_to_fn() {
+    let src = r#"
+fn double(x: i32) -> i32 { x * 2 }
+fn main() -> i32 {
+    let arr = [1, 2, 3];
+    let mut sum = 0;
+    for x in arr {
+        sum += double(x);
+    }
+    sum - 12
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "doubled sum should be 12, got exit {exit_code}");
+}
+
+/// Milestone 109: for-array loop with conditional body.
+///
+/// FLS §6.17: if expressions inside for bodies work normally.
+/// FLS §6.15.1: The body executes once per element.
+#[test]
+fn milestone_109_for_array_conditional_body() {
+    let src = r#"
+fn main() -> i32 {
+    let arr = [1, 2, 3, 4, 5];
+    let mut count = 0;
+    for x in arr {
+        if x > 2 {
+            count += 1;
+        }
+    }
+    count - 3
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "count of elements > 2 should be 3, got exit {exit_code}");
+}
+
+/// Milestone 109: for-array loop with single element array.
+///
+/// FLS §6.15.1: A single-element array produces exactly one iteration.
+#[test]
+fn milestone_109_for_array_single_element() {
+    let src = r#"
+fn main() -> i32 {
+    let arr = [42];
+    let mut result = 0;
+    for x in arr {
+        result = x;
+    }
+    result - 42
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "result should be 42, got exit {exit_code}");
+}
+
+/// Milestone 109: for-array loop count with arithmetic on element.
+///
+/// FLS §6.5.5: Arithmetic on the loop variable.
+/// FLS §6.15.1: Each element is visited exactly once.
+#[test]
+fn milestone_109_for_array_arithmetic_on_element() {
+    let src = r#"
+fn main() -> i32 {
+    let arr = [1, 2, 3, 4];
+    let mut result = 0;
+    for x in arr {
+        result += x * x;
+    }
+    result - 30
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "sum of squares should be 30, got exit {exit_code}");
+}
+
+/// Milestone 109: for-array loop with array parameter.
+///
+/// FLS §6.15.1: The iterator can be an array parameter as well as a local.
+/// FLS §9: Function parameters are valid array sources for for-in.
+#[test]
+fn milestone_109_for_array_param() {
+    let src = r#"
+fn sum_arr(arr: [i32; 4]) -> i32 {
+    let mut s = 0;
+    for x in arr {
+        s += x;
+    }
+    s
+}
+fn main() -> i32 {
+    sum_arr([3, 7, 2, 8]) - 20
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "sum should be 20, got exit {exit_code}");
+}
+
+/// Milestone 109: for-array loop with continue.
+///
+/// FLS §6.15.7: continue in a for loop skips the remainder of the body
+/// and advances to the next element.
+#[test]
+fn milestone_109_for_array_continue() {
+    let src = r#"
+fn main() -> i32 {
+    let arr = [1, 2, 3, 4, 5];
+    let mut sum = 0;
+    for x in arr {
+        if x == 3 {
+            continue;
+        }
+        sum += x;
+    }
+    sum - 12
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "sum skipping 3 should be 12, got exit {exit_code}");
+}
+
+/// Assembly inspection: for-array loop emits LoadIndexed.
+///
+/// FLS §6.9: Array element access uses indexed load.
+/// FLS §6.15.1: Loop control uses cmp + branch instructions.
+#[test]
+fn runtime_for_array_emits_load_indexed() {
+    let src = r#"
+fn main() -> i32 {
+    let arr = [1, 2, 3];
+    let mut sum = 0;
+    for x in arr {
+        sum += x;
+    }
+    sum
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(asm.contains("lsl"), "for-array must emit lsl #3 for indexed load: {asm}");
+    assert!(asm.contains("ldr"), "for-array must emit ldr: {asm}");
+}
