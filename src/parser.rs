@@ -34,6 +34,7 @@ use crate::ast::{
     BinOp, Block, EnumDef, EnumVariant, EnumVariantKind, Expr, ExprKind, FnDef, Item, ItemKind,
     NamedField, Param, ParamKind, Pat, SourceFile, Span, Stmt, StmtKind, StructDef, StructKind,
     Ty, TyKind, TupleField, UnaryOp, Visibility, ImplDef, TraitDef, ConstDef, StaticDef, TypeAliasDef,
+    AssocTypeDef,
 };
 use crate::lexer::{Token, TokenKind};
 
@@ -388,8 +389,15 @@ impl<'src> Parser<'src> {
 
         let mut methods = Vec::new();
         let mut assoc_consts = Vec::new();
+        let mut assoc_types = Vec::new();
         while self.peek_kind() != TokenKind::CloseBrace && self.peek_kind() != TokenKind::Eof {
             let vis = self.parse_visibility();
+            // FLS §10.2: `type Name = Ty;` is an associated type binding in an impl block.
+            if self.peek_kind() == TokenKind::KwType {
+                let at = self.parse_assoc_type_def()?;
+                assoc_types.push(at);
+                continue;
+            }
             // FLS §10.3: `const NAME: Ty = EXPR;` is an associated constant (not a `const fn`).
             // Distinguish by peeking: `const fn` → const function, `const IDENT` → assoc const.
             if self.peek_kind() == TokenKind::KwConst
@@ -410,7 +418,7 @@ impl<'src> Parser<'src> {
             };
             if self.peek_kind() != TokenKind::KwFn {
                 return Err(self.error(format!(
-                    "expected `fn` or `const` inside impl block, found {:?}",
+                    "expected `fn`, `const`, or `type` inside impl block, found {:?}",
                     self.peek_kind()
                 )));
             }
@@ -422,7 +430,7 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::CloseBrace)?;
         let span = start.to(end);
 
-        Ok(ImplDef { ty, trait_name, methods, assoc_consts, span })
+        Ok(ImplDef { ty, trait_name, methods, assoc_consts, assoc_types, span })
     }
 
     /// Parse a trait definition.
@@ -460,8 +468,15 @@ impl<'src> Parser<'src> {
 
         let mut methods = Vec::new();
         let mut assoc_consts = Vec::new();
+        let mut assoc_types = Vec::new();
         while self.peek_kind() != TokenKind::CloseBrace && self.peek_kind() != TokenKind::Eof {
             let vis = self.parse_visibility();
+            // FLS §10.2: `type Name;` or `type Name = Ty;` in a trait body.
+            if self.peek_kind() == TokenKind::KwType {
+                let at = self.parse_assoc_type_def()?;
+                assoc_types.push(at);
+                continue;
+            }
             // FLS §10.3: `const NAME: Ty;` or `const NAME: Ty = EXPR;` in a trait body.
             if self.peek_kind() == TokenKind::KwConst
                 && self.peek_nth(1) != TokenKind::KwFn
@@ -481,7 +496,7 @@ impl<'src> Parser<'src> {
             };
             if self.peek_kind() != TokenKind::KwFn {
                 return Err(self.error(format!(
-                    "expected `fn` or `const` inside trait body, found {:?}",
+                    "expected `fn`, `const`, or `type` inside trait body, found {:?}",
                     self.peek_kind()
                 )));
             }
@@ -496,7 +511,7 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::CloseBrace)?;
         let span = start.to(end);
 
-        Ok(TraitDef { name, methods, assoc_consts, span })
+        Ok(TraitDef { name, methods, assoc_consts, assoc_types, span })
     }
 
     /// Consume a `self`, `&self`, or `&mut self` parameter if present.
@@ -594,6 +609,36 @@ impl<'src> Parser<'src> {
         let end = self.current_span();
         self.expect(TokenKind::Semi)?;
         Ok(crate::ast::AssocConst { name, ty, value, span: start.to(end) })
+    }
+
+    /// Parse an associated type declaration inside an `impl` or `trait` block.
+    ///
+    /// FLS §10.2: Associated Types.
+    ///
+    /// Grammar:
+    /// ```text
+    /// AssocTypeDecl ::= "type" Identifier ("=" Type)? ";"
+    /// ```
+    ///
+    /// In a trait body: `type Item;` (abstract) or `type Item = i32;` (with default).
+    /// In an impl block: `type Item = i32;` (concrete binding).
+    ///
+    /// FLS §10.2: "Each implementation of the trait must provide a type binding
+    /// for each abstract associated type declared in the trait."
+    fn parse_assoc_type_def(&mut self) -> Result<AssocTypeDef, ParseError> {
+        let start = self.current_span();
+        self.expect(TokenKind::KwType)?;
+        let name = self.expect(TokenKind::Ident)?;
+        // Optional `= Type` — present in impl blocks and trait defaults, absent in
+        // abstract trait declarations.
+        let ty = if self.eat(TokenKind::Eq) {
+            Some(self.parse_ty()?)
+        } else {
+            None
+        };
+        let end = self.current_span();
+        self.expect(TokenKind::Semi)?;
+        Ok(AssocTypeDef { name, ty, span: start.to(end) })
     }
 
     /// Parse a static item declaration.

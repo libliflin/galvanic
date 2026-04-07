@@ -869,6 +869,34 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         }
     }
 
+    // Collect associated type bindings from impl blocks. FLS §10.2: Associated Types.
+    //
+    // Each `impl TypeName { type Item = ConcreteType; }` is added to the type alias
+    // map under TWO keys:
+    //   - `"TypeName::Item"` → for calls from outside (e.g. function return type annotations)
+    //   - `"Self::Item"` is NOT added globally — it is added per-impl below when lowering
+    //     methods, so that `Self` resolves correctly only within each impl's scope.
+    //
+    // FLS §10.2: "Each use of an associated type is substituted with the concrete type
+    // provided in the implementation."
+    //
+    // Cache-line note: the assoc-type map is built once and shared read-only.
+    // Not on any hot runtime path.
+    for item in &src.items {
+        if let ItemKind::Impl(impl_def) = &item.kind {
+            let type_name = impl_def.ty.text(source);
+            for at in &impl_def.assoc_types {
+                if let Some(ty) = &at.ty {
+                    let at_name = at.name.text(source);
+                    let key = format!("{type_name}::{at_name}");
+                    if let Ok(irt) = lower_ty(ty, source, &type_alias_irtys) {
+                        type_alias_irtys.insert(key, irt);
+                    }
+                }
+            }
+        }
+    }
+
     // Collect constant item values: maps const name → i32 value.
     //
     // FLS §7.1: Constant items are compile-time values substituted at every
@@ -2976,6 +3004,18 @@ fn lower_ty(
 ) -> Result<IrTy, LowerError> {
     match &ty.kind {
         TyKind::Unit => Ok(IrTy::Unit),
+        // FLS §10.2: Associated types as two-segment paths, e.g. `TypeName::Item` or
+        // `Self::Item`. When inside a method on impl type `T`, `Self::X` resolves to
+        // the concrete type stored under the key `"T::X"` in `type_aliases` (which
+        // is populated from the assoc-type registry built during the first lowering pass).
+        TyKind::Path(segments) if segments.len() == 2 => {
+            let key = format!("{}::{}", segments[0].text(source), segments[1].text(source));
+            if let Some(&irt) = type_aliases.get(&key) {
+                Ok(irt)
+            } else {
+                Err(LowerError::Unsupported(format!("associated type `{key}` (not found in registry)")))
+            }
+        }
         TyKind::Path(segments) if segments.len() == 1 => {
             match segments[0].text(source) {
                 // FLS §4.1: Signed integer types. i8/i16/i64/isize all use
@@ -7359,6 +7399,36 @@ impl<'src> LowerCtx<'src> {
                                 }
                             }
                         }
+                        return Ok(());
+                    }
+                }
+
+                // FLS §6.11, §14.2: Unit struct constructor in let binding.
+                //
+                // `let u = Unit;` where `Unit` is a zero-field named struct.
+                // In Rust, a unit struct name used as an expression is syntactic
+                // sugar for `Unit {}` (a zero-field struct literal). There are no
+                // fields to evaluate or store — allocate one dummy slot and
+                // register the variable as a struct type so method calls work.
+                //
+                // FLS §11: impl blocks for unit structs are valid; the dummy slot
+                // ensures `&self` has a consistent stack address even though the
+                // struct carries no data.
+                //
+                // Cache-line note: one `alloc_slot` per unit struct binding,
+                // zero store instructions — smaller footprint than any fielded struct.
+                if let Some(init_expr) = init.as_ref()
+                    && let ExprKind::Path(segs) = &init_expr.kind
+                    && segs.len() == 1
+                {
+                    let ctor_name = segs[0].text(self.source);
+                    if let Some(field_names) = self.struct_defs.get(ctor_name)
+                        && field_names.is_empty()
+                    {
+                        let struct_name = ctor_name.to_owned();
+                        let base_slot = self.alloc_slot()?;
+                        self.locals.insert(var_name, base_slot);
+                        self.local_struct_types.insert(base_slot, struct_name);
                         return Ok(());
                     }
                 }

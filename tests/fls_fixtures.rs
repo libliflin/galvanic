@@ -72,3 +72,8 @@ fn fls_4_10_type_aliases() {
 fn fls_10_3_assoc_consts() {
     assert_galvanic_accepts("fls_10_3_assoc_consts.rs");
 }
+
+#[test]
+fn fls_10_2_assoc_types() {
+    assert_galvanic_accepts("fls_10_2_assoc_types.rs");
+}
