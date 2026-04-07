@@ -2414,6 +2414,10 @@ impl<'src> Parser<'src> {
             // produced by the lexer for `||` (logical-or) — at primary
             // level it can only be a zero-parameter closure.
             //
+            // `move |params| body` — FLS §6.14, §6.22: the `move` keyword
+            // causes captured variables to be moved into the closure
+            // environment. For Copy types this is identical to non-move.
+            //
             // Disambiguation: `|` as bitwise OR is handled at the
             // parse_bitwise_or level, which calls parse_unary →
             // parse_primary only when building the right operand. At
@@ -2423,8 +2427,15 @@ impl<'src> Parser<'src> {
             //
             // FLS §6.14 AMBIGUOUS: The spec lists attribute support
             // on closure params; galvanic does not implement attributes.
-            TokenKind::Or => self.parse_closure(false),
-            TokenKind::OrOr => self.parse_closure(true),
+            TokenKind::Or => self.parse_closure(false, false),
+            TokenKind::OrOr => self.parse_closure(true, false),
+            TokenKind::KwMove => {
+                self.advance(); // eat `move`
+                match self.peek_kind() {
+                    TokenKind::OrOr => self.parse_closure(true, true),
+                    _ => self.parse_closure(false, true),
+                }
+            }
 
             kind => Err(self.error(format!("expected expression, found {kind:?}"))),
         }
@@ -2623,23 +2634,23 @@ impl<'src> Parser<'src> {
     /// Grammar (simplified for galvanic's current subset):
     /// ```text
     /// ClosureExpression ::=
-    ///     "|" ClosureParam* "|" ("->" Type)? ExpressionWithoutBlock
-    ///   | "||"              "|" ("->" Type)? ExpressionWithoutBlock
+    ///     "move"? "|" ClosureParam* "|" ("->" Type)? ExpressionWithoutBlock
+    ///   | "move"? "||"                  ("->" Type)? ExpressionWithoutBlock
     /// ClosureParam ::= Pattern (":" Type)?
     /// ```
     ///
     /// `zero_params`: if `true`, the caller already consumed `||` (zero-param
-    /// shorthand); if `false`, the caller consumed `|` and we parse params.
+    /// shorthand); if `false`, the caller consumed `|` (or will consume it
+    /// here) and we parse params.
+    /// `is_move`: if `true`, the `move` keyword was already consumed.
     ///
     /// FLS §6.14: Non-capturing closures coerce to `fn` pointer types.
     /// Galvanic compiles them to hidden named functions and materialises the
     /// address as a function pointer value.
     ///
-    /// FLS §6.14 AMBIGUOUS: The spec does not specify how non-capturing
-    /// closures are distinguished from capturing ones at the syntax level.
-    /// Galvanic defers capture analysis; at this milestone all closures are
-    /// treated as non-capturing (no environment access is supported).
-    fn parse_closure(&mut self, zero_params: bool) -> Result<Expr, ParseError> {
+    /// FLS §6.22: `move` closures capture by value. For `Copy` types this
+    /// is semantically identical to shared-reference capture.
+    fn parse_closure(&mut self, zero_params: bool, is_move: bool) -> Result<Expr, ParseError> {
         use crate::ast::{ClosureParam, Pat};
 
         let start = self.current_span();
@@ -2710,7 +2721,7 @@ impl<'src> Parser<'src> {
         };
 
         let span = start.to(body.span);
-        Ok(Expr { kind: ExprKind::Closure { params, ret_ty, body }, span })
+        Ok(Expr { kind: ExprKind::Closure { is_move, params, ret_ty, body }, span })
     }
 
     /// Parse a match arm pattern, including OR patterns.

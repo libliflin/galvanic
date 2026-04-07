@@ -13440,7 +13440,7 @@ impl<'src> LowerCtx<'src> {
             // Cache-line note: the closure address fits in one 8-byte register.
             // Each captured variable adds one extra argument register per call —
             // same cost as an explicit parameter.
-            ExprKind::Closure { params, ret_ty, body } => {
+            ExprKind::Closure { is_move: _, params, ret_ty, body } => {
                 // Generate a unique name for the closure function.
                 let closure_name =
                     format!("__closure_{}_{}", self.fn_name, self.closure_counter);

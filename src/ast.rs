@@ -1172,13 +1172,19 @@ pub enum ExprKind {
     ///
     /// `|params| body` or `|params| -> RetTy { body }` or `|| body`.
     ///
-    /// Galvanic supports non-capturing closures only at this milestone.
+    /// Galvanic supports capturing closures at this milestone.
     /// Non-capturing closures coerce to `fn` pointer types (FLS §4.9,
     /// FLS §6.14). The closure compiles to a hidden named function and
     /// the expression evaluates to its address as a function pointer.
+    /// `move` closures capture by value (FLS §6.14, §6.22).
     ///
     /// Cache-line note: the address itself fits in one 8-byte slot.
     Closure {
+        /// Whether the closure uses the `move` keyword (FLS §6.14, §6.22).
+        ///
+        /// For `Copy` types (i32, bool, f64, etc.) `move` and non-move
+        /// closures are semantically identical — the value is copied either way.
+        is_move: bool,
         /// Parameters: pattern + optional type annotation.
         ///
         /// FLS §6.14: `ClosureParam → Pattern (`:` Type)?`

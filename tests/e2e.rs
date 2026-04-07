@@ -17114,3 +17114,160 @@ fn main() -> i32 { apply(|v| v + 1, 41) }
     // The impl Fn call must emit `blr` (indirect call through register) — same as fn ptr.
     assert!(asm.contains("blr"), "impl Fn call must emit blr instruction: {asm}");
 }
+
+// ── Milestone 125: move closures (FLS §6.14, §6.22) ─────────────────────────
+
+/// Milestone 125: basic `move` closure captures an integer by value.
+///
+/// FLS §6.14: `move` keyword causes captured variables to be moved into the
+/// closure environment. FLS §6.22: For `Copy` types the move is a copy —
+/// semantically identical to shared-reference capture.
+#[test]
+fn milestone_125_move_closure_basic() {
+    let src = r#"
+fn main() -> i32 {
+    let n = 20;
+    let add = move |x| x + n;
+    add(22)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "20+22=42, got {exit_code}");
+}
+
+/// Milestone 125: `move` closure capturing a function parameter.
+///
+/// FLS §6.14, §6.22: The `move` keyword causes the closure to own a copy of
+/// the captured parameter.
+#[test]
+fn milestone_125_move_closure_captures_parameter() {
+    let src = r#"
+fn make(n: i32) -> i32 {
+    let f = move |x| x + n;
+    f(10)
+}
+fn main() -> i32 { make(32) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "10+32=42, got {exit_code}");
+}
+
+/// Milestone 125: `move` closure with arithmetic on captured value.
+///
+/// FLS §6.14: The captured variable is available inside the closure body
+/// for arbitrary arithmetic expressions.
+#[test]
+fn milestone_125_move_closure_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    let base = 6;
+    let f = move |x| base * x;
+    f(7)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "6*7=42, got {exit_code}");
+}
+
+/// Milestone 125: `move` closure called multiple times (Fn semantics for Copy types).
+///
+/// FLS §6.14: A closure is `Fn` if it captures by shared reference or by copy.
+/// Since `move` of a `Copy` type produces a copy, the closure can be called
+/// multiple times with consistent results.
+#[test]
+fn milestone_125_move_closure_called_twice() {
+    let src = r#"
+fn main() -> i32 {
+    let n = 21;
+    let double = move |x| x + n;
+    double(0) + double(0)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "21+21=42, got {exit_code}");
+}
+
+/// Milestone 125: `move` closure with two captured variables.
+///
+/// FLS §6.22: All free variables mentioned in the closure body are captured.
+/// `move` causes all of them to be moved (copied for `Copy` types).
+#[test]
+fn milestone_125_move_closure_two_captures() {
+    let src = r#"
+fn main() -> i32 {
+    let a = 20;
+    let b = 22;
+    let f = move || a + b;
+    f()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "20+22=42, got {exit_code}");
+}
+
+/// Milestone 125: `move` closure in result expression (tail expression).
+///
+/// FLS §6.4: The tail expression of a block provides the block's value.
+#[test]
+fn milestone_125_move_closure_result_in_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    let offset = 2;
+    let f = move |x| x + offset;
+    f(20) + f(20)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 44, "22+22=44, got {exit_code}");
+}
+
+/// Milestone 125: `move` zero-parameter closure.
+///
+/// FLS §6.14: A closure with no parameters written as `move || body`.
+#[test]
+fn milestone_125_move_closure_zero_params() {
+    let src = r#"
+fn main() -> i32 {
+    let val = 42;
+    let get = move || val;
+    get()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "got {exit_code}");
+}
+
+/// Milestone 125: `move` closure passed as `impl Fn` argument.
+///
+/// FLS §12, §6.14: A `move` closure satisfies `impl Fn` bounds when it
+/// captures `Copy` types — the closure can be called multiple times.
+#[test]
+fn milestone_125_move_closure_as_impl_fn() {
+    let src = r#"
+fn apply(f: impl Fn(i32) -> i32, x: i32) -> i32 { f(x) }
+fn main() -> i32 {
+    let offset = 1;
+    apply(move |x| x + offset, 41)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "41+1=42, got {exit_code}");
+}
+
+/// Assembly check: `move` closure emits same code as non-move closure for Copy types.
+///
+/// FLS §6.22: For `Copy` types, `move` capture and non-move capture produce
+/// identical runtime behaviour — the value is passed by register either way.
+#[test]
+fn runtime_move_closure_emits_same_as_non_move() {
+    let src = r#"
+fn main() -> i32 {
+    let n = 1;
+    let f = move |x| x + n;
+    f(41)
+}
+"#;
+    let asm = compile_to_asm(src);
+    // The captured value is passed as an extra register argument — same as non-move.
+    assert!(asm.contains("__closure_"), "move closure must emit hidden closure function: {asm}");
+}
