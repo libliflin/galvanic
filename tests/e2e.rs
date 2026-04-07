@@ -12477,3 +12477,163 @@ fn main() -> i32 {
         "expected `fcvtzs` after fadd in assembly:\n{asm}"
     );
 }
+
+// ── Milestone 98: f32 literals compile to runtime ARM64 (FLS §2.4.4.2) ──────
+
+/// Milestone 98: f32 literal with _f32 suffix, cast directly to i32.
+///
+/// FLS §2.4.4.2: The suffix `_f32` selects the 32-bit float type.
+/// FLS §6.5.9: `f32 as i32` truncates toward zero.
+#[test]
+fn milestone_98_f32_literal_direct_cast() {
+    let src = r#"
+fn main() -> i32 {
+    3.0_f32 as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "3.0_f32 as i32 = 3, got {exit_code}");
+}
+
+/// Milestone 98: f32 literal bound to a let binding, then cast.
+///
+/// FLS §8.1: `let x: f32 = 2.5` stores s{N} to a stack slot via StoreF32.
+/// FLS §6.5.9: `x as i32` truncates toward zero → 2.
+#[test]
+fn milestone_98_f32_let_binding_then_cast() {
+    let src = r#"
+fn main() -> i32 {
+    let x: f32 = 2.5_f32;
+    x as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2, "2.5_f32 as i32 = 2 (truncate), got {exit_code}");
+}
+
+/// Milestone 98: truncation toward zero (not floor).
+///
+/// FLS §6.5.9: `f32 as i32` truncates toward zero.
+#[test]
+fn milestone_98_f32_truncation_toward_zero() {
+    let src = r#"
+fn main() -> i32 {
+    let x: f32 = 3.9_f32;
+    x as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "3.9_f32 as i32 = 3 (truncate not floor), got {exit_code}");
+}
+
+/// Milestone 98: two f32 bindings, sum their i32 casts.
+///
+/// FLS §8.1: Multiple f32 bindings use separate stack slots.
+/// FLS §6.5.9: Each `as i32` truncates independently.
+#[test]
+fn milestone_98_two_f32_bindings_summed() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f32 = 2.0_f32;
+    let b: f32 = 3.0_f32;
+    (a as i32) + (b as i32)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "2.0_f32 + 3.0_f32 as i32 = 5, got {exit_code}");
+}
+
+/// Milestone 98: f32 addition.
+///
+/// FLS §6.5.5: The `+` operator on `f32` operands produces an `f32` result.
+/// FLS §6.5.9: Cast to i32 for exit code.
+#[test]
+fn milestone_98_f32_add() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f32 = 1.5_f32;
+    let b: f32 = 2.5_f32;
+    (a + b) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 4, "1.5_f32 + 2.5_f32 = 4.0 as i32 = 4, got {exit_code}");
+}
+
+/// Milestone 98: f32 subtraction.
+///
+/// FLS §6.5.5: The `-` operator on `f32` operands produces an `f32` result.
+#[test]
+fn milestone_98_f32_sub() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f32 = 10.0_f32;
+    let b: f32 = 3.0_f32;
+    (a - b) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "10.0_f32 - 3.0_f32 = 7.0 as i32 = 7, got {exit_code}");
+}
+
+/// Milestone 98: f32 multiplication.
+///
+/// FLS §6.5.5: The `*` operator on `f32` operands produces an `f32` result.
+#[test]
+fn milestone_98_f32_mul() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f32 = 3.0_f32;
+    let b: f32 = 4.0_f32;
+    (a * b) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 12, "3.0_f32 * 4.0_f32 = 12.0 as i32 = 12, got {exit_code}");
+}
+
+/// Milestone 98: f32 division.
+///
+/// FLS §6.5.5: The `/` operator on `f32` operands produces an `f32` result.
+#[test]
+fn milestone_98_f32_div() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f32 = 15.0_f32;
+    let b: f32 = 3.0_f32;
+    (a / b) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "15.0_f32 / 3.0_f32 = 5.0 as i32 = 5, got {exit_code}");
+}
+
+/// Assembly check: f32 literal emits ADRP + ADD + LDR into s{N}.
+///
+/// FLS §2.4.4.2: f32 constants are loaded from .rodata via s-registers.
+/// The constant label uses `__f32c{idx}` suffix (vs `__fc{idx}` for f64).
+#[test]
+fn runtime_f32_literal_emits_ldr_into_sreg() {
+    let src = r#"
+fn main() -> i32 {
+    3.0_f32 as i32
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("ldr     s"),
+        "expected `ldr s` (single-precision float load) in assembly:\n{asm}"
+    );
+    assert!(
+        asm.contains("fcvtzs"),
+        "expected `fcvtzs` (float-to-int) in assembly:\n{asm}"
+    );
+    assert!(
+        asm.contains("main__f32c0"),
+        "expected f32 constant label main__f32c0 in assembly:\n{asm}"
+    );
+    assert!(
+        asm.contains(".word"),
+        "expected `.word` directive for f32 constant in assembly:\n{asm}"
+    );
+}

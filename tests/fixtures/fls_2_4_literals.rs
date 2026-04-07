@@ -16,6 +16,15 @@ fn main() {
     let _f = 3.14e5;
     let _g = 8_031.4_e-12f64;
 
+    // FLS §2.4.4.2 — f32 float literals (32-bit single-precision)
+    // The `_f32` suffix selects the `f32` type. FLS §2.4.4.2 lists both
+    // `f32` and `f64` as valid float suffixes. The FLS does not provide
+    // standalone example programs for f32 arithmetic; these are derived
+    // from the section's type description.
+    let _h: f32 = 3.0_f32;
+    let _i: f32 = 1.5_f32;
+    let _j: f32 = 2.5_f32;
+
     // FLS §2.4.7 — Boolean literals
     let _h = true;
     let _i = false;

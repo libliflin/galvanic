@@ -118,19 +118,36 @@ pub fn emit_asm(module: &Module) -> Result<String, CodegenError> {
     // cache line — identical footprint to a static item.  Using .rodata
     // (vs .data) tells the OS to map the page read-only, reducing TLB pressure
     // from store-miss writeback.
-    let has_floats = module.fns.iter().any(|f| !f.float_consts.is_empty());
-    if has_floats {
+    let has_f64_floats = module.fns.iter().any(|f| !f.float_consts.is_empty());
+    let has_f32_floats = module.fns.iter().any(|f| !f.float32_consts.is_empty());
+    if has_f64_floats || has_f32_floats {
         writeln!(out)?;
         writeln!(out, "    .section .rodata")?;
+        // f64 constants: 8 bytes each, 8-byte aligned (.align 3).
         for func in &module.fns {
             for (idx, &bits) in func.float_consts.iter().enumerate() {
-                // Reconstruct the float value for the comment.
                 let val = f64::from_bits(bits);
                 writeln!(out, "    .align 3")?;
                 writeln!(out, "{}__fc{idx}:", func.name)?;
                 writeln!(
                     out,
                     "    .quad 0x{bits:016x}          // f64 {val} (FLS §2.4.4.2)"
+                )?;
+            }
+        }
+        // f32 constants: 4 bytes each, 4-byte aligned (.align 2).
+        //
+        // Cache-line note: two f32 constants fit in one 8-byte cache-line
+        // slot, vs one f64. The `.align 2` directive ensures `ldr s{n}, [x17]`
+        // sees a 4-byte-aligned address as required by ARM64.
+        for func in &module.fns {
+            for (idx, &bits) in func.float32_consts.iter().enumerate() {
+                let val = f32::from_bits(bits);
+                writeln!(out, "    .align 2")?;
+                writeln!(out, "{}__f32c{idx}:", func.name)?;
+                writeln!(
+                    out,
+                    "    .word 0x{bits:08x}            // f32 {val} (FLS §2.4.4.2)"
                 )?;
             }
         }
@@ -962,6 +979,82 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
                 "    {mnemonic}    d{dst}, d{lhs}, d{rhs}           // FLS §6.5.5: f64 {mnemonic}"
             )?;
         }
+
+        // FLS §2.4.4.2: Load a 32-bit float constant from .rodata into s{dst}.
+        //
+        // Same ADRP + ADD + LDR sequence as LoadF64Const but uses `ldr s{dst}`
+        // (4-byte load) instead of `ldr d{dst}` (8-byte load).
+        //
+        // Cache-line note: 3 × 4-byte instructions = 12 bytes. The constant
+        // (.word in .rodata) is one 4-byte slot — half the footprint of f64.
+        Instr::LoadF32Const { dst, idx } => {
+            let label = format!("{fn_name}__f32c{idx}");
+            writeln!(out, "    adrp    x17, {label}              // FLS §2.4.4.2: f32 const addr (page)")?;
+            writeln!(out, "    add     x17, x17, :lo12:{label}  // FLS §2.4.4.2: f32 const addr (offset)")?;
+            writeln!(out, "    ldr     s{dst}, [x17]             // FLS §2.4.4.2: load f32 into s{dst}")?;
+        }
+
+        // FLS §8.1: Store a single-precision float register to a stack slot.
+        //
+        // `str s{src}, [sp, #{slot*8}]` — stores 4 bytes from `s{src}`.
+        // The slot is 8 bytes wide; only the lower 4 bytes are written.
+        //
+        // Cache-line note: one 4-byte instruction.
+        Instr::StoreF32 { src, slot } => {
+            let off = (*slot as u32) * 8;
+            writeln!(
+                out,
+                "    str     s{src}, [sp, #{off:<14}] // FLS §8.1: store f32 slot {slot}"
+            )?;
+        }
+
+        // FLS §8.1: Load a single-precision float register from a stack slot.
+        //
+        // `ldr s{dst}, [sp, #{slot*8}]` — loads 4 bytes into `s{dst}`.
+        //
+        // Cache-line note: one 4-byte instruction.
+        Instr::LoadF32Slot { dst, slot } => {
+            let off = (*slot as u32) * 8;
+            writeln!(
+                out,
+                "    ldr     s{dst}, [sp, #{off:<14}] // FLS §8.1: load f32 slot {slot}"
+            )?;
+        }
+
+        // FLS §6.5.9: Convert a single-precision float register to a signed
+        // 32-bit integer, truncating toward zero.
+        //
+        // `fcvtzs w{dst}, s{src}` — same semantics as F64ToI32 but uses `s`
+        // (single-precision) instead of `d` (double-precision) source.
+        //
+        // FLS §6.5.9 AMBIGUOUS: ARM64 FCVTZS saturates out-of-range values;
+        // Rust requires wrapping (release) or panic (debug). Same as F64ToI32.
+        //
+        // Cache-line note: one 4-byte instruction.
+        Instr::F32ToI32 { dst, src } => {
+            writeln!(
+                out,
+                "    fcvtzs  w{dst}, s{src}              // FLS §6.5.9: f32→i32 truncate"
+            )?;
+        }
+
+        // FLS §6.5.5: Float arithmetic — fadd/fsub/fmul/fdiv on s-registers.
+        //
+        // Same mnemonics as F64BinOp but operands use `s{N}` (single-precision).
+        //
+        // Cache-line note: one 4-byte instruction per f32 binary operation.
+        Instr::F32BinOp { op, dst, lhs, rhs } => {
+            let mnemonic = match op {
+                crate::ir::F32BinOp::Add => "fadd",
+                crate::ir::F32BinOp::Sub => "fsub",
+                crate::ir::F32BinOp::Mul => "fmul",
+                crate::ir::F32BinOp::Div => "fdiv",
+            };
+            writeln!(
+                out,
+                "    {mnemonic}    s{dst}, s{lhs}, s{rhs}           // FLS §6.5.5: f32 {mnemonic}"
+            )?;
+        }
     }
     Ok(())
 }
@@ -1006,6 +1099,12 @@ fn emit_load_x0(out: &mut String, value: &IrValue) -> Result<(), CodegenError> {
         IrValue::FReg(_) => {
             return Err(CodegenError::Unsupported(
                 "returning a float value directly is not yet supported; cast to i32 first".into(),
+            ));
+        }
+        // FLS §4.2: Same for f32 — cast to i32 first.
+        IrValue::F32Reg(_) => {
+            return Err(CodegenError::Unsupported(
+                "returning an f32 value directly is not yet supported; cast to i32 first".into(),
             ));
         }
     }
