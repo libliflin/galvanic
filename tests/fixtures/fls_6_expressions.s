@@ -1332,7 +1332,8 @@ f64_array_index_example:
     mov     x3, #1                   // FLS §2.4.4.1: load imm 1
     add     x9, sp, #0               // FLS §6.9: address of f64 arr[0]
     ldr     d4, [x9, x3, lsl #3] // FLS §6.9: load f64 arr[index]
-    fmov    d0, d4              // FLS §4.2: f64 return reg 4 → d0
+    fcvtzs  w5, d4              // FLS §6.5.9: f64→i32 truncate
+    mov     x0, x5              // FLS §6.19: return reg 5 → x0
     add     sp, sp, #32             // FLS §8.1: restore stack frame
     ret
 
