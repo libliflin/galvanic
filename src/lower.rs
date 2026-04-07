@@ -28,7 +28,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{BinOp, Block, Expr, ExprKind, ItemKind, Pat, SelfKind, SourceFile, Stmt, StmtKind, StructKind, TyKind};
-use crate::ir::{F32BinOp, F64BinOp, IrBinOp, Instr, IrFn, IrTy, IrValue, Module};
+use crate::ir::{F32BinOp, F64BinOp, FCmpOp, IrBinOp, Instr, IrFn, IrTy, IrValue, Module};
 
 /// Enum variant registry: maps enum name → (variant name → (discriminant, field_names)).
 ///
@@ -975,6 +975,10 @@ fn lower_fn(
     // than 1 per parameter when an enum type occupies multiple registers
     // (discriminant + field registers).
     let mut reg_idx: usize = 0;
+    // `freg_idx` tracks the float register index (d0–d7 / s0–s7).
+    // ARM64 ABI: float args occupy a separate register bank from integer args.
+    // FLS §4.2: f64/f32 parameters are passed in d0–d7 / s0–s7.
+    let mut freg_idx: usize = 0;
 
     // FLS §10.1: If this is a method with a self parameter, spill the self
     // value from leading registers.
@@ -1397,21 +1401,52 @@ fn lower_fn(
             }
         }
 
+        let param_ty = lower_ty(&param.ty, source)?;
+
+        // FLS §4.2: f64 parameters are passed in d0–d7 (ARM64 float register bank).
+        // Spill d{freg_idx} to the stack slot and register in float_locals so that
+        // path expressions emit LoadF64Slot rather than the integer Load.
+        if param_ty == IrTy::F64 {
+            if freg_idx >= 8 {
+                return Err(LowerError::Unsupported(
+                    "functions with more than 8 float parameters (exceeds ARM64 float register window)".into(),
+                ));
+            }
+            let slot = ctx.alloc_slot()?;
+            ctx.instrs.push(Instr::StoreF64 { src: freg_idx as u8, slot });
+            ctx.float_locals.insert(param_name, slot);
+            freg_idx += 1;
+            continue;
+        }
+
+        // FLS §4.2: f32 parameters are passed in s0–s7.
+        // Spill s{freg_idx} to the stack slot and register in float32_locals.
+        if param_ty == IrTy::F32 {
+            if freg_idx >= 8 {
+                return Err(LowerError::Unsupported(
+                    "functions with more than 8 float parameters (exceeds ARM64 float register window)".into(),
+                ));
+            }
+            let slot = ctx.alloc_slot()?;
+            ctx.instrs.push(Instr::StoreF32 { src: freg_idx as u8, slot });
+            ctx.float32_locals.insert(param_name, slot);
+            freg_idx += 1;
+            continue;
+        }
+
         // FLS §9: i32 and bool parameters — one register each.
         if reg_idx >= 8 {
             return Err(LowerError::Unsupported(
                 "functions with more than 8 parameters (exceeds ARM64 register window)".into(),
             ));
         }
-        let param_ty = lower_ty(&param.ty, source)?;
-        // Only i32 and bool parameters are supported (both use integer registers).
         // FLS §4.3: bool is passed as a 32-bit integer register on ARM64.
         // FLS §4.1: i32 parameters occupy one 64-bit register (x0–x7).
         // FLS §4.1: All primitive integer types and bool are supported as
         // parameters. Each uses one 64-bit ARM64 register (x0–x7).
         if !matches!(param_ty, IrTy::I32 | IrTy::Bool | IrTy::U32 | IrTy::FnPtr) {
             return Err(LowerError::Unsupported(
-                "parameter type other than i32/bool/u32/i64/u64/usize/isize/i8/i16/u8/u16/fn ptr".into(),
+                "parameter type other than i32/bool/u32/i64/u64/usize/isize/i8/i16/u8/u16/fn ptr/f64/f32".into(),
             ));
         }
         let slot = ctx.alloc_slot()?;
@@ -2631,6 +2666,18 @@ impl<'src> LowerCtx<'src> {
             crate::ast::ExprKind::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div, lhs, rhs } => {
                 self.is_f64_expr(lhs) && self.is_f64_expr(rhs)
             }
+            // FLS §6.5.9: A cast expression `x as f64` produces an f64 value.
+            crate::ast::ExprKind::Cast { ty, .. } => {
+                if let crate::ast::TyKind::Path(segs) = &ty.kind {
+                    segs.len() == 1 && segs[0].text(self.source) == "f64"
+                } else {
+                    false
+                }
+            }
+            // FLS §6.5.4: `-expr` has the same type as `expr`.
+            crate::ast::ExprKind::Unary { op: crate::ast::UnaryOp::Neg, operand } => {
+                self.is_f64_expr(operand)
+            }
             _ => false,
         }
     }
@@ -2653,6 +2700,18 @@ impl<'src> LowerCtx<'src> {
             // FLS §6.5.5: A binary arithmetic expression on f32 operands produces f32.
             crate::ast::ExprKind::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div, lhs, rhs } => {
                 self.is_f32_expr(lhs) && self.is_f32_expr(rhs)
+            }
+            // FLS §6.5.9: A cast expression `x as f32` produces an f32 value.
+            crate::ast::ExprKind::Cast { ty, .. } => {
+                if let crate::ast::TyKind::Path(segs) = &ty.kind {
+                    segs.len() == 1 && segs[0].text(self.source) == "f32"
+                } else {
+                    false
+                }
+            }
+            // FLS §6.5.4: `-expr` has the same type as `expr`.
+            crate::ast::ExprKind::Unary { op: crate::ast::UnaryOp::Neg, operand } => {
+                self.is_f32_expr(operand)
             }
             _ => false,
         }
@@ -7894,6 +7953,8 @@ impl<'src> LowerCtx<'src> {
                 //
                 // FLS §6.1.2:37–45: All loads are runtime instructions.
                 let mut arg_regs = Vec::with_capacity(args.len());
+                // FLS §4.2: Float arguments go in d0–d7; collected separately.
+                let mut float_arg_regs: Vec<u8> = Vec::new();
                 for arg in args {
                     // Check whether this argument is a struct variable.
                     //
@@ -8182,9 +8243,18 @@ impl<'src> LowerCtx<'src> {
                             arg_regs.push(field_reg);
                         }
                     } else {
+                        // FLS §4.2: Float arguments go in the float register bank.
+                        // Lower the arg; if it produces a float value, add it to
+                        // float_arg_regs instead of arg_regs.
                         let val = self.lower_expr(arg, &IrTy::I32)?;
-                        let reg = self.val_to_reg(val)?;
-                        arg_regs.push(reg);
+                        match val {
+                            IrValue::FReg(r) => float_arg_regs.push(r),
+                            IrValue::F32Reg(r) => float_arg_regs.push(r),
+                            _ => {
+                                let reg = self.val_to_reg(val)?;
+                                arg_regs.push(reg);
+                            }
+                        }
                     }
                 }
 
@@ -8192,7 +8262,12 @@ impl<'src> LowerCtx<'src> {
                 let dst = self.alloc_reg()?;
 
                 self.has_calls = true;
-                self.instrs.push(Instr::Call { dst, name: fn_name, args: arg_regs });
+                self.instrs.push(Instr::Call {
+                    dst,
+                    name: fn_name,
+                    args: arg_regs,
+                    float_args: float_arg_regs,
+                });
 
                 Ok(IrValue::Reg(dst))
             }
@@ -8213,6 +8288,43 @@ impl<'src> LowerCtx<'src> {
             // Cache-line note: the emitted `str` is 4 bytes — same footprint
             // as the `str` emitted by a let-binding initializer.
             ExprKind::Binary { op: BinOp::Assign, lhs, rhs } => {
+                // FLS §4.2: Handle f64/f32 variable assignment as early returns.
+                // f64/f32 locals are stored in `float_locals`/`float32_locals`,
+                // not `locals`, so they must be dispatched before the general
+                // slot-resolution block below.
+                //
+                // FLS §6.5.10: The assignment is a runtime store instruction
+                // (FLS §6.1.2:37–45); no compile-time constant folding.
+                if let ExprKind::Path(segments) = &lhs.kind
+                    && segments.len() == 1
+                {
+                    let var_name = segments[0].text(self.source);
+                    if let Some(&slot) = self.float_locals.get(var_name) {
+                        // f64 assignment: lower RHS as F64, emit StoreF64.
+                        let val = self.lower_expr(rhs, &IrTy::F64)?;
+                        let src = match val {
+                            IrValue::FReg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "f64 assignment: RHS did not produce a float register".into(),
+                            )),
+                        };
+                        self.instrs.push(Instr::StoreF64 { src, slot });
+                        return Ok(IrValue::Unit);
+                    }
+                    if let Some(&slot) = self.float32_locals.get(var_name) {
+                        // f32 assignment: lower RHS as F32, emit StoreF32.
+                        let val = self.lower_expr(rhs, &IrTy::F32)?;
+                        let src = match val {
+                            IrValue::F32Reg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "f32 assignment: RHS did not produce an f32 register".into(),
+                            )),
+                        };
+                        self.instrs.push(Instr::StoreF32 { src, slot });
+                        return Ok(IrValue::Unit);
+                    }
+                }
+
                 // Resolve the LHS to a stack slot (must be a declared local or field).
                 //
                 // FLS §6.5.10: The left operand must be a place expression. Galvanic
@@ -8549,10 +8661,68 @@ impl<'src> LowerCtx<'src> {
                     BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne
                 ) =>
             {
-                // Both operands must be i32 at this milestone.
-                // FLS §6.5.3 AMBIGUOUS: the spec does not separately describe
-                // the type-checking rules for comparisons in the absence of
-                // type inference. We assume both sides are i32.
+                // FLS §6.5.3: Comparison operator expressions.
+                //
+                // Dispatch: if both operands are f64, emit FCmpF64 (fcmp + cset);
+                // if both are f32, emit FCmpF32; otherwise treat as i32.
+                //
+                // FLS §6.5.3 AMBIGUOUS: The spec does not describe type-checking
+                // rules for comparisons without type inference. Galvanic uses the
+                // is_f64/f32_expr heuristic to classify operands.
+                let fcmp_op = match op {
+                    BinOp::Lt => Some(FCmpOp::Lt),
+                    BinOp::Le => Some(FCmpOp::Le),
+                    BinOp::Gt => Some(FCmpOp::Gt),
+                    BinOp::Ge => Some(FCmpOp::Ge),
+                    BinOp::Eq => Some(FCmpOp::Eq),
+                    BinOp::Ne => Some(FCmpOp::Ne),
+                    _ => None,
+                };
+
+                if let Some(fcmp) = fcmp_op {
+                    if self.is_f64_expr(lhs) {
+                        // FLS §6.5.3: f64 comparison → `fcmp d{lhs}, d{rhs}` + `cset`.
+                        let lhs_val = self.lower_expr(lhs, &IrTy::F64)?;
+                        let lhs_freg = match lhs_val {
+                            IrValue::FReg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "f64 comparison: expected float register for lhs".into(),
+                            )),
+                        };
+                        let rhs_val = self.lower_expr(rhs, &IrTy::F64)?;
+                        let rhs_freg = match rhs_val {
+                            IrValue::FReg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "f64 comparison: expected float register for rhs".into(),
+                            )),
+                        };
+                        let dst = self.alloc_reg()?;
+                        self.instrs.push(Instr::FCmpF64 { op: fcmp, dst, lhs: lhs_freg, rhs: rhs_freg });
+                        return Ok(IrValue::Reg(dst));
+                    }
+                    if self.is_f32_expr(lhs) {
+                        // FLS §6.5.3: f32 comparison → `fcmp s{lhs}, s{rhs}` + `cset`.
+                        let lhs_val = self.lower_expr(lhs, &IrTy::F32)?;
+                        let lhs_freg = match lhs_val {
+                            IrValue::F32Reg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "f32 comparison: expected f32 register for lhs".into(),
+                            )),
+                        };
+                        let rhs_val = self.lower_expr(rhs, &IrTy::F32)?;
+                        let rhs_freg = match rhs_val {
+                            IrValue::F32Reg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "f32 comparison: expected f32 register for rhs".into(),
+                            )),
+                        };
+                        let dst = self.alloc_reg()?;
+                        self.instrs.push(Instr::FCmpF32 { op: fcmp, dst, lhs: lhs_freg, rhs: rhs_freg });
+                        return Ok(IrValue::Reg(dst));
+                    }
+                }
+
+                // Integer comparison path.
                 let lhs_val = self.lower_expr(lhs, &IrTy::I32)?;
                 // Spill lhs register if rhs contains a call (ARM64 caller-save
                 // convention; same rationale as arithmetic BinOp above).
@@ -9610,24 +9780,49 @@ impl<'src> LowerCtx<'src> {
                 Ok(IrValue::Reg(result_reg))
             }
 
-            // FLS §6.5.4: Unary negation `-operand` — arithmetic two's complement negation.
+            // FLS §6.5.4: Unary negation `-operand`.
             //
-            // Lowering:
-            //   1. Lower the operand to a register.
-            //   2. Emit `Instr::Neg { dst, src }` → `neg x{dst}, x{src}` on ARM64.
+            // Three cases depending on operand type:
+            //   - f64 operand: emit `fneg d{dst}, d{src}` (Instr::FNegF64)
+            //   - f32 operand: emit `fneg s{dst}, s{src}` (Instr::FNegF32)
+            //   - integer operand: emit `neg x{dst}, x{src}` (Instr::Neg)
             //
-            // FLS §6.1.2:37–45: Even `-5` in a non-const context emits a runtime `neg`
-            // instruction — no compile-time folding to a negative immediate.
+            // FLS §6.1.2:37–45: Even `-5` or `-2.5_f64` in a non-const context
+            // must emit a runtime instruction — no compile-time folding.
             //
             // FLS §6.5.4: "The type of a negation expression is the type of the operand."
             //
-            // Cache-line note: `neg` is 4 bytes (alias for `sub xD, xzr, xS`).
+            // Cache-line note: all three ARM64 instructions are 4 bytes.
             ExprKind::Unary { op: crate::ast::UnaryOp::Neg, operand } => {
-                let val = self.lower_expr(operand, &IrTy::I32)?;
-                let src = self.val_to_reg(val)?;
-                let dst = self.alloc_reg()?;
-                self.instrs.push(Instr::Neg { dst, src });
-                Ok(IrValue::Reg(dst))
+                if self.is_f64_expr(operand) {
+                    let val = self.lower_expr(operand, &IrTy::F64)?;
+                    let src = match val {
+                        IrValue::FReg(r) => r,
+                        _ => return Err(LowerError::Unsupported(
+                            "f64 negation: expected float register".into(),
+                        )),
+                    };
+                    let dst = self.alloc_reg()?;
+                    self.instrs.push(Instr::FNegF64 { dst, src });
+                    Ok(IrValue::FReg(dst))
+                } else if self.is_f32_expr(operand) {
+                    let val = self.lower_expr(operand, &IrTy::F32)?;
+                    let src = match val {
+                        IrValue::F32Reg(r) => r,
+                        _ => return Err(LowerError::Unsupported(
+                            "f32 negation: expected f32 register".into(),
+                        )),
+                    };
+                    let dst = self.alloc_reg()?;
+                    self.instrs.push(Instr::FNegF32 { dst, src });
+                    Ok(IrValue::F32Reg(dst))
+                } else {
+                    let val = self.lower_expr(operand, &IrTy::I32)?;
+                    let src = self.val_to_reg(val)?;
+                    let dst = self.alloc_reg()?;
+                    self.instrs.push(Instr::Neg { dst, src });
+                    Ok(IrValue::Reg(dst))
+                }
             }
 
             // FLS §6.5.4: Negation operator `!operand` — two cases:
@@ -9847,10 +10042,59 @@ impl<'src> LowerCtx<'src> {
                         "cast to bool not yet supported (FLS §6.5.9)".into(),
                     )),
 
-                    // FLS §6.5.9: Cast to f64 target not yet implemented.
-                    "f64" => Err(LowerError::Unsupported(
-                        "cast to f64 not yet supported (FLS §6.5.9)".into(),
-                    )),
+                    // FLS §6.5.9: Integer-to-f64 cast.
+                    //
+                    // `i32 as f64` converts a signed integer to IEEE 754
+                    // double-precision. ARM64: `scvtf d{dst}, w{src}`.
+                    // All i32 values are exactly representable in f64.
+                    //
+                    // FLS §6.5.9: "Casting from an integer to a float will
+                    // produce the closest possible float."
+                    "f64" => {
+                        let val = self.lower_expr(inner, &IrTy::I32)?;
+                        let src = match val {
+                            IrValue::Reg(r) => r,
+                            IrValue::I32(n) => {
+                                // Materialise the constant into a register first.
+                                let r = self.alloc_reg()?;
+                                self.instrs.push(Instr::LoadImm(r, n));
+                                r
+                            }
+                            _ => return Err(LowerError::Unsupported(
+                                "cast to f64: expected integer register".into(),
+                            )),
+                        };
+                        let dst = self.alloc_reg()?;
+                        self.instrs.push(Instr::I32ToF64 { dst, src });
+                        Ok(IrValue::FReg(dst))
+                    }
+
+                    // FLS §6.5.9: Integer-to-f32 cast.
+                    //
+                    // `i32 as f32` converts a signed integer to IEEE 754
+                    // single-precision. ARM64: `scvtf s{dst}, w{src}`.
+                    // Values that cannot be exactly represented are rounded
+                    // to nearest-even.
+                    //
+                    // FLS §6.5.9: "Casting from an integer to a float will
+                    // produce the closest possible float."
+                    "f32" => {
+                        let val = self.lower_expr(inner, &IrTy::I32)?;
+                        let src = match val {
+                            IrValue::Reg(r) => r,
+                            IrValue::I32(n) => {
+                                let r = self.alloc_reg()?;
+                                self.instrs.push(Instr::LoadImm(r, n));
+                                r
+                            }
+                            _ => return Err(LowerError::Unsupported(
+                                "cast to f32: expected integer register".into(),
+                            )),
+                        };
+                        let dst = self.alloc_reg()?;
+                        self.instrs.push(Instr::I32ToF32 { dst, src });
+                        Ok(IrValue::F32Reg(dst))
+                    }
 
                     other => Err(LowerError::Unsupported(format!(
                         "cast to `{other}` not yet supported (FLS §6.5.9)"
@@ -10213,7 +10457,12 @@ impl<'src> LowerCtx<'src> {
                     }
                 } else {
                     let dst = self.alloc_reg()?;
-                    self.instrs.push(Instr::Call { dst, name: mangled, args: arg_regs });
+                    self.instrs.push(Instr::Call {
+                        dst,
+                        name: mangled,
+                        args: arg_regs,
+                        float_args: vec![],
+                    });
                     Ok(IrValue::Reg(dst))
                 }
             }

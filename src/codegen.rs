@@ -501,6 +501,31 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
             )?;
         }
 
+        // `fneg d{dst}, d{src}` — IEEE 754 double-precision sign flip.
+        //
+        // FLS §6.5.4: The unary `-` on an `f64` value negates it. ARM64 FNEG
+        // flips the sign bit without touching the mantissa/exponent.
+        //
+        // FLS §6.1.2:37–45: Runtime instruction — no constant folding.
+        // Cache-line note: one 4-byte instruction.
+        Instr::FNegF64 { dst, src } => {
+            writeln!(
+                out,
+                "    fneg    d{dst}, d{src}               // FLS §6.5.4: f64 negate d{src}"
+            )?;
+        }
+
+        // `fneg s{dst}, s{src}` — IEEE 754 single-precision sign flip.
+        //
+        // FLS §6.5.4: The unary `-` on an `f32` value negates it.
+        // Cache-line note: one 4-byte instruction.
+        Instr::FNegF32 { dst, src } => {
+            writeln!(
+                out,
+                "    fneg    s{dst}, s{src}               // FLS §6.5.4: f32 negate s{src}"
+            )?;
+        }
+
         // FLS §6.5.4: Bitwise NOT `!operand` — complement all bits.
         // ARM64: `mvn x{dst}, x{src}` (alias for `orn xD, xzr, xS`).
         // The GNU assembler accepts `mvn` directly; it encodes as a 4-byte instruction.
@@ -599,13 +624,22 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
         // args form a cycle (e.g., args = [1, 0] would incorrectly overwrite).
         // For the current milestone all arguments are freshly materialized
         // immediates or loads, so arg[i] == i always holds in practice.
-        Instr::Call { dst, name, args } => {
-            // Move arguments to x0, x1, ... as required by the ARM64 ABI.
+        Instr::Call { dst, name, args, float_args } => {
+            // Move integer arguments to x0, x1, ... as required by the ARM64 ABI.
             for (i, &src_reg) in args.iter().enumerate() {
                 if src_reg != i as u8 {
                     writeln!(
                         out,
                         "    mov     x{i}, x{src_reg:<19} // FLS §6.12.1: arg {i}"
+                    )?;
+                }
+            }
+            // FLS §4.2: Move float arguments to d0, d1, ... (ARM64 float register bank).
+            for (i, &src_reg) in float_args.iter().enumerate() {
+                if src_reg != i as u8 {
+                    writeln!(
+                        out,
+                        "    fmov    d{i}, d{src_reg:<19} // FLS §4.2: float arg {i}"
                     )?;
                 }
             }
@@ -1038,6 +1072,32 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
             )?;
         }
 
+        // `scvtf d{dst}, w{src}` — SCVTF (Signed integer Convert to Floating-point).
+        //
+        // FLS §6.5.9: `i32 as f64`. Converts a signed 32-bit integer to IEEE 754
+        // double-precision. All i32 values are exactly representable in f64.
+        //
+        // Cache-line note: one 4-byte instruction.
+        Instr::I32ToF64 { dst, src } => {
+            writeln!(
+                out,
+                "    scvtf   d{dst}, w{src}              // FLS §6.5.9: i32→f64 convert"
+            )?;
+        }
+
+        // `scvtf s{dst}, w{src}` — SCVTF single-precision variant.
+        //
+        // FLS §6.5.9: `i32 as f32`. Values that cannot be exactly represented
+        // are rounded to nearest-even.
+        //
+        // Cache-line note: one 4-byte instruction.
+        Instr::I32ToF32 { dst, src } => {
+            writeln!(
+                out,
+                "    scvtf   s{dst}, w{src}              // FLS §6.5.9: i32→f32 convert"
+            )?;
+        }
+
         // FLS §6.5.5: Float arithmetic — fadd/fsub/fmul/fdiv on s-registers.
         //
         // Same mnemonics as F64BinOp but operands use `s{N}` (single-precision).
@@ -1054,6 +1114,45 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
                 out,
                 "    {mnemonic}    s{dst}, s{lhs}, s{rhs}           // FLS §6.5.5: f32 {mnemonic}"
             )?;
+        }
+
+        // FLS §6.5.3: Float comparison — `fcmp d{lhs}, d{rhs}` sets
+        // floating-point condition flags; `cset x{dst}, <cond>` materialises
+        // the boolean result.
+        //
+        // ARM64 note: FCMP uses the same condition code names as CMP.
+        // NaN inputs set Z=0, C=1, V=1, N=0 — `lt`/`le`/`gt`/`ge` produce 0,
+        // `eq` produces 0, `ne` produces 1 (consistent with IEEE 754 §5.11).
+        //
+        // Cache-line note: 2 × 4-byte instructions = 8 bytes.
+        Instr::FCmpF64 { op, dst, lhs, rhs } => {
+            let cond = match op {
+                crate::ir::FCmpOp::Lt => "lt",
+                crate::ir::FCmpOp::Le => "le",
+                crate::ir::FCmpOp::Gt => "gt",
+                crate::ir::FCmpOp::Ge => "ge",
+                crate::ir::FCmpOp::Eq => "eq",
+                crate::ir::FCmpOp::Ne => "ne",
+            };
+            writeln!(out, "    fcmp    d{lhs}, d{rhs}               // FLS §6.5.3: f64 compare")?;
+            writeln!(out, "    cset    x{dst}, {cond}                    // FLS §6.5.3: x{dst} = (d{lhs} {cond} d{rhs})")?;
+        }
+
+        // FLS §6.5.3: Single-precision float comparison.
+        //
+        // Same two-instruction pattern as FCmpF64 but uses `s`-registers.
+        // Cache-line note: 2 × 4-byte instructions = 8 bytes.
+        Instr::FCmpF32 { op, dst, lhs, rhs } => {
+            let cond = match op {
+                crate::ir::FCmpOp::Lt => "lt",
+                crate::ir::FCmpOp::Le => "le",
+                crate::ir::FCmpOp::Gt => "gt",
+                crate::ir::FCmpOp::Ge => "ge",
+                crate::ir::FCmpOp::Eq => "eq",
+                crate::ir::FCmpOp::Ne => "ne",
+            };
+            writeln!(out, "    fcmp    s{lhs}, s{rhs}               // FLS §6.5.3: f32 compare")?;
+            writeln!(out, "    cset    x{dst}, {cond}                    // FLS §6.5.3: x{dst} = (s{lhs} {cond} s{rhs})")?;
         }
     }
     Ok(())

@@ -12637,3 +12637,434 @@ fn main() -> i32 {
         "expected `.word` directive for f32 constant in assembly:\n{asm}"
     );
 }
+
+// ── Milestone 99: integer-to-float casts (`i32 as f64`, `i32 as f32`) ──────
+//
+// FLS §6.5.9: Numeric cast expressions. Casting from an integer type to a
+// floating-point type converts the value to the closest representable float.
+// ARM64: `scvtf d{dst}, w{src}` for i32→f64; `scvtf s{dst}, w{src}` for i32→f32.
+
+/// Milestone 99: literal integer cast to f64, then back to i32.
+///
+/// FLS §6.5.9: `i32 as f64` — SCVTF converts the signed integer to IEEE 754
+/// double-precision. All i32 values are exactly representable in f64.
+#[test]
+fn milestone_99_i32_as_f64_and_back() {
+    let src = r#"
+fn main() -> i32 {
+    let x: i32 = 7;
+    let y: f64 = x as f64;
+    y as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "7 as f64 as i32 == 7, got {exit_code}");
+}
+
+/// Milestone 99: literal integer cast to f64 used in f64 arithmetic.
+///
+/// FLS §6.5.9: `i32 as f64` produces an f64, which participates in f64
+/// arithmetic (FLS §6.5.5).
+#[test]
+fn milestone_99_i32_as_f64_in_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    let x: i32 = 3;
+    let y: f64 = x as f64;
+    (y * 2.0) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "3 as f64 * 2.0 as i32 == 6, got {exit_code}");
+}
+
+/// Milestone 99: parameter cast to f64.
+///
+/// FLS §6.5.9: The cast expression works for function parameters, not just
+/// literals. Verifies runtime codegen path (param value is not statically known).
+#[test]
+fn milestone_99_param_as_f64() {
+    let src = r#"
+fn to_double(n: i32) -> i32 {
+    let f: f64 = n as f64;
+    (f * 2.0) as i32
+}
+fn main() -> i32 {
+    to_double(4)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 8, "to_double(4) == 8, got {exit_code}");
+}
+
+/// Milestone 99: literal integer cast to f32, then back to i32.
+///
+/// FLS §6.5.9: `i32 as f32` — SCVTF single-precision variant.
+#[test]
+fn milestone_99_i32_as_f32_and_back() {
+    let src = r#"
+fn main() -> i32 {
+    let x: i32 = 5;
+    let y: f32 = x as f32;
+    y as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "5 as f32 as i32 == 5, got {exit_code}");
+}
+
+/// Milestone 99: i32 as f32 in f32 arithmetic.
+///
+/// FLS §6.5.9 + §6.5.5: Cast produces f32 that participates in f32 arithmetic.
+#[test]
+fn milestone_99_i32_as_f32_in_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    let x: i32 = 4;
+    let y: f32 = x as f32;
+    (y * 3.0_f32) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 12, "4 as f32 * 3.0 as i32 == 12, got {exit_code}");
+}
+
+/// Milestone 99: parameter cast to f32.
+///
+/// FLS §6.5.9: Works for function parameters.
+#[test]
+fn milestone_99_param_as_f32() {
+    let src = r#"
+fn triple_f32(n: i32) -> i32 {
+    let f: f32 = n as f32;
+    (f * 3.0_f32) as i32
+}
+fn main() -> i32 {
+    triple_f32(5)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 15, "triple_f32(5) == 15, got {exit_code}");
+}
+
+/// Milestone 99: inline literal cast to f64 without let binding.
+///
+/// FLS §6.5.9: The cast expression is evaluated inline (no stack slot required
+/// for the intermediate float if not bound to a name).
+#[test]
+fn milestone_99_inline_literal_as_f64() {
+    let src = r#"
+fn main() -> i32 {
+    (6 as f64 + 1.5) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "6 as f64 + 1.5 as i32 == 7, got {exit_code}");
+}
+
+/// Assembly check: `i32 as f64` emits `scvtf d{N}, w{M}`.
+///
+/// FLS §6.5.9: SCVTF (Signed integer Convert to Floating-point) is the ARM64
+/// instruction for integer-to-float conversion.
+#[test]
+fn runtime_i32_as_f64_emits_scvtf_dreg() {
+    let src = r#"
+fn main() -> i32 {
+    let x: i32 = 3;
+    (x as f64) as i32
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("scvtf   d"),
+        "expected `scvtf d` (int→f64) in assembly:\n{asm}"
+    );
+    assert!(
+        asm.contains("fcvtzs"),
+        "expected `fcvtzs` (f64→int) in assembly:\n{asm}"
+    );
+}
+
+// ── Milestone 100: float negation (`-x` for f64 and f32) ───────────────────
+//
+// FLS §6.5.4: The unary `-` operator applied to a floating-point value
+// produces its arithmetic negation (IEEE 754 sign-flip).
+// ARM64: `fneg d{dst}, d{src}` for f64; `fneg s{dst}, s{src}` for f32.
+
+/// Milestone 100: negate an f64 let binding, cast to i32 for exit code.
+///
+/// FLS §6.5.4: Unary negation on f64. `-2.5_f64` negated → `2.5`, as i32 → 2.
+#[test]
+fn milestone_100_f64_neg_positive() {
+    let src = r#"
+fn main() -> i32 {
+    let x: f64 = 2.5;
+    let y: f64 = -x;
+    y as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    // -2.5 as i32 = -2; exit code is u8-wrapped on Linux: (-2 & 0xFF) = 254.
+    assert_eq!(exit_code, 254, "-(2.5_f64) as i32 == -2, exit code 254 (wrapped), got {exit_code}");
+}
+
+/// Milestone 100: negate a negative f64 (double negation back to positive).
+///
+/// FLS §6.5.4: `-(-x)` restores the original value.
+#[test]
+fn milestone_100_f64_neg_of_neg() {
+    let src = r#"
+fn main() -> i32 {
+    let x: f64 = -3.0;
+    let y: f64 = -x;
+    y as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "-(-3.0_f64) as i32 == 3, got {exit_code}");
+}
+
+/// Milestone 100: f64 negation of a function parameter.
+///
+/// FLS §6.5.4: Negation works on values not statically known at compile time.
+#[test]
+fn milestone_100_f64_neg_param() {
+    let src = r#"
+fn negate(x: f64) -> i32 {
+    (-x) as i32
+}
+fn main() -> i32 {
+    negate(4.7)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    // -4.7 as i32 truncates toward zero → -4 (exit code wraps: 256 - 4 = 252)
+    assert_eq!(exit_code, 252, "negate(4.7) → -4 (wrapped) == 252, got {exit_code}");
+}
+
+/// Milestone 100: f64 negation in arithmetic expression.
+///
+/// FLS §6.5.4 + §6.5.5: Negated float participates in further arithmetic.
+#[test]
+fn milestone_100_f64_neg_in_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    let x: f64 = 1.5;
+    ((-x) + 5.0) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "(-1.5 + 5.0) as i32 == 3, got {exit_code}");
+}
+
+/// Milestone 100: negate an f32 let binding.
+///
+/// FLS §6.5.4: Unary negation on f32. ARM64: `fneg s{dst}, s{src}`.
+#[test]
+fn milestone_100_f32_neg_positive() {
+    let src = r#"
+fn main() -> i32 {
+    let x: f32 = 6.0_f32;
+    let y: f32 = -x;
+    y as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    // -6.0_f32 as i32 = -6 → exit code wraps: 256 - 6 = 250
+    assert_eq!(exit_code, 250, "-(6.0_f32) as i32 == -6 (wrapped to 250), got {exit_code}");
+}
+
+/// Milestone 100: f32 negation of a negative value.
+///
+/// FLS §6.5.4: `-(-x)` returns the original value for f32.
+#[test]
+fn milestone_100_f32_neg_of_neg() {
+    let src = r#"
+fn main() -> i32 {
+    let x: f32 = -5.0_f32;
+    let y: f32 = -x;
+    y as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "-(-5.0_f32) as i32 == 5, got {exit_code}");
+}
+
+/// Assembly check: `-x` where x is f64 emits `fneg d{N}, d{M}`.
+///
+/// FLS §6.5.4: FNEG is the ARM64 instruction for IEEE 754 sign-flip.
+#[test]
+fn runtime_f64_neg_emits_fneg_dreg() {
+    let src = r#"
+fn main() -> i32 {
+    let x: f64 = 2.5;
+    (-x) as i32
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("fneg    d"),
+        "expected `fneg d` (f64 negate) in assembly:\n{asm}"
+    );
+}
+
+// ── Milestone 101: float comparisons (`<`, `<=`, `>`, `>=`, `==`, `!=`) ────
+//
+// FLS §6.5.3: Comparison operator expressions on f64 and f32 operands.
+// ARM64: `fcmp d{a}, d{b}` + `cset x{dst}, <cond>`.
+
+/// Milestone 101: f64 greater-than in an if condition.
+///
+/// FLS §6.5.3: `>` on `f64` operands produces a `bool`.
+#[test]
+fn milestone_101_f64_gt_true() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f64 = 1.5;
+    let b: f64 = 1.0;
+    if a > b { 1 } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "1.5 > 1.0 is true, got {exit_code}");
+}
+
+/// Milestone 101: f64 greater-than false branch.
+///
+/// FLS §6.5.3: `>` when lhs <= rhs → false branch taken.
+#[test]
+fn milestone_101_f64_gt_false() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f64 = 0.5;
+    let b: f64 = 1.0;
+    if a > b { 1 } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "0.5 > 1.0 is false, got {exit_code}");
+}
+
+/// Milestone 101: f64 less-than.
+///
+/// FLS §6.5.3: `<` on `f64` operands.
+#[test]
+fn milestone_101_f64_lt() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f64 = 0.5;
+    let b: f64 = 1.0;
+    if a < b { 1 } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "0.5 < 1.0 is true, got {exit_code}");
+}
+
+/// Milestone 101: f64 equality.
+///
+/// FLS §6.5.3: `==` on `f64` operands.
+#[test]
+fn milestone_101_f64_eq() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f64 = 2.0;
+    let b: f64 = 2.0;
+    if a == b { 1 } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "2.0 == 2.0 is true, got {exit_code}");
+}
+
+/// Milestone 101: f64 not-equal.
+///
+/// FLS §6.5.3: `!=` on `f64` operands.
+#[test]
+fn milestone_101_f64_ne() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f64 = 2.0;
+    let b: f64 = 3.0;
+    if a != b { 1 } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "2.0 != 3.0 is true, got {exit_code}");
+}
+
+/// Milestone 101: f64 comparison with function parameter.
+///
+/// FLS §6.5.3: Comparison works when operands are not statically known.
+#[test]
+fn milestone_101_f64_cmp_param() {
+    let src = r#"
+fn clamp_positive(x: f64) -> i32 {
+    if x > 0.0 { 1 } else { 0 }
+}
+fn main() -> i32 {
+    clamp_positive(3.14)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "3.14 > 0.0 is true, got {exit_code}");
+}
+
+/// Milestone 101: f64 comparison in while loop condition.
+///
+/// FLS §6.5.3 + §6.15.3: Float comparison as loop termination condition.
+#[test]
+fn milestone_101_f64_cmp_in_while() {
+    let src = r#"
+fn main() -> i32 {
+    let mut x: f64 = 0.0;
+    let mut count: i32 = 0;
+    while x < 3.0 {
+        x = x + 1.0;
+        count = count + 1;
+    }
+    count
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "loop runs 3 times (0.0, 1.0, 2.0 < 3.0), got {exit_code}");
+}
+
+/// Milestone 101: f32 greater-than.
+///
+/// FLS §6.5.3: `>` on `f32` operands. ARM64: `fcmp s{a}, s{b}`.
+#[test]
+fn milestone_101_f32_gt() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f32 = 2.5_f32;
+    let b: f32 = 1.5_f32;
+    if a > b { 1 } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "2.5_f32 > 1.5_f32 is true, got {exit_code}");
+}
+
+/// Assembly check: f64 `>` emits `fcmp d{a}, d{b}` and `cset`.
+///
+/// FLS §6.5.3: FCMP sets floating-point condition flags; CSET materialises bool.
+#[test]
+fn runtime_f64_gt_emits_fcmp_and_cset() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f64 = 1.5;
+    let b: f64 = 1.0;
+    if a > b { 1 } else { 0 }
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("fcmp    d"),
+        "expected `fcmp d` (f64 compare) in assembly:\n{asm}"
+    );
+    assert!(
+        asm.contains("cset"),
+        "expected `cset` (condition set) in assembly:\n{asm}"
+    );
+}

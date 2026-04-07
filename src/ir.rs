@@ -358,6 +358,39 @@ pub enum Instr {
         src: u8,
     },
 
+    /// IEEE 754 double-precision negation.
+    ///
+    /// `FNegF64 { dst, src }` → `fneg d{dst}, d{src}` on ARM64.
+    ///
+    /// FLS §6.5.4: The unary `-` applied to an `f64` value produces its
+    /// arithmetic negation, flipping the IEEE 754 sign bit.
+    ///
+    /// FLS §6.1.2:37–45: Even `-2.5_f64` in a non-const context must emit
+    /// a runtime `fneg` instruction.
+    ///
+    /// Cache-line note: one 4-byte ARM64 FNEG instruction.
+    FNegF64 {
+        /// Destination float register (ARM64 `d{dst}`).
+        dst: u8,
+        /// Source float register (ARM64 `d{src}`).
+        src: u8,
+    },
+
+    /// IEEE 754 single-precision negation.
+    ///
+    /// `FNegF32 { dst, src }` → `fneg s{dst}, s{src}` on ARM64.
+    ///
+    /// FLS §6.5.4: The unary `-` applied to an `f32` value produces its
+    /// arithmetic negation, flipping the IEEE 754 sign bit.
+    ///
+    /// Cache-line note: one 4-byte ARM64 FNEG instruction.
+    FNegF32 {
+        /// Destination single-precision float register (ARM64 `s{dst}`).
+        dst: u8,
+        /// Source single-precision float register (ARM64 `s{src}`).
+        src: u8,
+    },
+
     /// Bitwise NOT: `dst = !src` (complement all bits).
     ///
     /// `Not { dst, src }` → `mvn x{dst}, x{src}` on ARM64.
@@ -407,32 +440,39 @@ pub enum Instr {
 
     /// Call a named function with arguments; result goes into a virtual register.
     ///
-    /// `Call { dst, name, args }` emits (for each arg[i] ≠ i):
+    /// `Call { dst, name, args, float_args }` emits (for each arg[i] ≠ i):
     ///   `mov x{i}, x{args[i]}`
+    /// then (for each float_args[i] ≠ i):
+    ///   `fmov d{i}, d{float_args[i]}`
     /// then:
     ///   `bl {name}`
     ///   `mov x{dst}, x0`  (omitted if dst == 0)
     ///
     /// FLS §6.12.1: Call expressions. The callee is a path expression resolved
     /// to a function item. Arguments are evaluated left-to-right (FLS §6.4:14)
-    /// and passed in x0–x7 per the ARM64 procedure call standard.
+    /// and passed in x0–x7 (integer) and d0–d7 (float) per the ARM64 ABI.
     ///
-    /// ARM64 ABI: integer/pointer args 0–7 go in x0–x7; return value in x0.
+    /// ARM64 ABI: integer/pointer args 0–7 go in x0–x7; float args 0–7 go in
+    /// d0–d7 (f64) or s0–s7 (f32); integer return value in x0.
     /// The link register (x30) is set to the return address by `bl`; the
     /// calling function must save x30 if it makes any calls (see `saves_lr`
     /// on `IrFn`).
     ///
-    /// Cache-line note: a call with N args emits at most N+2 instructions
-    /// (N moves + bl + mov for result). For the common case of 1–2 args
-    /// already in x0–x1, N moves collapse to 0.
+    /// Cache-line note: a call with N integer + M float args emits at most
+    /// N+M+2 instructions. For the common case of args already in place,
+    /// moves collapse to 0.
     Call {
         /// Destination virtual register for the return value.
         dst: u8,
         /// Name of the function to call.
         name: String,
-        /// Argument virtual registers, in left-to-right parameter order.
+        /// Integer argument virtual registers, in left-to-right parameter order.
         /// `args[i]` holds the value to place in `x{i}` before the call.
         args: Vec<u8>,
+        /// Float argument virtual registers, in left-to-right float-param order.
+        /// `float_args[i]` holds the value to place in `d{i}` before the call.
+        /// FLS §4.2: f64/f32 parameters use the ARM64 float register bank.
+        float_args: Vec<u8>,
     },
 
     /// Return from a `&mut self` method, writing modified fields back to the caller.
@@ -931,6 +971,38 @@ pub enum Instr {
         src: u8,
     },
 
+    /// Convert a signed 32-bit integer register to a 64-bit float register.
+    ///
+    /// `I32ToF64 { dst, src }` → `scvtf d{dst}, w{src}` on ARM64.
+    ///
+    /// FLS §6.5.9: Numeric cast `i32 as f64`. Converts a signed integer to
+    /// IEEE 754 double-precision float. All `i32` values are exactly
+    /// representable as `f64` (which has 52-bit mantissa).
+    ///
+    /// Cache-line note: one 4-byte instruction (SCVTF).
+    I32ToF64 {
+        /// Destination float register (ARM64 `d{dst}`).
+        dst: u8,
+        /// Source integer register (ARM64 `w{src}`).
+        src: u8,
+    },
+
+    /// Convert a signed 32-bit integer register to a 32-bit float register.
+    ///
+    /// `I32ToF32 { dst, src }` → `scvtf s{dst}, w{src}` on ARM64.
+    ///
+    /// FLS §6.5.9: Numeric cast `i32 as f32`. Converts a signed integer to
+    /// IEEE 754 single-precision float. Values that cannot be exactly
+    /// represented are rounded to nearest-even.
+    ///
+    /// Cache-line note: one 4-byte instruction (SCVTF).
+    I32ToF32 {
+        /// Destination single-precision float register (ARM64 `s{dst}`).
+        dst: u8,
+        /// Source integer register (ARM64 `w{src}`).
+        src: u8,
+    },
+
     /// Floating-point binary arithmetic on `f32` values.
     ///
     /// `F32BinOp { op, dst, lhs, rhs }` emits one of:
@@ -953,6 +1025,70 @@ pub enum Instr {
         /// Right operand (ARM64 `s{rhs}`).
         rhs: u8,
     },
+
+    /// IEEE 754 double-precision comparison, result in an integer register.
+    ///
+    /// `FCmpF64 { op, dst, lhs, rhs }` emits:
+    ///   1. `fcmp  d{lhs}, d{rhs}` — sets floating-point condition flags
+    ///   2. `cset  x{dst}, <cond>` — materialises 1 or 0 in `x{dst}`
+    ///
+    /// FLS §6.5.3: Comparison operator expressions. For `f64` operands, the
+    /// operators `<`, `<=`, `>`, `>=`, `==`, `!=` produce a `bool` result.
+    ///
+    /// FLS §6.5.3 AMBIGUOUS: The spec does not specify NaN comparison behaviour.
+    /// ARM64 FCMP with NaN input sets all flags such that `lt`, `le`, `gt`,
+    /// `ge` all produce 0, and `eq` produces 0, `ne` produces 1.
+    ///
+    /// Cache-line note: two 4-byte instructions (fcmp + cset = 8 bytes).
+    FCmpF64 {
+        /// The comparison operator.
+        op: FCmpOp,
+        /// Destination integer register (ARM64 `x{dst}`).
+        dst: u8,
+        /// Left float operand (ARM64 `d{lhs}`).
+        lhs: u8,
+        /// Right float operand (ARM64 `d{rhs}`).
+        rhs: u8,
+    },
+
+    /// IEEE 754 single-precision comparison, result in an integer register.
+    ///
+    /// `FCmpF32 { op, dst, lhs, rhs }` emits:
+    ///   1. `fcmp  s{lhs}, s{rhs}` — sets floating-point condition flags
+    ///   2. `cset  x{dst}, <cond>` — materialises 1 or 0 in `x{dst}`
+    ///
+    /// FLS §6.5.3: Same as `FCmpF64` but for `f32` operands.
+    ///
+    /// Cache-line note: two 4-byte instructions (fcmp + cset = 8 bytes).
+    FCmpF32 {
+        /// The comparison operator.
+        op: FCmpOp,
+        /// Destination integer register (ARM64 `x{dst}`).
+        dst: u8,
+        /// Left float operand (ARM64 `s{lhs}`).
+        lhs: u8,
+        /// Right float operand (ARM64 `s{rhs}`).
+        rhs: u8,
+    },
+}
+
+/// Comparison operator for floating-point comparison instructions.
+///
+/// FLS §6.5.3: Comparison operators on floating-point types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FCmpOp {
+    /// `<` — ordered less than.
+    Lt,
+    /// `<=` — ordered less than or equal.
+    Le,
+    /// `>` — ordered greater than.
+    Gt,
+    /// `>=` — ordered greater than or equal.
+    Ge,
+    /// `==` — ordered equal.
+    Eq,
+    /// `!=` — ordered not equal.
+    Ne,
 }
 
 /// Arithmetic operator for `f64` binary expressions.
