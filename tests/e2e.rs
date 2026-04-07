@@ -17457,6 +17457,39 @@ fn main() -> i32 {
     );
 }
 
+/// Assembly check: inner function call emits `bl` and is NOT constant-folded.
+///
+/// FLS §9, §6.12.1: When the argument to an inner function is a runtime
+/// parameter (unknown at compile time), the call must emit a `bl` instruction
+/// and must NOT be constant-folded to an immediate move.  If this test fails
+/// while `runtime_inner_fn_emits_separate_label` passes, galvanic has constant-
+/// folded a call whose input was statically known — an interpreter behaviour.
+///
+/// The litmus test: replacing the literal `21` with a function parameter must
+/// not break the implementation (FLS §6.1.2:37–45, fls-constraints §1).
+#[test]
+fn runtime_inner_fn_call_emits_bl_not_folded() {
+    let src = r#"
+fn outer(n: i32) -> i32 {
+    fn inner(x: i32) -> i32 { x * 2 }
+    inner(n)
+}
+fn main() -> i32 { outer(21) }
+"#;
+    let asm = compile_to_asm(src);
+    // The call to inner must be a runtime `bl inner` — not inlined or folded.
+    assert!(
+        asm.contains("bl      inner") || asm.contains("bl inner"),
+        "inner fn call must emit bl instruction: {asm}"
+    );
+    // The result must NOT be constant-folded: outer(21) == 42, but n is a
+    // runtime parameter so the compiler must not emit `mov x0, #42`.
+    assert!(
+        !asm.contains("mov     x0, #42"),
+        "inner fn call must not be constant-folded to #42: {asm}"
+    );
+}
+
 // ── Milestone 127: Default trait method implementations ──────────────────────
 //
 // FLS §10.1.1: A trait may provide a default implementation for a method.
