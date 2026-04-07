@@ -15913,3 +15913,170 @@ fn main() -> i32 {
         "f64 tuple load must emit `ldr d{{n}}`: {asm}"
     );
 }
+
+// ── Milestone 118: f64/f32 fields in tuple structs ───────────────────────────
+
+/// Milestone 118: tuple struct with f64 fields — first field access.
+///
+/// FLS §14.2, §6.10, §4.2: Tuple struct construction stores f64 fields via
+/// d-registers; `.0` field access loads via LoadF64Slot.
+#[test]
+fn milestone_118_f64_tuple_struct_first_field() {
+    let src = r#"
+struct Vec2(f64, f64);
+fn main() -> i32 {
+    let v = Vec2(3.0, 4.0);
+    v.0 as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "v.0=3.0→3, got {exit_code}");
+}
+
+/// Milestone 118: tuple struct with f64 fields — second field access.
+///
+/// FLS §14.2, §6.10, §4.2.
+#[test]
+fn milestone_118_f64_tuple_struct_second_field() {
+    let src = r#"
+struct Vec2(f64, f64);
+fn main() -> i32 {
+    let v = Vec2(3.0, 4.0);
+    v.1 as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 4, "v.1=4.0→4, got {exit_code}");
+}
+
+/// Milestone 118: tuple struct with f64 fields — field in arithmetic.
+///
+/// FLS §14.2, §6.10, §4.2, §6.5.5.
+#[test]
+fn milestone_118_f64_tuple_struct_field_sum() {
+    let src = r#"
+struct Vec2(f64, f64);
+fn main() -> i32 {
+    let v = Vec2(1.5, 2.5);
+    (v.0 + v.1) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 4, "1.5+2.5=4.0→4, got {exit_code}");
+}
+
+/// Milestone 118: tuple struct with f64 fields — passed to free function.
+///
+/// FLS §14.2, §9.2, §4.2: f64 fields in integer and float register banks
+/// at call site.
+#[test]
+fn milestone_118_f64_tuple_struct_passed_to_fn() {
+    let src = r#"
+struct Vec2(f64, f64);
+fn first(v: Vec2) -> i32 {
+    v.0 as i32
+}
+fn main() -> i32 {
+    let v = Vec2(7.0, 2.0);
+    first(v)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "first(Vec2(7,2))=7, got {exit_code}");
+}
+
+/// Milestone 118: tuple struct with f64 fields — result in arithmetic at call site.
+///
+/// FLS §14.2, §9.2, §4.2.
+#[test]
+fn milestone_118_f64_tuple_struct_result_in_arithmetic() {
+    let src = r#"
+struct Vec2(f64, f64);
+fn second(v: Vec2) -> i32 {
+    v.1 as i32
+}
+fn main() -> i32 {
+    let v = Vec2(3.0, 5.0);
+    second(v) + 2
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "5+2=7, got {exit_code}");
+}
+
+/// Milestone 118: tuple struct with f64 fields — method returns field.
+///
+/// FLS §14.2, §10.1, §4.2.
+#[test]
+fn milestone_118_f64_tuple_struct_method_get_field() {
+    let src = r#"
+struct Vec2(f64, f64);
+impl Vec2 {
+    fn x(self) -> f64 { self.0 }
+}
+fn main() -> i32 {
+    let v = Vec2(6.0, 9.0);
+    v.x() as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "v.x()=6.0→6, got {exit_code}");
+}
+
+/// Milestone 118: tuple struct with f64 fields — on function parameter.
+///
+/// FLS §14.2, §9.2, §4.2.
+#[test]
+fn milestone_118_f64_tuple_struct_on_parameter() {
+    let src = r#"
+struct Pair(f64, f64);
+fn sum_pair(p: Pair) -> i32 {
+    (p.0 + p.1) as i32
+}
+fn main() -> i32 {
+    let p = Pair(4.0, 5.0);
+    sum_pair(p)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 9, "4+5=9, got {exit_code}");
+}
+
+/// Milestone 118: f32 tuple struct first field.
+///
+/// FLS §14.2, §6.10, §4.2: f32 fields use s-registers.
+#[test]
+fn milestone_118_f32_tuple_struct_first_field() {
+    let src = r#"
+struct S32(f32, f32);
+fn main() -> i32 {
+    let v = S32(2.0_f32, 5.0_f32);
+    v.0 as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2, "v.0=2.0→2, got {exit_code}");
+}
+
+/// Milestone 118: assembly inspection — tuple struct f64 field store uses str dreg.
+///
+/// FLS §4.2, §14.2.
+#[test]
+fn runtime_f64_tuple_struct_field_store_emits_str_dreg() {
+    let src = r#"
+struct Vec2(f64, f64);
+fn main() -> i32 {
+    let v = Vec2(3.0, 4.0);
+    v.0 as i32
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("str     d"),
+        "f64 tuple struct store must emit `str d{{n}}`: {asm}"
+    );
+    assert!(
+        asm.contains("ldr     d"),
+        "f64 tuple struct load must emit `ldr d{{n}}`: {asm}"
+    );
+}

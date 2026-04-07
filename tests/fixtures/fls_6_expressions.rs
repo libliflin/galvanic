@@ -861,3 +861,25 @@ fn for_f64_array_example() -> i32 {
     }
     sum as i32  // must return 6
 }
+
+// FLS §14.2, §6.10, §4.2: Tuple struct with f64 fields.
+//
+// FLS §14.2: "A tuple struct type is a struct type with named fields of
+// potentially different types." (positional fields, accessed via index notation)
+// FLS §4.2: f64 fields use the float register bank (d-registers on ARM64).
+// FLS §6.10: Tuple indexing expressions `.0`, `.1` access positional fields.
+//
+// No FLS code example for tuple struct with float fields specifically; derived
+// from §14.2 (tuple struct definitions) and §4.2 (float types).
+//
+// Cache-line note: a two-field f64 tuple struct occupies 16 bytes (2 × 8).
+// Two such structs fit in one 64-byte cache line.
+
+struct FloatPair(f64, f64);
+
+fn f64_tuple_struct_example() -> i32 {
+    // FLS §14.2: Tuple struct constructor call.
+    let p = FloatPair(1.5, 2.5);
+    // FLS §6.10: Positional field access.
+    (p.0 + p.1) as i32  // must return 4
+}
