@@ -115,14 +115,14 @@ fn expr_contains_call(expr: &Expr) -> bool {
                 || block_contains_call(then_block)
                 || else_expr.as_ref().is_some_and(|e| expr_contains_call(e))
         }
-        ExprKind::While { cond, body } => {
+        ExprKind::While { cond, body, .. } => {
             expr_contains_call(cond) || block_contains_call(body)
         }
         ExprKind::WhileLet { scrutinee, body, .. } => {
             expr_contains_call(scrutinee) || block_contains_call(body)
         }
-        ExprKind::Loop(body) => block_contains_call(body),
-        ExprKind::Break(opt_val) => opt_val.as_ref().is_some_and(|e| expr_contains_call(e)),
+        ExprKind::Loop { body, .. } => block_contains_call(body),
+        ExprKind::Break { value: opt_val, .. } => opt_val.as_ref().is_some_and(|e| expr_contains_call(e)),
         ExprKind::Return(opt_val) => opt_val.as_ref().is_some_and(|e| expr_contains_call(e)),
         ExprKind::Range { start, end, .. } => {
             start.as_ref().is_some_and(|e| expr_contains_call(e))
@@ -201,7 +201,7 @@ fn stmt_contains_break_with_value(stmt: &Stmt) -> bool {
 /// statements inside nested loops belong to those loops, not the outer one.
 fn expr_contains_break_with_value(expr: &Expr) -> bool {
     match &expr.kind {
-        ExprKind::Break(Some(_)) => true,
+        ExprKind::Break { value: Some(_), .. } => true,
         // Recurse into non-loop control-flow.
         ExprKind::If { cond, then_block, else_expr } => {
             expr_contains_break_with_value(cond)
@@ -236,7 +236,7 @@ fn expr_contains_break_with_value(expr: &Expr) -> bool {
                 || args.iter().any(expr_contains_break_with_value)
         }
         // Do NOT recurse into nested loops — their `break` belongs to them.
-        ExprKind::Loop(_) | ExprKind::While { .. } | ExprKind::WhileLet { .. } | ExprKind::For { .. } => false,
+        ExprKind::Loop { .. } | ExprKind::While { .. } | ExprKind::WhileLet { .. } | ExprKind::For { .. } => false,
         // A closure body is a separate function — its `break` expressions belong to loops
         // inside the closure, not to any enclosing loop of the closure expression itself.
         ExprKind::Closure { .. } => false,
@@ -2022,6 +2022,10 @@ fn lower_ty(ty: &crate::ast::Ty, source: &str) -> Result<IrTy, LowerError> {
 /// FLS §6.15.6: Break expressions.
 /// FLS §6.15.7: Continue expressions.
 struct LoopCtx {
+    /// The optional block label for this loop (`'name` from `'name: loop …`).
+    /// Used by `break 'name` and `continue 'name` to target a specific loop
+    /// rather than the innermost one. FLS §6.15.6, §6.15.7.
+    label: Option<String>,
     /// Label at the top of the loop. Target for `continue` and the back-edge.
     header_label: u32,
     /// Label immediately after the loop. Target for `break`.
@@ -2569,7 +2573,10 @@ fn find_captures<'src>(
                 find_captures(e, outer_locals, closure_params, source, captured);
             }
         }
-        ExprKind::Return(Some(v)) | ExprKind::Break(Some(v)) => {
+        ExprKind::Return(Some(v)) => {
+            find_captures(v, outer_locals, closure_params, source, captured);
+        }
+        ExprKind::Break { value: Some(v), .. } => {
             find_captures(v, outer_locals, closure_params, source, captured);
         }
         ExprKind::Tuple(elems) | ExprKind::Array(elems) => {
@@ -2577,11 +2584,11 @@ fn find_captures<'src>(
                 find_captures(e, outer_locals, closure_params, source, captured);
             }
         }
-        ExprKind::While { cond, body } => {
+        ExprKind::While { cond, body, .. } => {
             find_captures(cond, outer_locals, closure_params, source, captured);
             find_in_block(body, outer_locals, closure_params, source, captured);
         }
-        ExprKind::Loop(body) => {
+        ExprKind::Loop { body, .. } => {
             find_in_block(body, outer_locals, closure_params, source, captured);
         }
         ExprKind::Match { scrutinee, arms } => {
@@ -8914,7 +8921,7 @@ impl<'src> LowerCtx<'src> {
             // Cache-line note: the header and exit labels carry no instruction cost.
             // The back-edge `b .L{header}` is one 4-byte instruction — it fits in
             // the same cache line as the last instruction of the body.
-            ExprKind::While { cond, body } => {
+            ExprKind::While { cond, body, label } => {
                 let header_label = self.alloc_label();
                 let exit_label = self.alloc_label();
 
@@ -8930,7 +8937,7 @@ impl<'src> LowerCtx<'src> {
                 // can resolve to the correct labels.
                 // FLS §6.15.3, §6.15.6, §6.15.7.
                 // `while` loops do not support break-with-value (FLS §6.15.6).
-                self.loop_stack.push(LoopCtx { header_label, exit_label, break_slot: None, break_ret_ty: IrTy::Unit });
+                self.loop_stack.push(LoopCtx { label: label.clone(), header_label, exit_label, break_slot: None, break_ret_ty: IrTy::Unit });
 
                 // Loop top: the branch target for the back-edge.
                 self.instrs.push(Instr::Label(header_label));
@@ -8997,7 +9004,7 @@ impl<'src> LowerCtx<'src> {
             // FLS §6.1.2:37–45: All checks emit runtime instructions.
             // Cache-line note: loop header costs ~2 instr (str scrut + pattern
             // cmp) plus body; back-edge is 1 branch (4 bytes).
-            ExprKind::WhileLet { pat, scrutinee, body } => {
+            ExprKind::WhileLet { pat, scrutinee, body, label } => {
                 let header_label = self.alloc_label();
                 let exit_label = self.alloc_label();
 
@@ -9037,6 +9044,7 @@ impl<'src> LowerCtx<'src> {
                 // Push loop context — while-let has no break-with-value.
                 // FLS §6.15.4, §6.15.6.
                 self.loop_stack.push(LoopCtx {
+                    label: label.clone(),
                     header_label,
                     exit_label,
                     break_slot: None,
@@ -9492,7 +9500,7 @@ impl<'src> LowerCtx<'src> {
             // Cache-line note: the loop generates ~7 instructions for the control
             // flow skeleton (load, cmp, cbz, load, add imm, str, b) — 28 bytes, fits
             // in one 32-byte half of a 64-byte instruction cache line.
-            ExprKind::For { pat, iter, body } => {
+            ExprKind::For { pat, iter, body, label } => {
                 // Only integer range iterators are supported at this milestone.
                 let (start_expr, end_expr, inclusive) = match iter.as_ref() {
                     Expr { kind: ExprKind::Range { start: Some(s), end: Some(e), inclusive }, .. } => {
@@ -9537,7 +9545,7 @@ impl<'src> LowerCtx<'src> {
                 // FLS §6.15.7: `continue` in a for loop advances to the next iteration.
                 // For a range-based for loop, the "next iteration" is the increment step.
                 // `for` loops do not support break-with-value (FLS §6.15.6).
-                self.loop_stack.push(LoopCtx { header_label: incr_label, exit_label, break_slot: None, break_ret_ty: IrTy::Unit });
+                self.loop_stack.push(LoopCtx { label: label.clone(), header_label: incr_label, exit_label, break_slot: None, break_ret_ty: IrTy::Unit });
 
                 // Bind the loop variable name so body can load it via Path.
                 self.locals.insert(pat_name, i_slot);
@@ -9611,7 +9619,7 @@ impl<'src> LowerCtx<'src> {
             //
             // Cache-line note: the header and exit labels have no instruction cost.
             // The back-edge `b .L{header}` is 4 bytes — one instruction slot.
-            ExprKind::Loop(body) => {
+            ExprKind::Loop { body, label } => {
                 let header_label = self.alloc_label();
                 let exit_label = self.alloc_label();
 
@@ -9633,7 +9641,7 @@ impl<'src> LowerCtx<'src> {
                 // and BEFORE any register allocations inside the body.
                 let reg_mark = self.next_reg;
 
-                self.loop_stack.push(LoopCtx { header_label, exit_label, break_slot, break_ret_ty: *ret_ty });
+                self.loop_stack.push(LoopCtx { label: label.clone(), header_label, exit_label, break_slot, break_ret_ty: *ret_ty });
 
                 // Loop top: the branch-back target.
                 self.instrs.push(Instr::Label(header_label));
@@ -9707,14 +9715,33 @@ impl<'src> LowerCtx<'src> {
             // FLS §6.1.2:37–45: The branch is a runtime `b` instruction.
             // Cache-line note: `store + b` = 8 bytes — two instructions, fits
             // in one half of a 16-byte bundle.
-            ExprKind::Break(value) => {
+            ExprKind::Break { label, value } => {
                 // Resolve the exit label and optional break slot from the
-                // innermost loop context.
-                let (exit_label, break_slot, break_ret_ty) = self.loop_stack.last()
-                    .map(|ctx| (ctx.exit_label, ctx.break_slot, ctx.break_ret_ty))
-                    .ok_or_else(|| LowerError::Unsupported(
-                        "break expression outside of a loop".into()
-                    ))?;
+                // target loop context.
+                //
+                // FLS §6.15.6: "A break expression exits the innermost
+                // enclosing loop expression or block expression labelled
+                // with a block label."
+                //
+                // If a label is present, search the loop_stack from top to
+                // bottom for a LoopCtx whose label matches. Otherwise use the
+                // innermost (top) context.
+                let (exit_label, break_slot, break_ret_ty) = if let Some(lbl) = label {
+                    // Labeled break: find matching loop on the stack.
+                    self.loop_stack.iter().rev()
+                        .find(|ctx| ctx.label.as_deref() == Some(lbl.as_str()))
+                        .map(|ctx| (ctx.exit_label, ctx.break_slot, ctx.break_ret_ty))
+                        .ok_or_else(|| LowerError::Unsupported(
+                            format!("break label `'{lbl}` not found in enclosing loops")
+                        ))?
+                } else {
+                    // Unlabeled break: use innermost loop.
+                    self.loop_stack.last()
+                        .map(|ctx| (ctx.exit_label, ctx.break_slot, ctx.break_ret_ty))
+                        .ok_or_else(|| LowerError::Unsupported(
+                            "break expression outside of a loop".into()
+                        ))?
+                };
 
                 if let Some(val_expr) = value {
                     // break-with-value: store result to the break_slot, then jump.
@@ -9735,10 +9762,11 @@ impl<'src> LowerCtx<'src> {
                 Ok(IrValue::Unit)
             }
 
-            // FLS §6.15.7: Continue expression — restart the innermost loop.
+            // FLS §6.15.7: Continue expression — restart the target loop.
             //
             // A `continue` transfers control to the header of the innermost
-            // enclosing loop, skipping any remaining statements in the body.
+            // enclosing loop (or the labeled loop if a label is given), skipping
+            // any remaining statements in the body.
             //
             // FLS §6.15.7: "A continue expression advances to the next iteration
             // of the innermost enclosing loop expression."
@@ -9746,13 +9774,23 @@ impl<'src> LowerCtx<'src> {
             // We approximate `!` as Unit since the never type is not yet in the IR.
             //
             // Cache-line note: `b .L{header}` is 4 bytes — same cost as `break`.
-            ExprKind::Continue => {
-                // Resolve the header label from the innermost loop context.
-                let header_label = self.loop_stack.last()
-                    .map(|ctx| ctx.header_label)
-                    .ok_or_else(|| LowerError::Unsupported(
-                        "continue expression outside of a loop".into()
-                    ))?;
+            ExprKind::Continue { label } => {
+                // Resolve the header label from the target loop context.
+                let header_label = if let Some(lbl) = label {
+                    // Labeled continue: find matching loop on the stack.
+                    self.loop_stack.iter().rev()
+                        .find(|ctx| ctx.label.as_deref() == Some(lbl.as_str()))
+                        .map(|ctx| ctx.header_label)
+                        .ok_or_else(|| LowerError::Unsupported(
+                            format!("continue label `'{lbl}` not found in enclosing loops")
+                        ))?
+                } else {
+                    self.loop_stack.last()
+                        .map(|ctx| ctx.header_label)
+                        .ok_or_else(|| LowerError::Unsupported(
+                            "continue expression outside of a loop".into()
+                        ))?
+                };
 
                 self.instrs.push(Instr::Branch(header_label));
 
