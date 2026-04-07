@@ -822,6 +822,51 @@ pub enum Instr {
         /// Source float register (ARM64 `d{src}`).
         src: u8,
     },
+
+    /// Floating-point binary arithmetic on `f64` values.
+    ///
+    /// `F64BinOp { op, dst, lhs, rhs }` emits one of:
+    ///   - `fadd  d{dst}, d{lhs}, d{rhs}` — addition
+    ///   - `fsub  d{dst}, d{lhs}, d{rhs}` — subtraction
+    ///   - `fmul  d{dst}, d{lhs}, d{rhs}` — multiplication
+    ///   - `fdiv  d{dst}, d{lhs}, d{rhs}` — division
+    ///
+    /// FLS §6.5.5: Arithmetic expressions on floating-point types. The `+`, `-`,
+    /// `*`, `/` operators on `f64` operands produce `f64` results, following
+    /// IEEE 754 double-precision semantics.
+    ///
+    /// FLS §6.5.5 AMBIGUOUS: The spec references IEEE 754 semantics but does not
+    /// specify the rounding mode. ARM64 hardware uses round-to-nearest-even by
+    /// default, matching the Rust reference behaviour.
+    ///
+    /// Cache-line note: one 4-byte instruction per operation.
+    F64BinOp {
+        /// The arithmetic operation.
+        op: F64BinOp,
+        /// Destination float register (ARM64 `d{dst}`).
+        dst: u8,
+        /// Left operand float register (ARM64 `d{lhs}`).
+        lhs: u8,
+        /// Right operand float register (ARM64 `d{rhs}`).
+        rhs: u8,
+    },
+}
+
+/// Arithmetic operator for `f64` binary expressions.
+///
+/// FLS §6.5.5: The arithmetic operators on floating-point types.
+/// Bitwise operators, remainder, and shifts are not defined for `f64` (FLS §6.5.6,
+/// §6.5.7, §6.5.8 only cover integer types).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum F64BinOp {
+    /// `fadd` — IEEE 754 double-precision addition.
+    Add,
+    /// `fsub` — IEEE 754 double-precision subtraction.
+    Sub,
+    /// `fmul` — IEEE 754 double-precision multiplication.
+    Mul,
+    /// `fdiv` — IEEE 754 double-precision division.
+    Div,
 }
 
 // ── Values ────────────────────────────────────────────────────────────────────

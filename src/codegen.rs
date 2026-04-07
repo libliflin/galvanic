@@ -939,6 +939,29 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
                 "    fcvtzs  w{dst}, d{src}              // FLS §6.5.9: f64→i32 truncate"
             )?;
         }
+
+        // FLS §6.5.5: Float arithmetic — fadd/fsub/fmul/fdiv on d-registers.
+        //
+        // ARM64 FP/SIMD instruction set: all four operations have the form
+        //   f<op>  d{dst}, d{lhs}, d{rhs}
+        // and follow IEEE 754 double-precision semantics with round-to-nearest-even.
+        //
+        // FLS §6.5.5 AMBIGUOUS: The spec references IEEE 754 but does not
+        // mandate a rounding mode. ARM64 hardware default is round-to-nearest-even.
+        //
+        // Cache-line note: one 4-byte instruction per f64 binary operation.
+        Instr::F64BinOp { op, dst, lhs, rhs } => {
+            let mnemonic = match op {
+                crate::ir::F64BinOp::Add => "fadd",
+                crate::ir::F64BinOp::Sub => "fsub",
+                crate::ir::F64BinOp::Mul => "fmul",
+                crate::ir::F64BinOp::Div => "fdiv",
+            };
+            writeln!(
+                out,
+                "    {mnemonic}    d{dst}, d{lhs}, d{rhs}           // FLS §6.5.5: f64 {mnemonic}"
+            )?;
+        }
     }
     Ok(())
 }
