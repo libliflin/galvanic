@@ -244,6 +244,128 @@ fn expr_contains_break_with_value(expr: &Expr) -> bool {
     }
 }
 
+/// Return `true` if the block contains a `break 'target_label <value>`
+/// expression at *any* nesting depth.
+///
+/// FLS §6.15.6: A labeled break exits the loop identified by the label,
+/// regardless of how many inner loops are between the break and its target.
+/// We must recurse into nested loops to find such breaks — but stop at any
+/// loop whose own label matches `target_label`, since that would shadow it.
+fn block_contains_labeled_break_with_value(block: &Block, target_label: &str) -> bool {
+    block
+        .stmts
+        .iter()
+        .any(|s| stmt_contains_labeled_break_with_value(s, target_label))
+        || block
+            .tail
+            .as_ref()
+            .is_some_and(|e| expr_contains_labeled_break_with_value(e, target_label))
+}
+
+fn stmt_contains_labeled_break_with_value(stmt: &Stmt, target_label: &str) -> bool {
+    match &stmt.kind {
+        StmtKind::Expr(e) => expr_contains_labeled_break_with_value(e, target_label),
+        StmtKind::Let { init, .. } => {
+            init.as_ref()
+                .is_some_and(|e| expr_contains_labeled_break_with_value(e, target_label))
+        }
+        StmtKind::Empty => false,
+    }
+}
+
+/// Return `true` if `expr` contains `break 'target_label <value>` at any depth,
+/// recursing into nested loops (but not into loops that shadow the label).
+fn expr_contains_labeled_break_with_value(expr: &Expr, target_label: &str) -> bool {
+    match &expr.kind {
+        ExprKind::Break { label: Some(lbl), value: Some(_) } if lbl.as_str() == target_label => {
+            true
+        }
+        ExprKind::If { cond, then_block, else_expr } => {
+            expr_contains_labeled_break_with_value(cond, target_label)
+                || block_contains_labeled_break_with_value(then_block, target_label)
+                || else_expr
+                    .as_ref()
+                    .is_some_and(|e| expr_contains_labeled_break_with_value(e, target_label))
+        }
+        ExprKind::IfLet { scrutinee, then_block, else_expr, .. } => {
+            expr_contains_labeled_break_with_value(scrutinee, target_label)
+                || block_contains_labeled_break_with_value(then_block, target_label)
+                || else_expr
+                    .as_ref()
+                    .is_some_and(|e| expr_contains_labeled_break_with_value(e, target_label))
+        }
+        ExprKind::Block(b) => block_contains_labeled_break_with_value(b, target_label),
+        ExprKind::Match { scrutinee, arms } => {
+            expr_contains_labeled_break_with_value(scrutinee, target_label)
+                || arms
+                    .iter()
+                    .any(|a| expr_contains_labeled_break_with_value(&a.body, target_label))
+        }
+        ExprKind::StructLit { fields, base, .. } => {
+            fields
+                .iter()
+                .any(|(_, v)| expr_contains_labeled_break_with_value(v, target_label))
+                || base
+                    .as_ref()
+                    .is_some_and(|b| expr_contains_labeled_break_with_value(b, target_label))
+        }
+        ExprKind::EnumVariantLit { fields, .. } => fields
+            .iter()
+            .any(|(_, v)| expr_contains_labeled_break_with_value(v, target_label)),
+        ExprKind::FieldAccess { receiver, .. } => {
+            expr_contains_labeled_break_with_value(receiver, target_label)
+        }
+        ExprKind::Array(elems) => elems
+            .iter()
+            .any(|e| expr_contains_labeled_break_with_value(e, target_label)),
+        ExprKind::Tuple(elems) => elems
+            .iter()
+            .any(|e| expr_contains_labeled_break_with_value(e, target_label)),
+        ExprKind::Index { base, index } => {
+            expr_contains_labeled_break_with_value(base, target_label)
+                || expr_contains_labeled_break_with_value(index, target_label)
+        }
+        ExprKind::MethodCall { receiver, args, .. } => {
+            expr_contains_labeled_break_with_value(receiver, target_label)
+                || args
+                    .iter()
+                    .any(|a| expr_contains_labeled_break_with_value(a, target_label))
+        }
+        // Recurse into nested loops, but stop if this loop's own label shadows the target.
+        ExprKind::Loop { body, label } => {
+            if label.as_deref() == Some(target_label) {
+                false
+            } else {
+                block_contains_labeled_break_with_value(body, target_label)
+            }
+        }
+        ExprKind::While { body, label, .. } => {
+            if label.as_deref() == Some(target_label) {
+                false
+            } else {
+                block_contains_labeled_break_with_value(body, target_label)
+            }
+        }
+        ExprKind::WhileLet { body, label, .. } => {
+            if label.as_deref() == Some(target_label) {
+                false
+            } else {
+                block_contains_labeled_break_with_value(body, target_label)
+            }
+        }
+        ExprKind::For { body, label, .. } => {
+            if label.as_deref() == Some(target_label) {
+                false
+            } else {
+                block_contains_labeled_break_with_value(body, target_label)
+            }
+        }
+        // Closures are separate functions — their breaks don't target outer loops.
+        ExprKind::Closure { .. } => false,
+        _ => false,
+    }
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 /// Lower a parsed source file to the IR.
@@ -9628,9 +9750,24 @@ impl<'src> LowerCtx<'src> {
                 // are present, allocate a stack slot to hold the result — the
                 // same phi-slot pattern used for if-else expressions.
                 //
+                // Two sources of break-with-value:
+                //   1. Unlabeled `break <value>` at this loop level (stops at
+                //      nested loops — handled by `block_contains_break_with_value`).
+                //   2. `break 'label <value>` targeting THIS loop's label from
+                //      inside a nested loop — handled by
+                //      `block_contains_labeled_break_with_value`.
+                //
+                // FLS §6.15.6: A labeled break exits the loop identified by the
+                // label, regardless of nesting depth. We must check nested loops
+                // to find such breaks.
+                //
                 // The break_slot is allocated BEFORE entering the loop body so
                 // that `break <value>` can store into it during body lowering.
-                let break_slot = if block_contains_break_with_value(body) {
+                let has_break_value = block_contains_break_with_value(body)
+                    || label
+                        .as_deref()
+                        .is_some_and(|lbl| block_contains_labeled_break_with_value(body, lbl));
+                let break_slot = if has_break_value {
                     Some(self.alloc_slot()?)
                 } else {
                     None
