@@ -1106,6 +1106,45 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
                 "    {mnemonic}    s{dst}, s{lhs}, s{rhs}           // FLS §6.5.5: f32 {mnemonic}"
             )?;
         }
+
+        // FLS §6.5.3: Float comparison — `fcmp d{lhs}, d{rhs}` sets
+        // floating-point condition flags; `cset x{dst}, <cond>` materialises
+        // the boolean result.
+        //
+        // ARM64 note: FCMP uses the same condition code names as CMP.
+        // NaN inputs set Z=0, C=1, V=1, N=0 — `lt`/`le`/`gt`/`ge` produce 0,
+        // `eq` produces 0, `ne` produces 1 (consistent with IEEE 754 §5.11).
+        //
+        // Cache-line note: 2 × 4-byte instructions = 8 bytes.
+        Instr::FCmpF64 { op, dst, lhs, rhs } => {
+            let cond = match op {
+                crate::ir::FCmpOp::Lt => "lt",
+                crate::ir::FCmpOp::Le => "le",
+                crate::ir::FCmpOp::Gt => "gt",
+                crate::ir::FCmpOp::Ge => "ge",
+                crate::ir::FCmpOp::Eq => "eq",
+                crate::ir::FCmpOp::Ne => "ne",
+            };
+            writeln!(out, "    fcmp    d{lhs}, d{rhs}               // FLS §6.5.3: f64 compare")?;
+            writeln!(out, "    cset    x{dst}, {cond}                    // FLS §6.5.3: x{dst} = (d{lhs} {cond} d{rhs})")?;
+        }
+
+        // FLS §6.5.3: Single-precision float comparison.
+        //
+        // Same two-instruction pattern as FCmpF64 but uses `s`-registers.
+        // Cache-line note: 2 × 4-byte instructions = 8 bytes.
+        Instr::FCmpF32 { op, dst, lhs, rhs } => {
+            let cond = match op {
+                crate::ir::FCmpOp::Lt => "lt",
+                crate::ir::FCmpOp::Le => "le",
+                crate::ir::FCmpOp::Gt => "gt",
+                crate::ir::FCmpOp::Ge => "ge",
+                crate::ir::FCmpOp::Eq => "eq",
+                crate::ir::FCmpOp::Ne => "ne",
+            };
+            writeln!(out, "    fcmp    s{lhs}, s{rhs}               // FLS §6.5.3: f32 compare")?;
+            writeln!(out, "    cset    x{dst}, {cond}                    // FLS §6.5.3: x{dst} = (s{lhs} {cond} s{rhs})")?;
+        }
     }
     Ok(())
 }

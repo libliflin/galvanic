@@ -12906,3 +12906,164 @@ fn main() -> i32 {
         "expected `fneg d` (f64 negate) in assembly:\n{asm}"
     );
 }
+
+// ── Milestone 101: float comparisons (`<`, `<=`, `>`, `>=`, `==`, `!=`) ────
+//
+// FLS §6.5.3: Comparison operator expressions on f64 and f32 operands.
+// ARM64: `fcmp d{a}, d{b}` + `cset x{dst}, <cond>`.
+
+/// Milestone 101: f64 greater-than in an if condition.
+///
+/// FLS §6.5.3: `>` on `f64` operands produces a `bool`.
+#[test]
+fn milestone_101_f64_gt_true() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f64 = 1.5;
+    let b: f64 = 1.0;
+    if a > b { 1 } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "1.5 > 1.0 is true, got {exit_code}");
+}
+
+/// Milestone 101: f64 greater-than false branch.
+///
+/// FLS §6.5.3: `>` when lhs <= rhs → false branch taken.
+#[test]
+fn milestone_101_f64_gt_false() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f64 = 0.5;
+    let b: f64 = 1.0;
+    if a > b { 1 } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "0.5 > 1.0 is false, got {exit_code}");
+}
+
+/// Milestone 101: f64 less-than.
+///
+/// FLS §6.5.3: `<` on `f64` operands.
+#[test]
+fn milestone_101_f64_lt() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f64 = 0.5;
+    let b: f64 = 1.0;
+    if a < b { 1 } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "0.5 < 1.0 is true, got {exit_code}");
+}
+
+/// Milestone 101: f64 equality.
+///
+/// FLS §6.5.3: `==` on `f64` operands.
+#[test]
+fn milestone_101_f64_eq() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f64 = 2.0;
+    let b: f64 = 2.0;
+    if a == b { 1 } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "2.0 == 2.0 is true, got {exit_code}");
+}
+
+/// Milestone 101: f64 not-equal.
+///
+/// FLS §6.5.3: `!=` on `f64` operands.
+#[test]
+fn milestone_101_f64_ne() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f64 = 2.0;
+    let b: f64 = 3.0;
+    if a != b { 1 } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "2.0 != 3.0 is true, got {exit_code}");
+}
+
+/// Milestone 101: f64 comparison with function parameter.
+///
+/// FLS §6.5.3: Comparison works when operands are not statically known.
+#[test]
+fn milestone_101_f64_cmp_param() {
+    let src = r#"
+fn clamp_positive(x: f64) -> i32 {
+    if x > 0.0 { 1 } else { 0 }
+}
+fn main() -> i32 {
+    clamp_positive(3.14)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "3.14 > 0.0 is true, got {exit_code}");
+}
+
+/// Milestone 101: f64 comparison in while loop condition.
+///
+/// FLS §6.5.3 + §6.15.3: Float comparison as loop termination condition.
+#[test]
+fn milestone_101_f64_cmp_in_while() {
+    let src = r#"
+fn main() -> i32 {
+    let mut x: f64 = 0.0;
+    let mut count: i32 = 0;
+    while x < 3.0 {
+        x = x + 1.0;
+        count = count + 1;
+    }
+    count
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "loop runs 3 times (0.0, 1.0, 2.0 < 3.0), got {exit_code}");
+}
+
+/// Milestone 101: f32 greater-than.
+///
+/// FLS §6.5.3: `>` on `f32` operands. ARM64: `fcmp s{a}, s{b}`.
+#[test]
+fn milestone_101_f32_gt() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f32 = 2.5_f32;
+    let b: f32 = 1.5_f32;
+    if a > b { 1 } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "2.5_f32 > 1.5_f32 is true, got {exit_code}");
+}
+
+/// Assembly check: f64 `>` emits `fcmp d{a}, d{b}` and `cset`.
+///
+/// FLS §6.5.3: FCMP sets floating-point condition flags; CSET materialises bool.
+#[test]
+fn runtime_f64_gt_emits_fcmp_and_cset() {
+    let src = r#"
+fn main() -> i32 {
+    let a: f64 = 1.5;
+    let b: f64 = 1.0;
+    if a > b { 1 } else { 0 }
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("fcmp    d"),
+        "expected `fcmp d` (f64 compare) in assembly:\n{asm}"
+    );
+    assert!(
+        asm.contains("cset"),
+        "expected `cset` (condition set) in assembly:\n{asm}"
+    );
+}

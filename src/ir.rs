@@ -1018,6 +1018,70 @@ pub enum Instr {
         /// Right operand (ARM64 `s{rhs}`).
         rhs: u8,
     },
+
+    /// IEEE 754 double-precision comparison, result in an integer register.
+    ///
+    /// `FCmpF64 { op, dst, lhs, rhs }` emits:
+    ///   1. `fcmp  d{lhs}, d{rhs}` — sets floating-point condition flags
+    ///   2. `cset  x{dst}, <cond>` — materialises 1 or 0 in `x{dst}`
+    ///
+    /// FLS §6.5.3: Comparison operator expressions. For `f64` operands, the
+    /// operators `<`, `<=`, `>`, `>=`, `==`, `!=` produce a `bool` result.
+    ///
+    /// FLS §6.5.3 AMBIGUOUS: The spec does not specify NaN comparison behaviour.
+    /// ARM64 FCMP with NaN input sets all flags such that `lt`, `le`, `gt`,
+    /// `ge` all produce 0, and `eq` produces 0, `ne` produces 1.
+    ///
+    /// Cache-line note: two 4-byte instructions (fcmp + cset = 8 bytes).
+    FCmpF64 {
+        /// The comparison operator.
+        op: FCmpOp,
+        /// Destination integer register (ARM64 `x{dst}`).
+        dst: u8,
+        /// Left float operand (ARM64 `d{lhs}`).
+        lhs: u8,
+        /// Right float operand (ARM64 `d{rhs}`).
+        rhs: u8,
+    },
+
+    /// IEEE 754 single-precision comparison, result in an integer register.
+    ///
+    /// `FCmpF32 { op, dst, lhs, rhs }` emits:
+    ///   1. `fcmp  s{lhs}, s{rhs}` — sets floating-point condition flags
+    ///   2. `cset  x{dst}, <cond>` — materialises 1 or 0 in `x{dst}`
+    ///
+    /// FLS §6.5.3: Same as `FCmpF64` but for `f32` operands.
+    ///
+    /// Cache-line note: two 4-byte instructions (fcmp + cset = 8 bytes).
+    FCmpF32 {
+        /// The comparison operator.
+        op: FCmpOp,
+        /// Destination integer register (ARM64 `x{dst}`).
+        dst: u8,
+        /// Left float operand (ARM64 `s{lhs}`).
+        lhs: u8,
+        /// Right float operand (ARM64 `s{rhs}`).
+        rhs: u8,
+    },
+}
+
+/// Comparison operator for floating-point comparison instructions.
+///
+/// FLS §6.5.3: Comparison operators on floating-point types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FCmpOp {
+    /// `<` — ordered less than.
+    Lt,
+    /// `<=` — ordered less than or equal.
+    Le,
+    /// `>` — ordered greater than.
+    Gt,
+    /// `>=` — ordered greater than or equal.
+    Ge,
+    /// `==` — ordered equal.
+    Eq,
+    /// `!=` — ordered not equal.
+    Ne,
 }
 
 /// Arithmetic operator for `f64` binary expressions.

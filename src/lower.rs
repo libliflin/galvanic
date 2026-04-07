@@ -28,7 +28,7 @@
 use std::collections::HashMap;
 
 use crate::ast::{BinOp, Block, Expr, ExprKind, ItemKind, Pat, SelfKind, SourceFile, Stmt, StmtKind, StructKind, TyKind};
-use crate::ir::{F32BinOp, F64BinOp, IrBinOp, Instr, IrFn, IrTy, IrValue, Module};
+use crate::ir::{F32BinOp, F64BinOp, FCmpOp, IrBinOp, Instr, IrFn, IrTy, IrValue, Module};
 
 /// Enum variant registry: maps enum name → (variant name → (discriminant, field_names)).
 ///
@@ -8573,10 +8573,68 @@ impl<'src> LowerCtx<'src> {
                     BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne
                 ) =>
             {
-                // Both operands must be i32 at this milestone.
-                // FLS §6.5.3 AMBIGUOUS: the spec does not separately describe
-                // the type-checking rules for comparisons in the absence of
-                // type inference. We assume both sides are i32.
+                // FLS §6.5.3: Comparison operator expressions.
+                //
+                // Dispatch: if both operands are f64, emit FCmpF64 (fcmp + cset);
+                // if both are f32, emit FCmpF32; otherwise treat as i32.
+                //
+                // FLS §6.5.3 AMBIGUOUS: The spec does not describe type-checking
+                // rules for comparisons without type inference. Galvanic uses the
+                // is_f64/f32_expr heuristic to classify operands.
+                let fcmp_op = match op {
+                    BinOp::Lt => Some(FCmpOp::Lt),
+                    BinOp::Le => Some(FCmpOp::Le),
+                    BinOp::Gt => Some(FCmpOp::Gt),
+                    BinOp::Ge => Some(FCmpOp::Ge),
+                    BinOp::Eq => Some(FCmpOp::Eq),
+                    BinOp::Ne => Some(FCmpOp::Ne),
+                    _ => None,
+                };
+
+                if let Some(fcmp) = fcmp_op {
+                    if self.is_f64_expr(lhs) {
+                        // FLS §6.5.3: f64 comparison → `fcmp d{lhs}, d{rhs}` + `cset`.
+                        let lhs_val = self.lower_expr(lhs, &IrTy::F64)?;
+                        let lhs_freg = match lhs_val {
+                            IrValue::FReg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "f64 comparison: expected float register for lhs".into(),
+                            )),
+                        };
+                        let rhs_val = self.lower_expr(rhs, &IrTy::F64)?;
+                        let rhs_freg = match rhs_val {
+                            IrValue::FReg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "f64 comparison: expected float register for rhs".into(),
+                            )),
+                        };
+                        let dst = self.alloc_reg()?;
+                        self.instrs.push(Instr::FCmpF64 { op: fcmp, dst, lhs: lhs_freg, rhs: rhs_freg });
+                        return Ok(IrValue::Reg(dst));
+                    }
+                    if self.is_f32_expr(lhs) {
+                        // FLS §6.5.3: f32 comparison → `fcmp s{lhs}, s{rhs}` + `cset`.
+                        let lhs_val = self.lower_expr(lhs, &IrTy::F32)?;
+                        let lhs_freg = match lhs_val {
+                            IrValue::F32Reg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "f32 comparison: expected f32 register for lhs".into(),
+                            )),
+                        };
+                        let rhs_val = self.lower_expr(rhs, &IrTy::F32)?;
+                        let rhs_freg = match rhs_val {
+                            IrValue::F32Reg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "f32 comparison: expected f32 register for rhs".into(),
+                            )),
+                        };
+                        let dst = self.alloc_reg()?;
+                        self.instrs.push(Instr::FCmpF32 { op: fcmp, dst, lhs: lhs_freg, rhs: rhs_freg });
+                        return Ok(IrValue::Reg(dst));
+                    }
+                }
+
+                // Integer comparison path.
                 let lhs_val = self.lower_expr(lhs, &IrTy::I32)?;
                 // Spill lhs register if rhs contains a call (ARM64 caller-save
                 // convention; same rationale as arithmetic BinOp above).
