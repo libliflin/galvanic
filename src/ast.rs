@@ -299,6 +299,33 @@ pub enum SelfKind {
 
 /// An impl block (inherent or trait).
 ///
+/// An associated constant declaration. FLS §10.3: Associated Constants.
+///
+/// Grammar:
+/// ```text
+/// AssocConstDecl ::= "const" Identifier ":" Type ("=" Expression)? ";"
+/// ```
+///
+/// In a trait body: the value is `None` (required — implementors must provide it)
+/// or `Some(expr)` (a default value). In an impl block: the value is always `Some(expr)`.
+///
+/// FLS §10.3: "An associated constant declaration may omit the initializer to
+/// indicate that implementors must supply a value."
+///
+/// Cache-line note: `AssocConst` is only allocated during parsing and discarded
+/// after constant folding in the first lowering pass. Not on any hot path.
+#[derive(Debug)]
+pub struct AssocConst {
+    /// The constant name.
+    pub name: Span,
+    /// The declared type.
+    pub ty: Ty,
+    /// The value. `None` for required constants in trait declarations.
+    pub value: Option<Expr>,
+    /// Span of the entire declaration including the trailing semicolon.
+    pub span: Span,
+}
+
 /// FLS §11: Implementations. `impl Type { methods }` defines inherent methods
 /// on a named type. `impl Trait for Type { methods }` implements a trait.
 ///
@@ -320,6 +347,8 @@ pub struct ImplDef {
     pub trait_name: Option<Span>,
     /// The methods defined in this impl block.
     pub methods: Vec<Box<FnDef>>,
+    /// Associated constants defined in this impl block. FLS §10.3.
+    pub assoc_consts: Vec<AssocConst>,
     /// Span of the entire impl block.
     pub span: Span,
 }
@@ -347,6 +376,11 @@ pub struct TraitDef {
     /// Each `FnDef` has `body: None` (the body is provided by implementors).
     /// FLS §13: A trait item may declare a method without a body.
     pub methods: Vec<Box<FnDef>>,
+    /// Associated constant declarations in this trait body. FLS §10.3.
+    ///
+    /// Required consts (`const N: i32;`) have `value: None`.
+    /// Default consts (`const N: i32 = 0;`) have `value: Some(expr)`.
+    pub assoc_consts: Vec<AssocConst>,
     /// Span of the entire trait definition.
     pub span: Span,
 }

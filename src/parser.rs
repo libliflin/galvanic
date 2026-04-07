@@ -387,8 +387,18 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::OpenBrace)?;
 
         let mut methods = Vec::new();
+        let mut assoc_consts = Vec::new();
         while self.peek_kind() != TokenKind::CloseBrace && self.peek_kind() != TokenKind::Eof {
             let vis = self.parse_visibility();
+            // FLS §10.3: `const NAME: Ty = EXPR;` is an associated constant (not a `const fn`).
+            // Distinguish by peeking: `const fn` → const function, `const IDENT` → assoc const.
+            if self.peek_kind() == TokenKind::KwConst
+                && self.peek_nth(1) != TokenKind::KwFn
+            {
+                let ac = self.parse_assoc_const()?;
+                assoc_consts.push(ac);
+                continue;
+            }
             // FLS §9:41: Allow `const fn` inside impl blocks.
             let is_const = if self.peek_kind() == TokenKind::KwConst
                 && self.peek_nth(1) == TokenKind::KwFn
@@ -400,7 +410,7 @@ impl<'src> Parser<'src> {
             };
             if self.peek_kind() != TokenKind::KwFn {
                 return Err(self.error(format!(
-                    "expected `fn` inside impl block, found {:?}",
+                    "expected `fn` or `const` inside impl block, found {:?}",
                     self.peek_kind()
                 )));
             }
@@ -412,7 +422,7 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::CloseBrace)?;
         let span = start.to(end);
 
-        Ok(ImplDef { ty, trait_name, methods, span })
+        Ok(ImplDef { ty, trait_name, methods, assoc_consts, span })
     }
 
     /// Parse a trait definition.
@@ -449,8 +459,17 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::OpenBrace)?;
 
         let mut methods = Vec::new();
+        let mut assoc_consts = Vec::new();
         while self.peek_kind() != TokenKind::CloseBrace && self.peek_kind() != TokenKind::Eof {
             let vis = self.parse_visibility();
+            // FLS §10.3: `const NAME: Ty;` or `const NAME: Ty = EXPR;` in a trait body.
+            if self.peek_kind() == TokenKind::KwConst
+                && self.peek_nth(1) != TokenKind::KwFn
+            {
+                let ac = self.parse_assoc_const()?;
+                assoc_consts.push(ac);
+                continue;
+            }
             // FLS §9:41: `const fn` may appear in trait bodies.
             let is_const = if self.peek_kind() == TokenKind::KwConst
                 && self.peek_nth(1) == TokenKind::KwFn
@@ -462,7 +481,7 @@ impl<'src> Parser<'src> {
             };
             if self.peek_kind() != TokenKind::KwFn {
                 return Err(self.error(format!(
-                    "expected `fn` inside trait body, found {:?}",
+                    "expected `fn` or `const` inside trait body, found {:?}",
                     self.peek_kind()
                 )));
             }
@@ -477,7 +496,7 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::CloseBrace)?;
         let span = start.to(end);
 
-        Ok(TraitDef { name, methods, span })
+        Ok(TraitDef { name, methods, assoc_consts, span })
     }
 
     /// Consume a `self`, `&self`, or `&mut self` parameter if present.
@@ -547,6 +566,34 @@ impl<'src> Parser<'src> {
         let end = self.current_span();
         self.expect(TokenKind::Semi)?;
         Ok(ConstDef { name, ty, value, span: start.to(end) })
+    }
+
+    /// Parse an associated constant declaration inside an `impl` or `trait` block.
+    ///
+    /// FLS §10.3: Associated Constants.
+    ///
+    /// Grammar:
+    /// ```text
+    /// AssocConstDecl ::= "const" Identifier ":" Type ("=" Expression)? ";"
+    /// ```
+    ///
+    /// The `= Expression` part is optional in trait bodies (required const, no default)
+    /// and mandatory in impl blocks. If absent, `value` is `None`.
+    fn parse_assoc_const(&mut self) -> Result<crate::ast::AssocConst, ParseError> {
+        let start = self.current_span();
+        self.expect(TokenKind::KwConst)?;
+        let name = self.expect(TokenKind::Ident)?;
+        self.expect(TokenKind::Colon)?;
+        let ty = self.parse_ty()?;
+        // Optional initializer.
+        let value = if self.eat(TokenKind::Eq) {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        let end = self.current_span();
+        self.expect(TokenKind::Semi)?;
+        Ok(crate::ast::AssocConst { name, ty, value, span: start.to(end) })
     }
 
     /// Parse a static item declaration.
