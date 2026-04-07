@@ -7403,6 +7403,36 @@ impl<'src> LowerCtx<'src> {
                     }
                 }
 
+                // FLS §6.11, §14.2: Unit struct constructor in let binding.
+                //
+                // `let u = Unit;` where `Unit` is a zero-field named struct.
+                // In Rust, a unit struct name used as an expression is syntactic
+                // sugar for `Unit {}` (a zero-field struct literal). There are no
+                // fields to evaluate or store — allocate one dummy slot and
+                // register the variable as a struct type so method calls work.
+                //
+                // FLS §11: impl blocks for unit structs are valid; the dummy slot
+                // ensures `&self` has a consistent stack address even though the
+                // struct carries no data.
+                //
+                // Cache-line note: one `alloc_slot` per unit struct binding,
+                // zero store instructions — smaller footprint than any fielded struct.
+                if let Some(init_expr) = init.as_ref()
+                    && let ExprKind::Path(segs) = &init_expr.kind
+                    && segs.len() == 1
+                {
+                    let ctor_name = segs[0].text(self.source);
+                    if let Some(field_names) = self.struct_defs.get(ctor_name)
+                        && field_names.is_empty()
+                    {
+                        let struct_name = ctor_name.to_owned();
+                        let base_slot = self.alloc_slot()?;
+                        self.locals.insert(var_name, base_slot);
+                        self.local_struct_types.insert(base_slot, struct_name);
+                        return Ok(());
+                    }
+                }
+
                 // Normal (non-struct) let binding.
                 //
                 // FLS §8.1: The introduced binding comes into scope for the
