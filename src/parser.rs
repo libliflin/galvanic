@@ -1070,6 +1070,35 @@ impl<'src> Parser<'src> {
                 Ok(Ty { kind: TyKind::FnPtr { params, ret }, span: start.to(end) })
             }
 
+            // Array type `[T; N]` — FLS §4.5.
+            //
+            // FLS §4.5: "An array type is a sequence type with a statically
+            // known length." Syntax: `[ElementType ; Length]` where `Length`
+            // is a constant expression. At this milestone only integer literal
+            // lengths are supported.
+            //
+            // Cache-line note: N elements × 8-byte slots. Parsed eagerly so
+            // that type annotations on array let bindings and parameters can
+            // be accepted without a parse error.
+            TokenKind::OpenBracket => {
+                self.advance(); // consume `[`
+                let elem = self.parse_ty()?;
+                self.expect(TokenKind::Semi)?;
+                let len_span = self.current_span();
+                self.expect(TokenKind::LitInteger)?;
+                let len_text = len_span.text(self.src);
+                // Strip any numeric separators and parse the base-10 length.
+                let len_digits: String = len_text.chars().filter(|&c| c != '_').collect();
+                let len: usize = len_digits.parse().map_err(|_| {
+                    self.error(format!(
+                        "array length `{len_text}` is not a valid usize literal"
+                    ))
+                })?;
+                let end = self.current_span();
+                self.expect(TokenKind::CloseBracket)?;
+                Ok(Ty { kind: TyKind::Array { elem: Box::new(elem), len }, span: start.to(end) })
+            }
+
             // Named type — FLS §4.1, §14
             TokenKind::Ident => {
                 let mut segments = vec![self.current_span()];
@@ -3026,6 +3055,50 @@ mod tests {
         let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
         let TyKind::FnPtr { ref params, .. } = f.params[0].ty.kind else { panic!("expected FnPtr") };
         assert_eq!(params.len(), 2);
+    }
+
+    #[test]
+    fn array_type_annotation_in_let() {
+        // FLS §4.5: array type `[T; N]` in a let binding annotation.
+        let src = "fn f() -> i32 { let a: [i32; 3] = [1, 2, 3]; a[0] }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref func) = sf.items[0].kind else { panic!("expected Fn") };
+        let body = func.body.as_ref().expect("expected function body");
+        let crate::ast::StmtKind::Let { ty: Some(ty), .. } = &body.stmts[0].kind else {
+            panic!("expected let with type annotation")
+        };
+        let TyKind::Array { ref elem, len } = ty.kind else { panic!("expected TyKind::Array") };
+        assert_eq!(len, 3);
+        let TyKind::Path(ref segs) = elem.kind else { panic!("expected element path") };
+        assert_eq!(segs[0].text(src), "i32");
+    }
+
+    #[test]
+    fn array_type_with_repeat_init() {
+        // FLS §4.5: array type annotation with repeat initializer `[0; 5]`.
+        let src = "fn f() -> i32 { let a: [i32; 5] = [0; 5]; a[0] }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref func) = sf.items[0].kind else { panic!("expected Fn") };
+        let body = func.body.as_ref().expect("expected function body");
+        let crate::ast::StmtKind::Let { ty: Some(ty), .. } = &body.stmts[0].kind else {
+            panic!("expected let with type annotation")
+        };
+        let TyKind::Array { len, .. } = ty.kind else { panic!("expected TyKind::Array") };
+        assert_eq!(len, 5);
+    }
+
+    #[test]
+    fn array_type_as_parameter() {
+        // FLS §4.5: `[T; N]` in function parameter position.
+        let src = "fn sum(a: [i32; 4]) -> i32 { 0 }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn") };
+        let TyKind::Array { ref elem, len } = f.params[0].ty.kind else {
+            panic!("expected TyKind::Array in param")
+        };
+        assert_eq!(len, 4);
+        let TyKind::Path(ref segs) = elem.kind else { panic!("expected element path") };
+        assert_eq!(segs[0].text(src), "i32");
     }
 
     #[test]

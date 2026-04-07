@@ -539,9 +539,9 @@ pub struct Ty {
 ///
 /// FLS §4: Type kinds.
 ///
-/// Many type forms are not yet represented: array types (§4.5), slice types
+/// Many type forms are not yet represented: slice types
 /// (§4.6), trait objects (§4.10), impl-Trait types (§4.11), and generic type
-/// arguments (`Vec<i32>`).
+/// arguments (`Vec<i32>`). Array types (§4.5) are now supported via `TyKind::Array`.
 #[derive(Debug)]
 pub enum TyKind {
     /// A named type (a path). FLS §4.1, §14.
@@ -583,6 +583,22 @@ pub enum TyKind {
         params: Vec<Ty>,
         /// Return type. `None` means the return type is omitted (implicitly `()`).
         ret: Option<Box<Ty>>,
+    },
+
+    /// An array type `[T; N]`. FLS §4.5.
+    ///
+    /// FLS §4.5: "An array type is a sequence type with a statically known
+    /// length. The values of an array type are contiguous sequences of zero
+    /// or more values of the element type." The length `N` is a compile-time
+    /// constant expression.
+    ///
+    /// Cache-line note: N elements × 8-byte slots. An 8-element `[i32; 8]`
+    /// occupies exactly one 64-byte cache line on the stack.
+    Array {
+        /// Element type.
+        elem: Box<Ty>,
+        /// Array length (constant).
+        len: usize,
     },
 }
 

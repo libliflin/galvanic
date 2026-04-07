@@ -716,3 +716,29 @@ fn array_repeat_example() -> i32 {
     // Sum: 0+0+0+0+0+0+0+0 + 1+1+1+1 = 4
     zeros[0] + zeros[7] + ones[0] + ones[1] + ones[2] + ones[3]
 }
+
+// ── FLS §4.5: Array type annotations ─────────────────────────────────────────
+
+// FLS §4.5: "An array type is a sequence type with a statically known length."
+// `[T; N]` in type position annotates a binding or parameter with element type
+// T and length N.
+//
+// FLS §8.1: A LetStatement may include an optional type annotation. The
+// annotation must be consistent with the initializer.
+//
+// FLS §4.5: No dedicated code example in the spec for `[T; N]` as a type
+// annotation; this function is derived from the semantic description.
+//
+// FLS §6.1.2:37–45: All element stores are runtime instructions even when the
+// array annotation is fully resolved at parse time.
+//
+// Cache-line note: `[i32; 3]` = 3 × 8-byte slots = 24 bytes < one cache line.
+
+fn array_type_annotation_example() -> i32 {
+    // FLS §4.5: explicit array type annotation on a let binding.
+    let a: [i32; 3] = [10, 20, 30];
+    // FLS §4.5 + §6.8: explicit annotation with repeat initializer.
+    let b: [i32; 4] = [5; 4];
+    // FLS §6.9: element access on annotated arrays.
+    a[1] + b[0]  // 20 + 5 = 25
+}
