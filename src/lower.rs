@@ -8641,6 +8641,71 @@ impl<'src> LowerCtx<'src> {
                     return Ok(IrValue::Unit);
                 }
 
+                // FLS §6.5.11, §4.2: Float compound assignment — `x += 1.0` where `x: f64` or `x: f32`.
+                //
+                // Float locals live in `float_locals` (f64) / `float32_locals` (f32), not `locals`.
+                // Must dispatch before the general integer slot-resolution block below.
+                // Only arithmetic ops (+, -, *, /) are valid for floating-point types (FLS §6.5.5).
+                // Bitwise ops and shifts are not defined for f64/f32 (FLS §6.5.6–§6.5.8).
+                //
+                // FLS §6.1.2:37–45: All three instructions (load + binop + store) are runtime.
+                // ARM64 cache-line note: LoadF64Slot + F64BinOp + StoreF64 = 3 instructions (12 bytes).
+                if let ExprKind::Path(segments) = &target.kind
+                    && segments.len() == 1
+                {
+                    let var_name = segments[0].text(self.source);
+                    if let Some(&slot) = self.float_locals.get(var_name) {
+                        // f64 compound assignment: LoadF64Slot + F64BinOp + StoreF64.
+                        let lhs_freg = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadF64Slot { dst: lhs_freg, slot });
+                        let rhs_val = self.lower_expr(value, &IrTy::F64)?;
+                        let rhs_freg = match rhs_val {
+                            IrValue::FReg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "f64 compound assignment: RHS did not produce a float register".into(),
+                            )),
+                        };
+                        let f_op = match op {
+                            BinOp::Add => F64BinOp::Add,
+                            BinOp::Sub => F64BinOp::Sub,
+                            BinOp::Mul => F64BinOp::Mul,
+                            BinOp::Div => F64BinOp::Div,
+                            _ => return Err(LowerError::Unsupported(format!(
+                                "operator `{op:?}` not defined for f64 (FLS §6.5.5)"
+                            ))),
+                        };
+                        let dst_freg = self.alloc_reg()?;
+                        self.instrs.push(Instr::F64BinOp { op: f_op, dst: dst_freg, lhs: lhs_freg, rhs: rhs_freg });
+                        self.instrs.push(Instr::StoreF64 { src: dst_freg, slot });
+                        return Ok(IrValue::Unit);
+                    }
+                    if let Some(&slot) = self.float32_locals.get(var_name) {
+                        // f32 compound assignment: LoadF32Slot + F32BinOp + StoreF32.
+                        let lhs_freg = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadF32Slot { dst: lhs_freg, slot });
+                        let rhs_val = self.lower_expr(value, &IrTy::F32)?;
+                        let rhs_freg = match rhs_val {
+                            IrValue::F32Reg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "f32 compound assignment: RHS did not produce an f32 register".into(),
+                            )),
+                        };
+                        let f_op = match op {
+                            BinOp::Add => F32BinOp::Add,
+                            BinOp::Sub => F32BinOp::Sub,
+                            BinOp::Mul => F32BinOp::Mul,
+                            BinOp::Div => F32BinOp::Div,
+                            _ => return Err(LowerError::Unsupported(format!(
+                                "operator `{op:?}` not defined for f32 (FLS §6.5.5)"
+                            ))),
+                        };
+                        let dst_freg = self.alloc_reg()?;
+                        self.instrs.push(Instr::F32BinOp { op: f_op, dst: dst_freg, lhs: lhs_freg, rhs: rhs_freg });
+                        self.instrs.push(Instr::StoreF32 { src: dst_freg, slot });
+                        return Ok(IrValue::Unit);
+                    }
+                }
+
                 // Resolve target to a stack slot.
                 //
                 // FLS §6.5.11: Supports two place expression forms on the LHS:

@@ -13299,3 +13299,119 @@ fn main() -> i32 {
         "expected `fmov s0, s{{n}}` or `fmov s{{n}}, s0` for float return/capture:\n{asm}"
     );
 }
+
+// ── Milestone 103: f64 compound assignment (FLS §6.5.11, §6.5.5) ─────────────
+
+/// Milestone 103: `let mut x = 1.0; x += 2.0; x as i32` → exit 3.
+///
+/// FLS §6.5.11: Compound assignment `+=` desugars to load + add + store at runtime.
+/// FLS §6.5.5: `+` on f64 emits `fadd` (IEEE 754 double-precision addition).
+/// FLS §6.1.2:37–45: All three instructions are emitted at runtime — no folding.
+#[test]
+fn milestone_103_f64_add_assign() {
+    let Some(exit_code) = compile_and_run("fn main() -> i32 { let mut x: f64 = 1.0; x += 2.0; x as i32 }\n") else {
+        return;
+    };
+    assert_eq!(exit_code, 3, "expected exit 3 from `x += 2.0` (1.0 + 2.0 = 3.0), got {exit_code}");
+}
+
+/// Milestone 103: `let mut x = 5.0; x -= 3.0; x as i32` → exit 2.
+///
+/// FLS §6.5.11: `-=` on f64 emits `fsub` at runtime.
+/// FLS §6.5.5: `fsub` is IEEE 754 subtraction.
+#[test]
+fn milestone_103_f64_sub_assign() {
+    let Some(exit_code) = compile_and_run("fn main() -> i32 { let mut x: f64 = 5.0; x -= 3.0; x as i32 }\n") else {
+        return;
+    };
+    assert_eq!(exit_code, 2, "expected exit 2 from `x -= 3.0` (5.0 - 3.0 = 2.0), got {exit_code}");
+}
+
+/// Milestone 103: `let mut x = 3.0; x *= 4.0; x as i32` → exit 12.
+///
+/// FLS §6.5.11: `*=` on f64 emits `fmul`.
+#[test]
+fn milestone_103_f64_mul_assign() {
+    let Some(exit_code) = compile_and_run("fn main() -> i32 { let mut x: f64 = 3.0; x *= 4.0; x as i32 }\n") else {
+        return;
+    };
+    assert_eq!(exit_code, 12, "expected exit 12 from `x *= 4.0` (3.0 * 4.0 = 12.0), got {exit_code}");
+}
+
+/// Milestone 103: `let mut x = 10.0; x /= 2.0; x as i32` → exit 5.
+///
+/// FLS §6.5.11: `/=` on f64 emits `fdiv`.
+#[test]
+fn milestone_103_f64_div_assign() {
+    let Some(exit_code) = compile_and_run("fn main() -> i32 { let mut x: f64 = 10.0; x /= 2.0; x as i32 }\n") else {
+        return;
+    };
+    assert_eq!(exit_code, 5, "expected exit 5 from `x /= 2.0` (10.0 / 2.0 = 5.0), got {exit_code}");
+}
+
+/// Milestone 103: f64 compound assign in a loop accumulates correctly.
+///
+/// FLS §6.5.11, §6.15.3: `while` loop with `x += 1.0` increments at each iteration.
+/// FLS §6.1.2:37–45: Each iteration emits a runtime load + fadd + store.
+#[test]
+fn milestone_103_f64_add_assign_in_loop() {
+    let src = "fn main() -> i32 { let mut x: f64 = 0.0; let mut i = 0; while i < 5 { x += 1.0; i += 1; } x as i32 }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 5, "expected exit 5 from 5 iterations of `x += 1.0`, got {exit_code}");
+}
+
+/// Milestone 103: f64 compound assign with a parameter on the RHS.
+///
+/// FLS §6.5.11: RHS may be any f64 expression, including a function parameter.
+/// FLS §6.1.2:37–45: Cannot constant-fold when operand is runtime-unknown.
+#[test]
+fn milestone_103_f64_add_assign_param() {
+    let src = "fn add_to(mut x: f64, d: f64) -> i32 { x += d; x as i32 }\nfn main() -> i32 { add_to(3.0, 4.0) }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 7, "expected exit 7 from `add_to(3.0, 4.0)` = 7.0, got {exit_code}");
+}
+
+/// Milestone 103: f64 compound assign result used in arithmetic.
+///
+/// FLS §6.5.11: After `x += 2.0`, `x` holds 4.0; multiplied by 3 → 12.
+#[test]
+fn milestone_103_f64_compound_result_in_arithmetic() {
+    let src = "fn main() -> i32 { let mut x: f64 = 2.0; x += 2.0; (x as i32) * 3 }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 12, "expected exit 12 from (2.0+2.0)*3 = 12, got {exit_code}");
+}
+
+/// Milestone 103: f32 compound assignment `+=`.
+///
+/// FLS §6.5.11, §6.5.5: `f32 +=` emits `fadd` on single-precision registers.
+/// ARM64: `fadd s{dst}, s{lhs}, s{rhs}`.
+#[test]
+fn milestone_103_f32_add_assign() {
+    let src = "fn main() -> i32 { let mut x: f32 = 1.0_f32; x += 2.0_f32; x as i32 }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 3, "expected exit 3 from f32 `x += 2.0` (1.0+2.0=3.0), got {exit_code}");
+}
+
+/// Assembly inspection: f64 `+=` must emit `fadd` (not `add`) and use float store/load.
+///
+/// FLS §6.5.11: Compound assignment on f64 requires float instructions.
+/// FLS §6.5.5: `fadd` is the ARM64 double-precision addition instruction.
+/// FLS §6.1.2:37–45: `ldr d` + `fadd` + `str d` must all appear at runtime.
+#[test]
+fn runtime_f64_add_assign_emits_fadd() {
+    let asm = compile_to_asm("fn main() -> i32 { let mut x: f64 = 1.0; x += 2.0; x as i32 }\n");
+    assert!(
+        asm.contains("fadd"),
+        "expected `fadd` instruction for f64 `+=`, got:\n{asm}"
+    );
+    // Must NOT fall through to integer `add`.
+    // (fadd presence is sufficient; integer add may appear for i32 operations elsewhere)
+}
