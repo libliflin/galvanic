@@ -16294,3 +16294,219 @@ fn main() -> i32 {
         "f64 enum variant field load must emit `ldr d{{n}}`: {asm}"
     );
 }
+
+// ── Milestone 120 ── f64/f32 fields in named enum struct variants ──────────
+//
+// FLS §15.3: Named-field enum variant construction and pattern binding.
+// FLS §4.2: f64 and f32 fields use float register instructions.
+// FLS §6.17, §6.18: if-let and match extraction of float fields.
+
+/// Milestone 120: named-field enum struct variant with f64 field — basic if-let extraction.
+///
+/// FLS §15.3, §4.2: `Enum::Variant { field: f64 }` stores the f64 via StoreF64;
+/// if-let binding loads it via LoadF64Slot into float_locals.
+#[test]
+fn milestone_120_f64_named_variant_basic() {
+    let src = r#"
+enum Shape {
+    Circle { radius: f64 },
+    None,
+}
+fn main() -> i32 {
+    let s = Shape::Circle { radius: 3.0 };
+    if let Shape::Circle { radius: r } = s {
+        r as i32
+    } else {
+        0
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "Circle{{radius:3.0}}→3, got {exit_code}");
+}
+
+/// Milestone 120: named-field enum struct variant with f64 — else branch taken.
+///
+/// FLS §15.3, §6.17: The else branch is taken when the discriminant doesn't match.
+#[test]
+fn milestone_120_f64_named_variant_else_branch() {
+    let src = r#"
+enum Shape {
+    Circle { radius: f64 },
+    None,
+}
+fn main() -> i32 {
+    let s = Shape::None;
+    if let Shape::Circle { radius: r } = s {
+        r as i32
+    } else {
+        7
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "None→else branch→7, got {exit_code}");
+}
+
+/// Milestone 120: named-field enum struct variant with f64 — field used in arithmetic.
+///
+/// FLS §15.3, §4.2, §6.5.1: Extracted f64 field participates in float arithmetic.
+#[test]
+fn milestone_120_f64_named_variant_arithmetic() {
+    let src = r#"
+enum Measurement {
+    Length { meters: f64 },
+    None,
+}
+fn main() -> i32 {
+    let m = Measurement::Length { meters: 4.5 };
+    if let Measurement::Length { meters: d } = m {
+        (d * 2.0) as i32
+    } else {
+        0
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 9, "4.5*2.0=9.0→9, got {exit_code}");
+}
+
+/// Milestone 120: named-field enum struct variant with f64 — match expression.
+///
+/// FLS §15.3, §6.18: Match arm binds named field; value used in body.
+#[test]
+fn milestone_120_f64_named_variant_match() {
+    let src = r#"
+enum Measurement {
+    Distance { meters: f64 },
+    Count { value: i32 },
+}
+fn main() -> i32 {
+    let m = Measurement::Distance { meters: 6.0 };
+    match m {
+        Measurement::Distance { meters: d } => d as i32,
+        Measurement::Count { value: v } => v,
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "Distance{{meters:6.0}}→6, got {exit_code}");
+}
+
+/// Milestone 120: named-field enum struct variant with f64 — match selects second arm.
+///
+/// FLS §6.18: When first arm's discriminant doesn't match, the second arm fires.
+#[test]
+fn milestone_120_f64_named_variant_match_other_arm() {
+    let src = r#"
+enum Measurement {
+    Distance { meters: f64 },
+    Count { value: i32 },
+}
+fn main() -> i32 {
+    let m = Measurement::Count { value: 5 };
+    match m {
+        Measurement::Distance { meters: d } => d as i32,
+        Measurement::Count { value: v } => v,
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "Count{{value:5}}→5, got {exit_code}");
+}
+
+/// Milestone 120: named-field enum struct variant with f64 — extracted field passed to function.
+///
+/// FLS §15.3, §4.2, §9: Bound f64 field is passed as argument to another function.
+#[test]
+fn milestone_120_f64_named_variant_passed_to_fn() {
+    let src = r#"
+enum Shape {
+    Circle { radius: f64 },
+    None,
+}
+fn double(x: f64) -> i32 { (x * 2.0) as i32 }
+fn main() -> i32 {
+    let s = Shape::Circle { radius: 5.0 };
+    if let Shape::Circle { radius: r } = s {
+        double(r)
+    } else {
+        0
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "double(5.0)=10, got {exit_code}");
+}
+
+/// Milestone 120: named-field enum struct variant with two f64 fields.
+///
+/// FLS §15.3, §4.2: Multiple f64 fields each get their own float slot.
+#[test]
+fn milestone_120_f64_named_variant_two_fields() {
+    let src = r#"
+enum Rect {
+    Dims { width: f64, height: f64 },
+    None,
+}
+fn main() -> i32 {
+    let r = Rect::Dims { width: 3.0, height: 4.0 };
+    if let Rect::Dims { width: w, height: h } = r {
+        (w + h) as i32
+    } else {
+        0
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "3.0+4.0=7.0→7, got {exit_code}");
+}
+
+/// Milestone 120: named-field enum struct variant with f32 field — basic if-let.
+///
+/// FLS §15.3, §4.2: f32 fields use StoreF32/LoadF32Slot instructions.
+#[test]
+fn milestone_120_f32_named_variant_basic() {
+    let src = r#"
+enum Shape {
+    Circle { radius: f32 },
+    None,
+}
+fn main() -> i32 {
+    let s = Shape::Circle { radius: 6.0_f32 };
+    if let Shape::Circle { radius: r } = s {
+        r as i32
+    } else {
+        0
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "Circle{{radius:6.0f32}}→6, got {exit_code}");
+}
+
+/// Milestone 120: named-field enum struct variant — assembly emits float stores/loads.
+///
+/// FLS §4.2, §15.3: f64 named variant fields must use d-register instructions.
+#[test]
+fn runtime_f64_named_variant_emits_str_dreg() {
+    let src = r#"
+enum Shape {
+    Circle { radius: f64 },
+    None,
+}
+fn main() -> i32 {
+    let s = Shape::Circle { radius: 3.0 };
+    if let Shape::Circle { radius: r } = s { r as i32 } else { 0 }
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("str     d"),
+        "f64 named variant field store must emit `str d{{n}}`: {asm}"
+    );
+    assert!(
+        asm.contains("ldr     d"),
+        "f64 named variant field load must emit `ldr d{{n}}`: {asm}"
+    );
+}

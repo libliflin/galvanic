@@ -605,12 +605,30 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         }
                         // FLS §15.3: Named-field variant. Store names in declaration order
                         // so that construction and patterns can map name → slot index.
+                        // FLS §4.2: Track f64/f32 field positions for named variants too,
+                        // so construction and pattern binding can use float stores/loads.
                         EnumVariantKind::Named(fields) => {
                             let names: Vec<String> = fields
                                 .iter()
                                 .map(|f| f.name.text(source).to_owned())
                                 .collect();
-                            variants.insert(variant_name, (discriminant as i32, names));
+                            variants.insert(variant_name.clone(), (discriminant as i32, names));
+                            let float_tys: Vec<Option<IrTy>> = fields
+                                .iter()
+                                .map(|f| match &f.ty.kind {
+                                    TyKind::Path(segs) if segs.len() == 1 => {
+                                        match segs[0].text(source) {
+                                            "f64" => Some(IrTy::F64),
+                                            "f32" => Some(IrTy::F32),
+                                            _ => None,
+                                        }
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            if float_tys.iter().any(|t| t.is_some()) {
+                                variant_float_types.insert(variant_name, float_tys);
+                            }
                         }
                     }
                 }
@@ -4176,10 +4194,38 @@ impl<'src> LowerCtx<'src> {
                     let disc_reg = self.alloc_reg()?;
                     self.instrs.push(Instr::LoadImm(disc_reg, discriminant));
                     self.instrs.push(Instr::Store { src: disc_reg, slot: base_slot });
+                    // FLS §4.2, §15: Float fields use StoreF64/StoreF32.
                     for (i, arg) in args.iter().enumerate() {
-                        let val = self.lower_expr(arg, &IrTy::I32)?;
-                        let src = self.val_to_reg(val)?;
-                        self.instrs.push(Instr::Store { src, slot: base_slot + 1 + i as u8 });
+                        let slot = base_slot + 1 + i as u8;
+                        match self.enum_variant_field_float_ty(enum_name, variant_name, i) {
+                            Some(IrTy::F64) => {
+                                let val = self.lower_expr(arg, &IrTy::F64)?;
+                                let src = match val {
+                                    IrValue::FReg(r) => r,
+                                    _ => return Err(LowerError::Unsupported(
+                                        "f64 enum return tuple field did not produce float".into(),
+                                    )),
+                                };
+                                self.instrs.push(Instr::StoreF64 { src, slot });
+                                self.slot_float_ty.insert(slot, IrTy::F64);
+                            }
+                            Some(IrTy::F32) => {
+                                let val = self.lower_expr(arg, &IrTy::F32)?;
+                                let src = match val {
+                                    IrValue::F32Reg(r) => r,
+                                    _ => return Err(LowerError::Unsupported(
+                                        "f32 enum return tuple field did not produce float".into(),
+                                    )),
+                                };
+                                self.instrs.push(Instr::StoreF32 { src, slot });
+                                self.slot_float_ty.insert(slot, IrTy::F32);
+                            }
+                            _ => {
+                                let val = self.lower_expr(arg, &IrTy::I32)?;
+                                let src = self.val_to_reg(val)?;
+                                self.instrs.push(Instr::Store { src, slot });
+                            }
+                        }
                     }
                     return Ok(());
                 }
@@ -4202,6 +4248,7 @@ impl<'src> LowerCtx<'src> {
                     self.instrs.push(Instr::LoadImm(disc_reg, discriminant));
                     self.instrs.push(Instr::Store { src: disc_reg, slot: base_slot });
                     // Store fields in declaration order.
+                    // FLS §4.2, §15: Float fields use StoreF64/StoreF32.
                     for (field_idx, field_name) in field_names.iter().enumerate() {
                         let slot = base_slot + 1 + field_idx as u8;
                         let field_init = lit_fields
@@ -4212,9 +4259,35 @@ impl<'src> LowerCtx<'src> {
                                     "missing field `{field_name}` in `{enum_name}::{variant_name}` literal"
                                 ))
                             })?;
-                        let val = self.lower_expr(&field_init.1, &IrTy::I32)?;
-                        let src = self.val_to_reg(val)?;
-                        self.instrs.push(Instr::Store { src, slot });
+                        match self.enum_variant_field_float_ty(enum_name, variant_name, field_idx) {
+                            Some(IrTy::F64) => {
+                                let val = self.lower_expr(&field_init.1, &IrTy::F64)?;
+                                let src = match val {
+                                    IrValue::FReg(r) => r,
+                                    _ => return Err(LowerError::Unsupported(
+                                        "f64 enum return named field did not produce float".into(),
+                                    )),
+                                };
+                                self.instrs.push(Instr::StoreF64 { src, slot });
+                                self.slot_float_ty.insert(slot, IrTy::F64);
+                            }
+                            Some(IrTy::F32) => {
+                                let val = self.lower_expr(&field_init.1, &IrTy::F32)?;
+                                let src = match val {
+                                    IrValue::F32Reg(r) => r,
+                                    _ => return Err(LowerError::Unsupported(
+                                        "f32 enum return named field did not produce float".into(),
+                                    )),
+                                };
+                                self.instrs.push(Instr::StoreF32 { src, slot });
+                                self.slot_float_ty.insert(slot, IrTy::F32);
+                            }
+                            _ => {
+                                let val = self.lower_expr(&field_init.1, &IrTy::I32)?;
+                                let src = self.val_to_reg(val)?;
+                                self.instrs.push(Instr::Store { src, slot });
+                            }
+                        }
                     }
                     return Ok(());
                 }
@@ -6160,6 +6233,8 @@ impl<'src> LowerCtx<'src> {
                         // Store each field in declaration order.
                         // FLS §6.11: Fields evaluated in source order but stored in
                         // declaration order for layout stability.
+                        // FLS §4.2, §15: Float fields use StoreF64/StoreF32;
+                        // integer/bool fields use the regular Store instruction.
                         for (field_idx, field_name) in field_names.iter().enumerate() {
                             let slot = base_slot + 1 + field_idx as u8;
                             let field_init = lit_fields
@@ -6170,9 +6245,35 @@ impl<'src> LowerCtx<'src> {
                                         "missing field `{field_name}` in `{enum_name}::{variant_name}` literal"
                                     ))
                                 })?;
-                            let val = self.lower_expr(&field_init.1, &IrTy::I32)?;
-                            let src = self.val_to_reg(val)?;
-                            self.instrs.push(Instr::Store { src, slot });
+                            match self.enum_variant_field_float_ty(enum_name, variant_name, field_idx) {
+                                Some(IrTy::F64) => {
+                                    let val = self.lower_expr(&field_init.1, &IrTy::F64)?;
+                                    let src = match val {
+                                        IrValue::FReg(r) => r,
+                                        _ => return Err(LowerError::Unsupported(
+                                            "f64 named variant field did not produce a float value".into(),
+                                        )),
+                                    };
+                                    self.instrs.push(Instr::StoreF64 { src, slot });
+                                    self.slot_float_ty.insert(slot, IrTy::F64);
+                                }
+                                Some(IrTy::F32) => {
+                                    let val = self.lower_expr(&field_init.1, &IrTy::F32)?;
+                                    let src = match val {
+                                        IrValue::F32Reg(r) => r,
+                                        _ => return Err(LowerError::Unsupported(
+                                            "f32 named variant field did not produce a float value".into(),
+                                        )),
+                                    };
+                                    self.instrs.push(Instr::StoreF32 { src, slot });
+                                    self.slot_float_ty.insert(slot, IrTy::F32);
+                                }
+                                _ => {
+                                    let val = self.lower_expr(&field_init.1, &IrTy::I32)?;
+                                    let src = self.val_to_reg(val)?;
+                                    self.instrs.push(Instr::Store { src, slot });
+                                }
+                            }
                         }
                         return Ok(());
                     }
@@ -7963,6 +8064,9 @@ impl<'src> LowerCtx<'src> {
                             });
                             self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: else_label });
                             // Install named field bindings by declaration order.
+                            // FLS §4.2, §15: Float fields use LoadF64Slot/LoadF32Slot
+                            // and register in float_locals so path expressions emit
+                            // the correct float instructions downstream.
                             for (fname_span, fp) in pat_fields.iter() {
                                 let fname = fname_span.text(self.source);
                                 let field_idx = field_names
@@ -7978,9 +8082,27 @@ impl<'src> LowerCtx<'src> {
                                         let bind_name = bind_span.text(self.source);
                                         let fslot = base + 1 + field_idx as u8;
                                         let bslot = self.alloc_slot()?;
-                                        let breg = self.alloc_reg()?;
-                                        self.instrs.push(Instr::Load { dst: breg, slot: fslot });
-                                        self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                        match self.enum_variant_field_float_ty(enum_name, variant_name, field_idx) {
+                                            Some(IrTy::F64) => {
+                                                let freg = self.alloc_reg()?;
+                                                self.instrs.push(Instr::LoadF64Slot { dst: freg, slot: fslot });
+                                                self.instrs.push(Instr::StoreF64 { src: freg, slot: bslot });
+                                                self.slot_float_ty.insert(bslot, IrTy::F64);
+                                                self.float_locals.insert(bind_name, bslot);
+                                            }
+                                            Some(IrTy::F32) => {
+                                                let freg = self.alloc_reg()?;
+                                                self.instrs.push(Instr::LoadF32Slot { dst: freg, slot: fslot });
+                                                self.instrs.push(Instr::StoreF32 { src: freg, slot: bslot });
+                                                self.slot_float_ty.insert(bslot, IrTy::F32);
+                                                self.float32_locals.insert(bind_name, bslot);
+                                            }
+                                            _ => {
+                                                let breg = self.alloc_reg()?;
+                                                self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                                self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                            }
+                                        }
                                         self.locals.insert(bind_name, bslot);
                                         bound_names.push(bind_name);
                                     }
@@ -8701,6 +8823,7 @@ impl<'src> LowerCtx<'src> {
                                         });
                                         self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
                                         // Install named field bindings by declaration order.
+                                        // FLS §4.2, §15: Float fields use float loads/stores.
                                         for (fname_span, fp) in pat_fields.iter() {
                                             let fname = fname_span.text(self.source);
                                             let field_idx = field_names.iter().position(|n| n == fname)
@@ -8712,9 +8835,27 @@ impl<'src> LowerCtx<'src> {
                                                     let bind_name = bind_span.text(self.source);
                                                     let fslot = base + 1 + field_idx as u8;
                                                     let bslot = self.alloc_slot()?;
-                                                    let breg = self.alloc_reg()?;
-                                                    self.instrs.push(Instr::Load { dst: breg, slot: fslot });
-                                                    self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                                    match self.enum_variant_field_float_ty(enum_name, variant_name, field_idx) {
+                                                        Some(IrTy::F64) => {
+                                                            let freg = self.alloc_reg()?;
+                                                            self.instrs.push(Instr::LoadF64Slot { dst: freg, slot: fslot });
+                                                            self.instrs.push(Instr::StoreF64 { src: freg, slot: bslot });
+                                                            self.slot_float_ty.insert(bslot, IrTy::F64);
+                                                            self.float_locals.insert(bind_name, bslot);
+                                                        }
+                                                        Some(IrTy::F32) => {
+                                                            let freg = self.alloc_reg()?;
+                                                            self.instrs.push(Instr::LoadF32Slot { dst: freg, slot: fslot });
+                                                            self.instrs.push(Instr::StoreF32 { src: freg, slot: bslot });
+                                                            self.slot_float_ty.insert(bslot, IrTy::F32);
+                                                            self.float32_locals.insert(bind_name, bslot);
+                                                        }
+                                                        _ => {
+                                                            let breg = self.alloc_reg()?;
+                                                            self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                                            self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                                        }
+                                                    }
                                                     self.locals.insert(bind_name, bslot);
                                                     bound_sv.push(bind_name);
                                                 }
@@ -9284,6 +9425,7 @@ impl<'src> LowerCtx<'src> {
                                             rhs: p_reg,
                                         });
                                         self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
+                                        // FLS §4.2, §15: Float fields use float loads/stores.
                                         for (fname_span, fp) in pat_fields.iter() {
                                             let fname = fname_span.text(self.source);
                                             let field_idx = field_names.iter().position(|n| n == fname)
@@ -9295,9 +9437,27 @@ impl<'src> LowerCtx<'src> {
                                                     let bind_name = bind_span.text(self.source);
                                                     let fslot = base + 1 + field_idx as u8;
                                                     let bslot = self.alloc_slot()?;
-                                                    let breg = self.alloc_reg()?;
-                                                    self.instrs.push(Instr::Load { dst: breg, slot: fslot });
-                                                    self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                                    match self.enum_variant_field_float_ty(enum_name, variant_name, field_idx) {
+                                                        Some(IrTy::F64) => {
+                                                            let freg = self.alloc_reg()?;
+                                                            self.instrs.push(Instr::LoadF64Slot { dst: freg, slot: fslot });
+                                                            self.instrs.push(Instr::StoreF64 { src: freg, slot: bslot });
+                                                            self.slot_float_ty.insert(bslot, IrTy::F64);
+                                                            self.float_locals.insert(bind_name, bslot);
+                                                        }
+                                                        Some(IrTy::F32) => {
+                                                            let freg = self.alloc_reg()?;
+                                                            self.instrs.push(Instr::LoadF32Slot { dst: freg, slot: fslot });
+                                                            self.instrs.push(Instr::StoreF32 { src: freg, slot: bslot });
+                                                            self.slot_float_ty.insert(bslot, IrTy::F32);
+                                                            self.float32_locals.insert(bind_name, bslot);
+                                                        }
+                                                        _ => {
+                                                            let breg = self.alloc_reg()?;
+                                                            self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                                            self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                                        }
+                                                    }
                                                     self.locals.insert(bind_name, bslot);
                                                     bound_sv.push(bind_name);
                                                 }
@@ -11164,6 +11324,7 @@ impl<'src> LowerCtx<'src> {
                             });
                             self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: exit_label });
                             // Install named field bindings by declaration order.
+                            // FLS §4.2, §15: Float fields use float loads/stores.
                             for (fname_span, fp) in pat_fields.iter() {
                                 let fname = fname_span.text(self.source);
                                 let field_idx = field_names
@@ -11179,9 +11340,27 @@ impl<'src> LowerCtx<'src> {
                                         let bind_name = bind_span.text(self.source);
                                         let fslot = base + 1 + field_idx as u8;
                                         let bslot = self.alloc_slot()?;
-                                        let breg = self.alloc_reg()?;
-                                        self.instrs.push(Instr::Load { dst: breg, slot: fslot });
-                                        self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                        match self.enum_variant_field_float_ty(enum_name, variant_name, field_idx) {
+                                            Some(IrTy::F64) => {
+                                                let freg = self.alloc_reg()?;
+                                                self.instrs.push(Instr::LoadF64Slot { dst: freg, slot: fslot });
+                                                self.instrs.push(Instr::StoreF64 { src: freg, slot: bslot });
+                                                self.slot_float_ty.insert(bslot, IrTy::F64);
+                                                self.float_locals.insert(bind_name, bslot);
+                                            }
+                                            Some(IrTy::F32) => {
+                                                let freg = self.alloc_reg()?;
+                                                self.instrs.push(Instr::LoadF32Slot { dst: freg, slot: fslot });
+                                                self.instrs.push(Instr::StoreF32 { src: freg, slot: bslot });
+                                                self.slot_float_ty.insert(bslot, IrTy::F32);
+                                                self.float32_locals.insert(bind_name, bslot);
+                                            }
+                                            _ => {
+                                                let breg = self.alloc_reg()?;
+                                                self.instrs.push(Instr::Load { dst: breg, slot: fslot });
+                                                self.instrs.push(Instr::Store { src: breg, slot: bslot });
+                                            }
+                                        }
                                         self.locals.insert(bind_name, bslot);
                                         bound_names.push(bind_name);
                                     }
