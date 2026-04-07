@@ -1298,6 +1298,21 @@ for_array_example:
     add     sp, sp, #64             // FLS §8.1: restore stack frame
     ret
 
+    // fn array_len_example — FLS §9
+    .global array_len_example
+array_len_example:
+    sub     sp, sp, #32             // FLS §8.1: frame for 3 slot(s)
+    mov     x0, #10                  // FLS §2.4.4.1: load imm 10
+    str     x0, [sp, #0              ] // FLS §8.1: store slot 0
+    mov     x1, #20                  // FLS §2.4.4.1: load imm 20
+    str     x1, [sp, #8              ] // FLS §8.1: store slot 1
+    mov     x2, #30                  // FLS §2.4.4.1: load imm 30
+    str     x2, [sp, #16             ] // FLS §8.1: store slot 2
+    mov     x3, #3                   // FLS §2.4.4.1: load imm 3
+    mov     x0, x3              // FLS §6.19: return reg 3 → x0
+    add     sp, sp, #32             // FLS §8.1: restore stack frame
+    ret
+
     // ELF entry point — FLS §18.1
     .global _start
 _start:

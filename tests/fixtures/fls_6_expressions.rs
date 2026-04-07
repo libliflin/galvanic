@@ -793,3 +793,28 @@ fn for_array_example() -> i32 {
     }
     sum  // 1+2+3+4+5 = 15
 }
+
+// ── FLS §6.12.2: Method call expressions — array `.len()` ────────────────────
+//
+// FLS §4.5: Array types `[T; N]` have a fixed element count N encoded in the
+// type. `.len()` on an array returns that count as a `usize` value.
+// FLS §6.12.2: Method call expressions — `receiver.method(args)`.
+//
+// FLS §6.12.2 NOTE: The spec does not provide a concrete code example for
+// calling `.len()` on an array. This function is derived from the semantic
+// description of §4.5 (array type rules) and §6.12.2 (method call dispatch).
+//
+// FLS §4.5 NOTE: The spec states that the length is part of the array type.
+// Galvanic emits a compile-time `LoadImm` for `.len()` on both array literals
+// and array variables — no runtime stack access is required.
+//
+// Cache-line note: `.len()` compiles to a single `mov` immediate — identical
+// cost to reading a `const`. No additional cache traffic beyond the instruction
+// itself.
+
+fn array_len_example() -> i32 {
+    // FLS §4.5: a three-element array has length 3.
+    let arr = [10, 20, 30];
+    // FLS §6.12.2: method call on an array variable.
+    arr.len() as i32  // must return 3
+}
