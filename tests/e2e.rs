@@ -16510,3 +16510,141 @@ fn main() -> i32 {
         "f64 named variant field load must emit `ldr d{{n}}`: {asm}"
     );
 }
+
+// ── Milestone 121: f64 and f32 const items ────────────────────────────────────
+
+/// Milestone 121: f64 const used as return value.
+///
+/// FLS §7.1: `const` items are substituted at every use site.
+/// FLS §4.2, §6.5.9: The f64 const is cast to i32 at the call site.
+/// FLS §2.4.4.2: Float literals without suffix are f64.
+#[test]
+fn milestone_121_f64_const_as_return_value() {
+    let src = r#"
+const PI: f64 = 3.0;
+fn main() -> i32 { PI as i32 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "expected exit 3, got {exit_code}");
+}
+
+/// Milestone 121: f64 const used in arithmetic.
+///
+/// FLS §7.1: Const substituted into a runtime arithmetic expression.
+/// FLS §6.5.5: Addition of two f64 values.
+#[test]
+fn milestone_121_f64_const_in_arithmetic() {
+    let src = r#"
+const BASE: f64 = 2.5;
+fn main() -> i32 { (BASE + 1.5) as i32 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 4, "expected exit 4, got {exit_code}");
+}
+
+/// Milestone 121: f64 const passed as function argument.
+///
+/// FLS §7.1: The const value is substituted at the call site.
+/// FLS §6.12.1: The substituted value is passed as a runtime argument.
+#[test]
+fn milestone_121_f64_const_as_fn_arg() {
+    let src = r#"
+const SCALE: f64 = 5.0;
+fn double(x: f64) -> i32 { (x * 2.0) as i32 }
+fn main() -> i32 { double(SCALE) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "expected exit 10, got {exit_code}");
+}
+
+/// Milestone 121: two f64 consts used together.
+///
+/// FLS §7.1: Multiple const items can coexist and be used independently.
+#[test]
+fn milestone_121_two_f64_consts() {
+    let src = r#"
+const A: f64 = 3.0;
+const B: f64 = 4.0;
+fn main() -> i32 { (A + B) as i32 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "expected exit 7, got {exit_code}");
+}
+
+/// Milestone 121: f64 const that references another f64 const.
+///
+/// FLS §7.1: Const items may reference other const items as initializers.
+#[test]
+fn milestone_121_f64_const_references_const() {
+    let src = r#"
+const HALF: f64 = 1.5;
+const FULL: f64 = HALF * 2.0;
+fn main() -> i32 { FULL as i32 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "expected exit 3, got {exit_code}");
+}
+
+/// Milestone 121: f64 const used in if-condition comparison.
+///
+/// FLS §7.1: Const substituted into a comparison expression.
+/// FLS §6.17: The comparison result drives branch selection.
+#[test]
+fn milestone_121_f64_const_in_if_condition() {
+    let src = r#"
+const THRESHOLD: f64 = 5.0;
+fn main() -> i32 {
+    let x: f64 = 6.0;
+    if x > THRESHOLD { 1 } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected exit 1, got {exit_code}");
+}
+
+/// Milestone 121: f32 const used as return value.
+///
+/// FLS §7.1: f32 const items are substituted like f64 consts.
+/// FLS §4.2: f32 uses s-register instructions.
+#[test]
+fn milestone_121_f32_const_as_return_value() {
+    let src = r#"
+const HALF: f32 = 2.5_f32;
+fn main() -> i32 { HALF as i32 }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2, "expected exit 2, got {exit_code}");
+}
+
+/// Milestone 121: f64 const emits LoadF64Const (ldr into d-register).
+///
+/// FLS §7.1, §4.2: Float const substitution must use the float register bank.
+/// Cache-line note: `ldr d{N}, [pc, #offset]` is 4 bytes (one instruction slot).
+#[test]
+fn runtime_f64_const_emits_ldr_dreg() {
+    let src = r#"
+const PI: f64 = 3.14159;
+fn main() -> i32 { PI as i32 }
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("ldr     d"),
+        "f64 const load must emit `ldr d{{n}}`: {asm}"
+    );
+}
+
+/// Milestone 121: f32 const emits LoadF32Const (ldr into s-register).
+///
+/// FLS §7.1, §4.2: f32 const substitution must use s-register instructions.
+#[test]
+fn runtime_f32_const_emits_ldr_sreg() {
+    let src = r#"
+const HALF: f32 = 0.5_f32;
+fn main() -> i32 { (HALF + 0.5_f32) as i32 }
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("ldr     s"),
+        "f32 const load must emit `ldr s{{n}}`: {asm}"
+    );
+}
