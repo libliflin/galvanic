@@ -326,6 +326,24 @@ pub struct AssocConst {
     pub span: Span,
 }
 
+/// An associated type declaration or definition.
+///
+/// FLS §10.2: Associated types. `type Foo;` in a trait body declares a required
+/// associated type. `type Foo = Bar;` in an impl block defines it.
+///
+/// Cache-line note: `AssocType` is only allocated during parsing; it is not
+/// used in codegen at this milestone (associated types are structural annotations).
+#[derive(Debug)]
+pub struct AssocType {
+    /// The associated type name.
+    pub name: Span,
+    /// The concrete type. `None` for declarations in trait bodies (required —
+    /// implementors must supply a definition). `Some` for definitions in impl blocks.
+    pub ty: Option<Ty>,
+    /// Span of the entire declaration including the trailing semicolon.
+    pub span: Span,
+}
+
 /// FLS §11: Implementations. `impl Type { methods }` defines inherent methods
 /// on a named type. `impl Trait for Type { methods }` implements a trait.
 ///
@@ -349,6 +367,8 @@ pub struct ImplDef {
     pub methods: Vec<Box<FnDef>>,
     /// Associated constants defined in this impl block. FLS §10.3.
     pub assoc_consts: Vec<AssocConst>,
+    /// Associated type definitions in this impl block. FLS §10.2.
+    pub assoc_types: Vec<AssocType>,
     /// Span of the entire impl block.
     pub span: Span,
 }
@@ -381,6 +401,10 @@ pub struct TraitDef {
     /// Required consts (`const N: i32;`) have `value: None`.
     /// Default consts (`const N: i32 = 0;`) have `value: Some(expr)`.
     pub assoc_consts: Vec<AssocConst>,
+    /// Associated type declarations in this trait body. FLS §10.2.
+    ///
+    /// Required associated types (`type Foo;`) have `ty: None`.
+    pub assoc_types: Vec<AssocType>,
     /// Span of the entire trait definition.
     pub span: Span,
 }

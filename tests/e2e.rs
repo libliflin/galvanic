@@ -17864,3 +17864,238 @@ fn main() -> i32 { Config::MAX }
         "assoc const must emit immediate load of 100: {asm}"
     );
 }
+
+// ── Milestone 129: associated types in trait and impl blocks ─────────────────
+//
+// FLS §10.2: Associated types. A trait may declare an associated type with
+// `type Name;`. An impl block provides the concrete definition `type Name = Ty;`.
+// At this milestone, associated type declarations are parsed and stored but are
+// not used in code generation — function signatures use concrete types directly.
+
+/// Milestone 129: basic associated type declaration and method.
+///
+/// FLS §10.2: `type Item = i32;` in an impl block declares the associated type.
+/// The method uses `i32` directly; the associated type is structural annotation.
+#[test]
+fn milestone_129_assoc_type_basic() {
+    let src = r#"
+trait Container {
+    type Item;
+    fn get(&self) -> i32;
+}
+struct Wrapper { x: i32 }
+impl Container for Wrapper {
+    type Item = i32;
+    fn get(&self) -> i32 { self.x }
+}
+fn main() -> i32 {
+    let w = Wrapper { x: 42 };
+    w.get()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "get() returns 42, got {exit_code}");
+}
+
+/// Milestone 129: associated type in inherent impl block.
+///
+/// FLS §10.2, §11.2: Inherent impl blocks may also define associated types.
+#[test]
+fn milestone_129_assoc_type_inherent_impl() {
+    let src = r#"
+struct Counter { count: i32 }
+impl Counter {
+    type Value = i32;
+    fn value(&self) -> i32 { self.count }
+}
+fn main() -> i32 {
+    let c = Counter { count: 7 };
+    c.value()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "value() returns 7, got {exit_code}");
+}
+
+/// Milestone 129: associated type with method using field in arithmetic.
+///
+/// FLS §10.2: Associated type declaration is orthogonal to method body logic.
+#[test]
+fn milestone_129_assoc_type_field_in_arithmetic() {
+    let src = r#"
+trait Compute {
+    type Result;
+    fn compute(&self) -> i32;
+}
+struct Adder { a: i32, b: i32 }
+impl Compute for Adder {
+    type Result = i32;
+    fn compute(&self) -> i32 { self.a + self.b }
+}
+fn main() -> i32 {
+    let x = Adder { a: 20, b: 22 };
+    x.compute()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "20+22=42, got {exit_code}");
+}
+
+/// Milestone 129: two impls of the same trait with different associated types.
+///
+/// FLS §10.2: Different implementors may choose different concrete types.
+#[test]
+fn milestone_129_assoc_type_two_impls() {
+    let src = r#"
+trait HasVal {
+    type Val;
+    fn val(&self) -> i32;
+}
+struct Small { x: i32 }
+struct Large { x: i32 }
+impl HasVal for Small {
+    type Val = i32;
+    fn val(&self) -> i32 { self.x }
+}
+impl HasVal for Large {
+    type Val = i32;
+    fn val(&self) -> i32 { self.x * 10 }
+}
+fn main() -> i32 {
+    let s = Small { x: 3 };
+    let l = Large { x: 3 };
+    s.val() + l.val()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 33, "3+30=33, got {exit_code}");
+}
+
+/// Milestone 129: associated type alongside associated constant.
+///
+/// FLS §10.2 + §10.3: A single impl block may define both associated types
+/// and associated constants.
+#[test]
+fn milestone_129_assoc_type_with_const() {
+    let src = r#"
+trait Metadata {
+    type Kind;
+    const VERSION: i32;
+    fn version(&self) -> i32;
+}
+struct Widget { v: i32 }
+impl Metadata for Widget {
+    type Kind = i32;
+    const VERSION: i32 = 2;
+    fn version(&self) -> i32 { Widget::VERSION + self.v }
+}
+fn main() -> i32 {
+    let w = Widget { v: 5 };
+    w.version()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "VERSION(2)+v(5)=7, got {exit_code}");
+}
+
+/// Milestone 129: associated type on parameter (trait method dispatch).
+///
+/// FLS §10.2: The method is called via static dispatch; associated type
+/// does not affect the calling convention.
+#[test]
+fn milestone_129_assoc_type_on_parameter() {
+    let src = r#"
+trait Scale {
+    type Factor;
+    fn scale(&self, n: i32) -> i32;
+}
+struct Double;
+impl Scale for Double {
+    type Factor = i32;
+    fn scale(&self, n: i32) -> i32 { n * 2 }
+}
+fn apply(s: Double, n: i32) -> i32 {
+    s.scale(n)
+}
+fn main() -> i32 {
+    let d = Double;
+    apply(d, 21)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "21*2=42, got {exit_code}");
+}
+
+/// Milestone 129: associated type result used in arithmetic.
+///
+/// FLS §10.2: Return value of a method is used in an arithmetic expression;
+/// associated type declaration does not interfere.
+#[test]
+fn milestone_129_assoc_type_result_in_arithmetic() {
+    let src = r#"
+trait Measure {
+    type Unit;
+    fn measure(&self) -> i32;
+}
+struct Box { side: i32 }
+impl Measure for Box {
+    type Unit = i32;
+    fn measure(&self) -> i32 { self.side * self.side }
+}
+fn main() -> i32 {
+    let b = Box { side: 4 };
+    b.measure() + 10
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 26, "4*4+10=26, got {exit_code}");
+}
+
+/// Milestone 129: associated type with default method body in trait.
+///
+/// FLS §10.2 + §10.1.1: A trait may combine an associated type declaration
+/// with a default method that the impl inherits.
+#[test]
+fn milestone_129_assoc_type_with_default_method() {
+    let src = r#"
+trait Describe {
+    type Label;
+    fn label_len(&self) -> i32 { 5 }
+}
+struct Item;
+impl Describe for Item {
+    type Label = i32;
+}
+fn main() -> i32 {
+    let it = Item;
+    it.label_len()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "default label_len()=5, got {exit_code}");
+}
+
+/// Assembly check: program with associated type parses and emits valid ARM64.
+///
+/// FLS §10.2: The associated type declaration does not generate any instructions —
+/// the method body is emitted as normal.
+#[test]
+fn runtime_assoc_type_emits_method_body() {
+    let src = r#"
+trait Get {
+    type Out;
+    fn get(&self) -> i32;
+}
+struct Num { x: i32 }
+impl Get for Num {
+    type Out = i32;
+    fn get(&self) -> i32 { self.x }
+}
+fn main() -> i32 { let n = Num { x: 7 }; n.get() }
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("ret"),
+        "method with associated type must emit ret: {asm}"
+    );
+}
