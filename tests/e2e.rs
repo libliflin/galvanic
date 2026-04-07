@@ -17790,6 +17790,38 @@ fn main() -> i32 {
     );
 }
 
+/// Assembly check: default method called with a runtime value must not fold.
+///
+/// FLS §10.1.1, §6.1.2:37–45: A default trait method invoked in a non-const
+/// context must emit a runtime call. When `self.x` comes from a function
+/// parameter `n`, the result `n * 2` is unknown at compile time — the compiler
+/// must not fold it to `mov x0, #42`.
+#[test]
+fn runtime_default_method_result_not_folded() {
+    let src = r#"
+trait Scalable {
+    fn value(&self) -> i32;
+    fn doubled(&self) -> i32 { self.value() * 2 }
+}
+struct Foo { x: i32 }
+impl Scalable for Foo { fn value(&self) -> i32 { self.x } }
+fn make_and_double(n: i32) -> i32 {
+    let f = Foo { x: n };
+    f.doubled()
+}
+fn main() -> i32 { make_and_double(21) }
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("bl      Foo__doubled") || asm.contains("bl Foo__doubled"),
+        "default method call must emit bl Foo__doubled: {asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #42") && !asm.contains("mov x0, #42"),
+        "default method result must not be folded to constant 42: {asm}"
+    );
+}
+
 /// Milestone 128: basic associated constant on an inherent impl.
 ///
 /// FLS §10.3: An impl block may declare `const NAME: Type = VALUE;`.
@@ -17967,5 +17999,32 @@ fn main() -> i32 { Config::MAX }
     assert!(
         asm.contains("mov     x0, #100") || asm.contains("mov x0, #100"),
         "assoc const must emit immediate load of 100: {asm}"
+    );
+}
+
+/// Assembly check: associated constant used in runtime computation must not fold.
+///
+/// FLS §10.3, §6.1.2:37–45: `Config::MAX` is correctly inlined as an immediate,
+/// but when added to a runtime parameter `x`, the addition must emit a runtime
+/// `add` instruction. The result `x + 10` is unknown at compile time — the
+/// compiler must not fold it to `mov x0, #15` when called with literal `5`.
+#[test]
+fn runtime_assoc_const_in_computation_not_folded() {
+    let src = r#"
+struct Config;
+impl Config {
+    const MAX: i32 = 10;
+}
+fn compute(x: i32) -> i32 { x + Config::MAX }
+fn main() -> i32 { compute(5) }
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("add"),
+        "assoc const + parameter must emit add instruction: {asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #15") && !asm.contains("mov x0, #15"),
+        "assoc const in computation must not be folded to constant 15: {asm}"
     );
 }
