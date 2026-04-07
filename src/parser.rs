@@ -1342,6 +1342,20 @@ impl<'src> Parser<'src> {
             return Ok(StmtOrTail::Stmt(self.parse_let_stmt()?));
         }
 
+        // Inner item statement — FLS §3, §9.
+        // A `fn` keyword in block position starts an inner function definition,
+        // not an expression. Parse it as a full item and wrap in `StmtKind::Item`.
+        // Inner functions do not capture outer locals (unlike closures).
+        // Only `fn` is handled here; other item kinds may be added in future milestones.
+        if self.peek_kind() == TokenKind::KwFn {
+            let item = self.parse_item()?;
+            let item_span = item.span;
+            return Ok(StmtOrTail::Stmt(Stmt {
+                kind: StmtKind::Item(Box::new(item)),
+                span: start.to(item_span),
+            }));
+        }
+
         // Expression statement or tail — FLS §8.3, §6.10
         let expr = self.parse_expr()?;
         let expr_span = expr.span;

@@ -17271,3 +17271,155 @@ fn main() -> i32 {
     // The captured value is passed as an extra register argument — same as non-move.
     assert!(asm.contains("__closure_"), "move closure must emit hidden closure function: {asm}");
 }
+
+// ── Milestone 126: Inner function definitions in block bodies ─────────────────
+//
+// FLS §9: Function items. FLS §3: Items (including functions) may appear as
+// statements inside block expressions. An inner function does not capture
+// outer locals — it compiles to a sibling top-level function.
+//
+// Note: FLS §9 does not provide a dedicated example of inner functions;
+// the feature is implied by §3 (items are allowed in block position).
+
+/// Milestone 126: basic inner function called once.
+///
+/// FLS §9, §3: `fn double` defined inside `fn main`'s block.
+#[test]
+fn milestone_126_inner_fn_basic() {
+    let src = r#"
+fn main() -> i32 {
+    fn double(x: i32) -> i32 { x * 2 }
+    double(21)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "double(21)=42, got {exit_code}");
+}
+
+/// Milestone 126: inner function with no parameters returns a constant.
+///
+/// FLS §9, §3: An inner `fn` with no params and a scalar return.
+#[test]
+fn milestone_126_inner_fn_no_params() {
+    let src = r#"
+fn main() -> i32 {
+    fn answer() -> i32 { 42 }
+    answer()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "answer()=42, got {exit_code}");
+}
+
+/// Milestone 126: inner function called multiple times.
+///
+/// FLS §9: A function item may be called any number of times.
+#[test]
+fn milestone_126_inner_fn_called_twice() {
+    let src = r#"
+fn main() -> i32 {
+    fn square(x: i32) -> i32 { x * x }
+    square(3) + square(4)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 25, "9+16=25, got {exit_code}");
+}
+
+/// Milestone 126: inner function called with result in arithmetic.
+///
+/// FLS §9, §6.12.1: Call expression result used in a larger expression.
+#[test]
+fn milestone_126_inner_fn_result_in_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    fn half(x: i32) -> i32 { x / 2 }
+    half(80) + half(4)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "40+2=42, got {exit_code}");
+}
+
+/// Milestone 126: inner function two parameters.
+///
+/// FLS §9: Functions may have multiple parameters.
+#[test]
+fn milestone_126_inner_fn_two_params() {
+    let src = r#"
+fn main() -> i32 {
+    fn add(a: i32, b: i32) -> i32 { a + b }
+    add(35, 7)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "35+7=42, got {exit_code}");
+}
+
+/// Milestone 126: inner function calls outer function.
+///
+/// FLS §9: Inner functions can call functions defined in the outer scope.
+#[test]
+fn milestone_126_inner_fn_calls_outer() {
+    let src = r#"
+fn triple(x: i32) -> i32 { x * 3 }
+fn main() -> i32 {
+    fn triple_and_add(x: i32, n: i32) -> i32 { triple(x) + n }
+    triple_and_add(13, 3)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "39+3=42, got {exit_code}");
+}
+
+/// Milestone 126: inner function with result stored in let binding.
+///
+/// FLS §8.1, §9: Inner fn result assigned to a local variable.
+#[test]
+fn milestone_126_inner_fn_result_in_let() {
+    let src = r#"
+fn main() -> i32 {
+    fn negate(x: i32) -> i32 { -x }
+    let v = negate(-42);
+    v
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "negate(-42)=42, got {exit_code}");
+}
+
+/// Milestone 126: two inner functions, one calls the other.
+///
+/// FLS §9, §3: Two inner function items in the same block; the first
+/// calls the second (forward reference resolved by the pre-pass).
+#[test]
+fn milestone_126_two_inner_fns() {
+    let src = r#"
+fn main() -> i32 {
+    fn double(x: i32) -> i32 { x * 2 }
+    fn quad(x: i32) -> i32 { double(x) * 2 }
+    quad(10) + double(1)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "40+2=42, got {exit_code}");
+}
+
+/// Assembly check: inner function emits a separate labeled function.
+///
+/// FLS §9, §3: The inner function must produce a top-level assembly label
+/// (not inline code) so that `bl` can reach it.
+#[test]
+fn runtime_inner_fn_emits_separate_label() {
+    let src = r#"
+fn main() -> i32 {
+    fn helper(x: i32) -> i32 { x + 1 }
+    helper(41)
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("helper:"),
+        "inner fn must emit assembly label 'helper:': {asm}"
+    );
+}

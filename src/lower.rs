@@ -27,7 +27,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{BinOp, Block, Expr, ExprKind, ItemKind, Pat, SelfKind, SourceFile, Stmt, StmtKind, StructKind, TyKind};
+use crate::ast::{BinOp, Block, Expr, ExprKind, ItemKind, ParamKind, Pat, SelfKind, SourceFile, Stmt, StmtKind, StructKind, TyKind};
 use crate::ir::{F32BinOp, F64BinOp, FCmpOp, IrBinOp, Instr, IrFn, IrTy, IrValue, Module};
 
 /// Enum variant registry: maps enum name → (variant name → (discriminant, field_names)).
@@ -172,6 +172,9 @@ fn stmt_contains_call(stmt: &Stmt) -> bool {
         StmtKind::Expr(e) => expr_contains_call(e),
         StmtKind::Let { init, .. } => init.as_ref().is_some_and(|e| expr_contains_call(e)),
         StmtKind::Empty => false,
+        // FLS §3, §9: Inner item definitions are not expressions; they cannot
+        // themselves contain a runtime call in the enclosing scope.
+        StmtKind::Item(_) => false,
     }
 }
 
@@ -194,6 +197,7 @@ fn stmt_contains_break_with_value(stmt: &Stmt) -> bool {
             init.as_ref().is_some_and(|e| expr_contains_break_with_value(e))
         }
         StmtKind::Empty => false,
+        StmtKind::Item(_) => false,
     }
 }
 
@@ -274,6 +278,7 @@ fn stmt_contains_labeled_break_with_value(stmt: &Stmt, target_label: &str) -> bo
                 .is_some_and(|e| expr_contains_labeled_break_with_value(e, target_label))
         }
         StmtKind::Empty => false,
+        StmtKind::Item(_) => false,
     }
 }
 
@@ -3249,14 +3254,20 @@ struct LowerCtx<'src> {
     /// Cache-line note: `Option<Vec<u8>>` = 24 bytes (None = 0 heap allocation).
     last_closure_captures: Option<Vec<u8>>,
 
-    /// Names of all free functions declared in the current source file.
+    /// Names of all free functions visible in the current scope.
     ///
     /// FLS §4.9: Used to detect when a single-segment path expression refers to a
     /// function item (and should emit `LoadFnAddr`) rather than a local variable.
     /// Populated from the top-level `lower()` function before lowering begins.
+    /// Inner function names (FLS §9, §3: items inside block bodies) are inserted
+    /// dynamically as they are encountered during block lowering.
     ///
-    /// Cache-line note: read-only during lowering; not on any hot path.
-    fn_names: &'src std::collections::HashSet<String>,
+    /// Owned rather than borrowed so that inner function names can be added
+    /// during lowering without requiring a mutable reference to the module-level set.
+    ///
+    /// Cache-line note: modified once per inner-function declaration; read once
+    /// per path expression that might be a function. Not on a hot arithmetic path.
+    fn_names: std::collections::HashSet<String>,
 
     /// Compile-time constant values: maps const name → i32.
     ///
@@ -3459,6 +3470,8 @@ fn find_captures<'src>(
                     find_captures(e, outer_locals, &inner_params, source, captured);
                 }
                 StmtKind::Empty => {}
+                // FLS §3, §9: Inner function items do not capture outer locals.
+                StmtKind::Item(_) => {}
             }
         }
         if let Some(tail) = &block.tail {
@@ -3587,7 +3600,7 @@ impl<'src> LowerCtx<'src> {
         static_names: &'src std::collections::HashSet<String>,
         static_f64_names: &'src std::collections::HashSet<String>,
         static_f32_names: &'src std::collections::HashSet<String>,
-        fn_names: &'src std::collections::HashSet<String>,
+        fn_names: &std::collections::HashSet<String>,
         struct_field_types: &'src HashMap<String, Vec<Option<String>>>,
         struct_field_offsets: &'src HashMap<String, Vec<usize>>,
         struct_sizes: &'src HashMap<String, usize>,
@@ -3628,7 +3641,7 @@ impl<'src> LowerCtx<'src> {
             static_names,
             static_f64_names,
             static_f32_names,
-            fn_names,
+            fn_names: fn_names.clone(),
             struct_field_types,
             struct_field_offsets,
             struct_sizes,
@@ -4481,6 +4494,23 @@ impl<'src> LowerCtx<'src> {
     /// FLS §6.4: Block expressions.
     /// FLS §6.1.2:37–45: Non-const function bodies must emit runtime code.
     fn lower_block_to_value(&mut self, block: &Block, ret_ty: &IrTy) -> Result<IrValue, LowerError> {
+        // FLS §3, §9: Pre-pass — register inner function names so they are
+        // visible as direct-call targets throughout the block, even for calls
+        // that appear before the function's definition statement.
+        //
+        // This enables forward calls and mutual recursion between inner functions
+        // in the same block (subject to the no-struct-return limitation at this
+        // milestone). The names are inserted into `self.fn_names` (now owned)
+        // so all subsequent expression lowering in this block sees them.
+        for stmt in &block.stmts {
+            if let StmtKind::Item(item) = &stmt.kind
+                && let ItemKind::Fn(fn_def) = &item.kind
+            {
+                let name = fn_def.name.text(self.source).to_owned();
+                self.fn_names.insert(name);
+            }
+        }
+
         for stmt in &block.stmts {
             self.lower_stmt(stmt)?;
         }
@@ -7259,6 +7289,137 @@ impl<'src> LowerCtx<'src> {
 
             // FLS §8.2: Empty statements are no-ops.
             StmtKind::Empty => Ok(()),
+
+            // FLS §3, §9: Inner function item defined inside a block body.
+            //
+            // An inner function is compiled as a sibling top-level function —
+            // identical to a closure that captures nothing. It does not capture
+            // outer locals (unlike closures). Its name is registered in
+            // `self.fn_names` (which was already done in the pre-pass in
+            // `lower_block_to_value`) so that call sites emit a direct `bl`.
+            //
+            // FLS §6.14 AMBIGUOUS: The spec does not distinguish inner functions
+            // from closures in terms of name visibility; galvanic treats inner
+            // function names as direct-call targets (no `blr` indirection).
+            //
+            // Cache-line note: the generated label is 8 bytes aligned by the
+            // assembler; function bodies are naturally cache-line aligned for
+            // the ARM64 I-cache (64-byte lines, 4-byte instructions).
+            StmtKind::Item(item) => {
+                let ItemKind::Fn(fn_def) = &item.kind else {
+                    // Non-fn inner items (structs, enums, etc.) are parsed but
+                    // not yet lowered. Skip silently at this milestone.
+                    return Ok(());
+                };
+
+                let fn_name = fn_def.name.text(self.source).to_owned();
+
+                // Determine return type.
+                // FLS §9: Scalar return types only at this milestone.
+                let ret_ty = match &fn_def.ret_ty {
+                    None => IrTy::Unit,
+                    Some(ty) => lower_ty(ty, self.source, self.type_aliases)
+                        .map_err(|_| LowerError::Unsupported(format!(
+                            "inner function `{fn_name}` has unsupported return type"
+                        )))?,
+                };
+
+                let body = match &fn_def.body {
+                    None => return Err(LowerError::Unsupported(
+                        format!("inner function `{fn_name}` has no body")
+                    )),
+                    Some(b) => b,
+                };
+
+                // Build a new LowerCtx for the inner function body.
+                // Labels continue from where the enclosing function left off so
+                // all labels in the module's assembly output remain unique.
+                let inner_start_label = self.next_label;
+                let mut inner_ctx = LowerCtx::new(
+                    self.source,
+                    &fn_name,
+                    ret_ty,
+                    self.struct_defs,
+                    self.tuple_struct_defs,
+                    self.tuple_struct_float_field_types,
+                    self.enum_defs,
+                    self.enum_variant_float_field_types,
+                    self.method_self_kinds,
+                    self.mut_self_scalar_return_fns,
+                    self.struct_return_fns,
+                    self.struct_return_free_fns,
+                    self.enum_return_fns,
+                    self.struct_return_methods,
+                    self.tuple_return_free_fns,
+                    self.f64_return_fns,
+                    self.f32_return_fns,
+                    self.const_vals,
+                    self.const_f64_vals,
+                    self.const_f32_vals,
+                    self.static_names,
+                    self.static_f64_names,
+                    self.static_f32_names,
+                    &self.fn_names,
+                    self.struct_field_types,
+                    self.struct_field_offsets,
+                    self.struct_sizes,
+                    self.type_aliases,
+                    self.struct_float_field_types,
+                    inner_start_label,
+                );
+
+                // Spill parameters from ARM64 registers.
+                // FLS §9: Parameters arrive in x0..x{n-1}.
+                // Only simple ident parameters with scalar types supported.
+                for (i, param) in fn_def.params.iter().enumerate() {
+                    let param_ty = lower_ty(&param.ty, self.source, self.type_aliases)
+                        .unwrap_or(IrTy::I32);
+                    let slot = inner_ctx.alloc_slot()?;
+                    match param_ty {
+                        IrTy::F64 => {
+                            inner_ctx.instrs.push(Instr::StoreF64 { src: i as u8, slot });
+                            inner_ctx.slot_float_ty.insert(slot, IrTy::F64);
+                        }
+                        IrTy::F32 => {
+                            inner_ctx.instrs.push(Instr::StoreF32 { src: i as u8, slot });
+                            inner_ctx.slot_float_ty.insert(slot, IrTy::F32);
+                        }
+                        _ => {
+                            inner_ctx.instrs.push(Instr::Store { src: i as u8, slot });
+                            if param_ty == IrTy::FnPtr {
+                                inner_ctx.local_fn_ptr_slots.insert(slot);
+                            }
+                        }
+                    }
+                    if let ParamKind::Ident(name_span) = &param.kind {
+                        let name = name_span.text(self.source);
+                        if name != "_" {
+                            inner_ctx.locals.insert(name, slot);
+                        }
+                    }
+                }
+
+                // Lower the body and append Ret.
+                inner_ctx.lower_block(body, &ret_ty)?;
+
+                // Propagate the label counter back to the enclosing function.
+                self.next_label = inner_ctx.next_label;
+
+                // Collect the inner function and any closures it defines.
+                let inner_fn = IrFn {
+                    name: fn_name,
+                    ret_ty,
+                    body: inner_ctx.instrs,
+                    stack_slots: inner_ctx.next_slot,
+                    saves_lr: inner_ctx.has_calls,
+                    float_consts: inner_ctx.float_consts,
+                    float32_consts: inner_ctx.float32_consts,
+                };
+                self.pending_closures.push(inner_fn);
+                self.pending_closures.extend(inner_ctx.pending_closures);
+
+                Ok(())
+            }
         }
     }
 
@@ -13497,7 +13658,7 @@ impl<'src> LowerCtx<'src> {
                     self.static_names,
                     self.static_f64_names,
                     self.static_f32_names,
-                    self.fn_names,
+                    &self.fn_names,
                     self.struct_field_types,
                     self.struct_field_offsets,
                     self.struct_sizes,

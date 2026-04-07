@@ -698,6 +698,16 @@ pub enum StmtKind {
 
     /// An empty statement (lone `;`). FLS §8.2.
     Empty,
+
+    /// An item defined inside a block body. FLS §3, §9.
+    ///
+    /// Rust permits function items (and other items) to appear as statements
+    /// inside block expressions. Inner functions are scoped to the block but
+    /// compile to top-level functions in the output — they do not capture
+    /// variables from the enclosing scope (unlike closures).
+    ///
+    /// Grammar: `Item` (where `Item` is a `FnDef`, `StructDef`, etc.)
+    Item(Box<Item>),
 }
 
 // ── Expressions ───────────────────────────────────────────────────────────────
