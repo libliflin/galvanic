@@ -7841,6 +7841,8 @@ impl<'src> LowerCtx<'src> {
                         self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: else_label });
                         // Install positional field bindings into bound_names.
                         // FLS §4.2, §15: Float fields use LoadF64Slot/LoadF32Slot.
+                        // FLS §4.2: Register f64/f32 bindings in float_locals/float32_locals so
+                        // that path expressions like `x as i32` correctly emit fcvtzs (F64ToI32).
                         for (fi, fp) in fields.iter().enumerate() {
                             if let Pat::Ident(span) = fp {
                                 let fname = span.text(self.source);
@@ -7852,12 +7854,14 @@ impl<'src> LowerCtx<'src> {
                                         self.instrs.push(Instr::LoadF64Slot { dst: freg, slot: fslot });
                                         self.instrs.push(Instr::StoreF64 { src: freg, slot: bslot });
                                         self.slot_float_ty.insert(bslot, IrTy::F64);
+                                        self.float_locals.insert(fname, bslot);
                                     }
                                     Some(IrTy::F32) => {
                                         let freg = self.alloc_reg()?;
                                         self.instrs.push(Instr::LoadF32Slot { dst: freg, slot: fslot });
                                         self.instrs.push(Instr::StoreF32 { src: freg, slot: bslot });
                                         self.slot_float_ty.insert(bslot, IrTy::F32);
+                                        self.float32_locals.insert(fname, bslot);
                                     }
                                     _ => {
                                         let breg = self.alloc_reg()?;
@@ -8026,6 +8030,8 @@ impl<'src> LowerCtx<'src> {
                         let then_val = self.lower_block_to_value(then_block, ret_ty)?;
                         for name in &bound_names {
                             self.locals.remove(*name);
+                            self.float_locals.remove(*name);
+                            self.float32_locals.remove(*name);
                         }
                         let then_reg = self.val_to_reg(then_val)?;
                         self.instrs.push(Instr::Store { src: then_reg, slot: phi_slot });
@@ -8054,6 +8060,8 @@ impl<'src> LowerCtx<'src> {
                         self.lower_block_to_value(then_block, &IrTy::Unit)?;
                         for name in &bound_names {
                             self.locals.remove(*name);
+                            self.float_locals.remove(*name);
+                            self.float32_locals.remove(*name);
                         }
                         self.instrs.push(Instr::Branch(end_label));
 
@@ -8078,6 +8086,8 @@ impl<'src> LowerCtx<'src> {
                         let then_val = self.lower_block_to_value(then_block, &IrTy::F64)?;
                         for name in &bound_names {
                             self.locals.remove(*name);
+                            self.float_locals.remove(*name);
+                            self.float32_locals.remove(*name);
                         }
                         let then_freg = match then_val {
                             IrValue::FReg(r) => r,
@@ -8122,6 +8132,8 @@ impl<'src> LowerCtx<'src> {
                         let then_val = self.lower_block_to_value(then_block, &IrTy::F32)?;
                         for name in &bound_names {
                             self.locals.remove(*name);
+                            self.float_locals.remove(*name);
+                            self.float32_locals.remove(*name);
                         }
                         let then_freg = match then_val {
                             IrValue::F32Reg(r) => r,
@@ -8554,6 +8566,7 @@ impl<'src> LowerCtx<'src> {
                                     self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
                                     // Install field bindings.
                                     // FLS §4.2, §15: Float fields use LoadF64Slot/LoadF32Slot.
+                                    // FLS §4.2: Register f64/f32 bindings in float_locals/float32_locals.
                                     let mut bound: Vec<&str> = Vec::new();
                                     for (fi, fp) in fields.iter().enumerate() {
                                         if let Pat::Ident(span) = fp {
@@ -8566,12 +8579,14 @@ impl<'src> LowerCtx<'src> {
                                                     self.instrs.push(Instr::LoadF64Slot { dst: freg, slot: fslot });
                                                     self.instrs.push(Instr::StoreF64 { src: freg, slot: bslot });
                                                     self.slot_float_ty.insert(bslot, IrTy::F64);
+                                                    self.float_locals.insert(fname, bslot);
                                                 }
                                                 Some(IrTy::F32) => {
                                                     let freg = self.alloc_reg()?;
                                                     self.instrs.push(Instr::LoadF32Slot { dst: freg, slot: fslot });
                                                     self.instrs.push(Instr::StoreF32 { src: freg, slot: bslot });
                                                     self.slot_float_ty.insert(bslot, IrTy::F32);
+                                                    self.float32_locals.insert(fname, bslot);
                                                 }
                                                 _ => {
                                                     let breg = self.alloc_reg()?;
@@ -8596,7 +8611,11 @@ impl<'src> LowerCtx<'src> {
                                     let body_reg = self.val_to_reg(body_val)?;
                                     self.instrs.push(Instr::Store { src: body_reg, slot: phi_slot });
                                     self.instrs.push(Instr::Branch(exit_label));
-                                    for name in &bound { self.locals.remove(*name); }
+                                    for name in &bound {
+                                        self.locals.remove(*name);
+                                        self.float_locals.remove(*name);
+                                        self.float32_locals.remove(*name);
+                                    }
                                     self.instrs.push(Instr::Label(next_label));
                                     continue;
                                 }
@@ -8811,6 +8830,7 @@ impl<'src> LowerCtx<'src> {
                                 ))?;
                                 let mut names = Vec::new();
                                 // FLS §4.2, §15: Float fields use LoadF64Slot/LoadF32Slot.
+                                // FLS §4.2: Register f64/f32 bindings in float_locals/float32_locals.
                                 for (fi, fp) in fields.iter().enumerate() {
                                     if let Pat::Ident(span) = fp {
                                         let fname = span.text(self.source);
@@ -8822,12 +8842,14 @@ impl<'src> LowerCtx<'src> {
                                                 self.instrs.push(Instr::LoadF64Slot { dst: freg, slot: fslot });
                                                 self.instrs.push(Instr::StoreF64 { src: freg, slot: bslot });
                                                 self.slot_float_ty.insert(bslot, IrTy::F64);
+                                                self.float_locals.insert(fname, bslot);
                                             }
                                             Some(IrTy::F32) => {
                                                 let freg = self.alloc_reg()?;
                                                 self.instrs.push(Instr::LoadF32Slot { dst: freg, slot: fslot });
                                                 self.instrs.push(Instr::StoreF32 { src: freg, slot: bslot });
                                                 self.slot_float_ty.insert(bslot, IrTy::F32);
+                                                self.float32_locals.insert(fname, bslot);
                                             }
                                             _ => {
                                                 let breg = self.alloc_reg()?;
@@ -8907,6 +8929,8 @@ impl<'src> LowerCtx<'src> {
                         let body_val = self.lower_expr(&default_arm[0].body, ret_ty)?;
                         for name in &default_bindings {
                             self.locals.remove(*name);
+                            self.float_locals.remove(*name);
+                            self.float32_locals.remove(*name);
                         }
                         let body_reg = self.val_to_reg(body_val)?;
                         self.instrs.push(Instr::Store { src: body_reg, slot: phi_slot });
@@ -9145,6 +9169,7 @@ impl<'src> LowerCtx<'src> {
                                     self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
                                     // Install field bindings.
                                     // FLS §4.2, §15: Float fields use LoadF64Slot/LoadF32Slot.
+                                    // FLS §4.2: Register f64/f32 bindings in float_locals/float32_locals.
                                     let mut bound: Vec<&str> = Vec::new();
                                     for (fi, fp) in fields.iter().enumerate() {
                                         if let Pat::Ident(span) = fp {
@@ -9157,12 +9182,14 @@ impl<'src> LowerCtx<'src> {
                                                     self.instrs.push(Instr::LoadF64Slot { dst: freg, slot: fslot });
                                                     self.instrs.push(Instr::StoreF64 { src: freg, slot: bslot });
                                                     self.slot_float_ty.insert(bslot, IrTy::F64);
+                                                    self.float_locals.insert(fname, bslot);
                                                 }
                                                 Some(IrTy::F32) => {
                                                     let freg = self.alloc_reg()?;
                                                     self.instrs.push(Instr::LoadF32Slot { dst: freg, slot: fslot });
                                                     self.instrs.push(Instr::StoreF32 { src: freg, slot: bslot });
                                                     self.slot_float_ty.insert(bslot, IrTy::F32);
+                                                    self.float32_locals.insert(fname, bslot);
                                                 }
                                                 _ => {
                                                     let breg = self.alloc_reg()?;
@@ -9185,7 +9212,11 @@ impl<'src> LowerCtx<'src> {
                                     }
                                     self.lower_expr(&arm.body, &IrTy::Unit)?;
                                     self.instrs.push(Instr::Branch(exit_label));
-                                    for name in &bound { self.locals.remove(*name); }
+                                    for name in &bound {
+                                        self.locals.remove(*name);
+                                        self.float_locals.remove(*name);
+                                        self.float32_locals.remove(*name);
+                                    }
                                     self.instrs.push(Instr::Label(next_label));
                                     continue;
                                 }
@@ -9361,6 +9392,7 @@ impl<'src> LowerCtx<'src> {
                                 ))?;
                                 let mut names = Vec::new();
                                 // FLS §4.2, §15: Float fields use LoadF64Slot/LoadF32Slot.
+                                // FLS §4.2: Register f64/f32 bindings in float_locals/float32_locals.
                                 for (fi, fp) in fields.iter().enumerate() {
                                     if let Pat::Ident(span) = fp {
                                         let fname = span.text(self.source);
@@ -9372,12 +9404,14 @@ impl<'src> LowerCtx<'src> {
                                                 self.instrs.push(Instr::LoadF64Slot { dst: freg, slot: fslot });
                                                 self.instrs.push(Instr::StoreF64 { src: freg, slot: bslot });
                                                 self.slot_float_ty.insert(bslot, IrTy::F64);
+                                                self.float_locals.insert(fname, bslot);
                                             }
                                             Some(IrTy::F32) => {
                                                 let freg = self.alloc_reg()?;
                                                 self.instrs.push(Instr::LoadF32Slot { dst: freg, slot: fslot });
                                                 self.instrs.push(Instr::StoreF32 { src: freg, slot: bslot });
                                                 self.slot_float_ty.insert(bslot, IrTy::F32);
+                                                self.float32_locals.insert(fname, bslot);
                                             }
                                             _ => {
                                                 let breg = self.alloc_reg()?;
@@ -9455,6 +9489,8 @@ impl<'src> LowerCtx<'src> {
                         self.lower_expr(&default_arm[0].body, &IrTy::Unit)?;
                         for name in &default_bindings_unit {
                             self.locals.remove(*name);
+                            self.float_locals.remove(*name);
+                            self.float32_locals.remove(*name);
                         }
                         self.instrs.push(Instr::Label(exit_label));
                         Ok(IrValue::Unit)
@@ -11016,6 +11052,7 @@ impl<'src> LowerCtx<'src> {
                         self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: exit_label });
                         // Install positional field bindings into bound_names.
                         // FLS §4.2, §15: Float fields use LoadF64Slot/LoadF32Slot.
+                        // FLS §4.2: Register f64/f32 bindings in float_locals/float32_locals.
                         for (fi, fp) in fields.iter().enumerate() {
                             if let Pat::Ident(span) = fp {
                                 let fname = span.text(self.source);
@@ -11027,12 +11064,14 @@ impl<'src> LowerCtx<'src> {
                                         self.instrs.push(Instr::LoadF64Slot { dst: freg, slot: fslot });
                                         self.instrs.push(Instr::StoreF64 { src: freg, slot: bslot });
                                         self.slot_float_ty.insert(bslot, IrTy::F64);
+                                        self.float_locals.insert(fname, bslot);
                                     }
                                     Some(IrTy::F32) => {
                                         let freg = self.alloc_reg()?;
                                         self.instrs.push(Instr::LoadF32Slot { dst: freg, slot: fslot });
                                         self.instrs.push(Instr::StoreF32 { src: freg, slot: bslot });
                                         self.slot_float_ty.insert(bslot, IrTy::F32);
+                                        self.float32_locals.insert(fname, bslot);
                                     }
                                     _ => {
                                         let breg = self.alloc_reg()?;
@@ -11190,6 +11229,8 @@ impl<'src> LowerCtx<'src> {
                 // Remove all bindings before back-edge.
                 for name in &bound_names {
                     self.locals.remove(*name);
+                    self.float_locals.remove(*name);
+                    self.float32_locals.remove(*name);
                 }
 
                 // Back-edge: re-evaluate scrutinee and re-check pattern.
