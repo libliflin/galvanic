@@ -15365,3 +15365,186 @@ fn main() -> i32 {
         "f64 array index must emit `ldr d<N>`: {asm}"
     );
 }
+
+// ── Milestone 115: struct literals with f64/f32 fields ────────────────────────
+//
+// FLS §6.11: Struct expression. FLS §4.2: f64/f32 storage.
+// FLS §6.13: Field access expression.
+// FLS §6.1.2:37–45: All stores and loads are runtime instructions.
+//
+// These tests verify that struct literals with floating-point fields compile
+// to ARM64 `str d{N}` / `str s{N}` instructions, and that field accesses
+// produce `ldr d{N}` / `ldr s{N}` loads.
+
+/// Milestone 115: access first f64 field of a struct literal.
+///
+/// FLS §6.11: struct expression. FLS §6.13: field access. FLS §4.2: f64.
+/// FLS §6.5.9: `as i32` truncates toward zero.
+#[test]
+fn milestone_115_f64_struct_first_field() {
+    let src = r#"
+struct Point { x: f64, y: f64 }
+fn main() -> i32 {
+    let p = Point { x: 3.0, y: 4.0 };
+    p.x as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "p.x=3.0, got {exit_code}");
+}
+
+/// Milestone 115: access second f64 field of a struct literal.
+///
+/// FLS §6.11, §6.13, §4.2.
+#[test]
+fn milestone_115_f64_struct_second_field() {
+    let src = r#"
+struct Point { x: f64, y: f64 }
+fn main() -> i32 {
+    let p = Point { x: 3.0, y: 4.0 };
+    p.y as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 4, "p.y=4.0, got {exit_code}");
+}
+
+/// Milestone 115: sum two f64 struct fields.
+///
+/// FLS §6.11, §6.13, §4.2, §6.5.5 (f64 arithmetic).
+#[test]
+fn milestone_115_f64_struct_field_sum() {
+    let src = r#"
+struct Point { x: f64, y: f64 }
+fn main() -> i32 {
+    let p = Point { x: 1.5, y: 2.5 };
+    (p.x + p.y) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 4, "1.5+2.5=4, got {exit_code}");
+}
+
+/// Milestone 115: f64 field in arithmetic with integer result.
+///
+/// FLS §6.11, §6.13, §4.2, §6.5.5, §6.5.9.
+#[test]
+fn milestone_115_f64_struct_field_in_arithmetic() {
+    let src = r#"
+struct Rect { w: f64, h: f64 }
+fn main() -> i32 {
+    let r = Rect { w: 6.0, h: 7.0 };
+    (r.w * r.h) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "6*7=42, got {exit_code}");
+}
+
+/// Milestone 115: f64 field passed to a function.
+///
+/// FLS §6.11, §6.13, §4.2. Float fields are passed via float arg registers.
+#[test]
+fn milestone_115_f64_struct_field_passed_to_fn() {
+    let src = r#"
+struct Val { v: f64 }
+fn double(x: f64) -> i32 {
+    (x * 2.0) as i32
+}
+fn main() -> i32 {
+    let s = Val { v: 5.0 };
+    double(s.v)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "5*2=10, got {exit_code}");
+}
+
+/// Milestone 115: three-field struct with f64 fields.
+///
+/// FLS §6.11, §6.13, §4.2.
+#[test]
+fn milestone_115_f64_struct_three_fields() {
+    let src = r#"
+struct Vec3 { x: f64, y: f64, z: f64 }
+fn main() -> i32 {
+    let v = Vec3 { x: 1.0, y: 2.0, z: 3.0 };
+    (v.x + v.y + v.z) as i32
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "1+2+3=6, got {exit_code}");
+}
+
+/// Milestone 115: f64 struct field in if expression.
+///
+/// FLS §6.11, §6.13, §4.2, §6.17.
+#[test]
+fn milestone_115_f64_struct_field_in_if() {
+    let src = r#"
+struct Threshold { limit: f64 }
+fn main() -> i32 {
+    let t = Threshold { limit: 5.0 };
+    if t.limit > 3.0 { 1 } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "5.0>3.0 should be true, got {exit_code}");
+}
+
+/// Milestone 115: f64 field with other locals present.
+///
+/// FLS §6.11, §6.13, §4.2. Verifies slot numbering is correct when
+/// other local variables precede the struct in the frame.
+#[test]
+fn milestone_115_f64_struct_with_other_locals() {
+    let src = r#"
+struct Pair { a: f64, b: f64 }
+fn main() -> i32 {
+    let offset = 10;
+    let p = Pair { a: 1.5, b: 2.5 };
+    (p.a + p.b) as i32 + offset
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 14, "1.5+2.5+10=14, got {exit_code}");
+}
+
+/// Milestone 115: runtime — struct literal with f64 fields emits `str d{N}`.
+///
+/// FLS §6.11: struct literal. FLS §4.2: f64 stored with `str d{N}`.
+/// FLS §6.1.2:37–45: Stores are runtime instructions.
+#[test]
+fn runtime_f64_struct_field_store_emits_str_dreg() {
+    let src = r#"
+struct Point { x: f64, y: f64 }
+fn main() -> i32 {
+    let p = Point { x: 1.0, y: 2.0 };
+    p.x as i32
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("str     d"),
+        "f64 struct field store must emit `str d<N>`: {asm}"
+    );
+}
+
+/// Milestone 115: runtime — f64 struct field access emits `ldr d{N}`.
+///
+/// FLS §6.13: field access. FLS §4.2: f64 loaded with `ldr d{N}`.
+#[test]
+fn runtime_f64_struct_field_access_emits_ldr_dreg() {
+    let src = r#"
+struct Point { x: f64, y: f64 }
+fn main() -> i32 {
+    let p = Point { x: 1.0, y: 2.0 };
+    p.x as i32
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("ldr     d"),
+        "f64 struct field access must emit `ldr d<N>`: {asm}"
+    );
+}

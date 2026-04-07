@@ -469,6 +469,10 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     // Cache-line note: struct fields of struct type occupy their nested struct's total
     // slot count instead of a single slot, allowing precise offset computation.
     let mut struct_raw_field_types: HashMap<String, Vec<Option<String>>> = HashMap::new();
+    // FLS §4.2, §6.11, §6.13: Per-field float type for named structs.
+    // `None` = not a float field; `Some(IrTy::F64)` = f64; `Some(IrTy::F32)` = f32.
+    // Used to choose StoreF64/LoadF64Slot vs StoreF32/LoadF32Slot vs Store/Load.
+    let mut struct_float_field_types: HashMap<String, Vec<Option<IrTy>>> = HashMap::new();
 
     for item in &src.items {
         match &item.kind {
@@ -503,12 +507,30 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                                 _ => None, // reference types, tuple types, etc. — treat as scalar
                             })
                             .collect();
+                        // FLS §4.2: Record which scalar fields are f64 or f32 so struct
+                        // literal stores and field-access loads can use the correct register
+                        // bank (d-registers for f64, s-registers for f32).
+                        let float_types: Vec<Option<IrTy>> = fields
+                            .iter()
+                            .map(|f| match &f.ty.kind {
+                                TyKind::Path(segs) if segs.len() == 1 => {
+                                    match segs[0].text(source) {
+                                        "f64" => Some(IrTy::F64),
+                                        "f32" => Some(IrTy::F32),
+                                        _ => None,
+                                    }
+                                }
+                                _ => None,
+                            })
+                            .collect();
                         struct_defs.insert(struct_name.clone(), field_names);
-                        struct_raw_field_types.insert(struct_name, field_types);
+                        struct_raw_field_types.insert(struct_name.clone(), field_types);
+                        struct_float_field_types.insert(struct_name, float_types);
                     }
                     StructKind::Unit => {
                         struct_defs.insert(struct_name.clone(), vec![]);
-                        struct_raw_field_types.insert(struct_name, vec![]);
+                        struct_raw_field_types.insert(struct_name.clone(), vec![]);
+                        struct_float_field_types.insert(struct_name, vec![]);
                     }
                     StructKind::Tuple(fields) => {
                         // FLS §14.2: Tuple struct. Record field count so that
@@ -990,7 +1012,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     for item in &src.items {
         match &item.kind {
             ItemKind::Fn(fn_def) => {
-                let (ir_fn, closure_fns, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &enum_defs, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &static_names, &fn_names, &struct_raw_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, None, label_base)?;
+                let (ir_fn, closure_fns, next_label) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &enum_defs, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &static_names, &fn_names, &struct_raw_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, None, label_base)?;
                 label_base = next_label;
                 fns.push(ir_fn);
                 fns.extend(closure_fns);
@@ -1038,6 +1060,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         &struct_field_offsets,
                         &struct_sizes,
                         &type_alias_irtys,
+                        &struct_float_field_types,
                         mctx,
                         label_base,
                     )?;
@@ -1155,6 +1178,7 @@ fn lower_fn(
     struct_field_offsets: &HashMap<String, Vec<usize>>,
     struct_sizes: &HashMap<String, usize>,
     type_aliases: &HashMap<String, IrTy>,
+    struct_float_field_types: &HashMap<String, Vec<Option<IrTy>>>,
     method: Option<MethodCtx<'_>>,
     start_label: u32,
 ) -> Result<(IrFn, Vec<IrFn>, u32), LowerError> {
@@ -1227,7 +1251,7 @@ fn lower_fn(
         Some(block) => block,
     };
 
-    let mut ctx = LowerCtx::new(source, &name, ret_ty, struct_defs, tuple_struct_defs, enum_defs, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, f64_return_fns, f32_return_fns, const_vals, static_names, fn_names, struct_field_types, struct_field_offsets, struct_sizes, type_aliases, start_label);
+    let mut ctx = LowerCtx::new(source, &name, ret_ty, struct_defs, tuple_struct_defs, enum_defs, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, f64_return_fns, f32_return_fns, const_vals, static_names, fn_names, struct_field_types, struct_field_offsets, struct_sizes, type_aliases, struct_float_field_types, start_label);
 
     // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
     // to stack slots. Each parameter slot is allocated in parameter order
@@ -2778,6 +2802,25 @@ struct LowerCtx<'src> {
     ///
     /// Cache-line note: read-only during lowering; not on any hot path.
     type_aliases: &'src HashMap<String, IrTy>,
+
+    /// Per-field float type for named structs.
+    ///
+    /// FLS §4.2, §6.11, §6.13: `None` = not a float field; `Some(IrTy::F64)` = f64;
+    /// `Some(IrTy::F32)` = f32. Used to choose the correct store/load instruction
+    /// when constructing struct literals with float fields or accessing float fields.
+    ///
+    /// Cache-line note: read-only during lowering; not on any hot path.
+    struct_float_field_types: &'src HashMap<String, Vec<Option<IrTy>>>,
+
+    /// Tracks which stack slots hold f64 or f32 values from struct fields.
+    ///
+    /// FLS §4.2: When a struct with float fields is stored to the stack, each
+    /// float field's slot is registered here with its IrTy. Field-access loads
+    /// check this map to emit `LoadF64Slot`/`LoadF32Slot` instead of `Load`.
+    ///
+    /// Cache-line note: populated at struct literal construction; read at field
+    /// access. Not on any critical-path loop.
+    slot_float_ty: HashMap<u8, IrTy>,
 }
 
 /// Collect all free variables in `expr` that are present in `outer_locals`
@@ -2965,6 +3008,7 @@ impl<'src> LowerCtx<'src> {
         struct_field_offsets: &'src HashMap<String, Vec<usize>>,
         struct_sizes: &'src HashMap<String, usize>,
         type_aliases: &'src HashMap<String, IrTy>,
+        struct_float_field_types: &'src HashMap<String, Vec<Option<IrTy>>>,
         start_label: u32,
     ) -> Self {
         LowerCtx {
@@ -3015,6 +3059,8 @@ impl<'src> LowerCtx<'src> {
             float32_locals: HashMap::new(),
             float32_consts: Vec::new(),
             type_aliases,
+            struct_float_field_types,
+            slot_float_ty: HashMap::new(),
         }
     }
 
@@ -3036,6 +3082,19 @@ impl<'src> LowerCtx<'src> {
             LowerError::Unsupported("exceeded 256 stack slots".into())
         })?;
         Ok(s)
+    }
+
+    /// Return the float IrTy (F64 or F32) for a named struct field, if any.
+    ///
+    /// FLS §4.2, §6.11, §6.13: Used to choose the correct store/load instruction
+    /// for struct fields declared as `f64` or `f32`. Returns `None` for integer-like
+    /// fields (i32, bool, etc.) and nested-struct fields.
+    fn field_float_ty(&self, struct_name: &str, field_idx: usize) -> Option<IrTy> {
+        self.struct_float_field_types
+            .get(struct_name)
+            .and_then(|fts| fts.get(field_idx))
+            .copied()
+            .flatten()
     }
 
     /// Return true if `expr` is statically known to produce an `f64` value.
@@ -3099,6 +3158,25 @@ impl<'src> LowerCtx<'src> {
                 }
                 false
             }
+            // FLS §6.13, §4.2: Field access on a struct with an f64 field produces f64.
+            // Enables `p.x as i32` and `(p.x + p.y) as i32` to select F64ToI32.
+            crate::ast::ExprKind::FieldAccess { receiver, field } => {
+                if let crate::ast::ExprKind::Path(segs) = &receiver.kind
+                    && segs.len() == 1
+                {
+                    let var_name = segs[0].text(self.source);
+                    if let Some(&slot) = self.locals.get(var_name)
+                        && let Some(struct_name) = self.local_struct_types.get(&slot).cloned()
+                    {
+                        let field_name = field.text(self.source);
+                        if let Some(field_names) = self.struct_defs.get(&struct_name)
+                            && let Some(fi) = field_names.iter().position(|n| n == field_name) {
+                                return matches!(self.field_float_ty(&struct_name, fi), Some(IrTy::F64));
+                            }
+                    }
+                }
+                false
+            }
             _ => false,
         }
     }
@@ -3156,6 +3234,25 @@ impl<'src> LowerCtx<'src> {
                     if segs.len() == 2 {
                         let mangled = format!("{}__{}", segs[0].text(self.source), segs[1].text(self.source));
                         return self.f32_return_fns.contains(&mangled);
+                    }
+                }
+                false
+            }
+            // FLS §6.13, §4.2: Field access on a struct with an f32 field produces f32.
+            // Enables `p.x as i32` and `(p.x + p.y) as i32` to select F32ToI32.
+            crate::ast::ExprKind::FieldAccess { receiver, field } => {
+                if let crate::ast::ExprKind::Path(segs) = &receiver.kind
+                    && segs.len() == 1
+                {
+                    let var_name = segs[0].text(self.source);
+                    if let Some(&slot) = self.locals.get(var_name)
+                        && let Some(struct_name) = self.local_struct_types.get(&slot).cloned()
+                    {
+                        let field_name = field.text(self.source);
+                        if let Some(field_names) = self.struct_defs.get(&struct_name)
+                            && let Some(fi) = field_names.iter().position(|n| n == field_name) {
+                                return matches!(self.field_float_ty(&struct_name, fi), Some(IrTy::F32));
+                            }
                     }
                 }
                 false
@@ -5052,10 +5149,37 @@ impl<'src> LowerCtx<'src> {
                                     itype,
                                 )?;
                             } else {
-                                let val =
-                                    self.lower_expr(&field_init.1, &IrTy::I32)?;
-                                let src = self.val_to_reg(val)?;
-                                self.instrs.push(Instr::Store { src, slot });
+                                // FLS §4.2: Use float store for f64/f32 fields.
+                                let fty = self.field_float_ty(struct_name, fi);
+                                match fty {
+                                    Some(IrTy::F64) => {
+                                        let val = self.lower_expr(&field_init.1, &IrTy::F64)?;
+                                        let freg = match val {
+                                            IrValue::FReg(r) => r,
+                                            _ => return Err(LowerError::Unsupported(
+                                                "f64 struct field: initializer did not produce a float register".into(),
+                                            )),
+                                        };
+                                        self.instrs.push(Instr::StoreF64 { src: freg, slot });
+                                        self.slot_float_ty.insert(slot, IrTy::F64);
+                                    }
+                                    Some(IrTy::F32) => {
+                                        let val = self.lower_expr(&field_init.1, &IrTy::F32)?;
+                                        let freg = match val {
+                                            IrValue::F32Reg(r) => r,
+                                            _ => return Err(LowerError::Unsupported(
+                                                "f32 struct field: initializer did not produce an f32 register".into(),
+                                            )),
+                                        };
+                                        self.instrs.push(Instr::StoreF32 { src: freg, slot });
+                                        self.slot_float_ty.insert(slot, IrTy::F32);
+                                    }
+                                    _ => {
+                                        let val = self.lower_expr(&field_init.1, &IrTy::I32)?;
+                                        let src = self.val_to_reg(val)?;
+                                        self.instrs.push(Instr::Store { src, slot });
+                                    }
+                                }
                             }
                         }
 
@@ -5594,18 +5718,64 @@ impl<'src> LowerCtx<'src> {
                                         &nested_type_name,
                                     )?;
                                 } else {
-                                    let val = self.lower_expr(&field_init.1, &IrTy::I32)?;
-                                    let src = self.val_to_reg(val)?;
-                                    self.instrs.push(Instr::Store { src, slot: dst_slot });
+                                    // FLS §4.2, §6.11: Use float store for f64/f32 fields.
+                                    let fty = self.field_float_ty(struct_name, field_idx);
+                                    match fty {
+                                        Some(IrTy::F64) => {
+                                            let val = self.lower_expr(&field_init.1, &IrTy::F64)?;
+                                            let freg = match val {
+                                                IrValue::FReg(r) => r,
+                                                _ => return Err(LowerError::Unsupported(
+                                                    "f64 struct field: initializer did not produce a float register".into(),
+                                                )),
+                                            };
+                                            self.instrs.push(Instr::StoreF64 { src: freg, slot: dst_slot });
+                                            self.slot_float_ty.insert(dst_slot, IrTy::F64);
+                                        }
+                                        Some(IrTy::F32) => {
+                                            let val = self.lower_expr(&field_init.1, &IrTy::F32)?;
+                                            let freg = match val {
+                                                IrValue::F32Reg(r) => r,
+                                                _ => return Err(LowerError::Unsupported(
+                                                    "f32 struct field: initializer did not produce an f32 register".into(),
+                                                )),
+                                            };
+                                            self.instrs.push(Instr::StoreF32 { src: freg, slot: dst_slot });
+                                            self.slot_float_ty.insert(dst_slot, IrTy::F32);
+                                        }
+                                        _ => {
+                                            let val = self.lower_expr(&field_init.1, &IrTy::I32)?;
+                                            let src = self.val_to_reg(val)?;
+                                            self.instrs.push(Instr::Store { src, slot: dst_slot });
+                                        }
+                                    }
                                 }
                             } else if let Some(base_first_slot) = base_struct_slot {
                                 // FLS §6.11: Copy unspecified field from the base struct.
                                 // Load from `base_first_slot + field_offset`, store to `dst_slot`.
+                                // FLS §4.2: If the source slot is a float, propagate the type.
                                 // Cache-line note: load+store = two 4-byte instructions = 8 bytes.
                                 let src_slot = base_first_slot + field_offset as u8;
-                                let tmp = self.alloc_reg()?;
-                                self.instrs.push(Instr::Load { dst: tmp, slot: src_slot });
-                                self.instrs.push(Instr::Store { src: tmp, slot: dst_slot });
+                                let fty = self.field_float_ty(struct_name, field_idx);
+                                match fty {
+                                    Some(IrTy::F64) => {
+                                        let tmp = self.alloc_reg()?;
+                                        self.instrs.push(Instr::LoadF64Slot { dst: tmp, slot: src_slot });
+                                        self.instrs.push(Instr::StoreF64 { src: tmp, slot: dst_slot });
+                                        self.slot_float_ty.insert(dst_slot, IrTy::F64);
+                                    }
+                                    Some(IrTy::F32) => {
+                                        let tmp = self.alloc_reg()?;
+                                        self.instrs.push(Instr::LoadF32Slot { dst: tmp, slot: src_slot });
+                                        self.instrs.push(Instr::StoreF32 { src: tmp, slot: dst_slot });
+                                        self.slot_float_ty.insert(dst_slot, IrTy::F32);
+                                    }
+                                    _ => {
+                                        let tmp = self.alloc_reg()?;
+                                        self.instrs.push(Instr::Load { dst: tmp, slot: src_slot });
+                                        self.instrs.push(Instr::Store { src: tmp, slot: dst_slot });
+                                    }
+                                }
                             } else {
                                 return Err(LowerError::Unsupported(format!(
                                     "missing field `{field_name}` in `{struct_name}` literal"
@@ -11586,9 +11756,27 @@ impl<'src> LowerCtx<'src> {
                 // For struct-type fields (Some type), returning only the base slot
                 // is correct for read access — the caller can further chain accesses.
                 let (slot, _field_ty) = self.resolve_place(expr)?;
-                let reg = self.alloc_reg()?;
-                self.instrs.push(Instr::Load { dst: reg, slot });
-                Ok(IrValue::Reg(reg))
+                // FLS §4.2: Check if this slot holds a float struct field.
+                // If so, emit LoadF64Slot/LoadF32Slot to keep the value in a
+                // float register, enabling downstream float arithmetic without
+                // an explicit cast. (FLS §6.5.5, §6.5.9)
+                match self.slot_float_ty.get(&slot).copied() {
+                    Some(IrTy::F64) => {
+                        let dst = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadF64Slot { dst, slot });
+                        Ok(IrValue::FReg(dst))
+                    }
+                    Some(IrTy::F32) => {
+                        let dst = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadF32Slot { dst, slot });
+                        Ok(IrValue::F32Reg(dst))
+                    }
+                    _ => {
+                        let reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: reg, slot });
+                        Ok(IrValue::Reg(reg))
+                    }
+                }
             }
 
             // FLS §6.12.2 / §10.1: Method call expression `receiver.method(args)`.
@@ -12099,6 +12287,7 @@ impl<'src> LowerCtx<'src> {
                     self.struct_field_offsets,
                     self.struct_sizes,
                     self.type_aliases,
+                    self.struct_float_field_types,
                     closure_start_label,
                 );
 
