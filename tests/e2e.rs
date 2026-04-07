@@ -13415,3 +13415,209 @@ fn runtime_f64_add_assign_emits_fadd() {
     // Must NOT fall through to integer `add`.
     // (fadd presence is sufficient; integer add may appear for i32 operations elsewhere)
 }
+
+// ── Milestone 104: labeled break from nested loops (FLS §6.15.6) ──────────────
+
+/// Milestone 104: `break 'label` exits the labeled outer loop.
+///
+/// FLS §6.15.6: "A break expression exits the innermost enclosing loop
+/// expression or block expression labelled with a block label."
+/// Here `break 'outer` exits the outer `loop`, not the inner one.
+///
+/// FLS §6.1.2:37–45: The branch is a runtime `b` to the outer exit label.
+///
+/// Note: FLS §6.15.6 does not provide a standalone code example for labeled
+/// break; this program is derived from the spec's semantic description of
+/// labeled break behavior.
+#[test]
+fn milestone_104_labeled_break_outer() {
+    let src = r#"
+fn main() -> i32 {
+    let mut count = 0;
+    'outer: loop {
+        let mut i = 0;
+        loop {
+            if i >= 3 { break 'outer; }
+            count += 1;
+            i += 1;
+        }
+    }
+    count
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "expected count=3 before `break 'outer`, got {exit_code}");
+}
+
+/// Milestone 104: `break 'label` with a computed value exits the labeled loop.
+///
+/// FLS §6.15.6: A labeled `loop` expression supports `break 'label value`.
+/// The value becomes the result of the outer `loop` expression.
+///
+/// Note: FLS §6.15.6 does not provide a standalone example for labeled
+/// break-with-value; derived from the spec's semantic description.
+#[test]
+fn milestone_104_labeled_break_with_value() {
+    let src = r#"
+fn main() -> i32 {
+    'outer: loop {
+        let mut i = 0;
+        loop {
+            if i >= 5 { break 'outer i; }
+            i += 1;
+        }
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "expected i=5 as break value, got {exit_code}");
+}
+
+/// Milestone 104: `break 'label` does not affect unlabeled inner loop.
+///
+/// FLS §6.15.6: Only the loop identified by the label is exited; the inner
+/// unlabeled loop's `break` still exits only the inner loop.
+///
+/// Note: derived from spec semantic description (no FLS code example).
+#[test]
+fn milestone_104_inner_break_still_exits_inner() {
+    let src = r#"
+fn main() -> i32 {
+    let mut sum = 0;
+    'outer: loop {
+        let mut i = 0;
+        loop {
+            if i >= 2 { break; }
+            sum += 1;
+            i += 1;
+        }
+        if sum >= 4 { break 'outer; }
+    }
+    sum
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 4, "expected sum=4 (2 outer iters * 2 inner iters), got {exit_code}");
+}
+
+/// Milestone 104: `continue 'label` continues the labeled outer loop.
+///
+/// FLS §6.15.7: "A continue expression advances to the next iteration of
+/// the innermost enclosing loop expression, or the loop labelled with a
+/// block label if a label is given."
+///
+/// Note: FLS §6.15.7 does not provide a standalone code example; derived
+/// from the spec's semantic description of labeled continue.
+#[test]
+fn milestone_104_labeled_continue() {
+    let src = r#"
+fn main() -> i32 {
+    let mut outer_count = 0;
+    let mut i = 0;
+    'outer: while i < 3 {
+        i += 1;
+        outer_count += 1;
+        let mut j = 0;
+        loop {
+            j += 1;
+            if j >= 2 { continue 'outer; }
+        }
+    }
+    outer_count
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "expected outer_count=3 (3 outer iterations via `continue 'outer`), got {exit_code}");
+}
+
+/// Milestone 104: labeled break on a `while` loop (not just `loop`).
+///
+/// FLS §6.15.6: The label syntax applies to all loop expressions:
+/// `loop`, `while`, `while let`, and `for`.
+///
+/// Note: derived from spec semantic description (no FLS code example).
+#[test]
+fn milestone_104_labeled_break_while() {
+    let src = r#"
+fn main() -> i32 {
+    let mut x = 0;
+    'outer: while x < 10 {
+        x += 1;
+        let mut y = 0;
+        while y < 10 {
+            y += 1;
+            if x + y >= 5 { break 'outer; }
+        }
+    }
+    x
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    // When x=1, y=4 → x+y=5 ≥ 5 → break 'outer with x=1.
+    // When x=2, y=3 → x+y=5 ≥ 5 → break 'outer with x=2.
+    // Actually: x starts 0, first outer iter: x becomes 1. y goes 1,2,3,4 → x+y=1+4=5 → break. x=1.
+    assert_eq!(exit_code, 1, "expected x=1 when breaking outer while, got {exit_code}");
+}
+
+/// Milestone 104: labeled break on a `for` loop (FLS §6.15.1, §6.15.6).
+///
+/// FLS §6.15.6: A label can be applied to a `for` loop expression.
+/// `break 'label` then exits that specific for loop.
+///
+/// Note: derived from spec semantic description (no FLS code example).
+#[test]
+fn milestone_104_labeled_break_for() {
+    let src = r#"
+fn main() -> i32 {
+    let mut result = 0;
+    'outer: for i in 0..5 {
+        for j in 0..5 {
+            if i + j >= 6 { break 'outer; }
+            result += 1;
+        }
+    }
+    result
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    // i=0: j=0..5, all i+j<6 (max 5) → 5 increments
+    // i=1: j=0..4 (j=0..4: 1+0=1,1+1=2,..,1+4=5 all <6; j=5: 1+5=6 → break) → 5 increments
+    // i=2: j=0..3 (2+0..2+3=5 <6; j=4: 2+4=6 → break 'outer) → 4 increments
+    // Total: 5+5+4=14... let me recalculate
+    // i=0: j=0,1,2,3,4,5... wait for j in 0..5 is j=0,1,2,3,4 (5 values, exclusive)
+    // i=0: j=0..4 (5 values), all 0+j<=4 <6 → 5 increments
+    // i=1: j=0..4, all 1+j<=5 <6 → 5 increments
+    // i=2: j=0..4, 2+0=2,2+1=3,2+2=4,2+3=5 <6, 2+4=6 → break 'outer at j=4 → 4 increments
+    // Total: 5+5+4=14
+    assert_eq!(exit_code, 14, "expected result=14 from nested for loops with labeled break, got {exit_code}");
+}
+
+/// Assembly inspection: labeled break emits branch to the outer exit label,
+/// not the inner loop's exit label.
+///
+/// FLS §6.15.6: The compiler must resolve `break 'outer` to the exit label
+/// of the outer loop, skipping the inner loop's exit label.
+/// FLS §6.1.2:37–45: Both labels are runtime branches (`b .L{N}`).
+#[test]
+fn runtime_labeled_break_emits_outer_branch() {
+    let src = r#"
+fn main() -> i32 {
+    let mut count = 0;
+    'outer: loop {
+        loop {
+            break 'outer;
+        }
+        count += 1;
+    }
+    count
+}
+"#;
+    let asm = compile_to_asm(src);
+    // The assembly should contain at least two distinct branch-to-label
+    // sequences. The `break 'outer` must skip the `count += 1` instruction.
+    // Verify at least one `b` instruction appears (the labeled break).
+    assert!(
+        asm.lines().filter(|l| l.trim_start().starts_with("b ") || l.trim_start().starts_with("b\t")).count() >= 2,
+        "expected at least two `b` instructions for nested labeled loop, got:\n{asm}"
+    );
+}

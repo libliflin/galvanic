@@ -876,30 +876,39 @@ pub enum ExprKind {
         inclusive: bool,
     },
 
-    /// A loop expression. FLS §6.8.1.
+    /// A loop expression. FLS §6.15.2.
     ///
-    /// `loop { body }`
+    /// `loop { body }` or `'label: loop { body }`
     ///
-    /// FLS §6.8.1: A loop expression executes its body repeatedly until a
+    /// FLS §6.15.2: A loop expression executes its body repeatedly until a
     /// `break` expression is reached. Its value is the operand of `break`,
     /// or `()` if `break` carries no value.
-    Loop(Box<Block>),
+    ///
+    /// FLS §6.15.6: An optional block label `'label` allows `break 'label` and
+    /// `continue 'label` to target this loop from nested loops.
+    Loop {
+        /// Optional loop label (the `'name` before `loop`). FLS §6.15.6.
+        label: Option<String>,
+        body: Box<Block>,
+    },
 
-    /// A while loop expression. FLS §6.8.2.
+    /// A while loop expression. FLS §6.15.3.
     ///
-    /// `while cond { body }`
+    /// `while cond { body }` or `'label: while cond { body }`
     ///
-    /// FLS §6.8.2: A while loop expression evaluates the condition before each
+    /// FLS §6.15.3: A while loop expression evaluates the condition before each
     /// iteration; if the condition is `false` the loop terminates and evaluates
     /// to `()`.
     While {
+        /// Optional loop label. FLS §6.15.6.
+        label: Option<String>,
         cond: Box<Expr>,
         body: Box<Block>,
     },
 
     /// A while-let loop expression. FLS §6.15.4.
     ///
-    /// `while let Pattern = Expr { body }`
+    /// `while let Pattern = Expr { body }` or `'label: while let …`
     ///
     /// FLS §6.15.4: "A while let loop expression is syntactic sugar for a loop
     /// expression containing a match expression that breaks on mismatch."
@@ -908,6 +917,8 @@ pub enum ExprKind {
     /// Cache-line note: lowered to a loop header + pattern-match check + body,
     /// same instruction count as a `while` loop plus a pattern comparison.
     WhileLet {
+        /// Optional loop label. FLS §6.15.6.
+        label: Option<String>,
         /// The pattern to test each iteration.
         pat: Pat,
         /// The value being matched on each iteration.
@@ -916,17 +927,19 @@ pub enum ExprKind {
         body: Box<Block>,
     },
 
-    /// A for loop expression. FLS §6.8.3.
+    /// A for loop expression. FLS §6.15.1.
     ///
-    /// `for pat in iter { body }`
+    /// `for pat in iter { body }` or `'label: for pat in iter { body }`
     ///
-    /// FLS §6.8.3: A for loop expression iterates over the values produced by
+    /// FLS §6.15.1: A for loop expression iterates over the values produced by
     /// an [`IntoIterator`]. The loop evaluates to `()`.
     ///
-    /// FLS §6.8.3 NOTE: The pattern may be any irrefutable pattern. This
+    /// FLS §6.15.1 NOTE: The pattern may be any irrefutable pattern. This
     /// implementation restricts the loop variable to a simple identifier;
     /// destructuring patterns in `for` position are future work.
     For {
+        /// Optional loop label. FLS §6.15.6.
+        label: Option<String>,
         /// The loop variable (simple identifier pattern).
         pat: Span,
         /// The iterator expression.
@@ -935,27 +948,37 @@ pub enum ExprKind {
         body: Box<Block>,
     },
 
-    /// A break expression. FLS §6.8.4.
+    /// A break expression. FLS §6.15.6.
     ///
-    /// `break` or `break value`
+    /// `break`, `break value`, `break 'label`, or `break 'label value`
     ///
-    /// FLS §6.8.4: A break expression exits the innermost enclosing loop.
+    /// FLS §6.15.6: A break expression exits the innermost enclosing loop, or
+    /// the specific loop identified by the optional block label.
     /// The optional value becomes the result of the enclosing `loop` expression;
     /// `while` and `for` loops do not accept a break value.
     ///
-    /// FLS §6.8.4 AMBIGUOUS: The spec does not clearly distinguish whether the
+    /// FLS §6.15.6 AMBIGUOUS: The spec does not clearly distinguish whether the
     /// break-with-value restriction (only in `loop`, not `while`/`for`) is a
     /// syntactic or semantic constraint. This implementation parses `break expr`
     /// freely and defers the restriction to a future type-checking phase.
-    Break(Option<Box<Expr>>),
+    Break {
+        /// Optional target loop label (`'name`). FLS §6.15.6.
+        label: Option<String>,
+        /// Optional break value. Only valid in `loop` expressions.
+        value: Option<Box<Expr>>,
+    },
 
-    /// A continue expression. FLS §6.8.5.
+    /// A continue expression. FLS §6.15.7.
     ///
-    /// `continue`
+    /// `continue` or `continue 'label`
     ///
-    /// FLS §6.8.5: A continue expression skips the remainder of the current
-    /// loop body and begins the next iteration.
-    Continue,
+    /// FLS §6.15.7: A continue expression skips the remainder of the current
+    /// loop body and begins the next iteration. An optional label targets a
+    /// specific enclosing loop.
+    Continue {
+        /// Optional target loop label (`'name`). FLS §6.15.7.
+        label: Option<String>,
+    },
 
     /// A return expression. FLS §6.12.
     ///
