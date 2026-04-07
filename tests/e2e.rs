@@ -16080,3 +16080,217 @@ fn main() -> i32 {
         "f64 tuple struct load must emit `ldr d{{n}}`: {asm}"
     );
 }
+
+// ── Milestone 119: f64/f32 fields in enum tuple variants ─────────────────────
+
+/// Milestone 119: enum tuple variant with f64 field — basic if-let extraction.
+///
+/// FLS §15, §4.2, §6.17: Enum tuple variant construction stores f64 field via
+/// StoreF64; TupleStruct if-let pattern loads it via LoadF64Slot.
+#[test]
+fn milestone_119_f64_enum_tuple_variant_basic() {
+    let src = r#"
+enum Measure {
+    Length(f64),
+    None,
+}
+fn main() -> i32 {
+    let m = Measure::Length(7.0);
+    if let Measure::Length(x) = m {
+        x as i32
+    } else {
+        0
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "Length(7.0)→7, got {exit_code}");
+}
+
+/// Milestone 119: enum tuple variant with f64 field — else branch taken.
+///
+/// FLS §15, §4.2, §6.17.
+#[test]
+fn milestone_119_f64_enum_tuple_variant_else_branch() {
+    let src = r#"
+enum Measure {
+    Length(f64),
+    None,
+}
+fn main() -> i32 {
+    let m = Measure::None;
+    if let Measure::Length(x) = m {
+        x as i32
+    } else {
+        42
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "None→else branch 42, got {exit_code}");
+}
+
+/// Milestone 119: enum tuple variant with f64 field — field in arithmetic.
+///
+/// FLS §15, §4.2, §6.5.5.
+#[test]
+fn milestone_119_f64_enum_tuple_variant_arithmetic() {
+    let src = r#"
+enum Measure {
+    Length(f64),
+    None,
+}
+fn main() -> i32 {
+    let m = Measure::Length(3.5);
+    if let Measure::Length(x) = m {
+        (x + 1.5) as i32
+    } else {
+        0
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "3.5+1.5=5.0→5, got {exit_code}");
+}
+
+/// Milestone 119: enum tuple variant with f64 field — match expression.
+///
+/// FLS §15, §4.2, §6.18: TupleStruct pattern in match arm.
+#[test]
+fn milestone_119_f64_enum_tuple_variant_match() {
+    let src = r#"
+enum Measure {
+    Length(f64),
+    None,
+}
+fn main() -> i32 {
+    let m = Measure::Length(4.0);
+    match m {
+        Measure::Length(x) => x as i32,
+        Measure::None => 0,
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 4, "Length(4.0)→4, got {exit_code}");
+}
+
+/// Milestone 119: enum tuple variant with f64 field — match none arm.
+///
+/// FLS §15, §4.2, §6.18.
+#[test]
+fn milestone_119_f64_enum_tuple_variant_match_none() {
+    let src = r#"
+enum Measure {
+    Length(f64),
+    None,
+}
+fn main() -> i32 {
+    let m = Measure::None;
+    match m {
+        Measure::Length(x) => x as i32,
+        Measure::None => 99,
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 99, "None→99, got {exit_code}");
+}
+
+/// Milestone 119: enum tuple variant with two f64 fields.
+///
+/// FLS §15, §4.2: Two-field tuple variant; both fields are f64.
+#[test]
+fn milestone_119_f64_enum_tuple_variant_two_fields() {
+    let src = r#"
+enum Shape {
+    Rect(f64, f64),
+    None,
+}
+fn main() -> i32 {
+    let s = Shape::Rect(3.0, 4.0);
+    if let Shape::Rect(w, h) = s {
+        (w + h) as i32
+    } else {
+        0
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "3.0+4.0=7.0→7, got {exit_code}");
+}
+
+/// Milestone 119: enum tuple variant with f64 field — passed to free function.
+///
+/// FLS §15, §4.2, §9: f64 bound via pattern is used as function argument.
+#[test]
+fn milestone_119_f64_enum_tuple_variant_passed_to_fn() {
+    let src = r#"
+enum Measure {
+    Length(f64),
+    None,
+}
+fn double(x: f64) -> i32 {
+    (x * 2.0) as i32
+}
+fn main() -> i32 {
+    let m = Measure::Length(5.0);
+    if let Measure::Length(x) = m {
+        double(x)
+    } else {
+        0
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "5.0*2.0=10.0→10, got {exit_code}");
+}
+
+/// Milestone 119: enum tuple variant with f32 field — basic if-let extraction.
+///
+/// FLS §15, §4.2: f32 fields use StoreF32/LoadF32Slot.
+#[test]
+fn milestone_119_f32_enum_tuple_variant_basic() {
+    let src = r#"
+enum Measure {
+    Length(f32),
+    None,
+}
+fn main() -> i32 {
+    let m = Measure::Length(6.0_f32);
+    if let Measure::Length(x) = m {
+        x as i32
+    } else {
+        0
+    }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "Length(6.0f32)→6, got {exit_code}");
+}
+
+/// Milestone 119: enum tuple variant — assembly uses str/ldr d-registers for f64 fields.
+///
+/// FLS §4.2, §15: f64 enum variant fields must use float register instructions.
+#[test]
+fn runtime_f64_enum_tuple_variant_emits_str_dreg() {
+    let src = r#"
+enum Measure {
+    Length(f64),
+    None,
+}
+fn main() -> i32 {
+    let m = Measure::Length(3.0);
+    if let Measure::Length(x) = m { x as i32 } else { 0 }
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("str     d"),
+        "f64 enum variant field store must emit `str d{{n}}`: {asm}"
+    );
+    assert!(
+        asm.contains("ldr     d"),
+        "f64 enum variant field load must emit `ldr d{{n}}`: {asm}"
+    );
+}
