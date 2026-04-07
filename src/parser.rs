@@ -1440,8 +1440,31 @@ impl<'src> Parser<'src> {
                 self.expect(TokenKind::CloseParen)?;
                 Ok(Pat::Tuple(pats))
             }
+            // Slice/array pattern `[p0, p1, ...]`. FLS §5.1.8.
+            //
+            // Matches a fixed-size array, binding each element to the corresponding
+            // sub-pattern. Only `Pat::Ident` and `Pat::Wildcard` sub-patterns are
+            // supported in lowering at this milestone.
+            //
+            // FLS §5.1.8 AMBIGUOUS: The spec allows rest patterns `..` inside
+            // slice patterns. Galvanic does not yet support `..` in slice patterns.
+            TokenKind::OpenBracket => {
+                self.advance(); // consume `[`
+                let mut pats = Vec::new();
+                while self.peek_kind() != TokenKind::CloseBracket {
+                    pats.push(self.parse_let_pattern()?);
+                    if !self.eat(TokenKind::Comma) {
+                        break;
+                    }
+                    if self.peek_kind() == TokenKind::CloseBracket {
+                        break; // trailing comma
+                    }
+                }
+                self.expect(TokenKind::CloseBracket)?;
+                Ok(Pat::Slice(pats))
+            }
             kind => Err(self.error(format!(
-                "expected identifier, `_`, or `(` in let pattern, found {kind:?}"
+                "expected identifier, `_`, `(`, or `[` in let pattern, found {kind:?}"
             ))),
         }
     }
@@ -2811,8 +2834,32 @@ impl<'src> Parser<'src> {
                 self.advance();
                 Ok(Pat::LitBool(false))
             }
+            // Slice/array pattern `[p0, p1, ...]`. FLS §5.1.8.
+            //
+            // Matches a fixed-size array by destructuring each element position.
+            // Sub-patterns may be `Pat::Ident` (binding) or `Pat::Wildcard` (discard).
+            //
+            // FLS §5.1.8: "A slice pattern matches an array or slice type and
+            // destructures its elements." Galvanic supports fixed-size arrays only
+            // at this milestone (no unsized slice `&[T]` support yet).
+            //
+            // FLS §5.1.8 AMBIGUOUS: The spec allows rest patterns `..` inside
+            // slice patterns (`[a, .., z]`). Galvanic does not yet support `..`
+            // inside slice patterns; only exact-arity patterns are accepted.
+            TokenKind::OpenBracket => {
+                self.advance(); // consume `[`
+                let mut pats = Vec::new();
+                while self.peek_kind() != TokenKind::CloseBracket {
+                    pats.push(self.parse_single_pattern()?);
+                    if !self.eat(TokenKind::Comma) {
+                        break;
+                    }
+                }
+                self.expect(TokenKind::CloseBracket)?;
+                Ok(Pat::Slice(pats))
+            }
             kind => Err(self.error(format!(
-                "expected pattern (identifier, integer literal, `-` integer, `true`, `false`, or `_`), found {kind:?}"
+                "expected pattern (identifier, integer literal, `-` integer, `true`, `false`, `_`, or `[`), found {kind:?}"
             ))),
         }
     }
@@ -3344,6 +3391,43 @@ mod tests {
         assert_eq!(fields.len(), 2);
         assert!(matches!(fields[0], Pat::Wildcard));
         assert!(matches!(fields[1], Pat::Ident(_)));
+    }
+
+    #[test]
+    fn let_slice_pattern_two_fields() {
+        // FLS §5.1.8: slice/array pattern in let statement — two-element array.
+        let src = "fn f() { let arr = [1, 2]; let [a, b] = arr; }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        let StmtKind::Let { pat, .. } = &body.stmts[1].kind else {
+            panic!("expected let at index 1");
+        };
+        let Pat::Slice(fields) = pat else {
+            panic!("expected Pat::Slice, got {pat:?}");
+        };
+        assert_eq!(fields.len(), 2);
+        assert!(matches!(fields[0], Pat::Ident(_)));
+        assert!(matches!(fields[1], Pat::Ident(_)));
+    }
+
+    #[test]
+    fn let_slice_pattern_wildcard_field() {
+        // FLS §5.1.8 + §5.1: wildcard sub-pattern in slice pattern — ignores element.
+        let src = "fn f() { let arr = [1, 2, 3]; let [_, b, _] = arr; }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        let StmtKind::Let { pat, .. } = &body.stmts[1].kind else {
+            panic!("expected let at index 1");
+        };
+        let Pat::Slice(fields) = pat else {
+            panic!("expected Pat::Slice, got {pat:?}");
+        };
+        assert_eq!(fields.len(), 3);
+        assert!(matches!(fields[0], Pat::Wildcard));
+        assert!(matches!(fields[1], Pat::Ident(_)));
+        assert!(matches!(fields[2], Pat::Wildcard));
     }
 
     // ── Expressions ───────────────────────────────────────────────────────────

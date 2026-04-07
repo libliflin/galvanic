@@ -4608,6 +4608,122 @@ impl<'src> LowerCtx<'src> {
                     ));
                 }
 
+                // FLS §5.1.8 + §8.1: Slice/array pattern in let binding.
+                //
+                // `let [a, b, c] = arr;` destructures a fixed-size array by index.
+                //
+                // Supported initializer forms:
+                //   1. Variable path — `let [a, b, c] = arr;` — load each element
+                //      by index (LoadIndexed) and store to fresh slots; zero extra
+                //      stack overhead if the pattern arity matches the array length.
+                //   2. Array literal — `let [a, b, c] = [10, 20, 30];` — evaluate
+                //      each element expression and store to fresh slots.
+                //
+                // FLS §5.1.8: Sub-patterns are matched left-to-right against array
+                //   elements at indices 0, 1, …, N-1.
+                // FLS §6.1.2:37–45: All loads and stores are runtime instructions.
+                // Cache-line note: N-element destructure emits up to 2N instructions
+                //   (N LoadIndexed + N Store = 8N bytes) — 8 elements per 64-byte line.
+                if let Pat::Slice(pats) = pat {
+                    // Case 1: init is a local array variable path.
+                    if let Some(init_expr) = init.as_ref()
+                        && let ExprKind::Path(segs) = &init_expr.kind
+                        && segs.len() == 1
+                    {
+                        let src_name = segs[0].text(self.source);
+                        if let Some(src_slot) = self.locals.get(src_name).copied()
+                            && let Some(&arr_len) = self.local_array_lens.get(&src_slot)
+                        {
+                            if arr_len != pats.len() {
+                                return Err(LowerError::Unsupported(format!(
+                                    "slice pattern has {} elements but `{src_name}` has {arr_len}",
+                                    pats.len()
+                                )));
+                            }
+                            // Emit LoadIndexed + Store for each Ident sub-pattern.
+                            // FLS §6.9: Array indexing; FLS §5.1.8: element binding.
+                            for (i, sub_pat) in pats.iter().enumerate() {
+                                match sub_pat {
+                                    Pat::Ident(span) => {
+                                        let name = span.text(self.source);
+                                        if name != "_" {
+                                            let dst = self.alloc_reg()?;
+                                            let idx_reg = self.alloc_reg()?;
+                                            self.instrs.push(Instr::LoadImm(idx_reg, i as i32));
+                                            self.instrs.push(Instr::LoadIndexed {
+                                                dst,
+                                                base_slot: src_slot,
+                                                index_reg: idx_reg,
+                                            });
+                                            let elem_slot = self.alloc_slot()?;
+                                            self.instrs.push(Instr::Store { src: dst, slot: elem_slot });
+                                            self.locals.insert(name, elem_slot);
+                                        }
+                                    }
+                                    Pat::Wildcard => {}
+                                    _ => {
+                                        return Err(LowerError::Unsupported(
+                                            "only ident and wildcard sub-patterns supported \
+                                             in slice pattern at this milestone"
+                                                .into(),
+                                        ));
+                                    }
+                                }
+                            }
+                            return Ok(());
+                        }
+                    }
+
+                    // Case 2: init is an array literal `[e0, e1, …]`.
+                    if let Some(init_expr) = init.as_ref()
+                        && let ExprKind::Array(elems) = &init_expr.kind
+                    {
+                        if elems.len() != pats.len() {
+                            return Err(LowerError::Unsupported(format!(
+                                "slice pattern has {} elements but array literal has {}",
+                                pats.len(),
+                                elems.len()
+                            )));
+                        }
+                        for (sub_pat, elem_expr) in pats.iter().zip(elems.iter()) {
+                            match sub_pat {
+                                Pat::Ident(span) => {
+                                    let name = span.text(self.source);
+                                    // Evaluate element and store to fresh slot.
+                                    // FLS §6.4:14: Elements evaluated left-to-right.
+                                    // FLS §6.1.2:37–45: Store is a runtime instruction.
+                                    let val = self.lower_expr(elem_expr, &IrTy::I32)?;
+                                    let reg = self.val_to_reg(val)?;
+                                    let slot = self.alloc_slot()?;
+                                    self.instrs.push(Instr::Store { src: reg, slot });
+                                    if name != "_" {
+                                        self.locals.insert(name, slot);
+                                    }
+                                }
+                                Pat::Wildcard => {
+                                    // Evaluate for side effects but discard.
+                                    // FLS §6.4:14: Left-to-right evaluation order preserved.
+                                    let _ = self.lower_expr(elem_expr, &IrTy::I32)?;
+                                }
+                                _ => {
+                                    return Err(LowerError::Unsupported(
+                                        "only ident and wildcard sub-patterns supported \
+                                         in slice pattern at this milestone"
+                                            .into(),
+                                    ));
+                                }
+                            }
+                        }
+                        return Ok(());
+                    }
+
+                    return Err(LowerError::Unsupported(
+                        "slice/array pattern requires a local array variable or array \
+                         literal as initializer"
+                            .into(),
+                    ));
+                }
+
                 // FLS §5.10.2 + §8.1: Struct pattern in let binding.
                 //
                 // `let StructName { field1, field2, .. } = expr;` binds each named
@@ -6896,6 +7012,11 @@ impl<'src> LowerCtx<'src> {
                     Pat::Tuple(_) => {
                         return Err(LowerError::Unsupported(
                             "tuple pattern in if-let not yet supported".into(),
+                        ));
+                    }
+                    Pat::Slice(_) => {
+                        return Err(LowerError::Unsupported(
+                            "slice/array pattern in if-let not yet supported".into(),
                         ));
                     }
                 }
@@ -9806,6 +9927,11 @@ impl<'src> LowerCtx<'src> {
                     Pat::Tuple(_) => {
                         return Err(LowerError::Unsupported(
                             "tuple pattern in while-let not yet supported".into(),
+                        ));
+                    }
+                    Pat::Slice(_) => {
+                        return Err(LowerError::Unsupported(
+                            "slice/array pattern in while-let not yet supported".into(),
                         ));
                     }
                 }

@@ -1382,6 +1382,21 @@ pub enum Pat {
     /// Cache-line note: rebinding an existing tuple variable emits zero
     /// instructions (alias); a tuple literal init emits N stores (4N bytes).
     Tuple(Vec<Pat>),
+
+    /// Slice/array pattern `[p0, p1, ...]`. Matches a fixed-size array value.
+    ///
+    /// FLS §5.1.8: "A slice pattern matches an array or slice type and
+    /// destructures its elements." Each sub-pattern is matched against the
+    /// corresponding array element in order.
+    ///
+    /// Used in `let [a, b, c] = arr;` — each sub-pattern is bound to the
+    /// element at that index. Only `Pat::Ident` and `Pat::Wildcard`
+    /// sub-patterns are supported at this milestone.
+    ///
+    /// Cache-line note: rebinding from an existing array variable emits N
+    /// `LoadIndexed` + `Store` pairs (8N bytes); from an array literal init
+    /// emits N stores (4N bytes).
+    Slice(Vec<Pat>),
 }
 
 // ── Operators ─────────────────────────────────────────────────────────────────

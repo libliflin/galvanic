@@ -14486,3 +14486,161 @@ fn main() -> i32 {
     assert!(asm.contains("lsl"), "for-array must emit lsl #3 for indexed load: {asm}");
     assert!(asm.contains("ldr"), "for-array must emit ldr: {asm}");
 }
+
+// ── Milestone 110: array destructuring patterns in let bindings ──────────────
+//
+// FLS §5.1.8: Slice patterns. `let [a, b, c] = arr;` destructures a fixed-size
+// array into named bindings.
+
+/// Milestone 110: basic array destructure from variable, sum all elements.
+///
+/// FLS §5.1.8: Slice pattern; FLS §6.8: Array expressions; FLS §8.1: Let statements.
+/// All three bindings are used in the tail expression.
+#[test]
+fn milestone_110_slice_destruct_sum() {
+    let src = r#"
+fn main() -> i32 {
+    let arr = [10, 20, 30];
+    let [a, b, c] = arr;
+    a + b + c - 60
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "sum should be 60, got exit {exit_code}");
+}
+
+/// Milestone 110: destructure first element only (others wildcarded).
+///
+/// FLS §5.1.8: Wildcard sub-pattern `_` discards the element without binding.
+#[test]
+fn milestone_110_slice_destruct_first_wildcard_rest() {
+    let src = r#"
+fn main() -> i32 {
+    let arr = [7, 2, 3];
+    let [a, _, _] = arr;
+    a - 7
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "first element should be 7, got exit {exit_code}");
+}
+
+/// Milestone 110: destructure middle element only.
+///
+/// FLS §5.1.8: The index position of each sub-pattern determines which element
+/// is bound.
+#[test]
+fn milestone_110_slice_destruct_middle() {
+    let src = r#"
+fn main() -> i32 {
+    let arr = [1, 42, 3];
+    let [_, b, _] = arr;
+    b - 42
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "middle element should be 42, got exit {exit_code}");
+}
+
+/// Milestone 110: destructure from array literal directly.
+///
+/// FLS §5.1.8 + FLS §6.8: The initializer may be an array literal expression,
+/// not only a variable.
+#[test]
+fn milestone_110_slice_destruct_from_literal() {
+    let src = r#"
+fn main() -> i32 {
+    let [x, y] = [3, 4];
+    x * y - 12
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "3*4 should be 12, got exit {exit_code}");
+}
+
+/// Milestone 110: destructured bindings used in arithmetic.
+///
+/// FLS §5.1.8: Bindings introduced by a slice pattern are ordinary let
+/// bindings in scope for the rest of the block.
+#[test]
+fn milestone_110_slice_destruct_in_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    let arr = [2, 5, 10];
+    let [a, b, c] = arr;
+    a * b + c - 20
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "2*5+10 should be 20, got exit {exit_code}");
+}
+
+/// Milestone 110: destructured binding passed to a function.
+///
+/// FLS §5.1.8 + FLS §6.12.1: A binding from a slice pattern is a valid
+/// function argument.
+#[test]
+fn milestone_110_slice_destruct_passed_to_fn() {
+    let src = r#"
+fn double(x: i32) -> i32 { x * 2 }
+fn main() -> i32 {
+    let arr = [5, 1, 1];
+    let [first, _, _] = arr;
+    double(first) - 10
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "double(5) should be 10, got exit {exit_code}");
+}
+
+/// Milestone 110: destructure a two-element array.
+///
+/// FLS §5.1.8: Arity of the pattern must match the array length.
+#[test]
+fn milestone_110_slice_destruct_two_elements() {
+    let src = r#"
+fn main() -> i32 {
+    let arr = [8, 3];
+    let [a, b] = arr;
+    a - b - 5
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "8-3 should be 5, got exit {exit_code}");
+}
+
+/// Milestone 110: destructure inside an if condition.
+///
+/// FLS §5.1.8: Bindings from a slice pattern are available in subsequent
+/// expressions including conditions.
+#[test]
+fn milestone_110_slice_destruct_in_if() {
+    let src = r#"
+fn main() -> i32 {
+    let arr = [1, 0, 1];
+    let [a, b, c] = arr;
+    if b == 0 { a + c } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2, "a+c should be 2, got exit {exit_code}");
+}
+
+/// Milestone 110: assembly inspection — slice destruct from variable emits
+/// LoadImm + LoadIndexed for each bound element.
+///
+/// FLS §6.9: Array indexing; FLS §5.1.8: element binding.
+#[test]
+fn runtime_slice_destruct_emits_load_indexed() {
+    let src = r#"
+fn main() -> i32 {
+    let arr = [10, 20, 30];
+    let [a, b, c] = arr;
+    a + b + c - 60
+}
+"#;
+    let asm = compile_to_asm(src);
+    // Each element binding emits a LoadImm for the index + ldr with lsl for indexing.
+    assert!(asm.contains("lsl"), "slice destruct must emit lsl #3 for indexed load: {asm}");
+    assert!(asm.contains("ldr"), "slice destruct must emit ldr: {asm}");
+}
