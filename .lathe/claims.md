@@ -109,6 +109,32 @@ returns assembly containing `mov x0, #36` instead of `bl square`.
 
 ---
 
+## Claim 7: Generic function and method calls emit runtime branch instructions, not folded constants
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: Galvanic's monomorphization path is a compiler pass, not a macro-evaluator.
+When a generic function or method is called — even with statically-known literal arguments —
+the call must produce runtime `bl` instructions to the monomorphized specialization, not
+inline the body and constant-fold the result. `use_identity(7)` must emit `bl use_identity`
+in main AND `bl identity__i32` inside it. This claim extends Claim 6 to the generic
+monomorphization code path, which is a separate lowering pass from regular function calls.
+
+**Violated if**: `compile_to_asm(...)` for `fn identity<T>(x: T) -> T { x }` / `use_identity(7)` 
+returns assembly that lacks `bl use_identity` — indicating the outer call was inlined and
+constant-propagated away without a runtime call.
+
+**Red-team finding (2026-04-07)**: The original `runtime_generic_fn_not_folded` and
+`runtime_generic_method_not_folded` tests had a vacuously weak negative assertion:
+`!asm.contains("mov x0, #7") || asm.contains("ldr")`. Since any non-trivial ARM64
+program contains `ldr` instructions, this condition was always true regardless of whether
+folding occurred. The assertions were replaced with stronger positive checks: the outer
+wrapper call (`bl use_identity`, `bl use_wrapper`) must be present in the assembly.
+
+**Test**: `cargo test --test e2e -- runtime_generic_fn_not_folded runtime_generic_method_not_folded`
+
+---
+
 ## Not Yet Claims (honest gaps)
 
 These are promises the project will eventually make but cannot yet be falsified:

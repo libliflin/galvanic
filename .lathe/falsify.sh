@@ -159,6 +159,21 @@ else
     pass "Claim 6: function calls emit runtime bl (not folded constant)"
 fi
 
+# ── Claim 7: Generic function/method calls emit runtime bl, not folded constants ─
+# Tests that a generic function called with a literal argument:
+#   (a) calls the monomorphized specialization (bl identity__i32)
+#   (b) calls the outer wrapper at runtime (bl use_identity) — not folded away
+# Extends Claim 6 to the generic monomorphization code path (a separate lowering pass).
+# Red-team finding: the original negative assertions were vacuous — fixed 2026-04-07.
+# References: claims.md Claim 7.
+
+echo "--- Claim 7: generic function/method calls emit runtime bl (not folded) ---"
+if cargo test --test e2e --quiet -- runtime_generic_fn_not_folded runtime_generic_method_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 7" "runtime_generic_fn_not_folded or runtime_generic_method_not_folded FAILED — galvanic may be inlining and folding generic calls with literal arguments"
+else
+    pass "Claim 7: generic function/method calls emit runtime bl (not folded)"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""
