@@ -29301,3 +29301,59 @@ fn runtime_large_int_mul_emits_mul_not_folded() {
         "result 2000000000 must NOT be constant-folded; got:\n{asm}"
     );
 }
+
+/// Assembly inspection: large-value subtraction emits `sub`, not a constant.
+///
+/// FLS §6.23: Runtime subtraction with large inputs must emit ARM64 `sub`.
+/// The result must not be constant-folded into a `mov` or immediate sequence.
+///
+/// Claim 58: completes the Claim 57 coverage for all four arithmetic operators.
+/// Subtraction is distinct from addition — a folding interpreter that special-cased
+/// `x + y` but evaluated `x - y` at compile time would pass Claim 57 but fail here.
+#[test]
+fn runtime_large_int_sub_emits_sub_not_folded() {
+    let asm = compile_to_asm(
+        "fn f(x: i32, y: i32) -> i32 { x - y }\nfn main() -> i32 { f(2000000000, 1) }\n",
+    );
+    assert!(
+        asm.contains("sub"),
+        "large-value subtraction must emit ARM64 sub instruction; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("bl"),
+        "call to f must emit runtime bl (not inlined); got:\n{asm}"
+    );
+    // 2000000000 - 1 = 1999999999; assert not constant-folded.
+    assert!(
+        !asm.contains("1999999999"),
+        "result 1999999999 must NOT be constant-folded; got:\n{asm}"
+    );
+}
+
+/// Assembly inspection: large-value division emits `sdiv`, not a constant.
+///
+/// FLS §6.23: Runtime division with large inputs must emit ARM64 `sdiv`.
+/// The result must not be constant-folded into a `mov` or immediate sequence.
+///
+/// Claim 58: completes the Claim 57 coverage for all four arithmetic operators.
+/// Division is the most expensive operator and the one most tempting to evaluate
+/// at compile time when arguments are statically known at the call site.
+#[test]
+fn runtime_large_int_div_emits_sdiv_not_folded() {
+    let asm = compile_to_asm(
+        "fn f(x: i32, y: i32) -> i32 { x / y }\nfn main() -> i32 { f(2000000000, 4) }\n",
+    );
+    assert!(
+        asm.contains("sdiv"),
+        "large-value division must emit ARM64 sdiv instruction; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("bl"),
+        "call to f must emit runtime bl (not inlined); got:\n{asm}"
+    );
+    // 2000000000 / 4 = 500000000; assert not constant-folded.
+    assert!(
+        !asm.contains("500000000"),
+        "result 500000000 must NOT be constant-folded; got:\n{asm}"
+    );
+}

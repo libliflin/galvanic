@@ -2373,3 +2373,33 @@ assembly that:
 - contains the folded constant (`2000000001` or `2000000000`) as an immediate
 
 **Tests**: `cargo test --test e2e -- runtime_large_int_add_emits_add_not_folded runtime_large_int_mul_emits_mul_not_folded`
+
+---
+
+## Claim 58: large-value integer subtraction and division emit runtime instructions, not constant-folded
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: Integer subtraction and division with large operands (e.g., `f(2000000000, 1)`
+for sub, `f(2000000000, 4)` for div) must emit runtime ARM64 `sub`/`sdiv` instructions
+at the call site. The result must not be constant-folded into an immediate load sequence.
+
+This completes the Claim 57 story: Claim 57 verifies `add` and `mul`; Claim 58 verifies
+`sub` and `sdiv`. Together they cover all four basic arithmetic operators with the
+adversarial function-parameter pattern. A folding interpreter that special-cased addition
+and multiplication but constant-evaluated subtraction or division would pass Claim 57 and
+fail Claim 58.
+
+**FLS §6.1.2 Constraint 1**: Function call bodies are not const contexts —
+arithmetic must execute at runtime even when inputs are statically known at the call site.
+
+**FLS §6.5.5**: The subtraction and division operators must emit `sub` and `sdiv`
+ARM64 instructions respectively.
+
+**Violated if**: `compile_to_asm(LARGE_SUB)` or `compile_to_asm(LARGE_DIV)` returns
+assembly that:
+- lacks `sub`/`sdiv` in the function body, OR
+- lacks `bl` at the call site, OR
+- contains the folded constant (`1999999999` or `500000000`) as an immediate
+
+**Tests**: `cargo test --test e2e -- runtime_large_int_sub_emits_sub_not_folded runtime_large_int_div_emits_sdiv_not_folded`

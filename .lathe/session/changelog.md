@@ -1,62 +1,52 @@
-# Changelog — Cycle 103
+# Changelog — Cycle 104
 
 ## Who This Helps
-- **William (researcher)**: M174 documents a genuine FLS §6.23 conformance gap.
-  Galvanic uses ARM64 64-bit registers for i32 arithmetic, so overflow behavior
-  differs from both Rust debug mode (panic) and release mode (32-bit wrap). This
-  is the first cycle to explicitly document this as a research output. The §6.23
-  AMBIGUOUS annotations in `lower.rs` and `codegen.rs` are now permanent spec notes.
-- **FLS / Ferrocene Ecosystem**: One new documented ambiguity: §6.23 does not
-  specify the debug/release mode distinction in terms observable from the ARM64
-  instruction set. Galvanic's 64-bit register usage makes it non-conforming with
-  Rust's wrapping semantics at the 32-bit boundary.
-- **Compiler Researchers**: The §6.23 annotation in codegen.rs now explains exactly
-  why the `add x{dst}, x{lhs}, x{rhs}` instruction is used and what its overflow
-  semantics are relative to what the spec requires.
+- **William (researcher)**: Claim 58 closes the arithmetic-operator coverage gap in
+  the falsification suite. Previously Claim 57 only defended `add` and `mul` for
+  large-value non-folding; `sub` and `div` were tested only with tiny literals in
+  `fn main()` (no function parameters), which is a weaker adversarial pattern.
+  A folding interpreter that special-cased addition and multiplication but evaluated
+  subtraction or division at compile time would pass all prior claims. It cannot
+  pass Claim 58.
+- **Compiler Researchers**: The four basic arithmetic operators now have symmetric
+  adversarial coverage. The pattern (function-parameter input → assert instruction
+  emitted + assert result not folded) is consistently applied across `add`, `mul`,
+  `sub`, and `sdiv`.
 
 ## Observed
-- All 1470 e2e tests pass, 56 claims hold, CI clean on previous PR (M173).
-- Previous cycle's "Next" explicitly pointed to §6.23 Arithmetic Overflow.
-- The §6.23 issue is genuinely interesting: reading lower.rs and codegen.rs revealed
-  that galvanic's 64-bit register usage means overflow at i32::MAX doesn't wrap —
-  it just produces a large positive 64-bit value. This is different from both Rust
-  modes and is a real research finding worth documenting.
+- Claim 57 (cycle 103) tested large-value `add` and `mul` with the parameter-pattern.
+- `runtime_sub_emits_sub_instruction` used `fn main() -> i32 { 10 - 3 }` — no
+  function parameters, smaller values. A constant-folding pass would fold this but
+  there's no negative assertion on the folded literal.
+- `runtime_div_emits_sdiv` used `fn main() -> i32 { 10 / 2 }` — also no parameters,
+  only one negative assertion (`!asm.contains("mov x0, #5")`), but still weaker than
+  the parameter-pattern used for Claim 57.
+- Division is the most expensive arithmetic operator and the one most tempting to
+  evaluate at compile time when inputs are statically known. It had the weakest
+  non-folding assertion.
 
 ## Applied
-- **`src/lower.rs`**: Added FLS §6.23 AMBIGUOUS block to the runtime arithmetic
-  lowering section. Documents the 64-bit register vs i32 semantic mismatch.
-- **`src/codegen.rs`**: Updated `add`/`sub`/`mul` instruction comments to reference
-  §6.23 and the 64-bit wrapping (not 32-bit) behavior.
-- **`tests/fixtures/fls_6_23_overflow.rs`**: New fixture with programs using large
-  integer arithmetic, derived from §6.23 semantics.
-- **`tests/fls_fixtures.rs`**: Added `fls_6_23_overflow` parse acceptance test.
-- **`tests/e2e.rs`**: Added 8 compile-and-run M174 tests + 2 assembly inspection:
-  - `runtime_large_int_add_emits_add_not_folded`: large-arg add emits `add`, not constant
-  - `runtime_large_int_mul_emits_mul_not_folded`: large-arg mul emits `mul`, not constant
-- **`.lathe/claims.md`**: Added Claim 57 documenting the §6.23 overflow behavior.
-- **`.lathe/falsify.sh`**: Added Claim 57 adversarial check.
+- **`tests/e2e.rs`**: Added two assembly inspection tests:
+  - `runtime_large_int_sub_emits_sub_not_folded`: `fn f(x: i32, y: i32) -> i32 { x - y }`
+    called as `f(2000000000, 1)`; asserts `sub` emitted, `bl` emitted, `1999999999` not present.
+  - `runtime_large_int_div_emits_sdiv_not_folded`: `fn f(x: i32, y: i32) -> i32 { x / y }`
+    called as `f(2000000000, 4)`; asserts `sdiv` emitted, `bl` emitted, `500000000` not present.
+- **`.lathe/claims.md`**: Added Claim 58 with full rationale.
+- **`.lathe/falsify.sh`**: Added Claim 58 adversarial check.
 
 ## Validated
-- `cargo test --test e2e -- milestone_174 runtime_large_int` — 10 passed
-- `cargo test` — 1480 e2e (was 1470), 211 unit, 30 fixture (was 29), 1 smoke; 0 failed
+- `cargo test --test e2e -- runtime_large_int_sub_emits_sub_not_folded runtime_large_int_div_emits_sdiv_not_folded` — 2 passed
+- `cargo test --quiet` — 1484 e2e, all pass; 211 unit; 30 fixture; 1 smoke; 0 failed
 - `cargo clippy -- -D warnings` — clean
 
 ## FLS Notes
-- **FLS §6.23 AMBIGUOUS**: The spec specifies integer overflow as debug-mode panic
-  or release-mode 32-bit two's complement wrap. Galvanic uses ARM64 64-bit registers
-  for all i32 arithmetic. A value exceeding i32::MAX stays positive in a 64-bit
-  register rather than wrapping to i32::MIN. This is non-conforming with both modes.
-  The spec does not say anything about the 32-bit vs 64-bit register width used by
-  the implementation — this is an implementation detail not covered by FLS §6.23.
-- **FLS §6.23 AMBIGUOUS**: The spec does not specify the mechanism for raising a
-  runtime panic (required in debug mode). In a no_std ARM64 environment without
-  libc, there is no standard panic runtime. FLS §6.23 is silent on this.
+- No new FLS ambiguities discovered. Claim 58 exercises the same FLS §6.1.2 and §6.5.5
+  constraints as Claim 57, applied to the remaining operators.
 
 ## Next
-- M175: `unsafe impl<T> where T: Bound` — where-clause form of bounded unsafe impl
-  (parser already supports `parse_where_clause` in impl blocks, so pure tests).
-- Or: §6.5.3 Negation operator for non-i32 integer types (u32, i64, usize) —
-  documenting operator coverage gaps for unsigned negation (FLS §6.5.3 says
-  negation is only defined for signed integers; u32 negation is wrapping).
-- Or: Deepening existing milestone assembly inspection coverage for milestones
-  that only have compile-and-run tests (e.g., early milestones M1–M30).
+- The four basic arithmetic operators now have symmetric adversarial coverage.
+- Remaining potential gap: `rem` (`%`) with large values — `runtime_rem_emits_sdiv_and_msub`
+  uses inline literals (no parameter pattern). Could add Claim 59.
+- Or: M175 — `unsafe impl<T> where T: Bound` where-clause form (parser already
+  supports where clauses in impl blocks; would be a pure test milestone).
+- Or: §6.5.3 Negation operator for u32 (unsigned negation; FLS §6.5.3 is silent).
