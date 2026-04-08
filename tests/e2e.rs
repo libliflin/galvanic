@@ -33070,3 +33070,170 @@ fn main() -> i32 {\n\
         "both trampolines must shift len register (x1→x2) — found {shifts_len_count}: {asm}"
     );
 }
+
+// ── Milestone 195: for x in &arr — inline array borrow as slice iteration ──
+// FLS §6.15.1, §4.9, §6.4.4
+//
+// `for x in &arr` borrows a local array inline to produce a slice view and
+// iterates its elements. For Copy element types (i32), the loop variable
+// receives copies of the elements — same observable behaviour as `for x in arr`.
+//
+// FLS §6.15.1 AMBIGUOUS: The spec desugars `for x in &arr` via IntoIterator::into_iter(&arr),
+// requiring trait dispatch. Galvanic special-cases the &[T; N] → [T; N] inline borrow.
+// FLS §4.9 AMBIGUOUS: The loop variable should technically have type &i32 (a reference),
+// but since i32: Copy, galvanic copies the element value — same semantics for Copy types.
+
+/// Milestone 195: sum elements via `for x in &arr`.
+///
+/// FLS §6.15.1, §4.9, §6.4.4.
+#[test]
+fn milestone_195_for_arr_borrow_sum() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 { let a = [1, 2, 3]; let mut s = 0; for x in &a { s = s + x; } s }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 6);
+}
+
+/// Milestone 195: single-element array borrow iteration.
+#[test]
+fn milestone_195_for_arr_borrow_single_element() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 { let a = [42]; let mut s = 0; for x in &a { s = s + x; } s }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 42);
+}
+
+/// Milestone 195: first element via `for x in &arr` with early break.
+#[test]
+fn milestone_195_for_arr_borrow_first_element() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 { let a = [7, 2, 3]; let mut r = 0; for x in &a { r = x; break; } r }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 7);
+}
+
+/// Milestone 195: arithmetic on element inside `for x in &arr`.
+#[test]
+fn milestone_195_for_arr_borrow_arithmetic_on_element() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 { let a = [3, 4, 5]; let mut s = 0; for x in &a { s = s + x * 2; } s }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 24);
+}
+
+/// Milestone 195: element passed to a function.
+#[test]
+fn milestone_195_for_arr_borrow_element_to_fn() {
+    let Some(exit_code) = compile_and_run(
+        "fn double(n: i32) -> i32 { n * 2 }\n\
+fn main() -> i32 { let a = [1, 3, 5]; let mut s = 0; for x in &a { s = s + double(x); } s }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 18);
+}
+
+/// Milestone 195: `for x in &arr` with continue (skip negatives).
+#[test]
+fn milestone_195_for_arr_borrow_continue() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 { let a = [1, -2, 3, -4, 5]; let mut s = 0; for x in &a { if x < 0 { continue; } s = s + x; } s }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 9);
+}
+
+/// Milestone 195: result of `for x in &arr` used in arithmetic.
+#[test]
+fn milestone_195_for_arr_borrow_result_in_arithmetic() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 { let a = [2, 3, 4]; let mut s = 0; for x in &a { s = s + x; } s * 2 }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 18);
+}
+
+/// Milestone 195: `for x in &arr` called twice (ensures no folding to first call's sum).
+#[test]
+fn milestone_195_for_arr_borrow_called_twice() {
+    let Some(exit_code) = compile_and_run(
+        "fn sum_arr(a: [i32; 3]) -> i32 { let mut s = 0; for x in &a { s = s + x; } s }\n\
+fn main() -> i32 { sum_arr([1, 2, 3]) + sum_arr([10, 20, 30]) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 66);
+}
+
+/// Milestone 195: `for x in &arr` passed as array parameter.
+#[test]
+fn milestone_195_for_arr_borrow_param() {
+    let Some(exit_code) = compile_and_run(
+        "fn sum_arr(a: [i32; 4]) -> i32 { let mut s = 0; for x in &a { s = s + x; } s }\n\
+fn main() -> i32 { sum_arr([1, 2, 3, 4]) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 10);
+}
+
+/// Assembly inspection: `for x in &arr` emits indexed loads (ldr with register
+/// offset) — not a constant folded sum.
+///
+/// This test verifies that the loop body emits runtime load instructions
+/// from the array rather than evaluating at compile time.
+///
+/// FLS §6.15.1, §4.9, §6.1.2:37–45.
+#[test]
+fn runtime_for_arr_borrow_emits_indexed_load() {
+    let asm = compile_to_asm(
+        "fn main() -> i32 { let a = [1, 2, 3]; let mut s = 0; for x in &a { s = s + x; } s }\n",
+    );
+    // Must emit at least one indexed load (ldr with register-scaled offset).
+    assert!(
+        asm.contains("ldr") || asm.contains("lsl"),
+        "for-arr-borrow must emit ldr/lsl for indexed element loads: {asm}"
+    );
+    // Must not constant-fold sum([1,2,3]) = 6.
+    assert!(
+        !asm.contains("mov     x0, #6"),
+        "for-arr-borrow sum must not be constant-folded to #6: {asm}"
+    );
+}
+
+/// Assembly inspection: `for x in &arr` with two different arrays does not fold
+/// either result to a compile-time constant.
+///
+/// An interpreter that detected the array contents at compile time would fold
+/// sum([1,2,3]) = 6 or sum([10,20,30]) = 60. A compiler emits runtime indexed loads.
+///
+/// FLS §6.15.1, §4.9, §6.1.2:37–45.
+#[test]
+fn runtime_for_arr_borrow_two_arrays_not_folded() {
+    let asm = compile_to_asm(
+        "fn sum_arr(a: [i32; 3]) -> i32 { let mut s = 0; for x in &a { s = s + x; } s }\n\
+fn main() -> i32 { sum_arr([1, 2, 3]) + sum_arr([10, 20, 30]) }\n",
+    );
+    assert!(
+        !asm.contains("mov     x0, #6"),
+        "sum([1,2,3]) must not be constant-folded to #6: {asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #60"),
+        "sum([10,20,30]) must not be constant-folded to #60: {asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #66"),
+        "combined result must not be constant-folded to #66: {asm}"
+    );
+}
