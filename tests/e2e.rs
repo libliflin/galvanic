@@ -2303,6 +2303,40 @@ fn runtime_for_loop_emits_cmp_cbz_add_and_back_branch() {
     );
 }
 
+/// Assembly inspection: range-based for loop with a *parameter* upper bound emits
+/// runtime control flow (cmp/cbz/back-edge) and does NOT constant-fold the result.
+///
+/// This closes the gap left by `runtime_for_loop_emits_cmp_cbz_add_and_back_branch`,
+/// which uses literal bounds `0..5`. When the bound is a function parameter `n`, no
+/// constant folding is possible — the assembly must contain a genuine runtime comparison
+/// against `n` and a back-edge branch, not a pre-computed `mov x0, #10`.
+///
+/// Adversarial: `sum_to(5)` = 0+1+2+3+4 = 10. A constant-folding interpreter could
+/// emit `mov x0, #10`. A compiler must load `n` from its stack slot, compare, branch.
+///
+/// FLS §6.15.1: For loop expressions produce runtime control flow.
+/// FLS §6.16: Range bounds are evaluated at runtime (not in a const context).
+/// FLS §6.1.2:37–45: A regular fn body is not a const context.
+#[test]
+fn runtime_for_loop_param_bound_emits_runtime_control_flow_not_folded() {
+    let src = "fn sum_to(n: i32) -> i32 { let mut acc = 0; for i in 0..n { acc += i; } acc }\nfn main() -> i32 { sum_to(5) }\n";
+    let asm = compile_to_asm(src);
+    // The for loop must materialise a comparison against the parameter `n`.
+    assert!(asm.contains("cbz"), "expected cbz (loop-exit branch) for parameter-bound for loop");
+    assert!(asm.contains("add"), "expected add (loop body or counter increment) for parameter-bound for loop");
+    // Back-edge: unconditional branch back to the condition check.
+    assert!(asm.contains("b "), "expected back-edge branch for parameter-bound for loop");
+    // Negative assertion: sum_to(5) = 10. Since `n` is a parameter (unknown at compile time),
+    // the result cannot be constant-folded. A folded result would appear as `mov x0, #10`
+    // in `sum_to`'s body — that would mean galvanic interpreted the loop, not compiled it.
+    // FLS §6.1.2:37–45: non-const code runs at runtime regardless of whether inputs happen
+    // to be statically knowable at the call site.
+    assert!(
+        !asm.contains("mov     x0, #10"),
+        "for loop with parameter bound must not fold sum_to(5)=10 to mov x0, #10 — loop must execute at runtime"
+    );
+}
+
 // ── Milestone 20: loop-as-expression with break value ─────────────────────────
 //
 // FLS §6.15.2: A `loop` expression has the type of its `break <value>`
