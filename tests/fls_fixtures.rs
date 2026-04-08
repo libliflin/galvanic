@@ -112,3 +112,8 @@ fn fls_12_1_generic_impl() {
 fn fls_12_1_generic_enums() {
     assert_galvanic_accepts("fls_12_1_generic_enums.rs");
 }
+
+#[test]
+fn fls_12_1_generic_trait_impl() {
+    assert_galvanic_accepts("fls_12_1_generic_trait_impl.rs");
+}
