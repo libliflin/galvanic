@@ -27787,3 +27787,303 @@ fn main() -> i32 {
         "result must NOT be constant-folded to #5; got:\n{asm}"
     );
 }
+
+// ── Milestone 168: T::AssocType in generic function parameter position ────────
+//
+// FLS §10.2 / §12.1: An associated type projection `C::Item` may appear as the
+// type of a parameter in a generic function, e.g. `fn process<C: Container>(c: C,
+// item: C::Item) -> i32`. During monomorphization, `C::Item` resolves via the
+// per-monomorphization alias map (same mechanism as M167 for return position).
+//
+// FLS §10.2 / §12.1: AMBIGUOUS — The FLS does not specify how `T::X` in
+// parameter position is lowered during monomorphization. Galvanic resolves it
+// via the `effective_aliases` map (populated in `lower_fn`), identical to the
+// return-position case.
+
+/// Milestone 168: T::AssocType in parameter position — basic.
+#[test]
+fn milestone_168_param_proj_basic() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Container {
+    type Item;
+    fn get(&self) -> Self::Item;
+}
+struct Counter { val: i32 }
+impl Container for Counter {
+    type Item = i32;
+    fn get(&self) -> Self::Item { self.val }
+}
+fn process<C: Container>(c: C, item: C::Item) -> i32 { item }
+fn main() -> i32 {
+    let c = Counter { val: 5 };
+    process(c, 7)
+}
+"#) else { return; };
+    assert_eq!(exit_code, 7);
+}
+
+/// Milestone 168: T::AssocType param used in arithmetic.
+#[test]
+fn milestone_168_param_proj_in_arithmetic() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Container {
+    type Item;
+    fn get(&self) -> Self::Item;
+}
+struct Counter { val: i32 }
+impl Container for Counter {
+    type Item = i32;
+    fn get(&self) -> Self::Item { self.val }
+}
+fn add_extra<C: Container>(c: C, extra: C::Item) -> i32 {
+    c.get() + extra
+}
+fn main() -> i32 {
+    let c = Counter { val: 3 };
+    add_extra(c, 4)
+}
+"#) else { return; };
+    assert_eq!(exit_code, 7);
+}
+
+/// Milestone 168: T::AssocType param, result used in if.
+#[test]
+fn milestone_168_param_proj_result_in_if() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Container {
+    type Item;
+    fn get(&self) -> Self::Item;
+}
+struct Gauge { level: i32 }
+impl Container for Gauge {
+    type Item = i32;
+    fn get(&self) -> Self::Item { self.level }
+}
+fn check<C: Container>(c: C, threshold: C::Item) -> i32 {
+    if c.get() > threshold { 1 } else { 0 }
+}
+fn main() -> i32 {
+    let g = Gauge { level: 8 };
+    check(g, 5)
+}
+"#) else { return; };
+    assert_eq!(exit_code, 1);
+}
+
+/// Milestone 168: T::AssocType param, result passed to fn.
+#[test]
+fn milestone_168_param_proj_result_passed_to_fn() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Container {
+    type Item;
+    fn get(&self) -> Self::Item;
+}
+struct Val { n: i32 }
+impl Container for Val {
+    type Item = i32;
+    fn get(&self) -> Self::Item { self.n }
+}
+fn double(x: i32) -> i32 { x * 2 }
+fn apply<C: Container>(c: C, extra: C::Item) -> i32 {
+    double(c.get() + extra)
+}
+fn main() -> i32 {
+    apply(Val { n: 3 }, 4)
+}
+"#) else { return; };
+    assert_eq!(exit_code, 14);
+}
+
+/// Milestone 168: two concrete types, both monomorphized.
+#[test]
+fn milestone_168_param_proj_two_impls() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Measure {
+    type Unit;
+    fn measure(&self) -> Self::Unit;
+}
+struct Meters { val: i32 }
+struct Feet { val: i32 }
+impl Measure for Meters {
+    type Unit = i32;
+    fn measure(&self) -> Self::Unit { self.val }
+}
+impl Measure for Feet {
+    type Unit = i32;
+    fn measure(&self) -> Self::Unit { self.val * 3 }
+}
+fn with_offset<M: Measure>(m: M, offset: M::Unit) -> i32 {
+    m.measure() + offset
+}
+fn main() -> i32 {
+    let m = Meters { val: 2 };
+    let f = Feet { val: 1 };
+    with_offset(m, 1) + with_offset(f, 0)
+}
+"#) else { return; };
+    assert_eq!(exit_code, 6); // (2+1) + (3+0)
+}
+
+/// Milestone 168: T::AssocType param on parameter of outer fn.
+#[test]
+fn milestone_168_param_proj_on_parameter() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Container {
+    type Item;
+    fn get(&self) -> Self::Item;
+}
+struct Wrapper { x: i32 }
+impl Container for Wrapper {
+    type Item = i32;
+    fn get(&self) -> Self::Item { self.x }
+}
+fn combine<C: Container>(c: C, item: C::Item) -> i32 {
+    c.get() + item
+}
+fn run(w: Wrapper) -> i32 {
+    combine(w, 10)
+}
+fn main() -> i32 {
+    run(Wrapper { x: 5 })
+}
+"#) else { return; };
+    assert_eq!(exit_code, 15);
+}
+
+/// Milestone 168: called twice.
+#[test]
+fn milestone_168_param_proj_called_twice() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Container {
+    type Item;
+    fn get(&self) -> Self::Item;
+}
+struct Box { val: i32 }
+impl Container for Box {
+    type Item = i32;
+    fn get(&self) -> Self::Item { self.val }
+}
+fn with_default<C: Container>(c: C, d: C::Item) -> i32 {
+    c.get() + d
+}
+fn main() -> i32 {
+    let a = Box { val: 2 };
+    let b = Box { val: 3 };
+    with_default(a, 1) + with_default(b, 1)
+}
+"#) else { return; };
+    assert_eq!(exit_code, 7); // (2+1) + (3+1)
+}
+
+/// Milestone 168: T::AssocType param combined with associated const.
+#[test]
+fn milestone_168_param_proj_with_assoc_const() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Scaled {
+    type Value;
+    const FACTOR: i32;
+    fn raw(&self) -> Self::Value;
+}
+struct Unit { n: i32 }
+impl Scaled for Unit {
+    type Value = i32;
+    const FACTOR: i32 = 10;
+    fn raw(&self) -> Self::Value { self.n }
+}
+fn scale<S: Scaled>(s: S, extra: S::Value) -> i32 {
+    (s.raw() + extra) * S::FACTOR
+}
+fn main() -> i32 {
+    scale(Unit { n: 2 }, 3)
+}
+"#) else { return; };
+    assert_eq!(exit_code, 50); // (2+3)*10
+}
+
+// ── Assembly inspection: milestone 168 ───────────────────────────────────────
+
+/// Assembly inspection: T::AssocType in parameter position emits runtime add
+/// (parameter is used in arithmetic, not folded). The `extra` parameter is
+/// typed as `C::Item` which resolves to i32 at monomorphization.
+#[test]
+fn runtime_param_proj_emits_add_not_folded() {
+    let asm = compile_to_asm(r#"
+trait Container {
+    type Item;
+    fn get(&self) -> Self::Item;
+}
+struct Counter { val: i32 }
+impl Container for Counter {
+    type Item = i32;
+    fn get(&self) -> Self::Item { self.val }
+}
+fn add_extra<C: Container>(c: C, extra: C::Item) -> i32 {
+    c.get() + extra
+}
+fn make_and_call(n: i32) -> i32 {
+    let c = Counter { val: n };
+    add_extra(c, n)
+}
+fn main() -> i32 {
+    make_and_call(4)
+}
+"#);
+    // Positive: monomorphized label emitted.
+    assert!(
+        asm.contains("add_extra__Counter"),
+        "T::Item param generic fn must emit monomorphized label; got:\n{asm}"
+    );
+    // Positive: body dispatches via bl at runtime.
+    assert!(
+        asm.contains("bl      Counter__get"),
+        "T::Item param generic fn must emit bl Counter__get; got:\n{asm}"
+    );
+    // Positive: add instruction for the runtime arithmetic.
+    assert!(
+        asm.contains("add"),
+        "T::Item param generic fn must emit add for runtime arithmetic; got:\n{asm}"
+    );
+    // Negative: result must not be constant-folded.
+    assert!(
+        !asm.contains("mov     x0, #8"),
+        "add_extra must NOT fold result to #8; got:\n{asm}"
+    );
+}
+
+/// Assembly inspection: two-impl monomorphization for T::AssocType in parameter
+/// position — both concrete specialisations are emitted, neither is folded.
+#[test]
+fn runtime_param_proj_two_types_both_monomorphized() {
+    let asm = compile_to_asm(r#"
+trait Measure {
+    type Unit;
+    fn measure(&self) -> Self::Unit;
+}
+struct Meters { val: i32 }
+struct Feet { val: i32 }
+impl Measure for Meters {
+    type Unit = i32;
+    fn measure(&self) -> Self::Unit { self.val }
+}
+impl Measure for Feet {
+    type Unit = i32;
+    fn measure(&self) -> Self::Unit { self.val * 3 }
+}
+fn with_offset<M: Measure>(m: M, offset: M::Unit) -> i32 {
+    m.measure() + offset
+}
+fn main() -> i32 {
+    let m = Meters { val: 2 };
+    let f = Feet { val: 1 };
+    with_offset(m, 1) + with_offset(f, 0)
+}
+"#);
+    assert!(
+        asm.contains("with_offset__Meters") && asm.contains("with_offset__Feet"),
+        "both concrete type labels must be emitted; got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #6"),
+        "result must NOT be constant-folded to #6; got:\n{asm}"
+    );
+}
