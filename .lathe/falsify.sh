@@ -802,6 +802,29 @@ else
     pass "Claim 39: const fn called from non-const context emits runtime bl (not folded)"
 fi
 
+# ── Claim 40: For loops emit runtime control flow (not constant-folded) ───────
+#
+# `for i in 0..5 { acc += i; }` with acc starting at 0 produces acc=10. A constant-folding
+# interpreter could evaluate this at compile time and emit `mov x0, #10` — the exit code
+# would still be 10, making the regression invisible to all compile-and-run tests.
+#
+# The assembly must contain: cbz (exit branch), add (loop body), b (back-edge).
+# The assembly must NOT contain: `mov     x0, #10` (constant-folded result).
+#
+# FLS §6.15.1: For loop expressions produce runtime control flow.
+# FLS §6.16: Range expression bounds are materialised as runtime loads.
+# FLS §6.1.2 Constraint 1: fn main() is not a const context — loop must execute at runtime.
+#
+# Introduced in cycle 76 (red-team, for-loop constant-fold attack, FLS §6.15.1 + §6.1.2).
+# References: claims.md Claim 40.
+
+echo "--- Claim 40: for loop emits runtime control flow (not constant-folded) ---"
+if cargo test --test e2e --quiet -- runtime_for_loop_emits_cmp_cbz_add_and_back_branch 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 40" "runtime_for_loop_emits_cmp_cbz_add_and_back_branch FAILED — for loop may be constant-folding 0+1+2+3+4=10 to mov x0, #10, or loop structure (cbz/add/back-edge) was dropped"
+else
+    pass "Claim 40: for loop emits runtime cbz+add+back-edge and result not folded to #10"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

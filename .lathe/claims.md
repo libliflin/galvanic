@@ -456,6 +456,46 @@ which re-checks the pattern on every iteration.
 
 ---
 
+## Claim 40: For loops emit runtime control flow, not constant-folded results
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: When galvanic compiles a `for` loop over a statically-known range
+(e.g., `for i in 0..5 { acc += i; }`), it must emit runtime control flow instructions —
+`cbz` for the exit test, `add` for the loop body, and an unconditional `b` back-edge —
+rather than constant-folding the accumulated result to `mov x0, #10`.
+
+The adversarial threat: `0+1+2+3+4 = 10` is statically computable. A constant-folding
+interpreter could evaluate the entire loop at compile time and emit a single `mov x0, #10`.
+The exit code would still be correct (10), making the regression invisible to all
+compile-and-run tests.
+
+This claim guards the for-loop lowering path (FLS §6.15.1) and range expression materialization
+(FLS §6.16). FLS §6.1.2 Constraint 1 applies: `fn main()` is not a const context. Even when
+every operand is a literal, a for loop over a range must execute at runtime via branch
+instructions, not be unrolled and constant-folded.
+
+**Attack vectors**:
+1. Evaluate the range `0..5` at compile time and unroll the loop → emit five adds
+   followed by `mov x0, #10` (no back-edge, no cbz).
+2. Recognize that `acc` starts at 0 and `i` increments by 1 → fold to arithmetic formula
+   `n*(n-1)/2` → `mov x0, #10`.
+3. Dropping the for-loop lowering entirely and calling a builtin sum function → different
+   instruction pattern, incorrect for arbitrary loop bodies.
+
+The negative assertion (`!asm.contains("mov     x0, #10")`) is the adversarial gate.
+The positive assertions (cbz, add, b) verify the loop structure is present.
+
+**Violated if**: `compile_to_asm("fn main() -> i32 { let mut acc = 0; for i in 0..5 { acc += i; } acc }\n")` returns assembly that:
+- lacks `cbz` (no exit branch), OR
+- lacks `add` (loop body not emitted), OR
+- lacks back-edge `b ` (loop structure absent), OR
+- contains `mov     x0, #10` (result constant-folded from compile-time loop evaluation).
+
+**Test**: `cargo test --test e2e -- runtime_for_loop_emits_cmp_cbz_add_and_back_branch`
+
+---
+
 ## Not Yet Claims (honest gaps)
 
 These are promises the project will eventually make but cannot yet be falsified:
