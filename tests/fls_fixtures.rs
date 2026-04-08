@@ -151,3 +151,8 @@ fn fls_10_2_assoc_type_bounds() {
 fn fls_8_1_let_else() {
     assert_galvanic_accepts("fls_8_1_let_else.rs");
 }
+
+#[test]
+fn fls_4_14_supertrait_bounds() {
+    assert_galvanic_accepts("fls_4_14_supertrait_bounds.rs");
+}

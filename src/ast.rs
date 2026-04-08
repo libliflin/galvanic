@@ -421,6 +421,15 @@ pub struct ImplDef {
 pub struct TraitDef {
     /// The trait name (span of the identifier token).
     pub name: Span,
+    /// Supertrait bounds: the traits this trait extends. FLS §4.14.
+    ///
+    /// `trait Derived: Base { ... }` — `supertraits` contains the span of `Base`.
+    /// Multiple supertraits: `trait D: A + B { ... }` — one span per bound.
+    ///
+    /// Galvanic does not enforce that implementors also implement all supertraits
+    /// (no type-system enforcement). The field is stored for FLS traceability and
+    /// future use.
+    pub supertraits: Vec<Span>,
     /// Method signatures declared in the trait body.
     ///
     /// Each `FnDef` has `body: None` (the body is provided by implementors).

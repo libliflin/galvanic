@@ -26713,3 +26713,232 @@ fn runtime_impl_trait_return_not_folded() {
         "impl Trait return must NOT fold result to #7 (interpreter, not compiler); got:\n{asm}"
     );
 }
+
+// ── Milestone 164: Supertrait bounds ─────────────────────────────────────────
+//
+// FLS §4.14: A trait may declare one or more supertraits.
+// `trait Derived: Base { ... }` — every implementor of Derived must also
+// implement Base. Galvanic parses this and stores the supertrait names. Method
+// dispatch to supertrait methods from generic functions works via the
+// monomorphization path: `t.base_val()` where `T: Derived` resolves to
+// `T__base_val` at the concrete type.
+//
+// FLS §4.14 AMBIGUOUS: The spec does not specify how supertrait method
+// availability propagates to generic call sites.
+
+#[test]
+fn milestone_164_supertrait_basic() {
+    let src = r#"
+trait Base { fn base_val(&self) -> i32; }
+trait Derived: Base { fn derived_val(&self) -> i32; }
+struct Foo { x: i32 }
+impl Base for Foo { fn base_val(&self) -> i32 { self.x } }
+impl Derived for Foo { fn derived_val(&self) -> i32 { self.x + 1 } }
+fn main() -> i32 {
+    let f = Foo { x: 5 };
+    f.base_val()
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 5);
+}
+
+#[test]
+fn milestone_164_supertrait_call_via_generic() {
+    let src = r#"
+trait Base { fn base_val(&self) -> i32; }
+trait Derived: Base { fn derived_val(&self) -> i32; }
+struct Foo { x: i32 }
+impl Base for Foo { fn base_val(&self) -> i32 { self.x } }
+impl Derived for Foo { fn derived_val(&self) -> i32 { self.x + 1 } }
+fn get_base<T: Derived>(t: T) -> i32 { t.base_val() }
+fn main() -> i32 {
+    let f = Foo { x: 7 };
+    get_base(f)
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 7);
+}
+
+#[test]
+fn milestone_164_supertrait_both_methods_from_generic() {
+    let src = r#"
+trait Base { fn base_val(&self) -> i32; }
+trait Derived: Base { fn derived_val(&self) -> i32; }
+struct Foo { x: i32 }
+impl Base for Foo { fn base_val(&self) -> i32 { self.x } }
+impl Derived for Foo { fn derived_val(&self) -> i32 { self.x + 1 } }
+fn sum_both<T: Derived>(t: T) -> i32 { t.base_val() + t.derived_val() }
+fn main() -> i32 {
+    let f = Foo { x: 4 };
+    sum_both(f)
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 9); // 4 + 5
+}
+
+#[test]
+fn milestone_164_supertrait_result_in_arithmetic() {
+    let src = r#"
+trait Base { fn base_val(&self) -> i32; }
+trait Derived: Base { fn derived_val(&self) -> i32; }
+struct Foo { x: i32 }
+impl Base for Foo { fn base_val(&self) -> i32 { self.x * 2 } }
+impl Derived for Foo { fn derived_val(&self) -> i32 { self.x } }
+fn get_base<T: Derived>(t: T) -> i32 { t.base_val() }
+fn main() -> i32 {
+    let f = Foo { x: 3 };
+    get_base(f) + 1
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 7); // 3*2 + 1
+}
+
+#[test]
+fn milestone_164_supertrait_two_concrete_types() {
+    let src = r#"
+trait Base { fn base_val(&self) -> i32; }
+trait Derived: Base { fn derived_val(&self) -> i32; }
+struct Foo { x: i32 }
+struct Bar { y: i32 }
+impl Base for Foo { fn base_val(&self) -> i32 { self.x } }
+impl Derived for Foo { fn derived_val(&self) -> i32 { self.x + 10 } }
+impl Base for Bar { fn base_val(&self) -> i32 { self.y * 2 } }
+impl Derived for Bar { fn derived_val(&self) -> i32 { self.y } }
+fn get_base<T: Derived>(t: T) -> i32 { t.base_val() }
+fn main() -> i32 {
+    let f = Foo { x: 3 };
+    let b = Bar { y: 4 };
+    get_base(f) + get_base(b)
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 11); // 3 + 8
+}
+
+#[test]
+fn milestone_164_supertrait_on_parameter() {
+    let src = r#"
+trait Base { fn base_val(&self) -> i32; }
+trait Derived: Base { fn derived_val(&self) -> i32; }
+struct Foo { x: i32 }
+impl Base for Foo { fn base_val(&self) -> i32 { self.x } }
+impl Derived for Foo { fn derived_val(&self) -> i32 { self.x + 1 } }
+fn get_derived<T: Derived>(t: T) -> i32 { t.derived_val() }
+fn main() -> i32 {
+    let f = Foo { x: 9 };
+    get_derived(f)
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 10);
+}
+
+#[test]
+fn milestone_164_multi_supertrait_bounds() {
+    let src = r#"
+trait Alpha { fn alpha(&self) -> i32; }
+trait Beta { fn beta(&self) -> i32; }
+trait Gamma: Alpha + Beta { fn gamma(&self) -> i32; }
+struct Foo { x: i32 }
+impl Alpha for Foo { fn alpha(&self) -> i32 { self.x } }
+impl Beta for Foo { fn beta(&self) -> i32 { self.x + 1 } }
+impl Gamma for Foo { fn gamma(&self) -> i32 { self.x + 2 } }
+fn call_alpha<T: Gamma>(t: T) -> i32 { t.alpha() }
+fn main() -> i32 {
+    let f = Foo { x: 5 };
+    call_alpha(f)
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 5);
+}
+
+#[test]
+fn milestone_164_supertrait_called_twice() {
+    let src = r#"
+trait Base { fn base_val(&self) -> i32; }
+trait Derived: Base { fn derived_val(&self) -> i32; }
+struct Foo { x: i32 }
+impl Base for Foo { fn base_val(&self) -> i32 { self.x } }
+impl Derived for Foo { fn derived_val(&self) -> i32 { self.x + 1 } }
+fn get_base<T: Derived>(t: T) -> i32 { t.base_val() }
+fn main() -> i32 {
+    let f = Foo { x: 3 };
+    let g = Foo { x: 4 };
+    get_base(f) + get_base(g)
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 7);
+}
+
+// ── Assembly inspection: supertrait bounds ────────────────────────────────────
+
+/// FLS §4.14, §6.1.2: Calling a supertrait method from a generic function must
+/// emit a `bl` to the monomorphized label (not constant-folded).
+///
+/// `t.base_val()` where `T: Derived` and `T = Foo` must emit `bl Foo__base_val`
+/// (or equivalent mangled name). `base_val` returns `self.x + 3` so the return
+/// value (11) differs from the struct-init literal (8), making the negative
+/// assertion unambiguous: `mov x0, #11` in main's return path means folding.
+#[test]
+fn runtime_supertrait_call_emits_bl_not_folded() {
+    let src = r#"
+trait Base { fn base_val(&self) -> i32; }
+trait Derived: Base { fn derived_val(&self) -> i32; }
+struct Foo { x: i32 }
+impl Base for Foo { fn base_val(&self) -> i32 { self.x + 3 } }
+impl Derived for Foo { fn derived_val(&self) -> i32 { self.x + 1 } }
+fn get_base<T: Derived>(t: T) -> i32 { t.base_val() }
+fn main() -> i32 {
+    let f = Foo { x: 8 };
+    get_base(f)
+}
+"#;
+    // x: 8, base_val returns 8+3=11
+    let asm = compile_to_asm(src);
+    // Must emit add (base_val computes self.x + 3 at runtime).
+    assert!(
+        asm.contains("add"),
+        "supertrait method must emit add instruction; got:\n{asm}"
+    );
+    // Must not fold to #11 — x is stored in a struct field, not a compile-time const.
+    // main initializes with #8; if the result were folded, it would emit #11 in main.
+    assert!(
+        !asm.contains("mov     x0, #11"),
+        "supertrait call must NOT constant-fold to #11; got:\n{asm}"
+    );
+}
+
+/// FLS §4.14, §6.1.2: A generic function calling both supertrait and subtrait
+/// methods must emit two separate bl instructions (not folded).
+#[test]
+fn runtime_supertrait_both_methods_not_folded() {
+    let src = r#"
+trait Base { fn base_val(&self) -> i32; }
+trait Derived: Base { fn derived_val(&self) -> i32; }
+struct Foo { x: i32 }
+impl Base for Foo { fn base_val(&self) -> i32 { self.x } }
+impl Derived for Foo { fn derived_val(&self) -> i32 { self.x + 1 } }
+fn sum_both<T: Derived>(t: T) -> i32 { t.base_val() + t.derived_val() }
+fn main() -> i32 {
+    let f = Foo { x: 4 };
+    sum_both(f)
+}
+"#;
+    let asm = compile_to_asm(src);
+    // Must emit add (combining two method results).
+    assert!(
+        asm.contains("add"),
+        "supertrait + subtrait call sum must emit add; got:\n{asm}"
+    );
+    // Must not fold — 4 + 5 = 9.
+    assert!(
+        !asm.contains("mov     x0, #9"),
+        "supertrait sum must NOT constant-fold to #9; got:\n{asm}"
+    );
+}
