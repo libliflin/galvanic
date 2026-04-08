@@ -3070,3 +3070,28 @@ The `lsl #3` is the distinguishing signature of element address computation (vs 
 - The loop fails to actually mutate elements (runtime check: `double_in_place([1,2,3])` ≠ 12)
 
 **Tests**: `cargo test --test e2e -- runtime_for_arr_mut_borrow_emits_addr_of_indexed runtime_for_arr_mut_borrow_param_not_folded milestone_196_for_arr_mut_borrow_param milestone_196_for_arr_mut_borrow_double_in_place`
+
+---
+
+## Claim 83: `for x in arr` (consuming iteration) emits indexed loads at runtime (not constant-folded)
+
+**Stakeholder**: William (researcher), CI / Validation Infrastructure
+
+**Promise**: When a function takes an array parameter and iterates it with `for x in a` (consuming iteration), the loop body must emit runtime `ldr` instructions to load each element — never constant-folded from the call-site array contents. Calling the same function with two arrays of different element values must produce two different results, proving the function does not cache the first call's array.
+
+**Why this is load-bearing**: Milestone 109 (earlier cycle) added support for `for x in arr` consuming iteration over arrays. The implementation indexes into the array using a counted loop. The risk is that galvanic could partially interpret the loop by reading the known array initializer rather than emitting runtime loads. If galvanic inlines `[1, 2, 3]` at the call site and constant-folds the loop inside `sum_arr`, it would return `#6` for any call — a compiler-not-interpreter violation.
+
+**ARM64 implementation**: In `lower.rs`, the `for x in arr` path creates a counted-index loop with `Instr::LoadIndexed` to load each element at runtime. The assembly must contain at least one `ldr` (the element load), a back-edge branch, and NOT any constant representing the sum.
+
+**FLS §6.15.1**: For loop body executes at runtime; iteration variable is bound to each element in sequence.
+**FLS §9**: Function parameters have values unknown at compile time.
+**FLS §6.1.2:37–45**: Non-const function bodies emit runtime instructions.
+**FLS §6.15.1 AMBIGUOUS**: `for x in arr` should desugar to `IntoIterator::into_iter(arr)`, which requires the standard library `IntoIterator` impl for `[T; N]`. Galvanic bypasses this at the IR level since no runtime trait dispatch is available at this milestone.
+
+**Violated if**:
+- Assembly for `sum_arr(a: [i32; 3])` does NOT contain `ldr` (element load was constant-folded or inlined), OR
+- Assembly contains `mov     x0, #6` (sum of first call's array [1,2,3] was folded), OR
+- Assembly contains `mov     x0, #60` (sum of second call's array [10,20,30] was folded), OR
+- Assembly contains `mov     x0, #66` (combined result was folded)
+
+**Tests**: `cargo test --test e2e -- claim_83_for_array_param_emits_indexed_load_not_folded runtime_for_array_emits_load_indexed runtime_for_array_two_arrays_not_folded`

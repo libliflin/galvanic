@@ -1461,6 +1461,17 @@ else
     pass "Claim 82: for x in &mut arr emits element address computation at runtime and stores through pointer (not constant-folded)"
 fi
 
+echo "--- Claim 83: for x in arr (consuming iteration) with array parameter emits indexed loads at runtime (not constant-folded) ---"
+if cargo test --test e2e -- \
+    claim_83_for_array_param_emits_indexed_load_not_folded \
+    runtime_for_array_emits_load_indexed \
+    runtime_for_array_two_arrays_not_folded \
+    2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 83" "for-array consuming iteration runtime codegen FAILED — loop body may be constant-folding element loads instead of emitting ldr instructions; both sums ([1,2,3]=6 and [10,20,30]=60) must come from runtime indexed loads"
+else
+    pass "Claim 83: for x in arr consuming iteration emits runtime indexed loads (not constant-folded)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 
