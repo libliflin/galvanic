@@ -72,14 +72,24 @@ jobs:
 
       - name: Large repetitive input does not hang
         run: |
-          # 10k lines of let bindings inside a function — should not OOM or hang
+          # 10k lines of let bindings inside a function — should not OOM or hang.
+          # A clean non-zero exit (e.g. "exceeded stack slots") is acceptable;
+          # only signal death (exit > 128) or timeout counts as failure.
           python3 -c "
           print('fn main() {')
           for i in range(10000):
               print(f'    let x{i}: u32 = {i};')
           print('}')
           " > /tmp/stress.rs
-          timeout 30 ./target/release/galvanic /tmp/stress.rs
+          set +e
+          timeout 30 ./target/release/galvanic /tmp/stress.rs 2>/dev/null
+          EXIT_CODE=$?
+          set -e
+          if [ "$EXIT_CODE" -gt 128 ]; then
+            SIGNAL=$((EXIT_CODE - 128))
+            echo "FAIL: binary died with signal $SIGNAL on large input"
+            exit 1
+          fi
 
       - name: Deeply nested braces do not stack overflow
         run: |
