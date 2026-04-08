@@ -904,6 +904,25 @@ impl<'src> Parser<'src> {
         let name = self.current_span();
         self.advance();
 
+        // FLS §12.1: Optionally parse generic type parameters `<T, U, …>`.
+        // FLS §12.1 AMBIGUOUS: The FLS does not specify the disambiguation rule
+        // for `<` after an enum name (generic params vs. less-than). Galvanic
+        // treats `<` immediately after the enum name as opening a type-param list.
+        let mut generic_params = Vec::new();
+        if self.peek_kind() == TokenKind::Lt {
+            self.advance(); // eat `<`
+            while self.peek_kind() != TokenKind::Gt && self.peek_kind() != TokenKind::Eof {
+                if self.peek_kind() == TokenKind::Ident {
+                    generic_params.push(self.current_span());
+                    self.advance();
+                }
+                if self.peek_kind() == TokenKind::Comma {
+                    self.advance();
+                }
+            }
+            self.expect(TokenKind::Gt)?;
+        }
+
         // Enum body is always `{ … }`.
         self.expect(TokenKind::OpenBrace)?;
         let variants = self.parse_enum_variants()?;
@@ -911,7 +930,7 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::CloseBrace)?;
 
         let span = start.to(end);
-        Ok(EnumDef { vis, name, variants, span })
+        Ok(EnumDef { vis, name, generic_params, variants, span })
     }
 
     /// Parse the variant list inside an enum body `{ Var1, Var2, … }`.

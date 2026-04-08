@@ -628,6 +628,11 @@ pub struct EnumDef {
     pub vis: Visibility,
     /// The enum's name.
     pub name: Span,
+    /// Generic type parameters (`T`, `U`, …) if present.
+    ///
+    /// FLS §12.1: An enum definition may declare one or more type parameters.
+    /// Galvanic monomorphizes all type parameters to `i32` at this milestone.
+    pub generic_params: Vec<Span>,
     /// The enum's variants.
     pub variants: Vec<EnumVariant>,
     /// The span of the entire enum definition.

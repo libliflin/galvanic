@@ -19593,3 +19593,165 @@ fn main() -> i32 { use_pair(7) }
         "result must not be constant-folded to #7 without a load: {asm}"
     );
 }
+
+// ── Milestone 137: generic enums compile to runtime ARM64 (FLS §12.1) ────
+
+/// Milestone 137: basic generic enum — Value variant extracted.
+#[test]
+fn milestone_137_generic_enum_basic() {
+    let src = r#"
+enum Wrapper<T> { Value(T), Nothing }
+fn main() -> i32 {
+    let w = Wrapper::Value(7_i32);
+    match w { Wrapper::Value(x) => x, Wrapper::Nothing => 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 7);
+}
+
+/// Milestone 137: Nothing arm taken when Value not matched.
+#[test]
+fn milestone_137_generic_enum_nothing_arm() {
+    let src = r#"
+enum Wrapper<T> { Value(T), Nothing }
+fn main() -> i32 {
+    let w: Wrapper<i32> = Wrapper::Nothing;
+    match w { Wrapper::Value(x) => x, Wrapper::Nothing => 42 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 42);
+}
+
+/// Milestone 137: generic enum constructed from function parameter.
+#[test]
+fn milestone_137_generic_enum_from_param() {
+    let src = r#"
+enum Wrapper<T> { Value(T), Nothing }
+fn wrap_and_unwrap(x: i32) -> i32 {
+    let w = Wrapper::Value(x);
+    match w { Wrapper::Value(v) => v, Wrapper::Nothing => 0 }
+}
+fn main() -> i32 { wrap_and_unwrap(13) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 13);
+}
+
+/// Milestone 137: extracted field used in arithmetic.
+#[test]
+fn milestone_137_generic_enum_in_arithmetic() {
+    let src = r#"
+enum Wrapper<T> { Value(T), Nothing }
+fn main() -> i32 {
+    let w = Wrapper::Value(4_i32);
+    let x = match w { Wrapper::Value(v) => v, Wrapper::Nothing => 0 };
+    x * 3
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 12);
+}
+
+/// Milestone 137: Either<A, B> — left arm taken.
+#[test]
+fn milestone_137_generic_enum_either_left() {
+    let src = r#"
+enum Either<A, B> { Left(A), Right(B) }
+fn main() -> i32 {
+    let e = Either::Left(3_i32);
+    match e { Either::Left(x) => x, Either::Right(y) => y }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 3);
+}
+
+/// Milestone 137: Either<A, B> — right arm taken.
+#[test]
+fn milestone_137_generic_enum_either_right() {
+    let src = r#"
+enum Either<A, B> { Left(A), Right(B) }
+fn main() -> i32 {
+    let e = Either::Right(9_i32);
+    match e { Either::Left(x) => x, Either::Right(y) => y }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 9);
+}
+
+/// Milestone 137: generic enum result passed to function.
+#[test]
+fn milestone_137_generic_enum_result_passed_to_fn() {
+    let src = r#"
+enum Wrapper<T> { Value(T), Nothing }
+fn double(x: i32) -> i32 { x * 2 }
+fn main() -> i32 {
+    let w = Wrapper::Value(5_i32);
+    let v = match w { Wrapper::Value(x) => x, Wrapper::Nothing => 0 };
+    double(v)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 10);
+}
+
+/// Milestone 137: two generic enums in the same program.
+#[test]
+fn milestone_137_two_generic_enums() {
+    let src = r#"
+enum Wrapper<T> { Value(T), Nothing }
+fn main() -> i32 {
+    let a = Wrapper::Value(3_i32);
+    let b = Wrapper::Value(4_i32);
+    let x = match a { Wrapper::Value(v) => v, Wrapper::Nothing => 0 };
+    let y = match b { Wrapper::Value(v) => v, Wrapper::Nothing => 0 };
+    x + y
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 7);
+}
+
+/// Assembly inspection: generic enum match emits discriminant comparison and branch.
+///
+/// FLS §12.1: A match on a generic enum variant must emit a runtime discriminant
+/// check — not a constant fold. The match arm `Wrapper::Value(x) => x` must emit
+/// a `cmp` + `cbz` for the variant test, and a `bl` for the outer function call.
+///
+/// Anti-fold: `wrap_and_unwrap` takes a parameter, so galvanic cannot fold the
+/// result at compile time. The outer `bl wrap_and_unwrap` must appear in the assembly.
+#[test]
+fn runtime_generic_enum_emits_discriminant_check() {
+    let src = r#"
+enum Wrapper<T> { Value(T), Nothing }
+fn wrap_and_unwrap(x: i32) -> i32 {
+    let w = Wrapper::Value(x);
+    match w { Wrapper::Value(v) => v, Wrapper::Nothing => 0 }
+}
+fn main() -> i32 { wrap_and_unwrap(7) }
+"#;
+    let asm = compile_to_asm(src);
+    // Discriminant comparison must appear in the match.
+    assert!(
+        asm.contains("cmp"),
+        "generic enum match must emit a discriminant comparison (cmp): {asm}"
+    );
+    // Conditional branch must appear for the match arm.
+    assert!(
+        asm.contains("cbz"),
+        "generic enum match must emit a conditional branch (cbz): {asm}"
+    );
+    // The outer function call must not be folded — bl must be present.
+    assert!(
+        asm.contains("bl      wrap_and_unwrap") || asm.contains("bl wrap_and_unwrap"),
+        "call to wrap_and_unwrap must emit bl — must not be constant-folded: {asm}"
+    );
+    // Must not directly return the constant 7 without going through the function.
+    assert!(
+        !asm.starts_with("\n    .text\n\n    // fn main"),
+        "main must call wrap_and_unwrap, not be the only function: {asm}"
+    );
+}
