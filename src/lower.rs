@@ -1057,10 +1057,15 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         .items
         .iter()
         .filter_map(|item| {
-            if let ItemKind::Fn(fn_def) = &item.kind
-                && !fn_def.generic_params.is_empty()
-            {
-                return Some((fn_def.name.text(source).to_owned(), fn_def.as_ref()));
+            if let ItemKind::Fn(fn_def) = &item.kind {
+                let has_explicit_generics = !fn_def.generic_params.is_empty();
+                // FLS §11: impl Trait in argument position creates an implicit generic type
+                // parameter per impl Trait param. Functions with impl Trait params are treated
+                // as generic and monomorphized at call sites, like functions with explicit <T>.
+                let has_impl_trait = fn_def.params.iter().any(|p| matches!(p.ty.kind, TyKind::ImplTrait(_)));
+                if has_explicit_generics || has_impl_trait {
+                    return Some((fn_def.name.text(source).to_owned(), fn_def.as_ref()));
+                }
             }
             None
         })
@@ -1294,7 +1299,13 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     // Cache-line note: built once; read-only during lowering. Not on any hot path.
     let mut generic_fn_param_counts: HashMap<String, usize> = generic_fn_defs
         .iter()
-        .map(|(name, fn_def)| (name.clone(), fn_def.generic_params.len()))
+        .map(|(name, fn_def)| {
+            // FLS §11: impl Trait params each count as one implicit type parameter.
+            let impl_trait_count = fn_def.params.iter()
+                .filter(|p| matches!(p.ty.kind, TyKind::ImplTrait(_)))
+                .count();
+            (name.clone(), fn_def.generic_params.len() + impl_trait_count)
+        })
         .collect();
     // FLS §12.1: Also register generic methods with key `TypeName__method_name`.
     // This allows the method-call lowering path to apply the same mangle logic
@@ -1735,8 +1746,10 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         match &item.kind {
             ItemKind::Fn(fn_def) => {
                 // FLS §12.1: Generic functions are monomorphized at call sites.
-                // Skip them here — they are lowered in the post-pass loop below.
-                if !fn_def.generic_params.is_empty() {
+                // FLS §11: Functions with impl Trait params are also generic (implicit params).
+                // Skip both here — they are lowered in the post-pass loop below.
+                let has_impl_trait = fn_def.params.iter().any(|p| matches!(p.ty.kind, TyKind::ImplTrait(_)));
+                if !fn_def.generic_params.is_empty() || has_impl_trait {
                     continue;
                 }
                 let (ir_fn, closure_fns, fn_trampolines, next_label, needed) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &tuple_struct_float_field_types, &enum_defs, &enum_variant_float_field_types, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &const_f64_vals, &const_f32_vals, &assoc_const_vals, &static_names, &static_f64_names, &static_f32_names, &fn_names, &struct_raw_field_types, &struct_generic_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, &generic_fn_param_counts, &HashMap::new(), &HashMap::new(), None, label_base)?;
@@ -1947,7 +1960,11 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         // FLS §12.1: Total type params = method's own + impl block's params.
         // For `impl<T> Pair<T> { fn get(&self) -> T }`, the method has 0 own params
         // but the impl contributes `T`.
-        let n_params = fn_def.generic_params.len() + impl_params.len();
+        // FLS §11: Also count impl Trait params as implicit type params.
+        let impl_trait_count = fn_def.params.iter()
+            .filter(|p| matches!(p.ty.kind, TyKind::ImplTrait(_)))
+            .count();
+        let n_params = fn_def.generic_params.len() + impl_params.len() + impl_trait_count;
 
         // Use concrete_types if provided (may include struct type names like "Foo"),
         // otherwise fall back to "i32" for all params. Concrete types come from the
@@ -1989,6 +2006,27 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                     param_span.text(source).to_owned(),
                     concrete.to_owned(),
                 );
+            }
+        }
+
+        // FLS §11: Also build substitutions for impl Trait params.
+        // Each `impl Trait` parameter is an implicit anonymous type param keyed "__it_{n}".
+        // The concrete types for impl Trait params come after the explicit type params in
+        // `effective_concrete`: explicit_count entries for <T, U, ...>, then one per impl Trait.
+        let explicit_count = fn_def.generic_params.len() + impl_params.len();
+        let mut impl_trait_mono_idx = 0usize;
+        for param in &fn_def.params {
+            if matches!(param.ty.kind, TyKind::ImplTrait(_)) {
+                let key = format!("__it_{impl_trait_mono_idx}");
+                impl_trait_mono_idx += 1;
+                generic_subst.insert(key.clone(), IrTy::I32);
+                let concrete = effective_concrete
+                    .get(explicit_count + (impl_trait_mono_idx - 1))
+                    .map(|s| s.as_str())
+                    .unwrap_or("i32");
+                if concrete != "i32" {
+                    generic_type_subst.insert(key, concrete.to_owned());
+                }
             }
         }
 
@@ -2272,6 +2310,8 @@ fn lower_fn(
     // ARM64 ABI: float args occupy a separate register bank from integer args.
     // FLS §4.2: f64/f32 parameters are passed in d0–d7 / s0–s7.
     let mut freg_idx: usize = 0;
+    // FLS §11: Counter for impl Trait params — each uses a synthetic key "__it_{n}".
+    let mut impl_trait_param_idx: usize = 0;
 
     // FLS §10.1: If this is a method with a self parameter, spill the self
     // value from leading registers.
@@ -2672,6 +2712,53 @@ fn lower_fn(
                 unreachable!() // handled above
             }
         };
+
+        // FLS §11: impl Trait in argument position — resolve concrete type from
+        // the monomorphization substitution keyed "__it_{n}".
+        //
+        // `impl Trait` desugars to an anonymous generic type parameter. During
+        // monomorphization, the concrete type is placed in `generic_type_subst`
+        // under the key "__it_{n}" where n is this param's position among all
+        // `impl Trait` params in the function signature.
+        //
+        // FLS §11: AMBIGUOUS — The FLS does not mandate the register spilling
+        // convention for impl Trait params. Galvanic uses the same multi-register
+        // convention as named struct parameters (one register per field).
+        if matches!(param.ty.kind, TyKind::ImplTrait(_)) {
+            let it_key = format!("__it_{impl_trait_param_idx}");
+            impl_trait_param_idx += 1;
+            let concrete_name = generic_type_subst.get(&it_key).cloned().unwrap_or_else(|| "i32".to_owned());
+            if let Some(field_names) = struct_defs.get(concrete_name.as_str()) {
+                // Struct-typed impl Trait param: same spilling as `fn f(s: Struct)`.
+                let n_slots = struct_sizes.get(concrete_name.as_str()).copied().unwrap_or(field_names.len());
+                let regs_needed = n_slots.max(1);
+                if n_slots > 0 && reg_idx + n_slots > 8 {
+                    return Err(LowerError::Unsupported(
+                        "impl Trait struct parameter exceeds ARM64 register window (>8 total registers)".into(),
+                    ));
+                }
+                let base_slot = ctx.alloc_slot()?;
+                for _ in 1..n_slots {
+                    ctx.alloc_slot()?;
+                }
+                ctx.locals.insert(param_name, base_slot);
+                ctx.local_struct_types.insert(base_slot, concrete_name.clone());
+                for fi in 0..n_slots {
+                    ctx.instrs.push(Instr::Store {
+                        src: (reg_idx + fi) as u8,
+                        slot: base_slot + fi as u8,
+                    });
+                }
+                reg_idx += regs_needed;
+            } else {
+                // Scalar impl Trait param (or concrete type not a known struct).
+                let slot = ctx.alloc_slot()?;
+                ctx.locals.insert(param_name, slot);
+                ctx.instrs.push(Instr::Store { src: reg_idx as u8, slot });
+                reg_idx += 1;
+            }
+            continue;
+        }
 
         // FLS §15: Enum type parameters — `fn f(o: Opt)`.
         // FLS §11 / §6.12.2: Struct type parameters — `fn f(s: S)`.

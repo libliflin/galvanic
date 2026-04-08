@@ -742,6 +742,23 @@ pub enum TyKind {
         /// Array length (constant).
         len: usize,
     },
+
+    /// `impl Trait` in argument position. FLS §11, §12.1.
+    ///
+    /// `impl Trait` in argument position is syntactic sugar for an anonymous
+    /// type parameter with a trait bound. `fn foo(x: impl MyTrait) -> i32`
+    /// is equivalent to `fn foo<T: MyTrait>(x: T) -> i32`.
+    ///
+    /// The span names the trait (e.g., `Span("MyTrait")`). Galvanic resolves
+    /// the concrete type at each call site (monomorphization).
+    ///
+    /// FLS §11: AMBIGUOUS — The FLS does not precisely specify the desugaring
+    /// scope of `impl Trait` (whether lifetime capture rules apply, whether
+    /// the anonymous param is an RPIT or an APIT). Galvanic treats each
+    /// `impl Trait` parameter as an independent implicit generic type param.
+    ///
+    /// Cache-line note: same register footprint as explicit generic params.
+    ImplTrait(Span),
 }
 
 // ── Blocks ────────────────────────────────────────────────────────────────────

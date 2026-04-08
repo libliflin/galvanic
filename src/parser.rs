@@ -1613,9 +1613,9 @@ impl<'src> Parser<'src> {
                     let end = if let Some(ref r) = ret { r.span } else { end };
                     Ok(Ty { kind: TyKind::FnPtr { params, ret }, span: start.to(end) })
                 } else {
-                    // Non-callable trait (e.g. `impl Display`): treat as a named path type.
-                    // FLS §12: Non-callable impl Trait — not yet lowered.
-                    Ok(Ty { kind: TyKind::Path(vec![trait_span]), span: start.to(trait_span) })
+                    // Non-callable trait (e.g. `impl MyTrait`): argument-position impl Trait.
+                    // FLS §11: impl Trait in argument position is an anonymous generic type param.
+                    Ok(Ty { kind: TyKind::ImplTrait(trait_span), span: start.to(trait_span) })
                 }
             }
 
