@@ -31711,3 +31711,46 @@ fn runtime_const_from_i32_max_emits_loadimm() {
         "const LIMIT = i32::MAX must not load from stack (must be LoadImm): {asm}"
     );
 }
+
+// Claim 74 adversarial: const item chain via built-in associated constant.
+//
+// This tests the fixed-point const evaluator with two-segment path resolution
+// in const item initializers. The failure mode: if `assoc_known` is not
+// threaded into `eval_const_expr`, `const LIMIT = i32::MAX` resolves to None,
+// then `const DERIVED = LIMIT - 1` also resolves to None, and the program
+// either panics or produces exit code 0 instead of 1.
+//
+// FLS §7.1:10, §10.3: const items are evaluated at compile time; all
+// references within the initializer — including two-segment associated
+// constant paths — must be resolved before the const is used.
+#[test]
+fn claim_74_const_chain_through_builtin_assoc_not_zero() {
+    // Assembly inspection uses a leaf function (no parameter spilling) so
+    // we can cleanly assert there are no stack loads for the constant value.
+    // 2147483646 = 0x7FFFFFFE → movz #0xfffe + movk #0x7fff
+    let asm_src = "const LIMIT: i32 = i32::MAX;\nconst DERIVED: i32 = LIMIT - 1;\nfn main() -> i32 { DERIVED }\n";
+    let asm = compile_to_asm(asm_src);
+    // Positive: the correct immediate encoding must appear
+    assert!(
+        asm.contains("#0xfffe"),
+        "const DERIVED = LIMIT-1 (where LIMIT=i32::MAX) must emit movz #0xfffe: {asm}"
+    );
+    // Negative: the value must not come from a stack slot
+    assert!(
+        !asm.contains("ldr     x0, [sp"),
+        "const DERIVED must be inlined as LoadImm, not loaded from stack: {asm}"
+    );
+
+    // Runtime check: a non-trivial program that would produce wrong output
+    // (exit 0 instead of 1) if the const chain resolved to None/0.
+    let runtime_src = r#"
+const LIMIT: i32 = i32::MAX;
+const DERIVED: i32 = LIMIT - 1;
+fn check(x: i32) -> i32 { if x == 2147483646 { 1 } else { 0 } }
+fn main() -> i32 { check(DERIVED) }
+"#;
+    let Some(exit_code) = compile_and_run(runtime_src) else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "const chain LIMIT=i32::MAX, DERIVED=LIMIT-1 must resolve to 2147483646");
+}
