@@ -988,6 +988,31 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         }
     }
 
+    // Build dyn-return registry: fn_name → trait_name.
+    //
+    // FLS §4.13: When a free function has `-> &dyn Trait` as its return type,
+    // call sites must receive the fat pointer (data ptr, vtable ptr) in x0 and
+    // x1 and store both to consecutive stack slots. This map records which
+    // functions return `&dyn Trait` and which trait, so call-site lowering in
+    // `lower_stmt` can emit `CallRetFatPtr` instead of a plain `Call`.
+    //
+    // FLS §4.13 AMBIGUOUS: The spec does not define a fat pointer return ABI.
+    // Galvanic uses (x0=data_ptr, x1=vtable_ptr) matching the parameter ABI.
+    //
+    // Cache-line note: built once; read-only after construction.
+    let mut fn_dyn_return_traits: HashMap<String, String> = HashMap::new();
+    for item in &src.items {
+        if let ItemKind::Fn(fn_def) = &item.kind {
+            let fn_name = fn_def.name.text(source).to_owned();
+            if let Some(ret_ty) = &fn_def.ret_ty
+                && let TyKind::Ref { inner, .. } = &ret_ty.kind
+                && let TyKind::DynTrait(trait_span) = &inner.kind
+            {
+                fn_dyn_return_traits.insert(fn_name, trait_span.text(source).to_owned());
+            }
+        }
+    }
+
     // Collect type alias IrTy mappings: maps alias name → resolved IrTy.
     //
     // FLS §4.10: A type alias defines a new name for an existing type.
@@ -1805,7 +1830,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                 if !fn_def.generic_params.is_empty() || has_impl_trait {
                     continue;
                 }
-                let (ir_fn, closure_fns, fn_trampolines, next_label, needed, vtable_reqs) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &tuple_struct_float_field_types, &enum_defs, &enum_variant_float_field_types, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &const_f64_vals, &const_f32_vals, &assoc_const_vals, &static_names, &static_f64_names, &static_f32_names, &fn_names, &struct_raw_field_types, &struct_generic_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, &generic_fn_param_counts, &HashMap::new(), &HashMap::new(), &trait_method_order, &fn_dyn_param_traits, None, label_base)?;
+                let (ir_fn, closure_fns, fn_trampolines, next_label, needed, vtable_reqs) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &tuple_struct_float_field_types, &enum_defs, &enum_variant_float_field_types, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &const_f64_vals, &const_f32_vals, &assoc_const_vals, &static_names, &static_f64_names, &static_f32_names, &fn_names, &struct_raw_field_types, &struct_generic_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, &generic_fn_param_counts, &HashMap::new(), &HashMap::new(), &trait_method_order, &fn_dyn_param_traits, &fn_dyn_return_traits, None, label_base)?;
                 label_base = next_label;
                 fns.push(ir_fn);
                 fns.extend(closure_fns);
@@ -1883,6 +1908,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         &HashMap::new(),
                         &trait_method_order,
                         &fn_dyn_param_traits,
+                        &fn_dyn_return_traits,
                         mctx,
                         label_base,
                     )?;
@@ -1957,6 +1983,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                                 &HashMap::new(),
                                 &trait_method_order,
                                 &fn_dyn_param_traits,
+                                &fn_dyn_return_traits,
                                 mctx,
                                 label_base,
                             )?;
@@ -2136,6 +2163,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
             &generic_type_subst,
             &trait_method_order,
             &fn_dyn_param_traits,
+            &fn_dyn_return_traits,
             mctx,
             label_base,
         )?;
@@ -2315,6 +2343,8 @@ fn lower_fn(
     trait_method_order: &HashMap<String, Vec<String>>,
     // FLS §4.13: Which function params are `&dyn Trait`, keyed by trait name.
     fn_dyn_param_traits: &HashMap<String, Vec<Option<String>>>,
+    // FLS §4.13: Which free functions return `&dyn Trait`: fn_name → trait_name.
+    fn_dyn_return_traits: &HashMap<String, String>,
     method: Option<MethodCtx<'_>>,
     start_label: u32,
 ) -> LowerFnResult {
@@ -2336,12 +2366,29 @@ fn lower_fn(
         .unwrap_or_else(|| fn_def.name.text(source).to_owned());
 
     // FLS §9: "If no return type is specified, the return type is `()`."
+    // FLS §4.13: Detect `-> &dyn Trait` return before the main type determination.
+    // When present, the body lowering emits RetFields (data_slot, n_fields=2)
+    // rather than a scalar Ret. The IrTy placeholder is Unit.
+    let dyn_ret_trait: Option<String> = fn_def.ret_ty.as_ref().and_then(|ty| {
+        if let TyKind::Ref { inner, .. } = &ty.kind
+            && let TyKind::DynTrait(trait_span) = &inner.kind
+        {
+            Some(trait_span.text(source).to_owned())
+        } else {
+            None
+        }
+    });
+
     // For functions returning a struct or enum type, `lower_ty` would fail
     // (struct/enum names are not primitive IR types). Detect them separately.
     //
     // FLS §10.1: Associated functions may return the impl type or any other type.
     // FLS §9, §15: Free functions may return an enum type.
-    let (ret_ty, struct_ret_name, enum_ret_name, tuple_ret_n) = match &fn_def.ret_ty {
+    let (ret_ty, struct_ret_name, enum_ret_name, tuple_ret_n) = if dyn_ret_trait.is_some() {
+        // &dyn Trait return: use Unit as placeholder IrTy.
+        // The actual fat-pointer return is handled by the dyn_ret_trait branch below.
+        (IrTy::Unit, None, None, None)
+    } else { match &fn_def.ret_ty {
         None => (IrTy::Unit, None, None, None),
         Some(ty) => {
             match lower_ty(ty, source, type_aliases) {
@@ -2385,7 +2432,7 @@ fn lower_fn(
                 }
             }
         }
-    };
+    }}; // closes the if dyn_ret_trait.is_some() { ... } else { match ... }
 
     let body = match &fn_def.body {
         None => {
@@ -2396,7 +2443,7 @@ fn lower_fn(
         Some(block) => block,
     };
 
-    let mut ctx = LowerCtx::new(source, &name, ret_ty, struct_defs, tuple_struct_defs, tuple_struct_float_field_types, enum_defs, enum_variant_float_field_types, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, f64_return_fns, f32_return_fns, const_vals, const_f64_vals, const_f32_vals, assoc_const_vals, static_names, static_f64_names, static_f32_names, fn_names, struct_field_types, struct_generic_field_types, struct_field_offsets, struct_sizes, type_aliases, struct_float_field_types, generic_fn_param_counts.clone(), generic_type_subst, trait_method_order, fn_dyn_param_traits, start_label);
+    let mut ctx = LowerCtx::new(source, &name, ret_ty, struct_defs, tuple_struct_defs, tuple_struct_float_field_types, enum_defs, enum_variant_float_field_types, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, f64_return_fns, f32_return_fns, const_vals, const_f64_vals, const_f32_vals, assoc_const_vals, static_names, static_f64_names, static_f32_names, fn_names, struct_field_types, struct_generic_field_types, struct_field_offsets, struct_sizes, type_aliases, struct_float_field_types, generic_fn_param_counts.clone(), generic_type_subst, trait_method_order, fn_dyn_param_traits, fn_dyn_return_traits, start_label);
 
     // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
     // to stack slots. Each parameter slot is allocated in parameter order
@@ -3385,6 +3432,55 @@ fn lower_fn(
 
         // RetFields: load elements from base_slot..base_slot+N-1 into x0..x{N-1}.
         ctx.instrs.push(Instr::RetFields { base_slot, n_fields: n_elems });
+    } else if dyn_ret_trait.is_some() {
+        // FLS §4.13, §9: Function returning `&dyn Trait`.
+        //
+        // The callee must return the fat pointer (data ptr, vtable ptr) in x0 and x1.
+        // This reuses RetFields with n_fields=2: ldr x0 (data), ldr x1 (vtable),
+        // then the standard epilogue, matching the &dyn Trait parameter ABI.
+        //
+        // FLS §4.13 AMBIGUOUS: The spec does not define the fat pointer return ABI.
+        // Galvanic uses (x0=data_ptr, x1=vtable_ptr) matching the parameter ABI:
+        // `&dyn Trait` parameters arrive in (x{i}, x{i+1}) and are spilled to
+        // two consecutive stack slots. The same layout applies to return values.
+        //
+        // Cache-line note: 2 ldr instructions (8 bytes) before the epilogue —
+        // the same instruction count as a 2-field struct return (RetFields n=2).
+
+        // Lower all statements.
+        for stmt in &body.stmts {
+            ctx.lower_stmt(stmt)?;
+        }
+
+        // The tail expression must be a single-segment path naming a dyn-typed local.
+        // FLS §4.13: The returned fat pointer consists of the data_slot and
+        // data_slot+1 (vtable) of the named local variable.
+        let tail = body.tail.as_deref().ok_or_else(|| {
+            LowerError::Unsupported(
+                "function returning `&dyn Trait` must have a tail expression".into(),
+            )
+        })?;
+
+        let data_slot = if let ExprKind::Path(segs) = &tail.kind && segs.len() == 1 {
+            let var_name = segs[0].text(source);
+            if let Some(&slot) = ctx.locals.get(var_name)
+                && ctx.local_dyn_types.contains_key(&slot)
+            {
+                slot
+            } else {
+                return Err(LowerError::Unsupported(
+                    "&dyn Trait return: tail expression must name a dyn-typed local variable".into(),
+                ));
+            }
+        } else {
+            return Err(LowerError::Unsupported(
+                "&dyn Trait return: only a single-variable path tail is supported".into(),
+            ));
+        };
+
+        // RetFields with n_fields=2: ldr x0 ← data_slot, ldr x1 ← data_slot+1,
+        // then epilogue + ret. Returns fat pointer in (x0, x1).
+        ctx.instrs.push(Instr::RetFields { base_slot: data_slot, n_fields: 2 });
     } else {
         ctx.lower_block(body, &ret_ty)?;
     }
@@ -4437,6 +4533,16 @@ struct LowerCtx<'src> {
     ///
     /// Cache-line note: shared reference; read-only during lowering.
     fn_dyn_param_traits: &'src HashMap<String, Vec<Option<String>>>,
+
+    /// Dyn return info: fn_name → trait_name.
+    ///
+    /// FLS §4.13: When a free function has `-> &dyn Trait` as its return type,
+    /// this map records the trait name. Call-site lowering in `lower_stmt`
+    /// uses this to emit `CallRetFatPtr` instead of a plain `Call`, storing
+    /// the returned fat pointer (data ptr, vtable ptr) into consecutive slots.
+    ///
+    /// Cache-line note: shared reference; read-only during lowering.
+    fn_dyn_return_traits: &'src HashMap<String, String>,
 }
 
 /// Collect all free variables in `expr` that are present in `outer_locals`
@@ -4749,6 +4855,7 @@ impl<'src> LowerCtx<'src> {
         generic_type_subst: &'src HashMap<String, String>,
         trait_method_order: &'src HashMap<String, Vec<String>>,
         fn_dyn_param_traits: &'src HashMap<String, Vec<Option<String>>>,
+        fn_dyn_return_traits: &'src HashMap<String, String>,
         start_label: u32,
     ) -> Self {
         LowerCtx {
@@ -4821,6 +4928,7 @@ impl<'src> LowerCtx<'src> {
             local_dyn_types: HashMap::new(),
             trait_method_order,
             fn_dyn_param_traits,
+            fn_dyn_return_traits,
         }
     }
 
@@ -8960,6 +9068,84 @@ impl<'src> LowerCtx<'src> {
                     ));
                 }
 
+                // FLS §4.13: `let x = f(...)` where f returns `&dyn Trait`.
+                //
+                // When the initializer is a direct call to a function in
+                // `fn_dyn_return_traits`, emit `CallRetFatPtr` instead of a
+                // regular `Call` + single-register write. This stores the
+                // returned fat pointer (x0=data_ptr, x1=vtable_ptr) into two
+                // consecutive slots and registers the result in `local_dyn_types`,
+                // enabling subsequent `.method()` calls and further re-binds.
+                //
+                // FLS §4.13 AMBIGUOUS: Fat pointer return ABI is not specified.
+                // Galvanic extends the parameter ABI: (x0, x1) → (data_slot, vtable_slot).
+                //
+                // Cache-line note: N arg moves + bl + 2 stores = N+3 instructions.
+                if let Some(init_expr) = init.as_ref()
+                    && let ExprKind::Call { callee, args: call_args } = &init_expr.kind
+                    && let ExprKind::Path(segs) = &callee.kind
+                    && segs.len() == 1
+                {
+                    let called_fn = segs[0].text(self.source).to_owned();
+                    if let Some(trait_name) = self.fn_dyn_return_traits.get(&called_fn).cloned() {
+                        // Lower arguments. Fat pointer params are passed as two consecutive regs.
+                        let mut arg_regs: Vec<u8> = Vec::new();
+                        let dyn_params = self.fn_dyn_param_traits
+                            .get(&called_fn)
+                            .cloned()
+                            .unwrap_or_default();
+                        for (arg_idx, arg_expr) in call_args.iter().enumerate() {
+                            let is_dyn_param = dyn_params
+                                .get(arg_idx)
+                                .and_then(|x| x.as_ref())
+                                .is_some();
+                            if is_dyn_param {
+                                // Fat pointer argument: load data_ptr and vtable_ptr.
+                                // Only path-variable fat pointer args are supported here.
+                                if let ExprKind::Path(arg_segs) = &arg_expr.kind
+                                    && arg_segs.len() == 1
+                                {
+                                    let arg_name = arg_segs[0].text(self.source);
+                                    if let Some(&data_slot) = self.locals.get(arg_name)
+                                        && self.local_dyn_types.contains_key(&data_slot)
+                                    {
+                                        let dr = self.alloc_reg()?;
+                                        self.instrs.push(Instr::Load { dst: dr, slot: data_slot });
+                                        arg_regs.push(dr);
+                                        let vr = self.alloc_reg()?;
+                                        self.instrs.push(Instr::Load { dst: vr, slot: data_slot + 1 });
+                                        arg_regs.push(vr);
+                                        continue;
+                                    }
+                                }
+                                return Err(LowerError::Unsupported(
+                                    "dyn-returning fn: fat pointer arg must be a dyn-typed local variable".into(),
+                                ));
+                            }
+                            // Scalar argument.
+                            let val = self.lower_expr(arg_expr, &IrTy::I32)?;
+                            let reg = self.val_to_reg(val)?;
+                            arg_regs.push(reg);
+                        }
+                        // Allocate two consecutive slots: data_slot and vtable_slot.
+                        // FLS §4.13: fat pointer layout — data ptr at slot S, vtable at S+1.
+                        let dst_data_slot = self.alloc_slot()?;
+                        let _dst_vtable_slot = self.alloc_slot()?; // implicit: dst_data_slot + 1
+
+                        self.instrs.push(Instr::CallRetFatPtr {
+                            name: called_fn,
+                            args: arg_regs,
+                            dst_data_slot,
+                        });
+                        self.has_calls = true;
+
+                        // Register result as a dyn-typed local.
+                        self.locals.insert(var_name, dst_data_slot);
+                        self.local_dyn_types.insert(dst_data_slot, trait_name);
+                        return Ok(());
+                    }
+                }
+
                 // Normal (non-struct) let binding.
                 //
                 // FLS §8.1: The introduced binding comes into scope for the
@@ -9208,6 +9394,7 @@ impl<'src> LowerCtx<'src> {
                     self.generic_type_subst,
                     self.trait_method_order,
                     self.fn_dyn_param_traits,
+                    self.fn_dyn_return_traits,
                     inner_start_label,
                 );
 
@@ -16456,6 +16643,7 @@ impl<'src> LowerCtx<'src> {
                     self.generic_type_subst,
                     self.trait_method_order,
                     self.fn_dyn_param_traits,
+                    self.fn_dyn_return_traits,
                     closure_start_label,
                 );
 

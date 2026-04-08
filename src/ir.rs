@@ -885,6 +885,35 @@ pub enum Instr {
         method_idx: usize,
     },
 
+    /// Call a function that returns a `&dyn Trait` fat pointer. FLS §4.13.
+    ///
+    /// `CallRetFatPtr { name, args, dst_data_slot }` emits:
+    ///   `mov x{i}, x{args[i]}` (for each arg not already in the right register)
+    ///   `bl {name}`
+    ///   `str x0, [sp, #{dst_data_slot*8}]`      // store returned data ptr
+    ///   `str x1, [sp, #{(dst_data_slot+1)*8}]`  // store returned vtable ptr
+    ///
+    /// After the call, x0 = data pointer, x1 = vtable pointer (the fat pointer
+    /// components). Both are stored to consecutive stack slots at `dst_data_slot`
+    /// and `dst_data_slot+1` so the caller can use them as a local `&dyn Trait`.
+    ///
+    /// FLS §4.13: `&dyn Trait` as a function return type requires returning
+    /// (data_ptr, vtable_ptr) across the function boundary.
+    /// FLS §4.13 AMBIGUOUS: The spec does not define the fat pointer return ABI.
+    /// Galvanic uses (x0=data_ptr, x1=vtable_ptr) matching the parameter ABI.
+    ///
+    /// Cache-line note: N arg moves + bl + 2 stores = N+3 instructions.
+    /// For a one-fat-pointer-arg call: 2 moves + bl + 2 stores = 5 instructions
+    /// (20 bytes), fitting in one 64-byte cache line alongside other code.
+    CallRetFatPtr {
+        /// Name of the function to call.
+        name: String,
+        /// Integer argument registers (may include paired fat-ptr regs).
+        args: Vec<u8>,
+        /// Stack slot for the returned data pointer; vtable at dst_data_slot+1.
+        dst_data_slot: u8,
+    },
+
     /// Call a `&mut self` method and write modified fields back to the caller's struct.
     ///
     /// `CallMut { name, args, write_back_slot, n_fields }` emits:

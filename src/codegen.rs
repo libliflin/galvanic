@@ -971,6 +971,41 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
             )?;
         }
 
+        // FLS §4.13: Call a function returning a `&dyn Trait` fat pointer.
+        //
+        // After `bl {name}`, x0 = data pointer and x1 = vtable pointer.
+        // Store both to consecutive stack slots so the caller can use the
+        // result as a `&dyn Trait` local (registered in `local_dyn_types`).
+        //
+        // FLS §4.13 AMBIGUOUS: The fat pointer return ABI is not specified.
+        // Galvanic uses (x0=data_ptr, x1=vtable_ptr), symmetric with the
+        // two-register parameter convention for `&dyn Trait` parameters.
+        //
+        // Cache-line note: N arg moves + bl + 2 stores = N+3 instructions.
+        Instr::CallRetFatPtr { name, args, dst_data_slot } => {
+            // Move arguments to x0, x1, ... (fat ptr args occupy two regs each).
+            for (i, &src_reg) in args.iter().enumerate() {
+                if src_reg != i as u8 {
+                    writeln!(
+                        out,
+                        "    mov     x{i}, x{src_reg:<19} // FLS §4.13: arg {i}"
+                    )?;
+                }
+            }
+            writeln!(out, "    bl      {name:<24} // FLS §4.13: call &dyn Trait returning fn")?;
+            // Store returned fat pointer: x0 = data_ptr, x1 = vtable_ptr.
+            let data_offset = *dst_data_slot as u32 * 8;
+            let vtable_offset = (*dst_data_slot as u32 + 1) * 8;
+            writeln!(
+                out,
+                "    str     x0, [sp, #{data_offset:<15}] // FLS §4.13: store returned data ptr"
+            )?;
+            writeln!(
+                out,
+                "    str     x1, [sp, #{vtable_offset:<15}] // FLS §4.13: store returned vtable ptr"
+            )?;
+        }
+
         // FLS §6.12.2 + §10.1: Call a `&mut self` method and write modified fields back.
         //
         // After the `bl`, x0..x{N-1} hold the method's modified field values
