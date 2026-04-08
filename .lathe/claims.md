@@ -3016,3 +3016,28 @@ declared field type — not as a wider i32.
 - The closure body does NOT emit two `ldr` instructions before calling a function that takes `&[T]` (only one register passed to callee)
 
 **Tests**: `cargo test --test e2e -- claim_80_closure_trampoline_slice_param_passes_len_not_just_ptr runtime_closure_trampoline_shifts_fat_ptr_slice_param`
+
+---
+
+## Claim 81: `for x in &arr` with array parameter emits indexed loads at runtime (not constant-folded)
+
+**Stakeholder**: William (researcher), CI / Validation Infrastructure
+
+**Promise**: When a function takes an array parameter and iterates it with `for x in &a`, the loop body must emit runtime `ldr` instructions to load each element — never constant-folded from the call-site array contents. Calling the same function with two arrays of different element values must produce two different results, proving the function does not cache the first call's array.
+
+**Why this is load-bearing**: Milestone 195 (Cycle 145) added support for `for x in &arr` by detecting the `Unary { op: Ref, operand: Path(arr) }` pattern during lowering. The implementation coerces the local array to a slice and iterates with a counted index loop. The risk is that galvanic could partially interpret the loop body by reading the known array initializer rather than emitting runtime loads. If galvanic inlines `[1, 2, 3]` at the call site and constant-folds the loop inside `sum_borrow`, it would return `#6` for any call — a compiler-not-interpreter violation.
+
+**ARM64 implementation**: In `lower.rs`, the `for x in &a` path (detecting `Unary { op: Ref, ... }`) creates a counted-index loop with `Instr::ArrayIndex` to load each element at runtime. The element is pushed to a stack slot and the loop variable name resolves to that slot. The assembly must contain at least one `ldr` (the element load), a back-edge branch, and NOT any constant representing the sum.
+
+**FLS §6.15.1**: For loop body executes at runtime; iteration variable is bound to each element in sequence.
+**FLS §4.9**: `&[T; N]` coerces to `&[T]` (fat pointer) at the reference site; element access uses runtime pointer arithmetic.
+**FLS §6.1.2:37–45**: Non-const function bodies emit runtime instructions.
+**FLS §6.15.1 AMBIGUOUS**: `for x in &arr` should desugar to `IntoIterator::into_iter(&arr)`, which requires the standard library `IntoIterator` impl for `&[T; N]`. Galvanic bypasses this at the IR level. A conforming implementation requires runtime trait dispatch.
+
+**Violated if**:
+- Assembly for `sum_borrow(a: [i32; 3])` does NOT contain `ldr` (element load was constant-folded or inlined), OR
+- Assembly contains `mov     x0, #6` (sum of first call's array [1,2,3] was folded), OR
+- Assembly contains `mov     x0, #60` (sum of second call's array [10,20,30] was folded), OR
+- Assembly contains `mov     x0, #66` (combined result was folded)
+
+**Tests**: `cargo test --test e2e -- claim_81_for_arr_borrow_param_emits_indexed_load_not_folded runtime_for_arr_borrow_emits_indexed_load runtime_for_arr_borrow_two_arrays_not_folded`

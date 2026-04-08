@@ -1438,6 +1438,17 @@ else
     pass "Claim 80: capturing closure with &[T] explicit param correctly shifts both fat-pointer registers in trampoline"
 fi
 
+echo "--- Claim 81: for x in &arr with array parameter emits indexed loads at runtime (not constant-folded) ---"
+if cargo test --test e2e -- \
+    claim_81_for_arr_borrow_param_emits_indexed_load_not_folded \
+    runtime_for_arr_borrow_emits_indexed_load \
+    runtime_for_arr_borrow_two_arrays_not_folded \
+    2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 81" "for-arr-borrow runtime codegen FAILED — loop body may be constant-folding element loads instead of emitting ldr instructions; both sums ([1,2,3]=6 and [10,20,30]=60) must come from runtime indexed loads"
+else
+    pass "Claim 81: for x in &arr with array parameter emits runtime indexed loads (not constant-folded)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 
