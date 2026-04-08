@@ -741,6 +741,16 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     // `None` = not a float field; `Some(IrTy::F64)` = f64; `Some(IrTy::F32)` = f32.
     // Used to choose StoreF64/LoadF64Slot vs StoreF32/LoadF32Slot vs Store/Load.
     let mut struct_float_field_types: HashMap<String, Vec<Option<IrTy>>> = HashMap::new();
+    // FLS §4.1, §6.23: Per-field narrow integer type for named structs.
+    // `None` = not a narrow type; `Some(U8/I8/U16/I16)` = field requires boundary
+    // truncation/sign-extension when written (TruncU8/SextI8/TruncU16/SextI16).
+    // Without this, `S { x: a_u16 + b_u16 }` stores the unwrapped i32 sum, and
+    // subsequent comparisons against the field see wrong values.
+    let mut struct_narrow_field_types: HashMap<String, Vec<Option<IrTy>>> = HashMap::new();
+    // FLS §4.1, §6.23: Per-field narrow integer types for tuple structs.
+    // Mirrors `struct_narrow_field_types` but keyed by tuple struct name.
+    // Used to emit TruncU8/SextI8/TruncU16/SextI16 when constructing `Foo(val)`.
+    let mut tuple_struct_narrow_field_types: HashMap<String, Vec<Option<IrTy>>> = HashMap::new();
 
     for item in &src.items {
         match &item.kind {
@@ -814,14 +824,35 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                                 _ => None,
                             })
                             .collect();
+                        // FLS §4.1, §6.23: Track narrow integer field types so
+                        // struct construction can apply TruncU8/SextI8/TruncU16/SextI16
+                        // before storing, preventing mid-body comparisons from seeing
+                        // unwrapped values when arithmetic on narrow fields overflows.
+                        let narrow_types: Vec<Option<IrTy>> = fields
+                            .iter()
+                            .map(|f| match &f.ty.kind {
+                                TyKind::Path(segs) if segs.len() == 1 => {
+                                    match segs[0].text(source) {
+                                        "u8" => Some(IrTy::U8),
+                                        "i8" => Some(IrTy::I8),
+                                        "u16" => Some(IrTy::U16),
+                                        "i16" => Some(IrTy::I16),
+                                        _ => None,
+                                    }
+                                }
+                                _ => None,
+                            })
+                            .collect();
                         struct_defs.insert(struct_name.clone(), field_names);
                         struct_raw_field_types.insert(struct_name.clone(), field_types);
-                        struct_float_field_types.insert(struct_name, float_types);
+                        struct_float_field_types.insert(struct_name.clone(), float_types);
+                        struct_narrow_field_types.insert(struct_name, narrow_types);
                     }
                     StructKind::Unit => {
                         struct_defs.insert(struct_name.clone(), vec![]);
                         struct_raw_field_types.insert(struct_name.clone(), vec![]);
-                        struct_float_field_types.insert(struct_name, vec![]);
+                        struct_float_field_types.insert(struct_name.clone(), vec![]);
+                        struct_narrow_field_types.insert(struct_name, vec![]);
                     }
                     StructKind::Tuple(fields) => {
                         // FLS §14.2: Tuple struct. Record field count so that
@@ -840,8 +871,28 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                                 _ => None,
                             })
                             .collect();
+                        // FLS §4.1, §6.23: Track narrow integer field types so tuple
+                        // struct construction can apply TruncU8/SextI8/TruncU16/SextI16
+                        // before storing, preventing mid-body comparisons from seeing
+                        // unwrapped values when arithmetic on narrow fields overflows.
+                        let narrow_types: Vec<Option<IrTy>> = fields
+                            .iter()
+                            .map(|f| match &f.ty.kind {
+                                TyKind::Path(segs) if segs.len() == 1 => {
+                                    match segs[0].text(source) {
+                                        "u8" => Some(IrTy::U8),
+                                        "i8" => Some(IrTy::I8),
+                                        "u16" => Some(IrTy::U16),
+                                        "i16" => Some(IrTy::I16),
+                                        _ => None,
+                                    }
+                                }
+                                _ => None,
+                            })
+                            .collect();
                         tuple_struct_defs.insert(struct_name.clone(), fields.len());
-                        tuple_struct_float_field_types.insert(struct_name, float_types);
+                        tuple_struct_float_field_types.insert(struct_name.clone(), float_types);
+                        tuple_struct_narrow_field_types.insert(struct_name, narrow_types);
                     }
                 }
             }
@@ -1596,6 +1647,12 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                 if struct_defs.contains_key(ret_name) {
                     // FLS §9: Free function returning a named struct.
                     struct_return_free_fns.insert(fn_name.to_owned(), ret_name.to_owned());
+                } else if tuple_struct_defs.contains_key(ret_name) {
+                    // FLS §9, §14.2: Free function returning a tuple struct.
+                    // Same RetFields ABI as named-struct returns — fields packed
+                    // in x0..x{N-1}. Registered here so call sites use CallMut
+                    // write-back and field access resolves via local_tuple_lens.
+                    struct_return_free_fns.insert(fn_name.to_owned(), ret_name.to_owned());
                 }
             }
             // FLS §9, §11: Functions with `-> impl Trait` return use static dispatch.
@@ -1845,7 +1902,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                 if !fn_def.generic_params.is_empty() || has_impl_trait {
                     continue;
                 }
-                let (ir_fn, closure_fns, fn_trampolines, next_label, needed, vtable_reqs) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &tuple_struct_float_field_types, &enum_defs, &enum_variant_float_field_types, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &const_f64_vals, &const_f32_vals, &assoc_const_vals, &static_names, &static_f64_names, &static_f32_names, &fn_names, &struct_raw_field_types, &struct_generic_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, &generic_fn_param_counts, &HashMap::new(), &HashMap::new(), &trait_method_order, &fn_dyn_param_traits, &fn_dyn_return_traits, None, label_base)?;
+                let (ir_fn, closure_fns, fn_trampolines, next_label, needed, vtable_reqs) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &tuple_struct_float_field_types, &tuple_struct_narrow_field_types, &enum_defs, &enum_variant_float_field_types, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &const_f64_vals, &const_f32_vals, &assoc_const_vals, &static_names, &static_f64_names, &static_f32_names, &fn_names, &struct_raw_field_types, &struct_generic_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, &struct_narrow_field_types, &generic_fn_param_counts, &HashMap::new(), &HashMap::new(), &trait_method_order, &fn_dyn_param_traits, &fn_dyn_return_traits, None, label_base)?;
                 label_base = next_label;
                 fns.push(ir_fn);
                 fns.extend(closure_fns);
@@ -1952,6 +2009,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         &struct_defs,
                         &tuple_struct_defs,
                         &tuple_struct_float_field_types,
+                        &tuple_struct_narrow_field_types,
                         &enum_defs,
                         &enum_variant_float_field_types,
                         &method_self_kinds,
@@ -1977,6 +2035,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         &struct_sizes,
                         &impl_type_aliases,
                         &struct_float_field_types,
+                        &struct_narrow_field_types,
                         &generic_fn_param_counts,
                         &HashMap::new(),
                         &HashMap::new(),
@@ -2027,6 +2086,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                                 &struct_defs,
                                 &tuple_struct_defs,
                                 &tuple_struct_float_field_types,
+                                &tuple_struct_narrow_field_types,
                                 &enum_defs,
                                 &enum_variant_float_field_types,
                                 &method_self_kinds,
@@ -2052,6 +2112,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                                 &struct_sizes,
                                 &impl_type_aliases,
                                 &struct_float_field_types,
+                                &struct_narrow_field_types,
                                 &generic_fn_param_counts,
                                 &HashMap::new(),
                                 &HashMap::new(),
@@ -2207,6 +2268,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
             &struct_defs,
             &tuple_struct_defs,
             &tuple_struct_float_field_types,
+            &tuple_struct_narrow_field_types,
             &enum_defs,
             &enum_variant_float_field_types,
             &method_self_kinds,
@@ -2232,6 +2294,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
             &struct_sizes,
             &type_alias_irtys,
             &struct_float_field_types,
+            &struct_narrow_field_types,
             &generic_fn_param_counts,
             &generic_subst,
             &generic_type_subst,
@@ -2374,6 +2437,9 @@ fn lower_fn(
     struct_defs: &HashMap<String, Vec<String>>,
     tuple_struct_defs: &HashMap<String, usize>,
     tuple_struct_float_field_types: &HashMap<String, Vec<Option<IrTy>>>,
+    // FLS §4.1, §6.23: Per-field narrow integer types for tuple structs.
+    // Used to emit TruncU8/SextI8/TruncU16/SextI16 when constructing `Foo(val)`.
+    tuple_struct_narrow_field_types: &HashMap<String, Vec<Option<IrTy>>>,
     enum_defs: &EnumDefs,
     enum_variant_float_field_types: &HashMap<String, HashMap<String, Vec<Option<IrTy>>>>,
     method_self_kinds: &HashMap<String, SelfKind>,
@@ -2402,6 +2468,10 @@ fn lower_fn(
     struct_sizes: &HashMap<String, usize>,
     type_aliases: &HashMap<String, IrTy>,
     struct_float_field_types: &HashMap<String, Vec<Option<IrTy>>>,
+    // FLS §4.1, §6.23: Per-field narrow integer types for named structs.
+    // Used to emit TruncU8/SextI8/TruncU16/SextI16 when constructing struct literals
+    // with narrow-typed fields, so mid-body comparisons see correctly wrapped values.
+    struct_narrow_field_types: &HashMap<String, Vec<Option<IrTy>>>,
     generic_fn_param_counts: &HashMap<String, usize>,
     // Substitution for generic type parameters, e.g. `{"T" -> IrTy::I32}`.
     // FLS §12.1: Each call to `lower_fn` for a monomorphized generic function
@@ -2511,6 +2581,12 @@ fn lower_fn(
                                 // Use Unit as a placeholder IrTy; the actual return
                                 // is handled via RetFields in the body lowering below.
                                 (IrTy::Unit, Some(ret_name.to_owned()), None, None)
+                            } else if tuple_struct_defs.contains_key(ret_name) {
+                                // FLS §9, §14.2: Function returning a tuple struct type.
+                                // Same RetFields ABI as named-struct returns: N fields
+                                // packed into x0..x{N-1}. The body lowering path for
+                                // `struct_ret_name` handles both named and tuple structs.
+                                (IrTy::Unit, Some(ret_name.to_owned()), None, None)
                             } else if enum_defs.contains_key(ret_name) {
                                 // FLS §9, §15: Free function returning an enum type.
                                 // Use Unit as a placeholder IrTy; the actual return
@@ -2572,7 +2648,7 @@ fn lower_fn(
         Some(block) => block,
     };
 
-    let mut ctx = LowerCtx::new(source, &name, ret_ty, struct_defs, tuple_struct_defs, tuple_struct_float_field_types, enum_defs, enum_variant_float_field_types, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, f64_return_fns, f32_return_fns, const_vals, const_f64_vals, const_f32_vals, assoc_const_vals, static_names, static_f64_names, static_f32_names, fn_names, struct_field_types, struct_generic_field_types, struct_field_offsets, struct_sizes, type_aliases, struct_float_field_types, generic_fn_param_counts.clone(), generic_type_subst, trait_method_order, fn_dyn_param_traits, fn_dyn_return_traits, start_label);
+    let mut ctx = LowerCtx::new(source, &name, ret_ty, struct_defs, tuple_struct_defs, tuple_struct_float_field_types, tuple_struct_narrow_field_types, enum_defs, enum_variant_float_field_types, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, f64_return_fns, f32_return_fns, const_vals, const_f64_vals, const_f32_vals, assoc_const_vals, static_names, static_f64_names, static_f32_names, fn_names, struct_field_types, struct_generic_field_types, struct_field_offsets, struct_sizes, type_aliases, struct_float_field_types, struct_narrow_field_types, generic_fn_param_counts.clone(), generic_type_subst, trait_method_order, fn_dyn_param_traits, fn_dyn_return_traits, start_label);
 
     // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
     // to stack slots. Each parameter slot is allocated in parameter order
@@ -3445,9 +3521,12 @@ fn lower_fn(
         //
         // Cache-line note: lower_struct_expr_into emits N store instructions per
         // struct-literal arm + the RetFields N-ldr sequence = 2N instructions total.
+        // FLS §14.2: Tuple structs have field counts in `tuple_struct_defs`, not
+        // `struct_defs`. Check both so that `fn f() -> Byte { Byte(x) }` works.
         let n_fields = struct_defs.get(struct_name.as_str())
-            .ok_or_else(|| LowerError::Unsupported(format!("unknown struct `{struct_name}`")))?
-            .len();
+            .map(|f| f.len())
+            .or_else(|| tuple_struct_defs.get(struct_name.as_str()).copied())
+            .ok_or_else(|| LowerError::Unsupported(format!("unknown struct `{struct_name}`")))?;
 
         // Lower all statements.
         for stmt in &body.stmts {
@@ -4161,6 +4240,16 @@ struct LowerCtx<'src> {
     /// Cache-line note: read-only during lowering; not on any hot path.
     tuple_struct_float_field_types: &'src HashMap<String, Vec<Option<IrTy>>>,
 
+    /// Per-field narrow integer type for tuple structs.
+    ///
+    /// FLS §4.1, §6.23: `None` = not a narrow integer field; `Some(U8/I8/U16/I16)` =
+    /// field requires TruncU8/SextI8/TruncU16/SextI16 before the Store instruction
+    /// during tuple struct construction. Mirrors `struct_narrow_field_types` but
+    /// for positional-field constructors like `Foo(val)`.
+    ///
+    /// Cache-line note: read-only during lowering; not on any hot path.
+    tuple_struct_narrow_field_types: &'src HashMap<String, Vec<Option<IrTy>>>,
+
     /// Enum type definitions: maps enum name → (variant name → discriminant).
     ///
     /// FLS §15: Enumerations. Unit variants are assigned integer discriminants
@@ -4643,6 +4732,17 @@ struct LowerCtx<'src> {
     /// Cache-line note: read-only during lowering; not on any hot path.
     struct_float_field_types: &'src HashMap<String, Vec<Option<IrTy>>>,
 
+    /// Per-field narrow integer type for named structs.
+    ///
+    /// FLS §4.1, §6.23: `None` = not a narrow integer field; `Some(U8/I8/U16/I16)` =
+    /// field requires TruncU8/SextI8/TruncU16/SextI16 before the Store instruction
+    /// during struct literal construction. Without this, arithmetic overflow in a
+    /// narrow field is not normalised — mid-body comparisons against the field see
+    /// the unwrapped i32 value instead of the correctly wrapped narrow value.
+    ///
+    /// Cache-line note: read-only during lowering; not on any hot path.
+    struct_narrow_field_types: &'src HashMap<String, Vec<Option<IrTy>>>,
+
     /// Tracks which stack slots hold f64 or f32 values from struct fields.
     ///
     /// FLS §4.2: When a struct with float fields is stored to the stack, each
@@ -5020,6 +5120,7 @@ impl<'src> LowerCtx<'src> {
         struct_defs: &'src HashMap<String, Vec<String>>,
         tuple_struct_defs: &'src HashMap<String, usize>,
         tuple_struct_float_field_types: &'src HashMap<String, Vec<Option<IrTy>>>,
+        tuple_struct_narrow_field_types: &'src HashMap<String, Vec<Option<IrTy>>>,
         enum_defs: &'src EnumDefs,
         enum_variant_float_field_types: &'src HashMap<String, HashMap<String, Vec<Option<IrTy>>>>,
         method_self_kinds: &'src HashMap<String, SelfKind>,
@@ -5045,6 +5146,7 @@ impl<'src> LowerCtx<'src> {
         struct_sizes: &'src HashMap<String, usize>,
         type_aliases: &'src HashMap<String, IrTy>,
         struct_float_field_types: &'src HashMap<String, Vec<Option<IrTy>>>,
+        struct_narrow_field_types: &'src HashMap<String, Vec<Option<IrTy>>>,
         generic_fn_param_counts: HashMap<String, usize>,
         generic_type_subst: &'src HashMap<String, String>,
         trait_method_order: &'src HashMap<String, Vec<String>>,
@@ -5068,6 +5170,7 @@ impl<'src> LowerCtx<'src> {
             struct_defs,
             tuple_struct_defs,
             tuple_struct_float_field_types,
+            tuple_struct_narrow_field_types,
             enum_defs,
             enum_variant_float_field_types,
             method_self_kinds,
@@ -5117,6 +5220,7 @@ impl<'src> LowerCtx<'src> {
             float32_consts: Vec::new(),
             type_aliases,
             struct_float_field_types,
+            struct_narrow_field_types,
             slot_float_ty: HashMap::new(),
             slot_generic_type: HashMap::new(),
             generic_fn_param_counts,
@@ -5157,6 +5261,33 @@ impl<'src> LowerCtx<'src> {
     /// fields (i32, bool, etc.) and nested-struct fields.
     fn field_float_ty(&self, struct_name: &str, field_idx: usize) -> Option<IrTy> {
         self.struct_float_field_types
+            .get(struct_name)
+            .and_then(|fts| fts.get(field_idx))
+            .copied()
+            .flatten()
+    }
+
+    /// Return the narrow integer IrTy (U8/I8/U16/I16) for a named struct field, if any.
+    ///
+    /// FLS §4.1, §6.23: Used during struct literal construction to emit
+    /// TruncU8/SextI8/TruncU16/SextI16 before Store, normalising overflowed
+    /// arithmetic results to the declared field width. Returns `None` for
+    /// i32/bool/f64/f32 and other non-narrow fields.
+    fn field_narrow_ty(&self, struct_name: &str, field_idx: usize) -> Option<IrTy> {
+        self.struct_narrow_field_types
+            .get(struct_name)
+            .and_then(|fts| fts.get(field_idx))
+            .copied()
+            .flatten()
+    }
+
+    /// Return the narrow integer IrTy (U8/I8/U16/I16) for a tuple struct positional field.
+    ///
+    /// FLS §4.1, §6.23: Used during tuple struct construction (`Foo(val)`) to emit
+    /// TruncU8/SextI8/TruncU16/SextI16 before Store, matching the behaviour of
+    /// named struct construction. Returns `None` for i32/bool/f64/f32 fields.
+    fn tuple_struct_field_narrow_ty(&self, struct_name: &str, field_idx: usize) -> Option<IrTy> {
+        self.tuple_struct_narrow_field_types
             .get(struct_name)
             .and_then(|fts| fts.get(field_idx))
             .copied()
@@ -6845,6 +6976,17 @@ impl<'src> LowerCtx<'src> {
                         // Explicitly provided field initializer.
                         let val = self.lower_expr(&field_init.1, &IrTy::I32)?;
                         let src = self.val_to_reg(val)?;
+                        // FLS §4.1, §6.23: Normalise narrow-typed fields before
+                        // storing. Without this, `S { x: a_u16 + b_u16 }` where
+                        // the sum overflows stores the raw i32 value; subsequent
+                        // comparisons against the field see the unwrapped result.
+                        match self.field_narrow_ty(actual_name, field_idx) {
+                            Some(IrTy::U8) => self.instrs.push(Instr::TruncU8 { dst: src, src }),
+                            Some(IrTy::I8) => self.instrs.push(Instr::SextI8 { dst: src, src }),
+                            Some(IrTy::U16) => self.instrs.push(Instr::TruncU16 { dst: src, src }),
+                            Some(IrTy::I16) => self.instrs.push(Instr::SextI16 { dst: src, src }),
+                            _ => {}
+                        }
                         self.instrs.push(Instr::Store { src, slot });
                     } else if let Some(base_expr) = update_base.as_deref() {
                         // FLS §6.11: Struct update syntax — copy this field from base.
@@ -7110,6 +7252,43 @@ impl<'src> LowerCtx<'src> {
 
                 self.instrs.push(Instr::Label(exit_label));
                 Ok(())
+            }
+
+            // FLS §14.2, §6.12.1: Tuple struct constructor `Foo(expr, ...)` in
+            // return position. The callee returns the struct by packing field
+            // values into x0..x{N-1} via RetFields. This arm stores each field
+            // argument into the consecutive return slots before RetFields fires.
+            //
+            // FLS §4.1, §6.23: Narrow-typed fields (u8/i8/u16/i16) are
+            // normalised with TruncU8/SextI8/TruncU16/SextI16 before Store,
+            // identical to the tuple-struct-constructor-in-let path.
+            //
+            // Cache-line note: N argument lowers + N stores = 2N instructions;
+            // same density as the StructLit arm for named structs.
+            ExprKind::Call { callee, args } => {
+                if let ExprKind::Path(segs) = &callee.kind
+                    && segs.len() == 1
+                    && self.tuple_struct_defs.contains_key(segs[0].text(self.source))
+                {
+                    let ctor_name = segs[0].text(self.source);
+                    for (i, arg_expr) in args.iter().enumerate() {
+                        let val = self.lower_expr(arg_expr, &IrTy::I32)?;
+                        let src = self.val_to_reg(val)?;
+                        // FLS §4.1, §6.23: Normalise narrow-typed fields.
+                        match self.tuple_struct_field_narrow_ty(ctor_name, i) {
+                            Some(IrTy::U8) => self.instrs.push(Instr::TruncU8 { dst: src, src }),
+                            Some(IrTy::I8) => self.instrs.push(Instr::SextI8 { dst: src, src }),
+                            Some(IrTy::U16) => self.instrs.push(Instr::TruncU16 { dst: src, src }),
+                            Some(IrTy::I16) => self.instrs.push(Instr::SextI16 { dst: src, src }),
+                            _ => {}
+                        }
+                        self.instrs.push(Instr::Store { src, slot: base_slot + i as u8 });
+                    }
+                    return Ok(());
+                }
+                Err(LowerError::Unsupported(format!(
+                    "struct return (`{struct_name}`): unsupported call expression form",
+                )))
             }
 
             _ => Err(LowerError::Unsupported(format!(
@@ -7870,6 +8049,14 @@ impl<'src> LowerCtx<'src> {
                                         }
                                         let val = self.lower_expr(&field_init.1, &IrTy::I32)?;
                                         let src = self.val_to_reg(val)?;
+                                        // FLS §4.1, §6.23: narrow field — normalise before store.
+                                        match self.field_narrow_ty(struct_name, fi) {
+                                            Some(IrTy::U8) => self.instrs.push(Instr::TruncU8 { dst: src, src }),
+                                            Some(IrTy::I8) => self.instrs.push(Instr::SextI8 { dst: src, src }),
+                                            Some(IrTy::U16) => self.instrs.push(Instr::TruncU16 { dst: src, src }),
+                                            Some(IrTy::I16) => self.instrs.push(Instr::SextI16 { dst: src, src }),
+                                            _ => {}
+                                        }
                                         self.instrs.push(Instr::Store { src, slot });
                                     }
                                 }
@@ -8114,15 +8301,18 @@ impl<'src> LowerCtx<'src> {
                 {
                     let fn_name = segs[0].text(self.source);
                     if let Some(struct_name) = self.struct_return_free_fns.get(fn_name).cloned() {
-                        let field_names = self.struct_defs
-                            .get(&struct_name)
-                            .ok_or_else(|| {
-                                LowerError::Unsupported(format!(
-                                    "unknown struct `{struct_name}` from free fn `{fn_name}`"
-                                ))
-                            })?
-                            .clone();
-                        let n_fields = field_names.len();
+                        // FLS §14.2: Both named structs (in struct_defs) and tuple
+                        // structs (in tuple_struct_defs) are registered in
+                        // struct_return_free_fns. Look up field count in either map.
+                        let n_fields = if let Some(fns) = self.struct_defs.get(&struct_name) {
+                            fns.len()
+                        } else if let Some(&n) = self.tuple_struct_defs.get(struct_name.as_str()) {
+                            n
+                        } else {
+                            return Err(LowerError::Unsupported(format!(
+                                "unknown struct `{struct_name}` from free fn `{fn_name}`"
+                            )));
+                        };
 
                         // Allocate N consecutive slots for the new struct variable.
                         let base_slot = self.alloc_slot()?;
@@ -8130,7 +8320,17 @@ impl<'src> LowerCtx<'src> {
                             self.alloc_slot()?;
                         }
                         self.locals.insert(var_name, base_slot);
-                        self.local_struct_types.insert(base_slot, struct_name.clone());
+                        // FLS §14.2: Tuple struct variables use local_tuple_lens so
+                        // that `.0`, `.1` field access resolves via integer index
+                        // (the same path as `let n = Foo(v)` direct construction).
+                        // Named struct variables use local_struct_types for field
+                        // name → offset lookup.
+                        if self.tuple_struct_defs.contains_key(struct_name.as_str()) {
+                            self.local_tuple_lens.insert(base_slot, n_fields);
+                            self.local_tuple_struct_types.insert(base_slot, struct_name.clone());
+                        } else {
+                            self.local_struct_types.insert(base_slot, struct_name.clone());
+                        }
 
                         // Evaluate arguments and collect their virtual registers.
                         let mut arg_regs: Vec<u8> = Vec::new();
@@ -8474,6 +8674,14 @@ impl<'src> LowerCtx<'src> {
                                             }
                                             let val = self.lower_expr(&field_init.1, &IrTy::I32)?;
                                             let src = self.val_to_reg(val)?;
+                                            // FLS §4.1, §6.23: narrow field — normalise before store.
+                                            match self.field_narrow_ty(struct_name, field_idx) {
+                                                Some(IrTy::U8) => self.instrs.push(Instr::TruncU8 { dst: src, src }),
+                                                Some(IrTy::I8) => self.instrs.push(Instr::SextI8 { dst: src, src }),
+                                                Some(IrTy::U16) => self.instrs.push(Instr::TruncU16 { dst: src, src }),
+                                                Some(IrTy::I16) => self.instrs.push(Instr::SextI16 { dst: src, src }),
+                                                _ => {}
+                                            }
                                             self.instrs.push(Instr::Store { src, slot: dst_slot });
                                         }
                                     }
@@ -9063,6 +9271,16 @@ impl<'src> LowerCtx<'src> {
                                 _ => {
                                     let val = self.lower_expr(arg_expr, &IrTy::I32)?;
                                     let src = self.val_to_reg(val)?;
+                                    // FLS §4.1, §6.23: Normalise narrow-typed fields before
+                                    // storing. Without this, `Foo(a_u8 + b_u8)` stores the
+                                    // raw i32 sum; mid-body reads see the unwrapped value.
+                                    match self.tuple_struct_field_narrow_ty(ctor_name, i) {
+                                        Some(IrTy::U8) => self.instrs.push(Instr::TruncU8 { dst: src, src }),
+                                        Some(IrTy::I8) => self.instrs.push(Instr::SextI8 { dst: src, src }),
+                                        Some(IrTy::U16) => self.instrs.push(Instr::TruncU16 { dst: src, src }),
+                                        Some(IrTy::I16) => self.instrs.push(Instr::SextI16 { dst: src, src }),
+                                        _ => {}
+                                    }
                                     self.instrs.push(Instr::Store { src, slot });
                                 }
                             }
@@ -9610,6 +9828,7 @@ impl<'src> LowerCtx<'src> {
                     self.struct_defs,
                     self.tuple_struct_defs,
                     self.tuple_struct_float_field_types,
+                    self.tuple_struct_narrow_field_types,
                     self.enum_defs,
                     self.enum_variant_float_field_types,
                     self.method_self_kinds,
@@ -9635,6 +9854,7 @@ impl<'src> LowerCtx<'src> {
                     self.struct_sizes,
                     self.type_aliases,
                     self.struct_float_field_types,
+                    self.struct_narrow_field_types,
                     self.generic_fn_param_counts.clone(),
                     self.generic_type_subst,
                     self.trait_method_order,
@@ -16346,6 +16566,45 @@ impl<'src> LowerCtx<'src> {
                 {
                     let fn_name = segs[0].text(self.source);
                     if let Some(struct_name) = self.struct_return_free_fns.get(fn_name).cloned() {
+                        // FLS §14.2: The called function may return either a named struct
+                        // (field access by name) or a tuple struct (field access by integer index).
+                        // Check tuple_struct_defs first, then fall through to struct_defs.
+                        if let Some(&n_fields) = self.tuple_struct_defs.get(struct_name.as_str()) {
+                            // Tuple struct: field_name is an integer index like "0", "1".
+                            let field_idx: usize = field_name.parse().map_err(|_| {
+                                LowerError::Unsupported(format!(
+                                    "invalid tuple field index `{field_name}` on `{struct_name}`"
+                                ))
+                            })?;
+
+                            // Allocate N temporary slots for the tuple struct return value.
+                            let base_slot = self.alloc_slot()?;
+                            for _ in 1..n_fields {
+                                self.alloc_slot()?;
+                            }
+
+                            // Evaluate arguments.
+                            let mut arg_regs: Vec<u8> = Vec::new();
+                            for arg_expr in args.iter() {
+                                let val = self.lower_expr(arg_expr, &IrTy::I32)?;
+                                let reg = self.val_to_reg(val)?;
+                                arg_regs.push(reg);
+                            }
+
+                            self.has_calls = true;
+                            self.instrs.push(Instr::CallMut {
+                                name: fn_name.to_owned(),
+                                args: arg_regs,
+                                write_back_slot: base_slot,
+                                n_fields: n_fields as u8,
+                            });
+
+                            // Load the requested field from its slot.
+                            let dst = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst, slot: base_slot + field_idx as u8 });
+                            return Ok(IrValue::Reg(dst));
+                        }
+
                         let field_names = self
                             .struct_defs
                             .get(&struct_name)
@@ -17106,6 +17365,7 @@ impl<'src> LowerCtx<'src> {
                     self.struct_defs,
                     self.tuple_struct_defs,
                     self.tuple_struct_float_field_types,
+                    self.tuple_struct_narrow_field_types,
                     self.enum_defs,
                     self.enum_variant_float_field_types,
                     self.method_self_kinds,
@@ -17131,6 +17391,7 @@ impl<'src> LowerCtx<'src> {
                     self.struct_sizes,
                     self.type_aliases,
                     self.struct_float_field_types,
+                    self.struct_narrow_field_types,
                     self.generic_fn_param_counts.clone(),
                     self.generic_type_subst,
                     self.trait_method_order,

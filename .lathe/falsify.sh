@@ -1295,6 +1295,18 @@ else
     pass "Claim 69: u16/i16 arithmetic wraps at 16-bit boundaries (not identity through 32-bit registers)"
 fi
 
+echo "--- Claim 70: narrow integer struct fields normalised at construction time ---"
+if cargo test --test e2e --quiet -- \
+    runtime_u16_struct_field_construction_applies_trunc \
+    milestone_182_u16_struct_field_wraps_on_construction \
+    milestone_182_u8_struct_field_wraps_on_construction \
+    milestone_182_i16_struct_field_wraps_on_construction \
+    2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 70" "narrow struct field normalisation FAILED — struct fields with u8/i8/u16/i16 types may store unwrapped values at construction"
+else
+    pass "Claim 70: narrow integer struct fields are normalised (truncated/sign-extended) at construction time"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 
