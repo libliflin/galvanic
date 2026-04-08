@@ -26688,7 +26688,7 @@ fn runtime_impl_trait_return_emits_bl_not_blr() {
     );
     // The score method must be called as a direct bl to the concrete label.
     let has_score_bl = asm.lines().any(|l| {
-        (l.contains("bl") && l.contains("score") && !l.contains("blr"))
+        l.contains("bl") && l.contains("score") && !l.contains("blr")
     });
     assert!(
         has_score_bl,
@@ -26940,5 +26940,312 @@ fn main() -> i32 {
     assert!(
         !asm.contains("mov     x0, #9"),
         "supertrait sum must NOT constant-fold to #9; got:\n{asm}"
+    );
+}
+
+// ============================================================
+// Milestone 165: Default methods calling supertrait methods
+// FLS §4.14, §10.1.1
+// A default method body may call abstract methods on the same trait or
+// on a supertrait, resolved via monomorphization at codegen time.
+// ============================================================
+
+/// Milestone 165: default method in derived trait calls supertrait abstract method.
+///
+/// FLS §4.14, §10.1.1: A default method body may call methods belonging
+/// to a supertrait. The call is resolved by monomorphization: when `combined`
+/// is emitted for `Foo`, `self.base_val()` dispatches to `Foo__base_val`.
+#[test]
+fn milestone_165_default_calls_supertrait_basic() {
+    let src = r#"
+trait Base {
+    fn base_val(&self) -> i32;
+}
+trait Derived: Base {
+    fn combined(&self) -> i32 { self.base_val() + 1 }
+}
+struct Foo { x: i32 }
+impl Base for Foo { fn base_val(&self) -> i32 { self.x } }
+impl Derived for Foo {}
+fn main() -> i32 {
+    let f = Foo { x: 41 };
+    f.combined()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "41+1=42, got {exit_code}");
+}
+
+/// Milestone 165: default method calls both supertrait and own abstract method.
+///
+/// FLS §4.14, §10.1.1: A derived trait's default method may call methods
+/// from both its own abstract set and from the supertrait.
+#[test]
+fn milestone_165_default_calls_both_supertrait_and_own() {
+    let src = r#"
+trait Base {
+    fn base_val(&self) -> i32;
+}
+trait Derived: Base {
+    fn own_val(&self) -> i32;
+    fn combined(&self) -> i32 { self.base_val() + self.own_val() }
+}
+struct Foo { x: i32 }
+impl Base for Foo { fn base_val(&self) -> i32 { self.x } }
+impl Derived for Foo { fn own_val(&self) -> i32 { self.x + 1 } }
+fn main() -> i32 {
+    let f = Foo { x: 3 };
+    f.combined()
+}
+"#;
+    // 3 + (3+1) = 7
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "3+(3+1)=7, got {exit_code}");
+}
+
+/// Milestone 165: two types using the same derived trait default method.
+///
+/// FLS §4.14, §10.1.1: The default method body is instantiated separately
+/// for each implementing type. Both share the same source body but emit
+/// separate monomorphized labels.
+#[test]
+fn milestone_165_default_two_types_supertrait() {
+    let src = r#"
+trait Base {
+    fn base_val(&self) -> i32;
+}
+trait Derived: Base {
+    fn combined(&self) -> i32 { self.base_val() + 10 }
+}
+struct A { x: i32 }
+struct B { y: i32 }
+impl Base for A { fn base_val(&self) -> i32 { self.x } }
+impl Base for B { fn base_val(&self) -> i32 { self.y } }
+impl Derived for A {}
+impl Derived for B {}
+fn main() -> i32 {
+    let a = A { x: 5 };
+    let b = B { y: 7 };
+    a.combined() + b.combined()
+}
+"#;
+    // (5+10) + (7+10) = 15+17 = 32
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 32, "15+17=32, got {exit_code}");
+}
+
+/// Milestone 165: default method chained — one default calls another default.
+///
+/// FLS §10.1.1: A default method body may call another default method on
+/// the same trait, as long as that method is also available on all impls.
+#[test]
+fn milestone_165_default_method_chained() {
+    let src = r#"
+trait Scalable {
+    fn value(&self) -> i32;
+    fn doubled(&self) -> i32 { self.value() * 2 }
+    fn quadrupled(&self) -> i32 { self.doubled() * 2 }
+}
+struct Foo { x: i32 }
+impl Scalable for Foo { fn value(&self) -> i32 { self.x } }
+fn main() -> i32 {
+    let f = Foo { x: 5 };
+    f.quadrupled()
+}
+"#;
+    // 5*2=10, 10*2=20
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 20, "5*4=20, got {exit_code}");
+}
+
+/// Milestone 165: generic function with supertrait bound calls default method.
+///
+/// FLS §4.14, §10.1.1: When a generic function has `T: Derived` bound and
+/// calls a default method defined on `Derived`, the call resolves to the
+/// monomorphized default body for the concrete type.
+#[test]
+fn milestone_165_default_via_generic_supertrait_bound() {
+    let src = r#"
+trait Base {
+    fn base_val(&self) -> i32;
+}
+trait Derived: Base {
+    fn combined(&self) -> i32 { self.base_val() + 2 }
+}
+struct Foo { x: i32 }
+impl Base for Foo { fn base_val(&self) -> i32 { self.x } }
+impl Derived for Foo {}
+fn use_combined<T: Derived>(t: T) -> i32 { t.combined() }
+fn main() -> i32 {
+    let f = Foo { x: 8 };
+    use_combined(f)
+}
+"#;
+    // 8+2=10
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "8+2=10, got {exit_code}");
+}
+
+/// Milestone 165: default method result used in arithmetic.
+///
+/// FLS §10.1.1, §6.5.5: The result of a default method that calls a
+/// supertrait method is a value and may be used in arithmetic.
+#[test]
+fn milestone_165_default_result_in_arithmetic() {
+    let src = r#"
+trait Base {
+    fn base_val(&self) -> i32;
+}
+trait Derived: Base {
+    fn combined(&self) -> i32 { self.base_val() + 1 }
+}
+struct Foo { x: i32 }
+impl Base for Foo { fn base_val(&self) -> i32 { self.x } }
+impl Derived for Foo {}
+fn main() -> i32 {
+    let f = Foo { x: 3 };
+    f.combined() * f.combined()
+}
+"#;
+    // (3+1)*(3+1) = 16
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 16, "(3+1)*(3+1)=16, got {exit_code}");
+}
+
+/// Milestone 165: default method on parameter struct.
+///
+/// FLS §10.1.1, §9.2: A default-method call resolves correctly when the
+/// receiver was passed as a function parameter (runtime-determined value).
+#[test]
+fn milestone_165_default_on_parameter() {
+    let src = r#"
+trait Base {
+    fn base_val(&self) -> i32;
+}
+trait Derived: Base {
+    fn combined(&self) -> i32 { self.base_val() + 5 }
+}
+struct Foo { x: i32 }
+impl Base for Foo { fn base_val(&self) -> i32 { self.x } }
+impl Derived for Foo {}
+fn use_it(f: Foo) -> i32 { f.combined() }
+fn main() -> i32 {
+    let f = Foo { x: 7 };
+    use_it(f)
+}
+"#;
+    // 7+5=12
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 12, "7+5=12, got {exit_code}");
+}
+
+/// Milestone 165: override of default method that would call supertrait.
+///
+/// FLS §10.1.1: An implementing type may override a default method even if
+/// that default method calls supertrait methods. The override replaces the
+/// body entirely.
+#[test]
+fn milestone_165_default_override_supertrait_call() {
+    let src = r#"
+trait Base {
+    fn base_val(&self) -> i32;
+}
+trait Derived: Base {
+    fn combined(&self) -> i32 { self.base_val() + 100 }
+}
+struct Foo { x: i32 }
+impl Base for Foo { fn base_val(&self) -> i32 { self.x } }
+impl Derived for Foo {
+    fn combined(&self) -> i32 { self.base_val() + 1 }  // override
+}
+fn main() -> i32 {
+    let f = Foo { x: 5 };
+    f.combined()
+}
+"#;
+    // override: 5+1=6, not 5+100=105
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "override: 5+1=6, got {exit_code}");
+}
+
+/// Assembly check: default method calling supertrait abstract method emits
+/// a runtime `bl` to the concrete monomorphized label (not constant-folded).
+///
+/// FLS §4.14, §10.1.1, §6.1.2: The value of `self.x` is not known at
+/// compile time (struct constructed from a runtime parameter). The default
+/// method must emit `bl` to the abstract method's monomorphized label and
+/// compute `add` — not fold to a constant.
+#[test]
+fn runtime_supertrait_default_call_emits_bl_not_folded() {
+    let src = r#"
+trait Base { fn base_val(&self) -> i32; }
+trait Derived: Base {
+    fn combined(&self) -> i32 { self.base_val() + 1 }
+}
+struct Foo { x: i32 }
+impl Base for Foo { fn base_val(&self) -> i32 { self.x } }
+impl Derived for Foo {}
+fn make_foo(n: i32) -> Foo { Foo { x: n } }
+fn main() -> i32 {
+    let f = make_foo(9);
+    f.combined()
+}
+"#;
+    // make_foo(9) → Foo { x: 9 }; combined = 9+1 = 10
+    let asm = compile_to_asm(src);
+    // combined must call base_val at runtime via bl.
+    assert!(
+        asm.contains("bl      Foo__base_val"),
+        "default method must emit bl to Foo__base_val; got:\n{asm}"
+    );
+    // Must emit add (the +1 in the default body).
+    assert!(
+        asm.contains("add"),
+        "default method body must emit add; got:\n{asm}"
+    );
+    // Must not fold 9+1=10 into a constant in main.
+    assert!(
+        !asm.contains("mov     x0, #10"),
+        "supertrait default call must NOT constant-fold to #10; got:\n{asm}"
+    );
+}
+
+/// Assembly check: chained default method (default calling default) emits
+/// two separate `bl` dispatches, not a folded constant.
+///
+/// FLS §10.1.1, §6.1.2: Each call in the chain must be a runtime `bl`.
+/// Constant-folding would short-circuit the chain and emit a single `mov`.
+#[test]
+fn runtime_supertrait_default_chain_not_folded() {
+    let src = r#"
+trait Scalable {
+    fn value(&self) -> i32;
+    fn doubled(&self) -> i32 { self.value() * 2 }
+    fn quadrupled(&self) -> i32 { self.doubled() * 2 }
+}
+struct Foo { x: i32 }
+impl Scalable for Foo { fn value(&self) -> i32 { self.x } }
+fn make_foo(n: i32) -> Foo { Foo { x: n } }
+fn main() -> i32 {
+    let f = make_foo(3);
+    f.quadrupled()
+}
+"#;
+    // make_foo(3) → Foo { x: 3 }; doubled=6, quadrupled=12
+    let asm = compile_to_asm(src);
+    // quadrupled must call doubled at runtime.
+    assert!(
+        asm.contains("bl      Foo__doubled"),
+        "quadrupled must emit bl to Foo__doubled; got:\n{asm}"
+    );
+    // doubled must call value at runtime.
+    assert!(
+        asm.contains("bl      Foo__value"),
+        "doubled must emit bl to Foo__value; got:\n{asm}"
+    );
+    // Must not fold 3*4=12 — if it did, it would emit mov #12 in main.
+    assert!(
+        !asm.contains("mov     x0, #12"),
+        "default chain must NOT constant-fold to #12; got:\n{asm}"
     );
 }
