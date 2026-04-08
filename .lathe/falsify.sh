@@ -218,6 +218,23 @@ else
     pass "Claim 10: default trait method emits monomorphized label and runtime call"
 fi
 
+# ── Claim 11: Closures compile to hidden function labels ─────────────────────
+# Tests that:
+#   (a) a non-capturing closure emits a `__closure_*` label AND a `mul` instruction
+#       in the closure body (not constant-folded from `x * 2`)
+#   (b) a capturing closure emits `__closure_main_0` AND uses `blr` (indirect call)
+# These guard both code paths separately: FLS §6.14 (non-capturing) and §6.22 (capturing).
+# A regression where closures are inlined at call sites would lose the hidden label.
+# A regression where the body is constant-folded would lose the `mul` instruction.
+# References: claims.md Claim 11.
+
+echo "--- Claim 11: closures emit hidden function labels with runtime body instructions ---"
+if cargo test --test e2e --quiet -- runtime_closure_emits_hidden_function_label runtime_capturing_closure_emits_capture_load_before_explicit_arg 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 11" "runtime_closure_emits_hidden_function_label or runtime_capturing_closure_emits_capture_load_before_explicit_arg FAILED — closures may not be emitting hidden function labels or may be constant-folding closure bodies"
+else
+    pass "Claim 11: closures emit hidden function labels with runtime body instructions"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""
