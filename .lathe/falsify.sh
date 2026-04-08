@@ -1056,6 +1056,15 @@ else
     pass "Claim 50: T::AssocType in generic fn parameter emits monomorphized dispatch (not constant-folded)"
 fi
 
+# References: claims.md Claim 51.
+
+echo "--- Claim 51: where C::Item: Trait predicate emits monomorphized bl (not constant-folded) ---"
+if cargo test --test e2e --quiet -- runtime_where_proj_emits_bl_not_folded runtime_where_proj_two_types_both_monomorphized 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 51" "runtime_where_proj_emits_bl_not_folded or runtime_where_proj_two_types_both_monomorphized FAILED — where-proj fn may be constant-folded or monomorphized label missing"
+else
+    pass "Claim 51: where C::Item: Trait where-proj fn emits monomorphized bl (not constant-folded)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 

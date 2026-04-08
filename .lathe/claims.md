@@ -2088,3 +2088,66 @@ with `T::AssocType` parameter types must execute at runtime.
 - contains `mov     x0, #6` (two-type sum was constant-folded)
 
 **Tests**: `cargo test --test e2e -- runtime_param_proj_emits_add_not_folded runtime_param_proj_two_types_both_monomorphized`
+
+---
+
+## Claim 51: where C::Item: Trait predicate emits monomorphized bl (not constant-folded)
+
+**Stakeholder**: William (researcher), FLS / Ferrocene Ecosystem
+
+**Promise**: A generic function with a `where C::Item: Trait` where-clause
+predicate monomorphizes at call sites: `process<Holder>` emits a dedicated
+`process__Holder` label with a `bl Holder__get_val` runtime dispatch and does
+not fold the result to a constant. Two concrete types both get independent
+monomorphized labels.
+
+**Program (single type)**:
+```rust
+trait Container { type Item; fn get_val(&self) -> i32; }
+trait Marker {}
+struct Holder { val: i32 }
+impl Container for Holder { type Item = i32; fn get_val(&self) -> i32 { self.val } }
+impl Marker for i32 {}
+fn process<C: Container>(c: C, extra: i32) -> i32 where C::Item: Marker {
+    c.get_val() + extra
+}
+// main: process(Holder{val:3}, 2) → 5
+```
+
+Must emit:
+- `process__Holder` — monomorphized label
+- `bl` dispatching to `process__Holder`
+- NOT `mov     x0, #5` — result must not be folded
+
+**Why this claim matters**: Milestone 169 adds `where C::Item: Trait` predicate
+parsing. Without this claim, a regression that folds `process__Holder` to a
+constant would pass all exit-code tests. The where clause must not suppress
+monomorphization or cause the compiler to pre-evaluate the body.
+
+**Attack vectors**:
+1. Fold `process__Holder` to `mov x0, #5; ret` — exit code correct, folded.
+   Caught by `!asm.contains("mov     x0, #5")`.
+2. Fail to emit `process__Holder` label (generic fn not instantiated due to where clause).
+   Caught by `asm.contains("process__Holder")`.
+3. Emit only one of `process__Holder` / `process__Counter` (second instantiation missing).
+   Caught by the two-type test checking both labels.
+4. Fold two-type result to `mov x0, #9`.
+   Caught by `!asm.contains("mov     x0, #9")`.
+
+**FLS §4.14**: Where clause predicates do not alter the calling convention or
+cause compile-time evaluation of non-const functions.
+**FLS §10.2 / §4.14 AMBIGUOUS**: The FLS does not specify how `where C::Item: Trait`
+constrains dispatch. Galvanic parses the predicate; enforcement relies on the concrete
+impl being present at the call site (monomorphization handles it implicitly).
+**FLS §6.1.2 Constraint 1**: `fn main()` is not a const context — generic calls
+with `where C::Item: Trait` where clauses must execute at runtime.
+
+**Violated if**: `compile_to_asm(WHERE_PROJ)` returns assembly that:
+- lacks `process__Holder` (monomorphization missing), OR
+- contains `mov     x0, #5` (result constant-folded)
+
+**Violated if**: `compile_to_asm(WHERE_PROJ_TWO_TYPES)` returns assembly that:
+- lacks either `process__Holder` or `process__Counter`, OR
+- contains `mov     x0, #9` (two-type sum constant-folded)
+
+**Tests**: `cargo test --test e2e -- runtime_where_proj_emits_bl_not_folded runtime_where_proj_two_types_both_monomorphized`

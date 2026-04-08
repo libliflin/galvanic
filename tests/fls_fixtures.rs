@@ -156,3 +156,8 @@ fn fls_8_1_let_else() {
 fn fls_4_14_supertrait_bounds() {
     assert_galvanic_accepts("fls_4_14_supertrait_bounds.rs");
 }
+
+#[test]
+fn fls_10_2_where_clause_proj() {
+    assert_galvanic_accepts("fls_10_2_where_clause_proj.rs");
+}
