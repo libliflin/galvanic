@@ -1335,6 +1335,84 @@ fn runtime_xor_emits_eor_instruction() {
     );
 }
 
+/// Adversarial: bitwise AND with function parameters must emit `and` at runtime (not folded).
+///
+/// Claim 62: `fn bitand(x: i32, y: i32) -> i32 { x & y }` — parameters are unknown
+/// at compile time, so galvanic must emit `and` in the body and `bl bitand` at the
+/// call site. `mov x0, #1` (the folded result of 5 & 3) must be absent.
+///
+/// FLS §6.5.6: Bitwise AND operator.
+/// FLS §6.1.2 Constraint 1: Function bodies are not const contexts.
+#[test]
+fn runtime_and_emits_and_not_folded() {
+    let src = "fn bitand(x: i32, y: i32) -> i32 { x & y }\nfn main() -> i32 { bitand(5, 3) }\n";
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("and"),
+        "expected `and` instruction in bitand body, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("bl      bitand"),
+        "expected `bl bitand` at call site, got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #1"),
+        "assembly must not constant-fold `bitand(5, 3)` to #1:\n{asm}"
+    );
+}
+
+/// Adversarial: bitwise OR with function parameters must emit `orr` at runtime (not folded).
+///
+/// Claim 62: `fn bitor(x: i32, y: i32) -> i32 { x | y }` — parameters are unknown
+/// at compile time, so galvanic must emit `orr` in the body and `bl bitor` at the
+/// call site. `mov x0, #7` (the folded result of 5 | 3) must be absent.
+///
+/// FLS §6.5.6: Bitwise OR operator.
+/// FLS §6.1.2 Constraint 1: Function bodies are not const contexts.
+#[test]
+fn runtime_or_emits_orr_not_folded() {
+    let src = "fn bitor(x: i32, y: i32) -> i32 { x | y }\nfn main() -> i32 { bitor(5, 3) }\n";
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("orr"),
+        "expected `orr` instruction in bitor body, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("bl      bitor"),
+        "expected `bl bitor` at call site, got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #7"),
+        "assembly must not constant-fold `bitor(5, 3)` to #7:\n{asm}"
+    );
+}
+
+/// Adversarial: bitwise XOR with function parameters must emit `eor` at runtime (not folded).
+///
+/// Claim 62: `fn bitxor(x: i32, y: i32) -> i32 { x ^ y }` — parameters are unknown
+/// at compile time, so galvanic must emit `eor` in the body and `bl bitxor` at the
+/// call site. `mov x0, #6` (the folded result of 5 ^ 3) must be absent.
+///
+/// FLS §6.5.6: Bitwise XOR operator.
+/// FLS §6.1.2 Constraint 1: Function bodies are not const contexts.
+#[test]
+fn runtime_xor_emits_eor_not_folded() {
+    let src = "fn bitxor(x: i32, y: i32) -> i32 { x ^ y }\nfn main() -> i32 { bitxor(5, 3) }\n";
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("eor"),
+        "expected `eor` instruction in bitxor body, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("bl      bitxor"),
+        "expected `bl bitxor` at call site, got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #6"),
+        "assembly must not constant-fold `bitxor(5, 3)` to #6:\n{asm}"
+    );
+}
+
 /// Assembly inspection: `1 << 3` must emit `lsl`.
 ///
 /// FLS §6.5.7: Left shift. ARM64 uses `lsl` mnemonic.

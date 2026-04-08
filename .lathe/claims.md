@@ -2501,3 +2501,44 @@ from function parameters are not statically known.
 - contains `lsr` (wrong instruction for signed right-shift)
 
 **Tests**: `cargo test --test e2e -- runtime_shl_emits_lsl_not_folded runtime_shr_emits_asr_not_folded`
+
+## Claim 62: Bitwise operators emit runtime `and`/`orr`/`eor` instructions with function parameters (not constant-folded)
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: The bitwise AND (`&`), OR (`|`), and XOR (`^`) operators must emit
+ARM64 `and`, `orr`, and `eor` instructions at runtime when the operands are function
+parameters (unknown at compile time). The call site must emit `bl`. The results
+must not be constant-folded into immediates.
+
+The original `runtime_and_emits_and_instruction`, `runtime_or_emits_orr_instruction`,
+and `runtime_xor_emits_eor_instruction` tests used inline literals in `main`
+(`5 & 3`, `5 | 3`, `5 ^ 3`). A constant-folding interpreter could emit `mov x0, #1`,
+`mov x0, #7`, or `mov x0, #6` respectively and pass the positive-only assertions.
+`runtime_or_emits_orr_instruction` and `runtime_xor_emits_eor_instruction` had
+no negative assertions at all.
+
+Claim 62 uses function parameters (`fn bitand(x: i32, y: i32) -> i32 { x & y }`,
+etc.) which are unknown at compile time, preventing constant folding. It adds
+negative assertions confirming the folded constants are absent.
+
+**FLS §6.5.6**: Bitwise expression operators (`&`, `|`, `^`).
+**FLS §6.1.2 Constraint 1**: Function bodies are not const contexts; operands from
+function parameters are not statically known at compile time.
+
+**Violated if** `compile_to_asm("fn bitand(x: i32, y: i32) -> i32 { x & y } ...")`:
+- lacks `and` in the function body, OR
+- lacks `bl bitand` at the call site, OR
+- contains `mov x0, #1` (constant-folded result of 5 & 3)
+
+**Violated if** `compile_to_asm("fn bitor(x: i32, y: i32) -> i32 { x | y } ...")`:
+- lacks `orr` in the function body, OR
+- lacks `bl bitor` at the call site, OR
+- contains `mov x0, #7` (constant-folded result of 5 | 3)
+
+**Violated if** `compile_to_asm("fn bitxor(x: i32, y: i32) -> i32 { x ^ y } ...")`:
+- lacks `eor` in the function body, OR
+- lacks `bl bitxor` at the call site, OR
+- contains `mov x0, #6` (constant-folded result of 5 ^ 3)
+
+**Tests**: `cargo test --test e2e -- runtime_and_emits_and_not_folded runtime_or_emits_orr_not_folded runtime_xor_emits_eor_not_folded`
