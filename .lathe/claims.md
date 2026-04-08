@@ -2218,3 +2218,40 @@ execute at runtime.
 - contains `mov     x0, #14` (result constant-folded)
 
 **Tests**: `cargo test --test e2e -- runtime_unsafe_trait_method_emits_bl_not_folded runtime_unsafe_trait_body_emits_mul_not_folded`
+
+---
+
+## Claim 54: `unsafe fn` inside `unsafe trait` emits runtime bl and mul (not constant-folded)
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: The combination of `unsafe fn` declared inside `unsafe trait` and
+implemented in `unsafe impl` — M170 + M171 together — must produce correct
+runtime code. The qualifier is a static safety contract only. The method body
+must emit runtime instructions (e.g., `mul`), the call site must emit `bl`, and
+the result must not be constant-folded.
+
+This is distinct from:
+- Claim 52: standalone top-level `unsafe fn` (not inside a trait)
+- Claim 53: `unsafe trait` with regular (non-unsafe) `fn` methods
+
+**What this guards against**:
+1. A special case that treats `unsafe fn` inside `unsafe impl` differently from
+   a top-level `unsafe fn`, causing the body to fold.
+2. Constant-folding `3 * 4 + 5 = 17` when both qualifiers are present.
+3. Failing to emit `bl` for `m.compute(4, 5)` when the method is `unsafe fn`.
+
+**FLS §19 AMBIGUOUS**: The spec does not specify how `unsafe fn` inside an
+`unsafe trait` interacts with enforcement. Galvanic defers enforcement of both
+qualifiers — the `is_unsafe` flags on `FnDef`, `TraitDef`, and `ImplDef` are
+recorded but not enforced.
+
+**FLS §6.1.2 Constraint 1**: `unsafe fn` bodies are not const contexts — they
+must execute at runtime, identical to regular fn bodies.
+
+**Violated if**: `compile_to_asm(UNSAFE_FN_IN_UNSAFE_TRAIT)` returns assembly that:
+- lacks `mul` in the method body, OR
+- lacks `bl` at the call site, OR
+- contains `mov x0, #17` (result 3*4+5=17 constant-folded)
+
+**Tests**: `cargo test --test e2e -- runtime_unsafe_fn_in_unsafe_trait_emits_bl_and_mul_not_folded`
