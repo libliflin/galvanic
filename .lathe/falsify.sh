@@ -204,6 +204,20 @@ else
     pass "Claim 9: generic trait impl emits monomorphized runtime call (not folded)"
 fi
 
+# ── Claim 10: Default trait method dispatch emits monomorphized label ─────────
+# Tests that a default method body emits `Foo__doubled:` label (monomorphized)
+# and that calling it with a runtime arg emits `bl Foo__doubled` (not folded).
+# This guards the default method resolution path separately from Claims 6–9,
+# which cover regular functions, generic functions, and generic trait impls.
+# References: claims.md Claim 10.
+
+echo "--- Claim 10: default trait method emits monomorphized label and runtime call ---"
+if cargo test --test e2e --quiet -- runtime_default_method_emits_mangled_label runtime_default_method_result_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 10" "runtime_default_method_emits_mangled_label or runtime_default_method_result_not_folded FAILED — default trait method may not be emitting a type-specific monomorphized label or may be constant-folding the result"
+else
+    pass "Claim 10: default trait method emits monomorphized label and runtime call"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

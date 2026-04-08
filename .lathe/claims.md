@@ -176,6 +176,33 @@ code path, which combines the `generic_method_defs` pass with trait name resolut
 
 ---
 
+## Claim 10: Default trait method dispatch emits a type-specific monomorphized label at runtime
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: When a trait provides a default method body, galvanic must emit a
+type-specific monomorphized function — `Foo__doubled:` — NOT inline the body
+at each call site or share a single generic body across types. The default
+method body must be emitted as `TypeName__methodName`, and calls to it must
+emit `bl TypeName__methodName` at the call site. Furthermore, the result must
+not be constant-folded: calling a default method with a runtime value must
+produce a real `bl` instruction, not a `mov` of the precomputed constant.
+
+This claim guards the default method dispatch path (trait body resolution)
+separately from the regular method path. Claims 6–9 cover regular functions,
+generic functions, and generic trait impls — but none cover the case where the
+method body comes from the trait definition itself, which is resolved differently
+in the lowering pass.
+
+**Violated if**: `compile_to_asm(...)` for a trait with a default method fails
+to contain `Foo__doubled:` (monomorphized label absent) or fails to contain
+`bl      Foo__doubled` (call not dispatched through monomorphized label), OR
+contains `mov     x0, #42` when called with a runtime argument.
+
+**Test**: `cargo test --test e2e -- runtime_default_method_emits_mangled_label runtime_default_method_result_not_folded`
+
+---
+
 ## Not Yet Claims (honest gaps)
 
 These are promises the project will eventually make but cannot yet be falsified:
