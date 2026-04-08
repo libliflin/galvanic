@@ -747,6 +747,10 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     // Without this, `S { x: a_u16 + b_u16 }` stores the unwrapped i32 sum, and
     // subsequent comparisons against the field see wrong values.
     let mut struct_narrow_field_types: HashMap<String, Vec<Option<IrTy>>> = HashMap::new();
+    // FLS §4.1, §6.23: Per-field narrow integer types for tuple structs.
+    // Mirrors `struct_narrow_field_types` but keyed by tuple struct name.
+    // Used to emit TruncU8/SextI8/TruncU16/SextI16 when constructing `Foo(val)`.
+    let mut tuple_struct_narrow_field_types: HashMap<String, Vec<Option<IrTy>>> = HashMap::new();
 
     for item in &src.items {
         match &item.kind {
@@ -867,8 +871,28 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                                 _ => None,
                             })
                             .collect();
+                        // FLS §4.1, §6.23: Track narrow integer field types so tuple
+                        // struct construction can apply TruncU8/SextI8/TruncU16/SextI16
+                        // before storing, preventing mid-body comparisons from seeing
+                        // unwrapped values when arithmetic on narrow fields overflows.
+                        let narrow_types: Vec<Option<IrTy>> = fields
+                            .iter()
+                            .map(|f| match &f.ty.kind {
+                                TyKind::Path(segs) if segs.len() == 1 => {
+                                    match segs[0].text(source) {
+                                        "u8" => Some(IrTy::U8),
+                                        "i8" => Some(IrTy::I8),
+                                        "u16" => Some(IrTy::U16),
+                                        "i16" => Some(IrTy::I16),
+                                        _ => None,
+                                    }
+                                }
+                                _ => None,
+                            })
+                            .collect();
                         tuple_struct_defs.insert(struct_name.clone(), fields.len());
-                        tuple_struct_float_field_types.insert(struct_name, float_types);
+                        tuple_struct_float_field_types.insert(struct_name.clone(), float_types);
+                        tuple_struct_narrow_field_types.insert(struct_name, narrow_types);
                     }
                 }
             }
@@ -1872,7 +1896,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                 if !fn_def.generic_params.is_empty() || has_impl_trait {
                     continue;
                 }
-                let (ir_fn, closure_fns, fn_trampolines, next_label, needed, vtable_reqs) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &tuple_struct_float_field_types, &enum_defs, &enum_variant_float_field_types, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &const_f64_vals, &const_f32_vals, &assoc_const_vals, &static_names, &static_f64_names, &static_f32_names, &fn_names, &struct_raw_field_types, &struct_generic_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, &struct_narrow_field_types, &generic_fn_param_counts, &HashMap::new(), &HashMap::new(), &trait_method_order, &fn_dyn_param_traits, &fn_dyn_return_traits, None, label_base)?;
+                let (ir_fn, closure_fns, fn_trampolines, next_label, needed, vtable_reqs) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &tuple_struct_float_field_types, &tuple_struct_narrow_field_types, &enum_defs, &enum_variant_float_field_types, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &const_f64_vals, &const_f32_vals, &assoc_const_vals, &static_names, &static_f64_names, &static_f32_names, &fn_names, &struct_raw_field_types, &struct_generic_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, &struct_narrow_field_types, &generic_fn_param_counts, &HashMap::new(), &HashMap::new(), &trait_method_order, &fn_dyn_param_traits, &fn_dyn_return_traits, None, label_base)?;
                 label_base = next_label;
                 fns.push(ir_fn);
                 fns.extend(closure_fns);
@@ -1979,6 +2003,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         &struct_defs,
                         &tuple_struct_defs,
                         &tuple_struct_float_field_types,
+                        &tuple_struct_narrow_field_types,
                         &enum_defs,
                         &enum_variant_float_field_types,
                         &method_self_kinds,
@@ -2055,6 +2080,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                                 &struct_defs,
                                 &tuple_struct_defs,
                                 &tuple_struct_float_field_types,
+                                &tuple_struct_narrow_field_types,
                                 &enum_defs,
                                 &enum_variant_float_field_types,
                                 &method_self_kinds,
@@ -2236,6 +2262,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
             &struct_defs,
             &tuple_struct_defs,
             &tuple_struct_float_field_types,
+            &tuple_struct_narrow_field_types,
             &enum_defs,
             &enum_variant_float_field_types,
             &method_self_kinds,
@@ -2404,6 +2431,9 @@ fn lower_fn(
     struct_defs: &HashMap<String, Vec<String>>,
     tuple_struct_defs: &HashMap<String, usize>,
     tuple_struct_float_field_types: &HashMap<String, Vec<Option<IrTy>>>,
+    // FLS §4.1, §6.23: Per-field narrow integer types for tuple structs.
+    // Used to emit TruncU8/SextI8/TruncU16/SextI16 when constructing `Foo(val)`.
+    tuple_struct_narrow_field_types: &HashMap<String, Vec<Option<IrTy>>>,
     enum_defs: &EnumDefs,
     enum_variant_float_field_types: &HashMap<String, HashMap<String, Vec<Option<IrTy>>>>,
     method_self_kinds: &HashMap<String, SelfKind>,
@@ -2606,7 +2636,7 @@ fn lower_fn(
         Some(block) => block,
     };
 
-    let mut ctx = LowerCtx::new(source, &name, ret_ty, struct_defs, tuple_struct_defs, tuple_struct_float_field_types, enum_defs, enum_variant_float_field_types, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, f64_return_fns, f32_return_fns, const_vals, const_f64_vals, const_f32_vals, assoc_const_vals, static_names, static_f64_names, static_f32_names, fn_names, struct_field_types, struct_generic_field_types, struct_field_offsets, struct_sizes, type_aliases, struct_float_field_types, struct_narrow_field_types, generic_fn_param_counts.clone(), generic_type_subst, trait_method_order, fn_dyn_param_traits, fn_dyn_return_traits, start_label);
+    let mut ctx = LowerCtx::new(source, &name, ret_ty, struct_defs, tuple_struct_defs, tuple_struct_float_field_types, tuple_struct_narrow_field_types, enum_defs, enum_variant_float_field_types, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, f64_return_fns, f32_return_fns, const_vals, const_f64_vals, const_f32_vals, assoc_const_vals, static_names, static_f64_names, static_f32_names, fn_names, struct_field_types, struct_generic_field_types, struct_field_offsets, struct_sizes, type_aliases, struct_float_field_types, struct_narrow_field_types, generic_fn_param_counts.clone(), generic_type_subst, trait_method_order, fn_dyn_param_traits, fn_dyn_return_traits, start_label);
 
     // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
     // to stack slots. Each parameter slot is allocated in parameter order
@@ -4195,6 +4225,16 @@ struct LowerCtx<'src> {
     /// Cache-line note: read-only during lowering; not on any hot path.
     tuple_struct_float_field_types: &'src HashMap<String, Vec<Option<IrTy>>>,
 
+    /// Per-field narrow integer type for tuple structs.
+    ///
+    /// FLS §4.1, §6.23: `None` = not a narrow integer field; `Some(U8/I8/U16/I16)` =
+    /// field requires TruncU8/SextI8/TruncU16/SextI16 before the Store instruction
+    /// during tuple struct construction. Mirrors `struct_narrow_field_types` but
+    /// for positional-field constructors like `Foo(val)`.
+    ///
+    /// Cache-line note: read-only during lowering; not on any hot path.
+    tuple_struct_narrow_field_types: &'src HashMap<String, Vec<Option<IrTy>>>,
+
     /// Enum type definitions: maps enum name → (variant name → discriminant).
     ///
     /// FLS §15: Enumerations. Unit variants are assigned integer discriminants
@@ -5065,6 +5105,7 @@ impl<'src> LowerCtx<'src> {
         struct_defs: &'src HashMap<String, Vec<String>>,
         tuple_struct_defs: &'src HashMap<String, usize>,
         tuple_struct_float_field_types: &'src HashMap<String, Vec<Option<IrTy>>>,
+        tuple_struct_narrow_field_types: &'src HashMap<String, Vec<Option<IrTy>>>,
         enum_defs: &'src EnumDefs,
         enum_variant_float_field_types: &'src HashMap<String, HashMap<String, Vec<Option<IrTy>>>>,
         method_self_kinds: &'src HashMap<String, SelfKind>,
@@ -5114,6 +5155,7 @@ impl<'src> LowerCtx<'src> {
             struct_defs,
             tuple_struct_defs,
             tuple_struct_float_field_types,
+            tuple_struct_narrow_field_types,
             enum_defs,
             enum_variant_float_field_types,
             method_self_kinds,
@@ -5218,6 +5260,19 @@ impl<'src> LowerCtx<'src> {
     /// i32/bool/f64/f32 and other non-narrow fields.
     fn field_narrow_ty(&self, struct_name: &str, field_idx: usize) -> Option<IrTy> {
         self.struct_narrow_field_types
+            .get(struct_name)
+            .and_then(|fts| fts.get(field_idx))
+            .copied()
+            .flatten()
+    }
+
+    /// Return the narrow integer IrTy (U8/I8/U16/I16) for a tuple struct positional field.
+    ///
+    /// FLS §4.1, §6.23: Used during tuple struct construction (`Foo(val)`) to emit
+    /// TruncU8/SextI8/TruncU16/SextI16 before Store, matching the behaviour of
+    /// named struct construction. Returns `None` for i32/bool/f64/f32 fields.
+    fn tuple_struct_field_narrow_ty(&self, struct_name: &str, field_idx: usize) -> Option<IrTy> {
+        self.tuple_struct_narrow_field_types
             .get(struct_name)
             .and_then(|fts| fts.get(field_idx))
             .copied()
@@ -9151,6 +9206,16 @@ impl<'src> LowerCtx<'src> {
                                 _ => {
                                     let val = self.lower_expr(arg_expr, &IrTy::I32)?;
                                     let src = self.val_to_reg(val)?;
+                                    // FLS §4.1, §6.23: Normalise narrow-typed fields before
+                                    // storing. Without this, `Foo(a_u8 + b_u8)` stores the
+                                    // raw i32 sum; mid-body reads see the unwrapped value.
+                                    match self.tuple_struct_field_narrow_ty(ctor_name, i) {
+                                        Some(IrTy::U8) => self.instrs.push(Instr::TruncU8 { dst: src, src }),
+                                        Some(IrTy::I8) => self.instrs.push(Instr::SextI8 { dst: src, src }),
+                                        Some(IrTy::U16) => self.instrs.push(Instr::TruncU16 { dst: src, src }),
+                                        Some(IrTy::I16) => self.instrs.push(Instr::SextI16 { dst: src, src }),
+                                        _ => {}
+                                    }
                                     self.instrs.push(Instr::Store { src, slot });
                                 }
                             }
@@ -9698,6 +9763,7 @@ impl<'src> LowerCtx<'src> {
                     self.struct_defs,
                     self.tuple_struct_defs,
                     self.tuple_struct_float_field_types,
+                    self.tuple_struct_narrow_field_types,
                     self.enum_defs,
                     self.enum_variant_float_field_types,
                     self.method_self_kinds,
@@ -17195,6 +17261,7 @@ impl<'src> LowerCtx<'src> {
                     self.struct_defs,
                     self.tuple_struct_defs,
                     self.tuple_struct_float_field_types,
+                    self.tuple_struct_narrow_field_types,
                     self.enum_defs,
                     self.enum_variant_float_field_types,
                     self.method_self_kinds,

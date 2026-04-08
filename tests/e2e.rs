@@ -30833,3 +30833,155 @@ fn milestone_182_u16_struct_two_narrow_fields() {
     assert_eq!(exit, 1, "p.a = 60000; p.b = 70000 wraps to 4464 < 5000");
 }
 
+// ── Milestone 183: narrow integer types in tuple struct fields (FLS §4.1, §6.23) ──────────
+
+/// Assembly inspection: TruncU8 is emitted for a u8 tuple struct field,
+/// and the stored value is not constant-folded.
+#[test]
+fn runtime_u8_tuple_struct_field_construction_applies_trunc() {
+    let asm = compile_to_asm(
+        // Avoid returning tuple struct from fn — access the field directly in main.
+        "struct Byte(u8);\n\
+         fn main() -> i32 {\n\
+             let a: u8 = 200;\n\
+             let b: u8 = 100;\n\
+             let n = Byte(a + b);\n\
+             n.0 as i32\n\
+         }\n",
+    );
+    // TruncU8 emits `and w{r}, w{r}, #255` — verify it's present
+    assert!(asm.contains("and"), "u8 tuple struct field must emit and-truncation");
+    // Must not fold 200+100=300 to a constant
+    assert!(!asm.contains("mov     x0, #44"), "must not constant-fold wrapped value");
+}
+
+/// Assembly inspection: SextI16 is emitted for an i16 tuple struct field.
+#[test]
+fn runtime_i16_tuple_struct_field_construction_applies_sxth() {
+    // Use parameters so neither the add nor the sxth can be constant-folded.
+    let asm = compile_to_asm(
+        "struct Short(i16);\n\
+         fn build(a: i16, b: i16) -> i32 {\n\
+             let n = Short(a + b);\n\
+             n.0 as i32\n\
+         }\n\
+         fn main() -> i32 { build(30000, 5000) }\n",
+    );
+    assert!(asm.contains("sxth"), "i16 tuple struct field must emit sxth sign-extension");
+    // The add result is runtime — not folded to a specific constant
+    assert!(!asm.contains("mov     x0, #-30536"), "must not constant-fold the wrapped result");
+}
+
+#[test]
+fn milestone_183_u8_tuple_struct_field_wraps_on_construction() {
+    // FLS §4.1, §6.23: u8 tuple struct field stores the wrapped value at construction.
+    // 200 + 100 = 300; as u8 = 44. 44 < 100 must be true (exit 1).
+    let Some(exit) = compile_and_run(
+        "struct Byte(u8);\n\
+         fn build(a: u8, b: u8) -> Byte { Byte(a + b) }\n\
+         fn main() -> i32 {\n\
+             let n = build(200, 100);\n\
+             if n.0 < 100 { 1 } else { 0 }\n\
+         }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "200_u8 + 100_u8 wraps to 44; 44 < 100 should be true");
+}
+
+#[test]
+fn milestone_183_u16_tuple_struct_field_wraps_on_construction() {
+    // FLS §4.1, §6.23: u16 tuple struct field stores the wrapped value at construction.
+    // 65000 + 1000 = 66000; as u16 = 464. 464 < 500 must be true (exit 1).
+    let Some(exit) = compile_and_run(
+        "struct Short(u16);\n\
+         fn build(a: u16, b: u16) -> Short { Short(a + b) }\n\
+         fn main() -> i32 {\n\
+             let n = build(65000, 1000);\n\
+             if n.0 < 500 { 1 } else { 0 }\n\
+         }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "65000_u16 + 1000_u16 wraps to 464; 464 < 500 should be true");
+}
+
+#[test]
+fn milestone_183_i16_tuple_struct_field_wraps_on_construction() {
+    // FLS §4.1, §6.23: i16 tuple struct field stores the sign-extended wrapped value.
+    // 30000 + 5000 = 35000; as i16 overflows → negative. Exit 1 if result < 0.
+    let Some(exit) = compile_and_run(
+        "struct Short(i16);\n\
+         fn build(a: i16, b: i16) -> Short { Short(a + b) }\n\
+         fn main() -> i32 {\n\
+             let n = build(30000, 5000);\n\
+             let v: i32 = n.0 as i32;\n\
+             if v < 0 { 1 } else { 0 }\n\
+         }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "30000_i16 + 5000_i16 overflows to negative; v < 0 should be true");
+}
+
+#[test]
+fn milestone_183_u8_tuple_struct_identity_field() {
+    // Non-overflow case: value is preserved unchanged.
+    let Some(exit) = compile_and_run(
+        "struct Byte(u8);\n\
+         fn build(a: u8) -> Byte { Byte(a) }\n\
+         fn main() -> i32 { build(42).0 as i32 }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 42);
+}
+
+#[test]
+fn milestone_183_u16_tuple_struct_field_in_arithmetic() {
+    // FLS §4.1, §6.23: wrapped field value is correctly used in arithmetic.
+    let Some(exit) = compile_and_run(
+        "struct Short(u16);\n\
+         fn build(a: u16, b: u16) -> Short { Short(a + b) }\n\
+         fn main() -> i32 {\n\
+             let n = build(65000, 1000);\n\
+             n.0 as i32 + 1\n\
+         }\n",
+    ) else {
+        return;
+    };
+    // 65000 + 1000 = 66000; wraps to 464; 464 + 1 = 465
+    assert_eq!(exit, 465, "wrapped field 464 + 1 = 465");
+}
+
+#[test]
+fn milestone_183_u8_tuple_struct_passed_to_fn() {
+    // FLS §4.1, §6.23: wrapped tuple struct field passed as argument to another fn.
+    let Some(exit) = compile_and_run(
+        "struct Byte(u8);\n\
+         fn build(a: u8, b: u8) -> Byte { Byte(a + b) }\n\
+         fn check(v: u8) -> i32 { if v < 50 { 1 } else { 0 } }\n\
+         fn main() -> i32 { check(build(200, 100).0) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "200_u8 + 100_u8 wraps to 44; check(44) should return 1");
+}
+
+#[test]
+fn milestone_183_u16_tuple_struct_two_narrow_fields() {
+    // FLS §4.1, §6.23: Both narrow positional fields in a tuple struct are wrapped.
+    let Some(exit) = compile_and_run(
+        "struct Pair(u16, u16);\n\
+         fn build(x: u16, y: u16) -> Pair { Pair(x, y + x) }\n\
+         fn main() -> i32 {\n\
+             let p = build(60000, 10000);\n\
+             if p.0 as i32 == 60000 && p.1 < 5000 { 1 } else { 0 }\n\
+         }\n",
+    ) else {
+        return;
+    };
+    // p.0 = 60000 (no overflow), p.1 = 10000 + 60000 = 70000 wraps to 4464 < 5000
+    assert_eq!(exit, 1, "p.0 = 60000; p.1 = 70000 wraps to 4464 < 5000");
+}
+
