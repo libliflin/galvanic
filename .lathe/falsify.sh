@@ -1191,6 +1191,15 @@ else
     pass "Claim 62: bitwise operators emit runtime and/orr/eor with function parameters (not constant-folded)"
 fi
 
+# References: claims.md Claim 63.
+
+echo "--- Claim 63: unary operators emit runtime neg/mvn/eor with function parameters (not constant-folded) ---"
+if cargo test --test e2e --quiet -- runtime_neg_emits_neg_not_folded runtime_not_emits_mvn_not_folded runtime_bool_not_emits_eor_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 63" "runtime_neg_emits_neg_not_folded, runtime_not_emits_mvn_not_folded, or runtime_bool_not_emits_eor_not_folded FAILED — unary ops may be constant-folded instead of emitting runtime neg/mvn/eor"
+else
+    pass "Claim 63: unary operators emit runtime neg/mvn/eor with function parameters (not constant-folded)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 

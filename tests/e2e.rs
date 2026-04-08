@@ -1739,6 +1739,90 @@ fn runtime_bool_not_emits_eor_instruction() {
     );
 }
 
+/// Claim 63: unary `-` emits runtime `neg` with a function parameter (not constant-folded).
+///
+/// FLS §6.5.4: Negation operator on integers.
+/// FLS §6.1.2:37–45: Non-const function body must emit runtime instructions.
+///
+/// The existing `runtime_neg_emits_neg_instruction` uses a function parameter but lacks
+/// a negative assertion for the call site. This test adds the `bl neg_i32` runtime-call
+/// check and the negative assertion confirming the folded result is absent.
+#[test]
+fn runtime_neg_emits_neg_not_folded() {
+    let asm = compile_to_asm(
+        "fn neg_i32(x: i32) -> i32 { -x }\nfn main() -> i32 { neg_i32(5) }\n",
+    );
+    assert!(
+        asm.contains("neg"),
+        "expected `neg` instruction for unary negation with parameter, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("bl      neg_i32"),
+        "expected `bl neg_i32` at the call site (runtime dispatch), got:\n{asm}"
+    );
+    // If constant-folded: neg_i32(5) = -5 → mov x0, #-5 (absent when runtime)
+    assert!(
+        !asm.contains("mov     x0, #-5"),
+        "assembly must not constant-fold neg_i32(5) to mov #-5:\n{asm}"
+    );
+}
+
+/// Claim 63: integer `!` emits runtime `mvn` with a function parameter (not constant-folded).
+///
+/// FLS §6.5.4: Bitwise NOT on integers.
+/// FLS §6.1.2:37–45: Non-const function body must emit runtime instructions.
+///
+/// The existing `runtime_not_emits_mvn_instruction` uses `fn main() -> i32 { !5 }` —
+/// an inline literal in main, not a function parameter. This test uses a parameter
+/// to prevent any possible constant folding and adds a `bl` call-site assertion.
+#[test]
+fn runtime_not_emits_mvn_not_folded() {
+    let asm = compile_to_asm(
+        "fn bitwise_not(x: i32) -> i32 { !x }\nfn main() -> i32 { bitwise_not(5) }\n",
+    );
+    assert!(
+        asm.contains("mvn"),
+        "expected `mvn` instruction for `!x` with parameter, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("bl      bitwise_not"),
+        "expected `bl bitwise_not` at the call site (runtime dispatch), got:\n{asm}"
+    );
+    // If constant-folded: !5 = -6 → mov x0, #-6 (absent when runtime)
+    assert!(
+        !asm.contains("mov     x0, #-6"),
+        "assembly must not constant-fold bitwise_not(5) to mov #-6:\n{asm}"
+    );
+}
+
+/// Claim 63: bool `!` emits runtime `eor #1` with a function parameter (not constant-folded).
+///
+/// FLS §6.5.4: Logical NOT on bool.
+/// FLS §6.1.2:37–45: Non-const function body must emit runtime instructions.
+///
+/// The existing `runtime_bool_not_emits_eor_instruction` checks the instruction
+/// and that `mvn` is absent, but does not check the call site runtime dispatch.
+/// This test adds the `bl bool_not` call-site assertion.
+#[test]
+fn runtime_bool_not_emits_eor_not_folded() {
+    let asm = compile_to_asm(
+        "fn bool_not(b: bool) -> bool { !b }\nfn main() -> i32 { if bool_not(true) { 1 } else { 0 } }\n",
+    );
+    assert!(
+        asm.contains("eor") && asm.contains("#1"),
+        "expected `eor ... #1` instruction for `!b` with parameter, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("bl      bool_not"),
+        "expected `bl bool_not` at the call site (runtime dispatch), got:\n{asm}"
+    );
+    // Must NOT use bitwise NOT (mvn) for a bool operand.
+    assert!(
+        !asm.contains("mvn"),
+        "assembly must not use `mvn` for bool `!b` — should be `eor ... #1`:\n{asm}"
+    );
+}
+
 // ── Milestone 15: type cast expressions `as` ─────────────────────────────────
 //
 // FLS §6.5.9: Type cast expressions. The `as` operator converts a value of
