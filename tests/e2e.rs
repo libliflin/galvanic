@@ -24610,3 +24610,267 @@ fn main() -> i32 { check(Status::Active) }
         "OR pattern in while-let must not constant-fold result to #1: {asm}"
     );
 }
+
+// ── Milestone 156: Mixed-kind OR alternatives (literal | range) ───────────────
+//
+// FLS §5.1.11: OR patterns allow alternatives of different kinds. A pattern
+// like `1 | 2..=5` mixes a literal alternative with a range alternative.
+// This is valid Rust and the spec places no restriction on mixing kinds.
+//
+// FLS §5.1.11: AMBIGUOUS — The FLS §5.1.11 lists OR patterns but gives no
+// explicit statement about mixing pattern kinds within the same OR group.
+// The pattern grammar `Pat | Pat` clearly allows this compositionally.
+
+/// Match with literal | inclusive-range OR alternative — hit is the literal (value 1).
+#[test]
+fn milestone_156_match_or_literal_and_range_hits_literal() {
+    let Some(exit) = compile_and_run(r#"
+fn classify(n: i32) -> i32 {
+    match n {
+        1 | 10..=20 => 1,
+        _ => 0,
+    }
+}
+fn main() -> i32 { classify(1) }
+"#) else { return; };
+    assert_eq!(exit, 1);
+}
+
+/// Match with literal | inclusive-range OR alternative — hit is inside the range (value 15).
+#[test]
+fn milestone_156_match_or_literal_and_range_hits_range() {
+    let Some(exit) = compile_and_run(r#"
+fn classify(n: i32) -> i32 {
+    match n {
+        1 | 10..=20 => 1,
+        _ => 0,
+    }
+}
+fn main() -> i32 { classify(15) }
+"#) else { return; };
+    assert_eq!(exit, 1);
+}
+
+/// Match with literal | inclusive-range OR alternative — neither alternative matches.
+#[test]
+fn milestone_156_match_or_literal_and_range_no_match() {
+    let Some(exit) = compile_and_run(r#"
+fn classify(n: i32) -> i32 {
+    match n {
+        1 | 10..=20 => 1,
+        _ => 0,
+    }
+}
+fn main() -> i32 { classify(5) }
+"#) else { return; };
+    assert_eq!(exit, 0);
+}
+
+/// Match with multiple mixed alternatives: literal | exclusive-range | literal.
+#[test]
+fn milestone_156_match_or_mixed_three_alternatives() {
+    let Some(exit) = compile_and_run(r#"
+fn classify(n: i32) -> i32 {
+    match n {
+        0 | 2..10 | 100 => 1,
+        _ => 0,
+    }
+}
+fn main() -> i32 { classify(5) }
+"#) else { return; };
+    assert_eq!(exit, 1);
+}
+
+/// Match with mixed alternatives on a function parameter — range boundary at lo.
+#[test]
+fn milestone_156_match_or_range_boundary_lo() {
+    let Some(exit) = compile_and_run(r#"
+fn classify(n: i32) -> i32 {
+    match n {
+        -1 | 10..=20 => 1,
+        _ => 0,
+    }
+}
+fn main() -> i32 { classify(10) }
+"#) else { return; };
+    assert_eq!(exit, 1);
+}
+
+/// Match with mixed alternatives — range boundary at hi (inclusive).
+#[test]
+fn milestone_156_match_or_range_boundary_hi() {
+    let Some(exit) = compile_and_run(r#"
+fn classify(n: i32) -> i32 {
+    match n {
+        -1 | 10..=20 => 1,
+        _ => 0,
+    }
+}
+fn main() -> i32 { classify(20) }
+"#) else { return; };
+    assert_eq!(exit, 1);
+}
+
+/// Match with mixed alternatives — result used in arithmetic.
+#[test]
+fn milestone_156_match_or_result_in_arithmetic() {
+    let Some(exit) = compile_and_run(r#"
+fn classify(n: i32) -> i32 {
+    match n {
+        0 | 5..=9 => 10,
+        _ => 20,
+    }
+}
+fn main() -> i32 { classify(7) + classify(3) - 30 }
+"#) else { return; };
+    assert_eq!(exit, 0);
+}
+
+/// Match with mixed alternatives on a function parameter.
+#[test]
+fn milestone_156_match_or_mixed_on_parameter() {
+    let Some(exit) = compile_and_run(r#"
+fn is_special(n: i32) -> i32 {
+    match n {
+        42 | 1..=5 => 1,
+        _ => 0,
+    }
+}
+fn main() -> i32 { is_special(42) + is_special(3) + is_special(10) }
+"#) else { return; };
+    assert_eq!(exit, 2);
+}
+
+/// if-let with literal | inclusive-range — literal matches.
+#[test]
+fn milestone_156_if_let_or_literal_and_range_hits_literal() {
+    let Some(exit) = compile_and_run(r#"
+fn check(n: i32) -> i32 {
+    if let 0 | 10..=19 = n { 1 } else { 0 }
+}
+fn main() -> i32 { check(0) }
+"#) else { return; };
+    assert_eq!(exit, 1);
+}
+
+/// if-let with literal | inclusive-range — range matches.
+#[test]
+fn milestone_156_if_let_or_literal_and_range_hits_range() {
+    let Some(exit) = compile_and_run(r#"
+fn check(n: i32) -> i32 {
+    if let 0 | 10..=19 = n { 1 } else { 0 }
+}
+fn main() -> i32 { check(15) }
+"#) else { return; };
+    assert_eq!(exit, 1);
+}
+
+/// if-let with literal | inclusive-range — neither matches, else taken.
+#[test]
+fn milestone_156_if_let_or_literal_and_range_no_match() {
+    let Some(exit) = compile_and_run(r#"
+fn check(n: i32) -> i32 {
+    if let 0 | 10..=19 = n { 1 } else { 0 }
+}
+fn main() -> i32 { check(5) }
+"#) else { return; };
+    assert_eq!(exit, 0);
+}
+
+/// while-let with literal | inclusive-range — counts iterations while match holds.
+#[test]
+fn milestone_156_while_let_or_literal_and_range_counts() {
+    let Some(exit) = compile_and_run(r#"
+fn count(start: i32) -> i32 {
+    let mut x = start;
+    let mut n = 0;
+    while let 0 | 10..=14 = x {
+        n = n + 1;
+        x = x + 1;
+    }
+    n
+}
+fn main() -> i32 { count(10) }
+"#) else { return; };
+    assert_eq!(exit, 5);
+}
+
+/// while-let with literal | range — no initial match exits immediately.
+#[test]
+fn milestone_156_while_let_or_literal_and_range_no_initial_match() {
+    let Some(exit) = compile_and_run(r#"
+fn count(start: i32) -> i32 {
+    let mut x = start;
+    let mut n = 0;
+    while let 0 | 10..=14 = x {
+        n = n + 1;
+        x = x + 1;
+    }
+    n
+}
+fn main() -> i32 { count(5) }
+"#) else { return; };
+    assert_eq!(exit, 0);
+}
+
+/// Assembly inspection: mixed OR alternatives emit orr for accumulation.
+///
+/// `1 | 10..=20` must emit:
+///   - equality check for the literal `1` (cmp/cset or similar)
+///   - range check for `10..=20` (two comparisons + and)
+///   - `orr` to combine results
+///   - `cbz` to branch when nothing matched
+///
+/// Attack: silently rejecting range alternatives and only checking literal.
+/// That regression would pass `classify(1)` but fail `classify(15)`.
+///
+/// FLS §5.1.11: mixed-kind OR alternatives are valid and must each be checked.
+/// FLS §6.1.2 Constraint 1: all checks emit runtime instructions.
+#[test]
+fn runtime_mixed_or_emits_orr_accumulation() {
+    let asm = compile_to_asm(r#"
+fn classify(n: i32) -> i32 {
+    match n {
+        1 | 10..=20 => 1,
+        _ => 0,
+    }
+}
+fn main() -> i32 { classify(15) }
+"#);
+    assert!(asm.contains("orr"), "mixed OR pattern must emit orr to accumulate results: {asm}");
+    assert!(asm.contains("cbz"), "mixed OR pattern must emit cbz on match flag: {asm}");
+    // Must not fold: classify(15) returns 1, but the literal alt is 1, not 15.
+    // A folded implementation would have `mov x0, #1` near the end without an add check.
+    assert!(
+        !asm.contains("mov     x0, #1\n\tret"),
+        "mixed OR pattern must not fold result directly to #1: {asm}"
+    );
+}
+
+/// Assembly inspection: mixed OR result not folded when scrutinee is a parameter.
+///
+/// `classify(n)` takes `n` as a parameter — the compiler cannot know at compile
+/// time whether `n` matches `1` or falls in `10..=20`. So the result must be
+/// computed via runtime branch, not a compile-time constant.
+///
+/// FLS §6.1.2 Constraint 1 (litmus test): replacing literal with parameter must not break.
+#[test]
+fn runtime_mixed_or_result_not_folded() {
+    let asm = compile_to_asm(r#"
+fn classify(n: i32) -> i32 {
+    match n {
+        1 | 10..=20 => 1,
+        _ => 0,
+    }
+}
+fn main() -> i32 { classify(1) }
+"#);
+    assert!(asm.contains("orr"), "mixed OR pattern must emit runtime orr: {asm}");
+    // The function is called with 1, which matches the literal arm → returns 1.
+    // But the CHECK must be runtime. Result must be loaded from a branch path, not
+    // a single constant-folded `mov x0, #1; ret` without any comparison.
+    assert!(
+        asm.contains("cmp") || asm.contains("cset") || asm.contains("cbz"),
+        "mixed OR pattern must emit runtime comparison instructions: {asm}"
+    );
+}
