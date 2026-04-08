@@ -1418,6 +1418,26 @@ else
     pass "Claim 78: &[T] slice parameter fat-pointer length is a runtime load and indexing uses pointer arithmetic (not constant-folded)"
 fi
 
+echo "--- Claim 79: fn(&[T]) via fn-ptr passes fat pointer (addr+len) to callee ---"
+if cargo test --test e2e -- \
+    claim_79_fn_ptr_slice_arg_passes_len_not_just_ptr \
+    runtime_fn_ptr_slice_arg_emits_two_loads \
+    2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 79" "fn-ptr &[T] fat-pointer FAILED — CallIndirect may pass only the data pointer (not the length), causing the callee to use garbage as the slice length"
+else
+    pass "Claim 79: fn(&[T]) via fn-ptr passes both fat-pointer components (data ptr + length) before blr"
+fi
+
+echo "--- Claim 80: capturing closure with &[T] explicit parameter generates correct trampoline ---"
+if cargo test --test e2e -- \
+    claim_80_closure_trampoline_slice_param_passes_len_not_just_ptr \
+    runtime_closure_trampoline_shifts_fat_ptr_slice_param \
+    2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 80" "closure trampoline &[T] fat-pointer FAILED — trampoline may shift only 1 register instead of 2, clobbering the length when a capturing closure has a &[T] explicit param"
+else
+    pass "Claim 80: capturing closure with &[T] explicit param correctly shifts both fat-pointer registers in trampoline"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 

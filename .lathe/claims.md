@@ -2968,3 +2968,51 @@ declared field type — not as a wider i32.
 - Assembly for `s[1]` in a callee contains `mov x0, #20` (value constant-folded from known array contents)
 
 **Tests**: `cargo test --test e2e -- claim_78_slice_param_len_is_runtime_load_not_folded runtime_slice_param_len_emits_ldr_not_constant runtime_slice_index_emits_ptr_arithmetic_and_load runtime_slice_arg_emits_adrof_and_len`
+
+---
+
+## Claim 79: `fn(&[T])` via function pointer passes fat pointer (addr+len) to callee
+
+**Stakeholder**: William (researcher), CI / Validation Infrastructure
+
+**Promise**: When a `&[T]` slice variable is passed as an argument to a function via a function pointer (`f(s)` where `f: fn(&[i32]) -> R`), the calling function must emit TWO register loads — one for the slice data pointer and one for the length — before the `blr` instruction. The callee must NOT receive garbage as the length.
+
+**Why this is load-bearing**: Galvanic's `CallIndirect` path (indirect calls through fn pointers) must apply the same fat-pointer expansion as direct `Call` (direct `bl` calls). Before Cycle 142's fix, `CallIndirect` only emitted one load (the data pointer), passing whatever happened to be in x1 as the length. This caused the callee's for-loop to iterate the wrong number of times or segfault. The adversarial test uses two different-length slices passed through the same fn ptr; a broken callee would produce wrong results for at least one.
+
+**ARM64 implementation**: In `lower.rs`, the `CallIndirect` arg-expansion loop checks `local_slice_slots` and emits two loads (ptr slot, ptr+1 slot) for each `&[T]` argument, matching the direct-call path. The assembly for the calling function must contain `blr` (not `bl`) and at least two `ldr` instructions before it for the fat-pointer components.
+
+**FLS §4.9**: `&[T]` is a fat pointer (data pointer + element count).
+**FLS §6.1.2:37–45**: Non-const function bodies emit runtime instructions.
+**FLS §4.9 AMBIGUOUS**: Fat-pointer ABI (two consecutive registers: data ptr in xN, length in xN+1) is not mandated by the spec. Every new call variant (direct, indirect, closure trampoline, vtable) must be audited separately.
+
+**Violated if**:
+- Assembly for `apply(f, s)` where `f: fn(&[i32]) -> i32` and `s: &[i32]` does NOT contain `blr` (the indirect call was inlined), OR
+- The `apply` function section contains fewer than 2 `ldr` instructions before `blr` (length not passed), OR
+- Assembly contains `mov x0, #3` or `mov x0, #2` (length constant-folded from a specific call site), OR
+- The combined result of two `apply_len` calls (lengths 3 + 2 = 5) appears as `mov x0, #5` (fully constant-folded)
+
+**Tests**: `cargo test --test e2e -- claim_79_fn_ptr_slice_arg_passes_len_not_just_ptr runtime_fn_ptr_slice_arg_emits_two_loads`
+
+---
+
+## Claim 80: capturing closure with `&[T]` explicit parameter generates correct trampoline
+
+**Stakeholder**: William (researcher), CI / Validation Infrastructure
+
+**Promise**: When a capturing `move` closure has a `&[T]` explicit parameter and is passed to an `impl Fn(&[T])` callee, the generated trampoline MUST shift TWO registers (the data pointer AND the length) to make room for the captured value. The closure body must also correctly pass both fat-pointer components to any function called with the slice.
+
+**Why this is load-bearing**: The trampoline's `n_explicit` count tracks how many register positions to shift. Before the fix, `n_explicit` equalled the AST param count (1 for a single `&[T]` param). This caused the trampoline to shift only 1 register — moving the data pointer to position 1 while OVERWRITING the length that was already in position 1. The closure body received garbage as the length, so any slice operation (`s.len()`, `s[i]`) produced wrong results. The adversarial test passes two slices of different lengths through the same capturing closure; a broken trampoline would return the same (wrong) result for both.
+
+**ARM64 implementation**: In `lower.rs`, `last_closure_n_explicit` is set to the register-slot count of explicit params (not the AST param count). `&[T]` params count as 2 slots. The closure spill loop allocates two consecutive stack slots for `&[T]` params and registers the ptr slot in `local_slice_slots`. The trampoline codegen in `codegen.rs` iterates over `n_explicit` register slots in reverse order, shifting each from `x{i}` to `x{n_caps+i}` — correctly handling fat pointers because both register slots are shifted.
+
+**FLS §4.9**: `&[T]` is a fat pointer (data pointer + element count) occupying two consecutive registers.
+**FLS §6.22, §4.13**: The trampoline shifts explicit arguments by `n_caps` positions. Each fat-pointer arg occupies 2 register slots.
+**FLS §6.1.2:37–45**: Non-const function bodies emit runtime instructions.
+**FLS §4.9 AMBIGUOUS**: Fat-pointer ABI (two consecutive ARM64 registers: data ptr + length) is not mandated by the spec. The trampoline must be audited for every new param type that occupies more than one register.
+
+**Violated if**:
+- The trampoline for a closure with one `&[T]` explicit param and 1 capture does NOT contain `mov x2, x1` (shift len from position 1 to position 2), OR
+- The combined result of two calls with slices of different lengths (3 and 2) through a capturing closure appears as `mov x0, #5` (fully constant-folded), OR
+- The closure body does NOT emit two `ldr` instructions before calling a function that takes `&[T]` (only one register passed to callee)
+
+**Tests**: `cargo test --test e2e -- claim_80_closure_trampoline_slice_param_passes_len_not_just_ptr runtime_closure_trampoline_shifts_fat_ptr_slice_param`

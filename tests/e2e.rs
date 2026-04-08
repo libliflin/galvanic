@@ -32817,3 +32817,256 @@ fn main() -> i32 {
         "main result must not be constant-folded to #36: {asm}"
     );
 }
+
+/// Claim 79 adversarial test — assembly inspection half.
+///
+/// When `apply(f, s)` calls `f(s)` where `f: fn(&[i32]) -> i32` and
+/// `s: &[i32]`, the `apply` function must:
+/// 1. Use `blr` for the indirect call (not a direct `bl`).
+/// 2. Load BOTH fat-pointer components (data pointer + length) from the
+///    slice's stack slots before the `blr` — at least two `ldr` instructions.
+///
+/// Before the Cycle 142 fix, `CallIndirect` only emitted one load (the data
+/// pointer), passing garbage in x1 as the length. The callee would then
+/// segfault or loop for the wrong number of iterations.
+///
+/// FLS §4.9: `&[T]` is a fat pointer (data pointer + element count).
+/// FLS §6.1.2:37–45: Non-const function bodies must emit runtime instructions.
+/// FLS §4.9 AMBIGUOUS: Fat-pointer ABI not specified; galvanic uses two
+/// consecutive registers (data ptr in xN, length in xN+1).
+#[test]
+fn runtime_fn_ptr_slice_arg_emits_two_loads() {
+    let src = r#"
+fn sum_vals(s: &[i32]) -> i32 {
+    let mut t = 0;
+    for x in s { t = t + x; }
+    t
+}
+fn apply(f: fn(&[i32]) -> i32, s: &[i32]) -> i32 { f(s) }
+fn main() -> i32 {
+    let a = [2, 3, 5];
+    apply(sum_vals, &a)
+}
+"#;
+    let asm = compile_to_asm(src);
+
+    // Scope to the `apply` function (between `apply:` and `main:`).
+    let in_apply: Vec<&str> = asm
+        .lines()
+        .skip_while(|l| !l.starts_with("apply:"))
+        .take_while(|l| !l.starts_with("main:"))
+        .collect();
+
+    // apply must use blr for the indirect call (not direct bl sum_vals).
+    let has_blr = in_apply.iter().any(|l| l.trim_start().starts_with("blr"));
+    assert!(
+        has_blr,
+        "apply must use blr for indirect call through fn ptr: {}",
+        in_apply.join("\n")
+    );
+
+    // apply must emit at least 2 ldr instructions before the blr — one for
+    // the fat-pointer data component and one for the length component.
+    // A callee that only loads the data pointer (and passes garbage as length)
+    // would have exactly 1 ldr for the fat-pointer arguments.
+    let ldr_count = in_apply.iter().filter(|l| l.trim_start().starts_with("ldr")).count();
+    assert!(
+        ldr_count >= 2,
+        "apply must emit >=2 ldr instructions to pass both fat-pointer components \
+         (data ptr + length) — got {ldr_count}: {}",
+        in_apply.join("\n")
+    );
+
+    // Must not fold sum([2,3,5]) = 10 to a compile-time constant.
+    assert!(
+        !asm.contains("mov     x0, #10"),
+        "result must not be constant-folded to #10: {asm}"
+    );
+}
+
+/// Claim 79 adversarial test — two slices of different lengths through a fn ptr.
+///
+/// Calls the same function via a function pointer with slices of length 3 and 2.
+/// Before the fix, both calls would pass only the data pointer (x0); the callee
+/// would read garbage from x1 as the length. An interpreter that folds to the
+/// first call's length would return #3 for both. A correct compiler passes the
+/// runtime length each time, so the assembly must not constant-fold either result.
+///
+/// FLS §4.9: Fat-pointer length is determined at the call site and passed to
+/// the callee as a runtime argument.
+/// FLS §6.1.2:37–45: Non-const function bodies emit runtime instructions.
+#[test]
+fn claim_79_fn_ptr_slice_arg_passes_len_not_just_ptr() {
+    let asm = compile_to_asm(
+        "fn slice_len(s: &[i32]) -> usize { s.len() }\n\
+fn apply_len(f: fn(&[i32]) -> usize, s: &[i32]) -> usize { f(s) }\n\
+fn main() -> i32 {\n\
+    let a = [1, 2, 3];\n\
+    let b = [10, 20];\n\
+    (apply_len(slice_len, &a) + apply_len(slice_len, &b)) as i32\n\
+}\n",
+    );
+    // Must not fold either call's result to a compile-time constant length.
+    assert!(
+        !asm.contains("mov     x0, #3"),
+        "slice_len via fn ptr must not constant-fold to length #3: {asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #2"),
+        "slice_len via fn ptr must not constant-fold to length #2: {asm}"
+    );
+    // Must not fold the combined result.
+    assert!(
+        !asm.contains("mov     x0, #5"),
+        "combined result must not be constant-folded to #5: {asm}"
+    );
+    // apply_len must use blr (indirect dispatch, not direct bl).
+    let in_apply: Vec<&str> = asm
+        .lines()
+        .skip_while(|l| !l.starts_with("apply_len:"))
+        .take_while(|l| !l.starts_with("main:"))
+        .collect();
+    let has_blr = in_apply.iter().any(|l| l.trim_start().starts_with("blr"));
+    assert!(
+        has_blr,
+        "apply_len must use blr for indirect call: {}",
+        in_apply.join("\n")
+    );
+}
+
+// ── Claim 80: closure trampoline shifts fat-pointer args for &[T] params ─────
+
+/// Assembly inspection: capturing closure with `&[T]` explicit parameter.
+///
+/// When a capturing `move` closure has a `&[T]` explicit parameter and is passed
+/// to an `impl Fn(&[T])` callee, the trampoline MUST shift TWO registers (the
+/// data pointer AND the length) to make room for the captured value. Before the
+/// fix, `n_explicit` was the AST param count (1), so the trampoline only shifted
+/// 1 register — clobbering the length with the pointer, causing slice operations
+/// inside the closure to operate on garbage data.
+///
+/// FLS §4.9: `&[T]` is a fat pointer (data pointer + length). Every call path
+/// (direct, indirect, closure trampoline) must pass both components.
+/// FLS §6.22, §4.13: The trampoline shifts explicit arguments by `n_caps`
+/// positions. If an explicit arg is a fat pointer, it occupies 2 register slots.
+/// FLS §6.1.2:37–45: Non-const function bodies emit runtime instructions.
+/// FLS §4.9 AMBIGUOUS: Fat-pointer ABI not specified; galvanic uses two
+/// consecutive ARM64 registers (data ptr in xN, length in xN+1).
+#[test]
+fn runtime_closure_trampoline_shifts_fat_ptr_slice_param() {
+    let src = r#"
+fn slice_len(s: &[i32]) -> usize { s.len() }
+fn apply_len(f: impl Fn(&[i32]) -> usize, s: &[i32]) -> usize { f(s) }
+fn main() -> i32 {
+    let cap: i32 = 10;
+    let arr: [i32; 3] = [1, 2, 3];
+    apply_len(move |s: &[i32]| slice_len(s) + cap as usize, &arr) as i32
+}
+"#;
+    let asm = compile_to_asm(src);
+
+    // The trampoline must shift BOTH fat-pointer registers:
+    // - mov x2, x1  (shift len from position 1 to position 2)
+    // - mov x1, x0  (shift ptr from position 0 to position 1)
+    // - mov x0, x27 (cap from callee-saved into position 0)
+    let trampoline_section: Vec<&str> = asm
+        .lines()
+        .skip_while(|l| !l.contains("_trampoline:"))
+        .take_while(|l| !l.trim_start().starts_with("//") || l.contains("_trampoline"))
+        .collect();
+
+    // Must shift register 1 (len) up to position 2.
+    let shifts_len = trampoline_section
+        .iter()
+        .any(|l| l.contains("mov") && l.contains("x2") && l.contains("x1"));
+    assert!(
+        shifts_len,
+        "trampoline must shift len register (x1→x2) to make room for cap: {}",
+        asm
+    );
+
+    // Must shift register 0 (ptr) up to position 1.
+    let shifts_ptr = trampoline_section
+        .iter()
+        .any(|l| l.contains("mov") && l.contains("x1") && l.contains("x0"));
+    assert!(
+        shifts_ptr,
+        "trampoline must shift ptr register (x0→x1) to make room for cap: {}",
+        asm
+    );
+
+    // Result must not be constant-folded (3 + 10 = 13).
+    assert!(
+        !asm.contains("mov     x0, #13"),
+        "result must not be constant-folded to #13: {asm}"
+    );
+
+    // The closure body must emit two ldr instructions before calling slice_len
+    // (one for ptr, one for len).
+    let closure_section: Vec<&str> = asm
+        .lines()
+        .skip_while(|l| !l.starts_with("__closure_"))
+        .take_while(|l| !l.contains("_trampoline:"))
+        .collect();
+    let slice_len_call = closure_section.iter().position(|l| l.contains("bl") && l.contains("slice_len"));
+    if let Some(call_pos) = slice_len_call {
+        let ldrs_before_call = closure_section[..call_pos]
+            .iter()
+            .filter(|l| l.trim_start().starts_with("ldr"))
+            .count();
+        assert!(
+            ldrs_before_call >= 2,
+            "closure must load both fat-pointer components (ptr + len) before calling \
+             slice_len — got {ldrs_before_call} ldr(s) before the call: {}",
+            closure_section.join("\n")
+        );
+    }
+}
+
+/// Claim 80 adversarial: two slices of different lengths through a capturing closure.
+///
+/// Passes slices of length 3 and length 2 to the same capturing closure via
+/// `impl Fn(&[i32])`. Before the fix, the trampoline would clobber the length
+/// with the data pointer for both calls, so `slice_len(s)` would read the data
+/// pointer value (a stack address) as the length — producing an identical (wrong)
+/// result for both. A correct implementation must produce different results for
+/// slices of different lengths, proving the length is passed at runtime.
+///
+/// FLS §4.9, §6.22, §4.13 — see above.
+#[test]
+fn claim_80_closure_trampoline_slice_param_passes_len_not_just_ptr() {
+    let asm = compile_to_asm(
+        "fn slice_len(s: &[i32]) -> usize { s.len() }\n\
+fn apply_len(f: impl Fn(&[i32]) -> usize, s: &[i32]) -> usize { f(s) }\n\
+fn main() -> i32 {\n\
+    let cap: i32 = 0;\n\
+    let a: [i32; 3] = [1, 2, 3];\n\
+    let b: [i32; 2] = [10, 20];\n\
+    (apply_len(move |s: &[i32]| slice_len(s) + cap as usize, &a)\n\
+     + apply_len(move |s: &[i32]| slice_len(s) + cap as usize, &b)) as i32\n\
+}\n",
+    );
+    // Neither length should be constant-folded.
+    assert!(
+        !asm.contains("mov     x0, #3"),
+        "slice length 3 must not be constant-folded: {asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #2"),
+        "slice length 2 must not be constant-folded: {asm}"
+    );
+    // Combined result (3 + 0 + 2 + 0 = 5) must not be constant-folded.
+    assert!(
+        !asm.contains("mov     x0, #5"),
+        "combined result must not be constant-folded to #5: {asm}"
+    );
+    // Both closures' trampolines must shift the len register (x1→x2).
+    let shifts_len_count = asm
+        .lines()
+        .filter(|l| l.contains("// shift explicit arg 1 to position 2"))
+        .count();
+    assert!(
+        shifts_len_count >= 2,
+        "both trampolines must shift len register (x1→x2) — found {shifts_len_count}: {asm}"
+    );
+}
