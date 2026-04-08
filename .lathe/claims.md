@@ -2403,3 +2403,32 @@ assembly that:
 - contains the folded constant (`1999999999` or `500000000`) as an immediate
 
 **Tests**: `cargo test --test e2e -- runtime_large_int_sub_emits_sub_not_folded runtime_large_int_div_emits_sdiv_not_folded`
+
+---
+
+## Claim 59: large negative i32 constants are sign-extended for correct 64-bit comparisons
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: A large negative i32 constant (absolute value > 65535, e.g., -100000)
+loaded via the MOVZ+MOVK+sxtw sequence must be correctly sign-extended to 64 bits.
+A pattern match `match x { -100000 => 1, _ => 0 }` where `x` is a function parameter
+carrying -100000 must return 1.
+
+Without sign extension, MOVZ+MOVK loads 0x00000000FFFE7960 into the 64-bit register.
+A function parameter carrying -100000 holds 0xFFFFFFFFFFFE7960 (from the 64-bit `neg`
+instruction). These differ in 64-bit signed comparison → the match arm is never taken.
+With `sxtw`, both representations agree at 0xFFFFFFFFFFFE7960.
+
+**FLS §2.4.4.1**: Integer literals have i32 type; the ARM64 encoding must preserve
+signed semantics in 64-bit registers.
+**FLS §5.2**: Literal patterns (including negative literal patterns) use LoadImm to
+materialise the pattern value; this value must compare correctly against parameters.
+**FLS §6.5.7**: Comparison operators use signed 64-bit `cmp`; operands must be
+correctly sign-extended.
+
+**Violated if**: `compile_to_asm(LARGE_NEG_PATTERN)` returns assembly that:
+- lacks `sxtw` (no sign extension), OR
+- `compile_and_run(LARGE_NEG_PATTERN)` returns 0 instead of 1 (wrong arm taken)
+
+**Tests**: `cargo test --test e2e -- runtime_large_neg_const_emits_sxtw runtime_large_neg_const_pattern_not_folded milestone_175_neg_large_pattern_match_taken`

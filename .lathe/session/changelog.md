@@ -1,52 +1,71 @@
-# Changelog — Cycle 104
+# Changelog — Cycle 106
 
 ## Who This Helps
-- **William (researcher)**: Claim 58 closes the arithmetic-operator coverage gap in
-  the falsification suite. Previously Claim 57 only defended `add` and `mul` for
-  large-value non-folding; `sub` and `div` were tested only with tiny literals in
-  `fn main()` (no function parameters), which is a weaker adversarial pattern.
-  A folding interpreter that special-cased addition and multiplication but evaluated
-  subtraction or division at compile time would pass all prior claims. It cannot
-  pass Claim 58.
-- **Compiler Researchers**: The four basic arithmetic operators now have symmetric
-  adversarial coverage. The pattern (function-parameter input → assert instruction
-  emitted + assert result not folded) is consistently applied across `add`, `mul`,
-  `sub`, and `sdiv`.
+- **William (researcher)**: Programs with large negative integer constants (e.g.,
+  `-100000`) now produce correct results in comparisons and pattern matches. Without
+  this fix, `match x { -100000 => 1, _ => 0 }` where `x` is a parameter carrying
+  `-100000` would always take the wildcard arm — a silent correctness failure.
+- **Compiler Researchers**: The FLS §2.4.4.1 / §5.2 / §6.5.7 interaction (integer
+  literal materialization → pattern comparison → signed 64-bit cmp) is now
+  documented and tested. The specific sign-extension invariant is captured in Claim 59.
 
 ## Observed
-- Claim 57 (cycle 103) tested large-value `add` and `mul` with the parameter-pattern.
-- `runtime_sub_emits_sub_instruction` used `fn main() -> i32 { 10 - 3 }` — no
-  function parameters, smaller values. A constant-folding pass would fold this but
-  there's no negative assertion on the folded literal.
-- `runtime_div_emits_sdiv` used `fn main() -> i32 { 10 / 2 }` — also no parameters,
-  only one negative assertion (`!asm.contains("mov x0, #5")`), but still weaker than
-  the parameter-pattern used for Claim 57.
-- Division is the most expensive arithmetic operator and the one most tempting to
-  evaluate at compile time when inputs are statically known. It had the weakest
-  non-folding assertion.
+- Cycle 105 changelog noted: "Sign extension (`sxtw`) would be needed for correct
+  behavior in comparisons or right-shifts that observe the sign bit — pre-existing
+  gap, not introduced here."
+- The root cause: `emit_imm32` uses MOVZ+MOVK for values outside `[-65536, 65535]`,
+  which zero-extends the 32-bit two's complement bit pattern to 64 bits.
+  - `-100000` as i32 → bits = 0xFFFE7960.
+  - MOVZ+MOVK produces `x{reg} = 0x00000000FFFE7960` (zero-extended).
+  - A function parameter carrying `-100000` was loaded via `neg` (a 64-bit op),
+    giving `x{reg} = 0xFFFFFFFFFFFE7960` (sign-extended).
+  - `cmp` comparing these two 64-bit values returns NOT-EQUAL — wrong!
+- Affected paths: negative literal patterns (`Pat::NegLitInt`), range pattern bounds
+  (`LoadImm(*lo as i32)` in `lower.rs`), and const items with large negative values.
+- No existing tests covered large negative constants — all 1482 tests passed despite
+  the bug being present.
 
 ## Applied
-- **`tests/e2e.rs`**: Added two assembly inspection tests:
-  - `runtime_large_int_sub_emits_sub_not_folded`: `fn f(x: i32, y: i32) -> i32 { x - y }`
-    called as `f(2000000000, 1)`; asserts `sub` emitted, `bl` emitted, `1999999999` not present.
-  - `runtime_large_int_div_emits_sdiv_not_folded`: `fn f(x: i32, y: i32) -> i32 { x / y }`
-    called as `f(2000000000, 4)`; asserts `sdiv` emitted, `bl` emitted, `500000000` not present.
-- **`.lathe/claims.md`**: Added Claim 58 with full rationale.
-- **`.lathe/falsify.sh`**: Added Claim 58 adversarial check.
+- **`src/codegen.rs`**: In `emit_imm32`, added `sxtw x{reg}, w{reg}` after the
+  MOVZ+MOVK sequence. This sign-extends the 32-bit bit pattern in `w{reg}` to 64
+  bits. For positive large values (bit 31 of the 32-bit pattern = 0), `sxtw` is
+  a no-op. For negative large values, it corrects the sign.
+  - Cache-line note: the MOVZ+MOVK case grows from 2 instructions (8 bytes) to 3
+    (12 bytes), still within one 64-byte cache line.
+  - Removed the stale `FLS §6.23: AMBIGUOUS` comment that documented the bug.
+  - Updated the `Instr::LoadImm` comment to reflect the fix.
+- **`tests/e2e.rs`**: Added 10 M175 tests:
+  - 8 compile-and-run tests: negative pattern match (taken/not-taken), if-equality,
+    arithmetic, lt/gt comparisons, const item equality, range pattern.
+  - 2 assembly inspection tests: `sxtw` is present for large negative constants;
+    the match is not constant-folded.
+- **`.lathe/claims.md`**: Added Claim 59.
+- **`.lathe/falsify.sh`**: Added Claim 59 check.
 
 ## Validated
-- `cargo test --test e2e -- runtime_large_int_sub_emits_sub_not_folded runtime_large_int_div_emits_sdiv_not_folded` — 2 passed
-- `cargo test --quiet` — 1484 e2e, all pass; 211 unit; 30 fixture; 1 smoke; 0 failed
+- `cargo build` — clean
+- `cargo test --quiet` — 1492 passed; 0 failed (10 new M175 tests all pass)
 - `cargo clippy -- -D warnings` — clean
+- The new `milestone_175_neg_large_pattern_match_taken` test confirms the bug is
+  fixed: it would return 0 (wrong arm) without `sxtw`, returns 1 (correct) with it.
 
 ## FLS Notes
-- No new FLS ambiguities discovered. Claim 58 exercises the same FLS §6.1.2 and §6.5.5
-  constraints as Claim 57, applied to the remaining operators.
+- **FLS §2.4.4.1**: The spec specifies that integer literals have i32 type but is
+  silent on ARM64 encoding. The MOVZ+MOVK+sxtw sequence is an implementation choice
+  required by the 64-bit register model. No ambiguity in the spec — the behavior
+  follows from the type system.
+- **FLS §5.2**: Literal patterns must match values of the same bit pattern. The spec
+  assumes correct value representation — this fix ensures galvanic satisfies it.
+- **FLS §6.5.7**: Comparison operators are defined over the value, not the encoding.
+  galvanic's use of 64-bit `cmp` requires 64-bit-correct values.
 
 ## Next
-- The four basic arithmetic operators now have symmetric adversarial coverage.
-- Remaining potential gap: `rem` (`%`) with large values — `runtime_rem_emits_sdiv_and_msub`
-  uses inline literals (no parameter pattern). Could add Claim 59.
-- Or: M175 — `unsafe impl<T> where T: Bound` where-clause form (parser already
-  supports where clauses in impl blocks; would be a pure test milestone).
-- Or: §6.5.3 Negation operator for u32 (unsigned negation; FLS §6.5.3 is silent).
+- Claim 59 closes the large-value integer story (Claims 57+58+59 cover all four
+  arithmetic operators with large positives, and Claim 59 covers large negatives).
+- The `runtime_rem_emits_sdiv_and_msub` test still uses inline literals without
+  function parameters and lacks a negative "not folded" assertion. Claim 60 should
+  tighten this, mirroring the parameter-based pattern from Claims 57/58.
+- Or: look at the next FLS section after §6.23 — §6.5.3 Error Propagation (`?`
+  operator) is the most-used missing operator, but requires Result/Option types.
+  A simpler option: §4.1 additional integer types (i8, i16, u8, u16) since only
+  i32, u32, i64, usize are currently tested.

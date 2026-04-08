@@ -376,16 +376,16 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
 
         // FLS §2.4.4.1: Load integer immediate into virtual register.
         // ARM64: values in [-65536, 65535] assemble to a single MOVZ or MOVN.
-        // Larger 32-bit values require a MOVZ+MOVK pair (2 instructions, 8 bytes).
+        // Larger 32-bit values use MOVZ+MOVK+sxtw (3 instructions, 12 bytes).
         //
         // FLS §5.2: Negative literal patterns materialise their value via
         // LoadImm with a negative immediate.
         //
-        // FLS §6.23: AMBIGUOUS — galvanic uses 64-bit registers for i32 values;
-        // large constants loaded via MOVZ+MOVK are zero-extended (not sign-extended).
-        // Arithmetic on such values is correct for the low 32 bits.
+        // sxtw sign-extends the 32-bit bit pattern to 64 bits so that 64-bit
+        // comparisons (cmp x{reg}, ...) produce correct signed results for
+        // large negative i32 values (e.g., -100000 → 0xFFFFFFFFFFFE7960).
         //
-        // Cache-line note: small immediates = 4 bytes (1 slot); large = 8 bytes (2 slots).
+        // Cache-line note: small immediates = 4 bytes (1 slot); large = 12 bytes (3 slots).
         Instr::LoadImm(reg, n) => {
             emit_imm32(out, *reg as usize, *n)?;
         }
@@ -1470,19 +1470,31 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
 ///
 /// ARM64 encoding:
 /// - Values in [-65536, 65535]: single `mov` (GAS selects MOVZ or MOVN).
-/// - Other 32-bit values: MOVZ for low 16 bits + MOVK to insert high 16 bits.
+/// - Other 32-bit values: MOVZ+MOVK to load the 32-bit bit pattern, then `sxtw`
+///   to sign-extend from 32 bits to 64 bits.
+///
+/// The `sxtw` is required because galvanic uses 64-bit `x` registers for i32
+/// values. `cmp x{reg}, x{other}` is a signed 64-bit comparison; if `x{reg}`
+/// holds a zero-extended negative i32 (e.g., 0x00000000FFFE7960 for -100000),
+/// the comparison is wrong. `sxtw` produces the correct 64-bit value
+/// (e.g., 0xFFFFFFFFFFFE7960), matching values loaded via the `neg` instruction.
+///
+/// For positive large values (bit 31 of the 32-bit pattern = 0), `sxtw` is a
+/// no-op — it leaves the value unchanged.
 ///
 /// FLS §2.4.4.1: Integer literal materialization.
-/// FLS §6.23: AMBIGUOUS — values loaded with MOVZ+MOVK are zero-extended in
-/// the 64-bit register; sign extension is not performed.
-/// Cache-line note: small immediates = 1 instruction (4 bytes); large = 2 (8 bytes).
+/// FLS §5.2: Negative literal patterns also materialise via this path.
+/// Cache-line note: small immediates = 1 instruction (4 bytes);
+///   large = 2–3 instructions (8–12 bytes, fits within one cache line).
 fn emit_imm32(out: &mut String, reg: usize, n: i32) -> Result<(), CodegenError> {
     if (-65536..=65535).contains(&n) {
         // Single instruction: GAS selects MOVZ (positive) or MOVN (negative).
+        // MOVN already sign-extends, so no sxtw needed.
         writeln!(out, "    mov     x{reg}, #{n:<19} // FLS §2.4.4.1: load imm {n}")?;
     } else {
-        // Two-instruction MOVZ+MOVK for 32-bit values outside i16-adjacent range.
-        // Treat as 32-bit two's-complement bit pattern, split into two 16-bit halves.
+        // MOVZ+MOVK loads the 32-bit two's-complement bit pattern into the low 32
+        // bits of the register (upper 32 bits zero). Follow with sxtw to
+        // sign-extend to 64 bits so that 64-bit comparisons are correct.
         let bits = n as u32;
         let lo16 = bits & 0xFFFF;
         let hi16 = (bits >> 16) & 0xFFFF;
@@ -1493,6 +1505,9 @@ fn emit_imm32(out: &mut String, reg: usize, n: i32) -> Result<(), CodegenError> 
             writeln!(out, "    movz    x{reg}, #0x{lo16:04x}           // FLS §2.4.4.1: load imm {n} (lo16)")?;
             writeln!(out, "    movk    x{reg}, #0x{hi16:04x}, lsl #16  // FLS §2.4.4.1: load imm {n} (hi16)")?;
         }
+        // Sign-extend the 32-bit pattern in w{reg} to 64 bits in x{reg}.
+        // No-op for positive values; corrects sign for negative i32 values.
+        writeln!(out, "    sxtw    x{reg}, w{reg}               // sign-extend i32 to 64-bit (FLS §2.4.4.1)")?;
     }
     Ok(())
 }
