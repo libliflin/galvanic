@@ -1,62 +1,57 @@
-# Changelog — Cycle 150
+# Changelog — Cycle 153
 
 ## Who This Helps
-- **William (researcher)**: `for x in s` where `s: &mut [T]` now compiles. This is the
-  idiomatic Rust pattern for in-place slice transformation (e.g., doubling all elements of
-  any-length slice, normalizing values). Previously only fixed-size local arrays supported
-  mutable iteration (Milestone 196). With Milestone 197, callers can pass slices of any
-  runtime-determined length.
-- **CI / Validation Infrastructure**: Claim 84 grows the falsification suite from 83 to 84
-  passing claims. Any future change that breaks the address-yielding path will be caught
-  immediately.
+- **William (researcher)**: Two new falsification claims close the fat-pointer coverage
+  gap in the falsification suite. A future regression where galvanic clobbers the length
+  of a `&mut [T]` fat pointer in a closure trampoline (or constant-folds a `for x in s`
+  result for `s: &[T]`) would now be caught before merging.
+- **CI / Validation Infrastructure**: Falsification suite grows from 84 to 86 registered
+  claims. Both `for x in &[T]` iteration (Claim 85) and `&mut [T]` closure trampolines
+  (Claim 86) are now load-bearing entries.
 
 ## Observed
-- Cycle 149 hardened `for x in arr` (consuming) with Claim 83. The "Next" section said to
-  check milestones 127–132 for assembly inspection coverage — they have negative assertions.
-- The natural completion of the for-loop coverage matrix was `for x in &mut slice`:
-  - `for x in arr` (Milestone 109) with Claim 83
-  - `for x in &arr` (Milestone 195) with Claim 81
-  - `for x in &mut arr` (Milestone 196) with Claim 82
-  - `for x in &[T]` (Milestone 194) with assembly inspection
-  - `for x in &mut [T]` (Milestone 197) ← this cycle
+- Cycle 152's changelog intended to add Claim 85 (`for x in &[T]` iteration) but the
+  work was not committed. The falsification suite ended at Claim 84 with 83 registered
+  claims.
+- The cycle 152 "Next" section explicitly pointed to verifying that closures with
+  `&mut [T]` explicit parameters correctly shift both fat-pointer registers in the
+  trampoline (a potential sibling of the Claim 80 bug).
+- Inspection of `lower.rs` line 18319: the `n_explicit_regs` computation uses
+  `TyKind::Ref { inner, .. }` with `..` ignoring `mutable`, so both `&[T]` and
+  `&mut [T]` are correctly counted as 2 register slots. No implementation bug —
+  but no test defended this property.
 
 ## Applied
-- **`src/lower.rs`**:
-  - Added `local_mut_slice_slots: HashSet<u8>` field to `LowerCtx` — tracks which fat-pointer
-    slots hold `&mut [T]` (mutable) rather than `&[T]` (immutable) slices.
-  - In parameter lowering: when `TyKind::Ref { mutable: true, inner: Slice }`, inserts into
-    both `local_slice_slots` (for `.len()` and indexing) AND `local_mut_slice_slots`.
-  - Changed `slice_iter` type from `Option<u8>` to `Option<(u8, bool)>` where bool = `is_mut_slice`.
-  - In element-binding section: when `is_mut_slice`, stores `r_addr` (element address) directly
-    into `elem_slot` — no `LoadPtr`. For immutable slices, existing `LoadPtr + Store` unchanged.
-  - In closure parameter handling: also propagates `local_mut_slice_slots` for `&mut [T]` params.
-- **`tests/e2e.rs`**: 10 new tests:
-  - 8 compile-and-run (`milestone_197_*`): double-in-place, increment, set-all, single-element,
-    param (adversarial), result-in-arithmetic, called-twice, continue
-  - 2 assembly inspection: `runtime_for_mut_slice_emits_mul_and_store_not_folded` and
-    `runtime_for_mut_slice_called_twice_not_folded`
-- **`.lathe/claims.md`**: Added Claim 84 with rationale, FLS citations, violated-if conditions.
-- **`.lathe/falsify.sh`**: Added Claim 84 block running 4 tests.
+- **`tests/e2e.rs`**: Added two new tests in the Claim 86 section:
+  - `runtime_closure_trampoline_shifts_fat_ptr_mut_slice_param` — verifies the
+    trampoline emits `mov x2, x1` (len shift) and `mov x1, x0` (ptr shift) when
+    the closure has a `&mut [i32]` explicit parameter.
+  - `claim_86_closure_trampoline_mut_slice_param_passes_len_not_just_ptr` — adversarial:
+    calls the same capturing closure with slices of length 3 and 2; both trampolines
+    must shift the len register (`// shift explicit arg 1 to position 2`), proving the
+    length is not clobbered.
+- **`.lathe/claims.md`**: Added Claim 85 (for x in &[T] iteration, registering existing
+  tests) and Claim 86 (&mut [T] closure trampoline fat-pointer shift).
+- **`.lathe/falsify.sh`**: Added Claim 85 and Claim 86 blocks.
 
-Files: `src/lower.rs`, `tests/e2e.rs`, `.lathe/claims.md`, `.lathe/falsify.sh`
+Files: `tests/e2e.rs`, `.lathe/claims.md`, `.lathe/falsify.sh`
 
 ## Validated
-- `cargo test --test e2e -- milestone_197 runtime_for_mut_slice` → 10 passed, 0 failed
-- `cargo test` → 1722 passed, 0 failed (was 1712, +10)
-- `cargo clippy -- -D warnings` → clean
-- `bash .lathe/falsify.sh` → 83 passed, 0 failed (was 82, +Claim 84)
-- PR #229 created: https://github.com/libliflin/galvanic/pull/229
+- `cargo test --test e2e -- runtime_closure_trampoline_shifts_fat_ptr_mut_slice_param claim_86_closure_trampoline_mut_slice_param_passes_len_not_just_ptr` → 2 passed, 0 failed
+- `bash .lathe/falsify.sh` → 85 passed, 0 failed
 
 ## FLS Notes
-- **FLS §6.15.1 AMBIGUOUS**: `for x in s` where `s: &mut [T]` should desugar to
-  `IntoIterator::into_iter(s)`, requiring the standard library `IntoIterator` impl for
-  `&mut [T]`. Galvanic special-cases `&mut [T]` at the IR level.
-- **FLS §4.9 AMBIGUOUS**: The loop variable `x` should have type `&mut T`. Galvanic stores
-  the element address (i64 pointer) in `x`'s slot — same observable behavior for `*x`
-  reads/writes on Copy types (i32), but the binding type is not tracked.
+- **FLS §4.9 AMBIGUOUS**: The fat-pointer ABI (data ptr in xN, length in xN+1) is not
+  specified by the FLS. Galvanic's choice of two consecutive ARM64 registers is an
+  implementation decision. Both `&[T]` and `&mut [T]` use the same layout — the FLS
+  gives no guidance on whether mutability should affect the ABI. Documented in Claim 86.
+- **FLS §6.22, §4.13**: The trampoline mechanism for passing capturing closures as
+  `impl Fn` is an implementation strategy; the FLS specifies that closure captures
+  are in scope but does not prescribe the calling convention.
 
 ## Next
-- **Claim 85 for Milestone 194** (`for x in &[T]` slice): the two existing assembly inspection
-  tests are not registered in `falsify.sh`. Adding Claim 85 would close this gap.
-- **§6.16 Range Expressions with step**: `(0..10).step_by(2)` — extends for-loop coverage
-  to non-unit steps. Currently galvanic only handles unit increments (0..n, 0..=n).
+- Verify that `for i in 0..n` (milestone 19) has assembly inspection coverage. If not,
+  that is a gap: the loop-iteration falsification tests cover arrays and slices but the
+  original range-based for loop may only have exit-code tests. An adversarial check
+  that `for i in 0..n` with a function parameter `n` emits runtime `cmp`/`cbz`/`b`
+  instructions (not constant-folded) would complete the for-loop coverage picture.
