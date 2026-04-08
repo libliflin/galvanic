@@ -3406,6 +3406,21 @@ impl<'src> Parser<'src> {
                     }
                     self.expect(TokenKind::CloseBrace)?;
                     Ok(Pat::StructVariant { path: vec![first_span], fields: pat_fields })
+                } else if self.peek_kind() == TokenKind::At {
+                    // FLS §5.1.4: Binding pattern `name @ subpat`.
+                    //
+                    // The identifier is the binding name; `@` introduces the
+                    // sub-pattern that the matched value must also satisfy.
+                    //
+                    // Example: `n @ 1..=5` — binds the matched value to `n`
+                    // if it falls in the range [1, 5].
+                    //
+                    // FLS §5.1.4 AMBIGUOUS: The spec does not enumerate which
+                    // sub-pattern kinds are valid after `@`. Galvanic supports
+                    // literal and range sub-patterns; nested `@` is rejected.
+                    self.advance(); // consume `@`
+                    let subpat = self.parse_single_pattern()?;
+                    Ok(Pat::Bound { name: first_span, subpat: Box::new(subpat) })
                 } else {
                     Ok(Pat::Ident(first_span))
                 }

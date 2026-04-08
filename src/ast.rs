@@ -1636,6 +1636,35 @@ pub enum Pat {
     /// `LoadIndexed` + `Store` pairs (8N bytes); from an array literal init
     /// emits N stores (4N bytes).
     Slice(Vec<Pat>),
+
+    /// Binding pattern `name @ subpat`. FLS §5.1.4.
+    ///
+    /// Matches if `subpat` matches, and binds the matched value to `name`.
+    /// The name is in scope for the arm body and guard expression.
+    ///
+    /// FLS §5.1.4: "An identifier pattern matches any value and optionally
+    /// binds it to the identifier." The `@` notation extends this to additionally
+    /// test the bound value against a sub-pattern.
+    ///
+    /// Example: `match x { n @ 1..=5 => n * 2, _ => 0 }` — binds `x` to `n`
+    /// only when `x` is in range [1, 5], and uses `n` in the arm body.
+    ///
+    /// Supported sub-patterns: literal patterns (§5.2), range patterns (§5.1.9).
+    /// Nested `@` patterns and OR sub-patterns are not yet supported.
+    ///
+    /// FLS §5.1.4 AMBIGUOUS: The spec does not specify the order of evaluation
+    /// for `@` — whether the binding or the sub-pattern check occurs first.
+    /// Galvanic emits the sub-pattern check first (no binding on mismatch),
+    /// then installs the binding before the arm body.
+    ///
+    /// Cache-line note: adds 2 instructions (ldr + str = 8 bytes) for the
+    /// binding slot, plus the sub-pattern check instructions.
+    Bound {
+        /// The binding name (e.g., `n` in `n @ 1..=5`).
+        name: Span,
+        /// The sub-pattern to check (e.g., `1..=5`).
+        subpat: Box<Pat>,
+    },
 }
 
 // ── Operators ─────────────────────────────────────────────────────────────────
