@@ -560,6 +560,28 @@ pub enum Instr {
         src: u8,
     },
 
+    /// Truncate a register to 8 unsigned bits. Milestone 176.
+    ///
+    /// `TruncU8 { dst, src }` → `and w{dst}, w{src}, #255` on ARM64.
+    ///
+    /// Implements the FLS §6.23 wrapping semantics for `u8`: after arithmetic
+    /// the result is masked to the low 8 bits so that, e.g., 200_u8 + 100_u8
+    /// yields 44 (= 300 mod 256) rather than 300.
+    ///
+    /// Emitted at every u8 function return and explicit `return` expression.
+    /// Intermediate u8 values within a function are not truncated (deferred).
+    ///
+    /// FLS §4.1: "The unsigned integer types have a range of [0, 2^N - 1]."
+    /// FLS §6.23: Runtime wrapping semantics for non-const integer arithmetic.
+    ///
+    /// Cache-line note: one 4-byte ARM64 `and` instruction per truncation.
+    TruncU8 {
+        /// Destination register (receives low 8 bits of src).
+        dst: u8,
+        /// Source register (holds the value to truncate).
+        src: u8,
+    },
+
     /// Call a named function with arguments; result goes into a virtual register.
     ///
     /// `Call { dst, name, args, float_args }` emits (for each arg[i] ≠ i):
@@ -1506,7 +1528,7 @@ pub enum IrTy {
     /// Cache-line note: same register width as `IrTy::I32`.
     Bool,
 
-    /// Unsigned integer type — covers `u8`, `u16`, `u32`, `u64`, and `usize`.
+    /// Unsigned integer type — covers `u16`, `u32`, `u64`, and `usize`.
     ///
     /// FLS §4.1: Unsigned integer types. All map to a 64-bit ARM64 register
     /// (AArch64 is 64-bit; narrower types use the low bits). Key difference
@@ -1514,14 +1536,25 @@ pub enum IrTy {
     /// `lsr` (logical, zero-extending) rather than `asr` (arithmetic,
     /// sign-extending).
     ///
-    /// FLS §4.1 AMBIGUOUS: The spec does not specify the ABI layout for
-    /// unsigned types narrower than the register width. Galvanic stores them
-    /// in full 64-bit registers without truncation — correct for arithmetic
-    /// within the type's range, but will produce incorrect results for
-    /// overflow or bitwise operations on the upper bits. Truncation is deferred.
-    ///
     /// Cache-line note: same register width as `IrTy::I32`.
     U32,
+
+    /// The 8-bit unsigned integer type `u8`. FLS §4.1.
+    ///
+    /// Arithmetic uses the same instructions as `IrTy::U32` (unsigned division,
+    /// logical shift). The key difference: at function return and on explicit
+    /// `return` expressions, a `TruncU8` instruction masks the result to the
+    /// low 8 bits (`and w{r}, w{r}, #255`), implementing the FLS §6.23
+    /// wrapping semantics for u8.
+    ///
+    /// FLS §4.1: "The unsigned integer types ... have the same operations as
+    /// the signed integer types."
+    /// FLS §6.23: At runtime without overflow checks, integer overflow wraps
+    /// in two's complement. For u8, the modulus is 256.
+    ///
+    /// Cache-line note: same register width as `IrTy::U32`; one extra
+    /// `and` instruction at return boundaries.
+    U8,
 
     /// A function pointer type `fn(T1, ...) -> R`. FLS §4.9.
     ///

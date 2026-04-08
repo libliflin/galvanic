@@ -29784,3 +29784,130 @@ fn runtime_large_neg_const_pattern_not_folded() {
         "result must NOT be constant-folded to mov x0, #1; got:\n{asm}"
     );
 }
+
+// ── Milestone 176: u8 arithmetic with overflow wrapping ───────────────────────
+// FLS §4.1, §6.23: The u8 type wraps at 256. Galvanic emits `and w{r}, w{r},
+// #255` (TruncU8) at function return boundaries so that 200_u8 + 100_u8 = 44.
+
+/// Assembly inspection: u8 add emits a TruncU8 (`and`) at return.
+///
+/// Claim 64: u8 arithmetic emits runtime `add` and a `and` truncation —
+/// not a constant-folded result and not without truncation.
+#[test]
+fn milestone_176_u8_add_wraps() {
+    let Some(exit) = compile_and_run(
+        "fn add_u8(a: u8, b: u8) -> u8 { a + b }\nfn main() -> i32 { if add_u8(200, 100) == 44 { 1 } else { 0 } }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "200_u8 + 100_u8 should wrap to 44 (300 mod 256)");
+}
+
+#[test]
+fn milestone_176_u8_sub_wraps() {
+    let Some(exit) = compile_and_run(
+        "fn sub_u8(a: u8, b: u8) -> u8 { a - b }\nfn main() -> i32 { if sub_u8(10, 20) == 246 { 1 } else { 0 } }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "10_u8 - 20_u8 should wrap to 246 (= -10 mod 256)");
+}
+
+#[test]
+fn milestone_176_u8_identity() {
+    let Some(exit) = compile_and_run(
+        "fn id_u8(x: u8) -> u8 { x }\nfn main() -> i32 { id_u8(42) as i32 }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 42);
+}
+
+#[test]
+fn milestone_176_u8_in_arithmetic() {
+    let Some(exit) = compile_and_run(
+        "fn add_u8(a: u8, b: u8) -> u8 { a + b }\nfn main() -> i32 { add_u8(3, 5) as i32 }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 8);
+}
+
+#[test]
+fn milestone_176_u8_passed_to_fn() {
+    let Some(exit) = compile_and_run(
+        "fn double(x: u8) -> u8 { x + x }\nfn main() -> i32 { double(7) as i32 }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 14);
+}
+
+#[test]
+fn milestone_176_u8_passed_to_fn_wrap() {
+    let Some(exit) = compile_and_run(
+        "fn double(x: u8) -> u8 { x + x }\nfn main() -> i32 { if double(200) == 144 { 1 } else { 0 } }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "double(200): 200+200=400, 400 mod 256 = 144");
+}
+
+#[test]
+fn milestone_176_u8_called_twice() {
+    let Some(exit) = compile_and_run(
+        "fn add_u8(a: u8, b: u8) -> u8 { a + b }\nfn main() -> i32 { add_u8(1, 2) as i32 + add_u8(3, 4) as i32 }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 10);
+}
+
+#[test]
+fn milestone_176_u8_result_in_if() {
+    let Some(exit) = compile_and_run(
+        "fn add_u8(a: u8, b: u8) -> u8 { a + b }\nfn main() -> i32 { if add_u8(1, 1) == 2 { 7 } else { 0 } }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 7);
+}
+
+/// Assembly inspection: u8 add emits `and` for truncation, not a folded constant.
+///
+/// Adversarial: a function `add_u8(a: u8, b: u8) -> u8 { a + b }` with
+/// function-parameter operands cannot be constant-folded. The result must be
+/// masked with `and` to implement u8 wrapping semantics.
+#[test]
+fn runtime_u8_add_emits_and_truncation() {
+    let asm = compile_to_asm(
+        "fn add_u8(a: u8, b: u8) -> u8 { a + b }\nfn main() -> i32 { add_u8(200, 100) as i32 }\n",
+    );
+    assert!(
+        asm.contains("add"),
+        "u8 add must emit an add instruction; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("and") && asm.contains("#255"),
+        "u8 return must emit `and ... #255` for truncation; got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #44"),
+        "result must NOT be constant-folded to mov x0, #44; got:\n{asm}"
+    );
+}
+
+/// Assembly inspection: u8 truncation is not emitted for non-u8 functions.
+///
+/// This ensures the `and #255` is only emitted when needed (u8 return type),
+/// not for every function.
+#[test]
+fn runtime_u8_trunc_not_emitted_for_i32_return() {
+    let asm = compile_to_asm(
+        "fn add_i32(a: i32, b: i32) -> i32 { a + b }\nfn main() -> i32 { add_i32(1, 2) }\n",
+    );
+    assert!(
+        !asm.contains("and     w0, w0, #255"),
+        "i32-returning function must NOT emit u8 truncation; got:\n{asm}"
+    );
+}

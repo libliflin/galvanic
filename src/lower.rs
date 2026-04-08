@@ -3348,7 +3348,7 @@ fn lower_fn(
         // FLS §4.1: i32 parameters occupy one 64-bit register (x0–x7).
         // FLS §4.1: All primitive integer types and bool are supported as
         // parameters. Each uses one 64-bit ARM64 register (x0–x7).
-        if !matches!(param_ty, IrTy::I32 | IrTy::Bool | IrTy::U32 | IrTy::FnPtr) {
+        if !matches!(param_ty, IrTy::I32 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::FnPtr) {
             return Err(LowerError::Unsupported(
                 "parameter type other than i32/bool/u32/i64/u64/usize/isize/i8/i16/u8/u16/fn ptr/f64/f32".into(),
             ));
@@ -3899,11 +3899,14 @@ fn lower_ty(
                 // On ARM64, bool and i32 share the same register layout (0/1 as i64),
                 // but the semantics of `!` differ.
                 "bool" => Ok(IrTy::Bool),
-                // FLS §4.1: Unsigned integer types. u8/u16/u32/u64/usize all
+                // FLS §4.1: The u8 type. Arithmetic uses the same unsigned ops
+                // as U32 (udiv, lsr). At return boundaries, TruncU8 masks the
+                // result to 8 bits for correct FLS §6.23 overflow wrapping.
+                "u8" => Ok(IrTy::U8),
+                // FLS §4.1: Unsigned integer types. u16/u32/u64/usize all
                 // use 64-bit registers on ARM64. Unsigned division uses `udiv`
                 // and unsigned right shift uses `lsr` (see IrBinOp::UDiv/UShr).
-                // Width truncation for narrower types is deferred.
-                "u8" | "u16" | "u32" | "u64" | "usize" => Ok(IrTy::U32),
+                "u16" | "u32" | "u64" | "usize" => Ok(IrTy::U32),
                 // FLS §2.4.5: The `char` type is a Unicode scalar value — a u32
                 // in the range [0, 0x10FFFF]. On ARM64, char is stored in a
                 // 64-bit general-purpose register identical to `u32`.
@@ -6072,6 +6075,13 @@ impl<'src> LowerCtx<'src> {
     /// FLS §6.1.2:37–45: Non-const function bodies must emit runtime code.
     fn lower_block(&mut self, block: &Block, ret_ty: &IrTy) -> Result<(), LowerError> {
         let ret_val = self.lower_block_to_value(block, ret_ty)?;
+        // FLS §4.1, §6.23: u8 arithmetic wraps at 256. Mask the tail return
+        // value to 8 bits so that e.g. 200_u8 + 100_u8 yields 44, not 300.
+        // Early `return` expressions are handled in ExprKind::Return.
+        if *ret_ty == IrTy::U8
+            && let IrValue::Reg(r) = ret_val {
+                self.instrs.push(Instr::TruncU8 { dst: r, src: r });
+        }
         self.instrs.push(Instr::Ret(ret_val));
         Ok(())
     }
@@ -9609,11 +9619,10 @@ impl<'src> LowerCtx<'src> {
                         self.instrs.push(Instr::LoadImm(r, n));
                         Ok(IrValue::Reg(r))
                     }
-                    // FLS §4.1: Unsigned integer literal. Reuses LoadImm(i32)
-                    // so the value must fit in i32 range at this milestone.
-                    // Values in (i32::MAX, u32::MAX] require MOVZ+MOVK and are
-                    // deferred (FLS §2.4.4.1 AMBIGUOUS: spec does not specify
-                    // encoding limits for large unsigned literals).
+                    // FLS §4.1: Unsigned integer literal (u16/u32/u64/usize).
+                    // Reuses LoadImm(i32) so the value must fit in i32 range at
+                    // this milestone. Values in (i32::MAX, u32::MAX] require
+                    // MOVZ+MOVK and are deferred (FLS §2.4.4.1 AMBIGUOUS).
                     IrTy::U32 => {
                         if *n > i32::MAX as u128 {
                             return Err(LowerError::Unsupported(format!(
@@ -9624,6 +9633,19 @@ impl<'src> LowerCtx<'src> {
                         let n = *n as i32;
                         let r = self.alloc_reg()?;
                         self.instrs.push(Instr::LoadImm(r, n));
+                        Ok(IrValue::Reg(r))
+                    }
+                    // FLS §4.1: u8 literal. Values 0..=255 fit in a LoadImm.
+                    // Values > 255 are a compile-time error (FLS §6.23: overflow
+                    // in const context is an error, not wrapping).
+                    IrTy::U8 => {
+                        if *n > 255 {
+                            return Err(LowerError::Unsupported(format!(
+                                "u8 literal {n} out of range 0..=255"
+                            )));
+                        }
+                        let r = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(r, *n as i32));
                         Ok(IrValue::Reg(r))
                     }
                     _ => Err(LowerError::Unsupported("integer literal with non-integer type".into())),
@@ -10038,12 +10060,12 @@ impl<'src> LowerCtx<'src> {
                         }
                         Ok(acc_val)
                     }
-                    // FLS §4.1: Unsigned integer arithmetic. Same spill/reload
-                    // logic as signed, but division uses `udiv` (IrBinOp::UDiv)
-                    // and right shift uses `lsr` (IrBinOp::UShr) for correct
-                    // unsigned semantics. Add/sub/mul/bitwise are identical to
-                    // signed at the hardware level on ARM64.
-                    IrTy::U32 => {
+                    // FLS §4.1: Unsigned integer arithmetic (u8, u16, u32, u64).
+                    // Same spill/reload logic as signed, but division uses `udiv`
+                    // (IrBinOp::UDiv) and right shift uses `lsr` (IrBinOp::UShr)
+                    // for correct unsigned semantics. For u8, TruncU8 is emitted
+                    // at return boundaries (not per-operation) per FLS §6.23.
+                    IrTy::U32 | IrTy::U8 => {
                         let mut acc_val = self.lower_expr(leftmost, ret_ty)?;
 
                         for (step_op, rhs_expr) in &spine {
@@ -10227,7 +10249,7 @@ impl<'src> LowerCtx<'src> {
                     //
                     // Cache-line note: the phi slot is one 8-byte stack entry;
                     // read exactly once after the if expression completes.
-                    IrTy::I32 | IrTy::Bool | IrTy::U32 | IrTy::FnPtr => {
+                    IrTy::I32 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::FnPtr => {
                         let else_label = self.alloc_label();
                         let end_label = self.alloc_label();
 
@@ -11012,7 +11034,7 @@ impl<'src> LowerCtx<'src> {
                 }
 
                 match ret_ty {
-                    IrTy::I32 | IrTy::Bool | IrTy::U32 | IrTy::FnPtr => {
+                    IrTy::I32 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::FnPtr => {
                         let phi_slot = self.alloc_slot()?;
 
                         // Then branch.
@@ -11261,7 +11283,7 @@ impl<'src> LowerCtx<'src> {
                 let exit_label = self.alloc_label();
 
                 match ret_ty {
-                    IrTy::I32 | IrTy::Bool | IrTy::U32 | IrTy::FnPtr => {
+                    IrTy::I32 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::FnPtr => {
                         let phi_slot = self.alloc_slot()?;
 
                         for arm in checked_arms {
@@ -15496,6 +15518,11 @@ impl<'src> LowerCtx<'src> {
                     Some(val) => {
                         let v = self.lower_expr(val, &fn_ret_ty)?;
                         let r = self.val_to_reg(v)?;
+                        // FLS §4.1, §6.23: u8 return values must be masked to
+                        // 8 bits for correct overflow wrapping semantics.
+                        if fn_ret_ty == IrTy::U8 {
+                            self.instrs.push(Instr::TruncU8 { dst: r, src: r });
+                        }
                         IrValue::Reg(r)
                     }
                     None => IrValue::Unit,
