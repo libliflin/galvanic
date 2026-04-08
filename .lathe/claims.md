@@ -407,3 +407,40 @@ the call site.
 - contains `mov x0, #25` (result constant-folded).
 
 **Test**: `cargo test --test e2e -- milestone_147_dyn_trait_asm_inspection`
+
+---
+
+## Claim 17: When two concrete types are used behind the same dyn Trait parameter, BOTH vtables must be emitted
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: Galvanic's vtable accumulation pass (`pending_vtables`) must register ALL
+(trait, concrete_type) pairs encountered across all call sites — not just the first.
+When `print_area(&dyn Shape)` is called with both `Circle` and `Square`, the assembly
+must contain both `vtable_Shape_Circle` AND `vtable_Shape_Square` in `.rodata`.
+
+Claim 16 only tests a single concrete type. This claim extends coverage to the
+multi-type case, which exercises a different code path: the accumulation loop that
+deduplicates vtable requirements must correctly handle multiple entries without
+dropping any after the first.
+
+**Attack vector**: The `pending_vtables` accumulator could correctly register the
+first (trait, concrete_type) pair but silently discard subsequent pairs — e.g., via
+an off-by-one in a deduplication check, an early `return`, or a shadowed `insert`
+call. The single-type test (Claim 16) would still pass. The compile-and-run test
+(`milestone_147_dyn_trait_two_concrete_types`) might still produce the correct exit
+code if the second vtable's shim happened to read correct memory by coincidence —
+but the label would be absent, breaking any other call context.
+
+Furthermore, neither method result must be constant-folded:
+- Circle { r: 3 }.area() = 9 → must NOT see `mov x0, #9`
+- Square { side: 4 }.area() = 16 → must NOT see `mov x0, #16`
+
+**Violated if**: `compile_to_asm(...)` for `print_area(&c) + print_area(&sq)` with
+two concrete types returns assembly that:
+- lacks `vtable_Shape_Circle` (first vtable absent), OR
+- lacks `vtable_Shape_Square` (second vtable absent), OR
+- lacks `blr` (no indirect dispatch), OR
+- contains `mov x0, #9` or `mov x0, #16` (either method result was constant-folded).
+
+**Test**: `cargo test --test e2e -- runtime_dyn_trait_two_concrete_types_both_vtables_emitted`

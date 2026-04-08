@@ -314,6 +314,22 @@ else
     pass "Claim 16: dyn Trait dispatch uses vtable indirection, not constant folding"
 fi
 
+# ── Claim 17: Two concrete types behind dyn Trait both emit vtable labels ─────
+# Tests that when two different concrete types are passed to the same dyn Trait
+# parameter at different call sites, BOTH vtables are emitted in the assembly.
+# Claim 16 only tests a single concrete type. This guards the pending_vtables
+# accumulation loop against a regression where the second (trait, concrete_type)
+# pair is silently dropped — leaving that type's dispatch broken while Claim 16
+# and the two_concrete_types compile-and-run test still pass.
+# References: claims.md Claim 17.
+
+echo "--- Claim 17: two concrete types behind dyn Trait both emit vtable labels ---"
+if cargo test --test e2e --quiet -- runtime_dyn_trait_two_concrete_types_both_vtables_emitted 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 17" "runtime_dyn_trait_two_concrete_types_both_vtables_emitted FAILED — second concrete type vtable may not be emitted, or a method result was constant-folded"
+else
+    pass "Claim 17: both concrete type vtables emitted, no constant folding"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""
