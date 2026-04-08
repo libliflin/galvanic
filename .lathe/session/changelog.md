@@ -1,47 +1,39 @@
-# Changelog — Cycle 112
+# Changelog — Cycle 114
 
 ## Who This Helps
-- **William (researcher)**: Claim 64's falsification coverage was limited to
-  `add`. A regression where `TruncU8` stops being emitted for `mul` (but not
-  `add`) would have slipped through the falsification suite silently. Now the
-  fence prevents operator-specific regressions in u8 wrapping.
-- **Compiler Researchers**: The assembly inspection test for `mul_u8` provides
-  the same two-layer guarantee that `add_u8` has: runtime codegen (mul instruction
-  present) AND wrapping semantics (and #255 present).
+- **CI / Validation Infrastructure**: The e2e job was failing due to timeout,
+  blocking all merges. This restores CI health.
+- **William (researcher)**: A broken CI gate means nothing can merge. Fixing it
+  is the prerequisite for all forward progress.
 
 ## Observed
-- Claim 64 in `claims.md` described the violation condition for `add` and `sub`
-  but not `mul`. The falsify.sh check only ran `runtime_u8_add_emits_and_truncation`
-  — if `TruncU8` was disabled for `mul` while remaining for `add`, the claim
-  would report OK but `15_u8 * 20_u8` would return 300 instead of 44.
-- `milestone_176` had `u8_add_wraps` and `u8_sub_wraps` compile-and-run tests
-  but no `u8_mul_wraps` test and no assembly inspection for mul.
-- The lower.rs handler at line 10068 (`IrTy::U32 | IrTy::U8`) uses `IrBinOp::Mul`
-  for u8 mul. TruncU8 is emitted at the return boundary. The code is correct —
-  but the fence wasn't watching it.
+- Previous CI run (#24142834053) showed: `e2e: fail` with annotation
+  "The job has exceeded the maximum execution time of 10m0s."
+- The e2e job runs `cargo test --test e2e` on ubuntu-latest with the ARM64
+  cross toolchain + QEMU. Each compile-and-run test spawns cross-assembler,
+  cross-linker, and qemu-aarch64.
+- The test suite has grown to 1524 e2e tests (up from ~1400 in recent cycles),
+  and the cumulative subprocess overhead now exceeds 10 minutes on CI runners.
+- Falsification: all 65 claims pass locally. Tests: 1766 passed, 0 failed locally.
+  The timeout is a CI capacity issue, not a correctness issue.
 
 ## Applied
-- **`tests/e2e.rs`**: Added two tests:
-  - `milestone_176_u8_mul_wraps` (compile-and-run): verifies `mul_u8(15, 20) == 44`
-    (300 mod 256 = 44)
-  - `runtime_u8_mul_emits_and_truncation` (assembly inspection): verifies `mul`
-    instruction emitted, `and ... #255` emitted, and result NOT constant-folded
-    to `mov x0, #44`
-- **`.lathe/claims.md`**: Extended Claim 64 to explicitly document the `mul`
-  violation condition alongside `add`. Added `mul`-specific falsify conditions.
-- **`.lathe/falsify.sh`**: Extended Claim 64 check to include
-  `runtime_u8_mul_emits_and_truncation` and `milestone_176_u8_mul_wraps`.
+- **`.github/workflows/ci.yml`**: Increased `timeout-minutes` for the `e2e` job
+  from 10 to 20.
 
 ## Validated
-- `cargo test` — 1513 passed (was 1511); 0 failed
+- `cargo build` — clean (no source changes)
+- `cargo test` — 1766 passed, 0 failed
 - `cargo clippy -- -D warnings` — clean
-- `bash .lathe/falsify.sh` — 63 passed, 0 failed (Claim 64 now runs 4 tests)
 
 ## FLS Notes
-- No new ambiguities. The existing §4.1 / §6.23 notes apply to mul equally:
-  the spec requires all u8 arithmetic to wrap at 256 at runtime.
+- None — no FLS sections touched this cycle.
 
 ## Next
-- i8 support (sign-extending `sxtb` at return boundaries instead of `and #255`).
-- u8 compound assignment (`*=` for u8) is also unguarded.
-- u16 / i16 are similarly unguarded in the falsification suite.
+- Once CI passes, the natural next step is **u16/i16 narrow integer types**.
+  Both currently map to I32/U32 without wrapping, the same gap that u8/i8 had.
+  A u16 function returning 40000_u16 + 30000_u16 would return 70000 instead
+  of 4464 — wrong. The u8/i8 pattern (TruncU8/SextI8 at return boundaries)
+  is the template.
+- Alternatively: u8/i8 compound assignment (`+=`, `*=`) is unguarded —
+  `let mut x: u8 = 200; x += 100;` would not wrap correctly.
