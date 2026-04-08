@@ -27249,3 +27249,249 @@ fn main() -> i32 {
         "default chain must NOT constant-fold to #12; got:\n{asm}"
     );
 }
+
+// ── Milestone 166: Self::AssocType in method signatures — FLS §10.2 ──────────
+//
+// Associated types may appear as `Self::Item` in method return types and
+// parameter types. When the impl provides `type Item = i32;`, galvanic
+// resolves `Self::Item` to `IrTy::I32` via the per-impl type alias map.
+// When the trait provides a default (`type Item = i32;`) and the impl omits
+// `type Item`, galvanic falls back to the trait's default.
+//
+// FLS §10.2: "Each use of an associated type is substituted with the concrete
+// type provided in the implementation." Galvanic also handles trait-level
+// defaults per FLS §10.2: "If an associated type has a default, the default
+// is used when the implementation does not provide a definition."
+
+#[test]
+fn milestone_166_self_assoc_type_in_return() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Wrapper {
+    type Output;
+    fn value(&self) -> Self::Output;
+}
+struct IntWrap { x: i32 }
+impl Wrapper for IntWrap {
+    type Output = i32;
+    fn value(&self) -> Self::Output { self.x }
+}
+fn main() -> i32 {
+    let w = IntWrap { x: 7 };
+    w.value()
+}
+"#) else { return; };
+    assert_eq!(exit_code, 7);
+}
+
+#[test]
+fn milestone_166_self_assoc_type_in_param() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Scalable {
+    type Factor;
+    fn scale(&self, f: Self::Factor) -> i32;
+}
+struct Val { n: i32 }
+impl Scalable for Val {
+    type Factor = i32;
+    fn scale(&self, f: Self::Factor) -> i32 { self.n * f }
+}
+fn main() -> i32 {
+    let v = Val { n: 3 };
+    v.scale(4)
+}
+"#) else { return; };
+    assert_eq!(exit_code, 12);
+}
+
+#[test]
+fn milestone_166_self_assoc_type_result_in_arithmetic() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Provider {
+    type Item;
+    fn get(&self) -> Self::Item;
+}
+struct Src { val: i32 }
+impl Provider for Src {
+    type Item = i32;
+    fn get(&self) -> Self::Item { self.val }
+}
+fn double(s: Src) -> i32 { s.get() * 2 }
+fn main() -> i32 {
+    let s = Src { val: 5 };
+    double(s)
+}
+"#) else { return; };
+    assert_eq!(exit_code, 10);
+}
+
+#[test]
+fn milestone_166_self_assoc_type_two_impls() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Measure {
+    type Unit;
+    fn measure(&self) -> Self::Unit;
+}
+struct Meters { val: i32 }
+struct Feet { val: i32 }
+impl Measure for Meters {
+    type Unit = i32;
+    fn measure(&self) -> Self::Unit { self.val }
+}
+impl Measure for Feet {
+    type Unit = i32;
+    fn measure(&self) -> Self::Unit { self.val * 3 }
+}
+fn main() -> i32 {
+    let m = Meters { val: 2 };
+    let f = Feet { val: 1 };
+    m.measure() + f.measure()
+}
+"#) else { return; };
+    assert_eq!(exit_code, 5);
+}
+
+#[test]
+fn milestone_166_self_assoc_type_on_parameter() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Getter {
+    type Out;
+    fn get(&self) -> Self::Out;
+}
+struct Box1 { x: i32 }
+impl Getter for Box1 {
+    type Out = i32;
+    fn get(&self) -> Self::Out { self.x }
+}
+fn extract(b: Box1) -> i32 { b.get() }
+fn main() -> i32 {
+    extract(Box1 { x: 9 })
+}
+"#) else { return; };
+    assert_eq!(exit_code, 9);
+}
+
+#[test]
+fn milestone_166_self_assoc_type_result_in_if() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Flag {
+    type Val;
+    fn flag(&self) -> Self::Val;
+}
+struct Toggle { on: i32 }
+impl Flag for Toggle {
+    type Val = i32;
+    fn flag(&self) -> Self::Val { self.on }
+}
+fn main() -> i32 {
+    let t = Toggle { on: 1 };
+    if t.flag() == 1 { 11 } else { 0 }
+}
+"#) else { return; };
+    assert_eq!(exit_code, 11);
+}
+
+#[test]
+fn milestone_166_assoc_type_default_used() {
+    // Trait provides `type Item = i32;` as a default.
+    // Impl omits `type Item` — should fall back to default.
+    let Some(exit_code) = compile_and_run(r#"
+trait Container {
+    type Item = i32;
+    fn get(&self) -> i32;
+}
+struct IntBox { val: i32 }
+impl Container for IntBox {
+    fn get(&self) -> i32 { self.val }
+}
+fn main() -> i32 {
+    let b = IntBox { val: 6 };
+    b.get()
+}
+"#) else { return; };
+    assert_eq!(exit_code, 6);
+}
+
+#[test]
+fn milestone_166_self_assoc_type_called_twice() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Src {
+    type T;
+    fn val(&self) -> Self::T;
+}
+struct N { x: i32 }
+impl Src for N {
+    type T = i32;
+    fn val(&self) -> Self::T { self.x }
+}
+fn sum_twice(n: N) -> i32 { n.val() + n.val() }
+fn main() -> i32 {
+    sum_twice(N { x: 4 })
+}
+"#) else { return; };
+    assert_eq!(exit_code, 8);
+}
+
+// Assembly inspection: Self::AssocType in return position emits runtime call
+// (not constant-folded). Both make_wrap and IntWrap__value must be bl'd.
+#[test]
+fn runtime_self_assoc_type_return_emits_bl_not_folded() {
+    let src = r#"
+trait Wrapper {
+    type Output;
+    fn value(&self) -> Self::Output;
+}
+struct IntWrap { x: i32 }
+impl Wrapper for IntWrap {
+    type Output = i32;
+    fn value(&self) -> Self::Output { self.x }
+}
+fn make_wrap(n: i32) -> IntWrap { IntWrap { x: n } }
+fn main() -> i32 {
+    let w = make_wrap(7);
+    w.value()
+}
+"#;
+    let asm = compile_to_asm(src);
+    // make_wrap must be called at runtime — proves the struct is not constant-folded.
+    assert!(
+        asm.contains("bl      make_wrap"),
+        "make_wrap must be called at runtime; got:\n{asm}"
+    );
+    // Method call must emit a bl to the mangled name — proves dispatch is not inlined.
+    assert!(
+        asm.contains("bl      IntWrap__value"),
+        "Self::Output return type must emit bl to IntWrap__value; got:\n{asm}"
+    );
+}
+
+// Assembly inspection: Self::AssocType in parameter position emits runtime mul.
+#[test]
+fn runtime_self_assoc_type_param_emits_mul_not_folded() {
+    let src = r#"
+trait Scalable {
+    type Factor;
+    fn scale(&self, f: Self::Factor) -> i32;
+}
+struct Val { n: i32 }
+impl Scalable for Val {
+    type Factor = i32;
+    fn scale(&self, f: Self::Factor) -> i32 { self.n * f }
+}
+fn make_val(n: i32) -> Val { Val { n } }
+fn main() -> i32 {
+    let v = make_val(3);
+    v.scale(4)
+}
+"#;
+    let asm = compile_to_asm(src);
+    // scale method must emit a mul.
+    assert!(
+        asm.contains("mul"),
+        "Self::Factor param type must emit mul in Val__scale; got:\n{asm}"
+    );
+    // Must not fold 3*4=12.
+    assert!(
+        !asm.contains("mov     x0, #12"),
+        "Self::Factor param type must NOT constant-fold to #12; got:\n{asm}"
+    );
+}

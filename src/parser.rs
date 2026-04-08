@@ -1689,6 +1689,35 @@ impl<'src> Parser<'src> {
                 Ok(Ty { kind: TyKind::DynTrait(trait_span), span: start.to(trait_span) })
             }
 
+            // `Self` or `Self::AssocType` — FLS §10.2: In trait method signatures and
+            // impl method signatures, `Self` refers to the implementing type. `Self::Item`
+            // is an associated type projection. Galvanic represents these as a two-segment
+            // `TyKind::Path(["Self", "Item"])` so that `lower_ty` can resolve them via
+            // the per-impl type alias registry (key `"Self::Item"` → concrete IrTy).
+            //
+            // FLS §10.2: AMBIGUOUS — the spec does not fully specify how `Self::X`
+            // projections are resolved when `Self` appears in a default method body or
+            // a trait method signature. Galvanic resolves `Self::X` to the concrete type
+            // registered in the impl block (or the trait's default) at codegen time.
+            TokenKind::KwSelfUpper => {
+                let self_span = self.current_span();
+                self.advance(); // consume `Self`
+                let mut segments = vec![self_span];
+                // Optional `::AssocTypeName`.
+                if self.peek_kind() == TokenKind::ColonColon {
+                    self.advance(); // consume `::`
+                    if self.peek_kind() == TokenKind::Ident {
+                        segments.push(self.current_span());
+                        self.advance(); // consume associated type name
+                    }
+                    // If `::`  is not followed by an ident, stop — leave the `::` unconsumed
+                    // (the caller handles the error). Since we already consumed `::`, push
+                    // nothing and let `lower_ty` handle the bare `Self` path.
+                }
+                let end = *segments.last().unwrap();
+                Ok(Ty { kind: TyKind::Path(segments), span: start.to(end) })
+            }
+
             TokenKind::KwImpl => {
                 self.advance(); // consume `impl`
                 // Expect a trait name identifier.

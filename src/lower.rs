@@ -1861,6 +1861,65 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                 // FLS §13: Trait method implementations lower identically to
                 // inherent methods — static dispatch uses the same mangling.
                 let type_name = impl_def.ty.text(source);
+
+                // FLS §10.2: Build a per-impl type alias map that adds `Self::X` →
+                // concrete IrTy for each associated type in this impl block. This allows
+                // method signatures that use `Self::Item` as a return or parameter type
+                // to be resolved correctly during `lower_fn`.
+                //
+                // Strategy (from the comment at line 1044–1047): `"Self::Item"` must NOT
+                // be added globally (different impls have different `Self`). Instead it is
+                // built fresh for each impl block here and passed as `&impl_type_aliases`
+                // to `lower_fn`.
+                //
+                // Also handles FLS §10.2 associated type defaults: if the trait provides
+                // `type Item = T;` and the impl block omits it, the default is used.
+                //
+                // Cache-line note: cloning is O(N) in the number of type alias entries —
+                // acceptable since this is compile-time, not a runtime hot path.
+                let mut impl_type_aliases = type_alias_irtys.clone();
+                // 1. Add Self::X for each explicitly provided associated type.
+                for at in &impl_def.assoc_types {
+                    if let Some(ty) = &at.ty {
+                        let at_name = at.name.text(source);
+                        let self_key = format!("Self::{at_name}");
+                        if let Ok(irt) = lower_ty(ty, source, &type_alias_irtys) {
+                            impl_type_aliases.insert(self_key, irt);
+                        }
+                    }
+                }
+                // 2. For trait impls, also pull in trait-level associated type defaults
+                //    for any associated type that the impl does not override.
+                //    FLS §10.2: "If an associated type has a default, the default is used
+                //    when the implementation does not provide a definition."
+                if let Some(trait_span) = impl_def.trait_name {
+                    let trait_name = trait_span.text(source);
+                    if let Some(td) = trait_defs_map.get(trait_name) {
+                        let impl_at_names: std::collections::HashSet<&str> = impl_def.assoc_types
+                            .iter()
+                            .map(|at| at.name.text(source))
+                            .collect();
+                        for default_at in &td.assoc_types {
+                            if default_at.ty.is_none() {
+                                continue; // abstract — no default
+                            }
+                            let at_name = default_at.name.text(source);
+                            if impl_at_names.contains(at_name) {
+                                continue; // impl overrides it — already handled above
+                            }
+                            if let Some(ty) = &default_at.ty {
+                                let self_key = format!("Self::{at_name}");
+                                let type_key = format!("{type_name}::{at_name}");
+                                if let Ok(irt) = lower_ty(ty, source, &type_alias_irtys) {
+                                    impl_type_aliases.insert(self_key, irt);
+                                    // Also register TypeName::X for external call sites.
+                                    impl_type_aliases.entry(type_key).or_insert(irt);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // FLS §12.1: If the impl block itself has generic params (`impl<T>`),
                 // all methods in it are monomorphized on demand — skip the whole block
                 // here. The post-pass monomorphization loop handles them.
@@ -1916,7 +1975,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         &struct_generic_field_types,
                         &struct_field_offsets,
                         &struct_sizes,
-                        &type_alias_irtys,
+                        &impl_type_aliases,
                         &struct_float_field_types,
                         &generic_fn_param_counts,
                         &HashMap::new(),
@@ -1991,7 +2050,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                                 &struct_generic_field_types,
                                 &struct_field_offsets,
                                 &struct_sizes,
-                                &type_alias_irtys,
+                                &impl_type_aliases,
                                 &struct_float_field_types,
                                 &generic_fn_param_counts,
                                 &HashMap::new(),
