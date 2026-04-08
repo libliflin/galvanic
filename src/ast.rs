@@ -374,6 +374,13 @@ pub struct AssocTypeDef {
 pub struct ImplDef {
     /// The type being implemented (always the struct/enum name).
     pub ty: Span,
+    /// Generic type parameters declared on the impl block itself.
+    ///
+    /// FLS §12.1: An impl block may declare type parameters in angle brackets
+    /// after the `impl` keyword: `impl<T> Pair<T> { ... }`. Each span names
+    /// one type parameter (e.g. `T`). These parameters are substituted with
+    /// concrete types when the impl's methods are monomorphized.
+    pub generic_params: Vec<Span>,
     /// The trait being implemented, if any.
     ///
     /// `None` for inherent impls (`impl Foo { ... }`).

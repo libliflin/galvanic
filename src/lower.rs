@@ -27,7 +27,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{BinOp, Block, Expr, ExprKind, ItemKind, ParamKind, Pat, SelfKind, SourceFile, Stmt, StmtKind, StructKind, TyKind};
+use crate::ast::{BinOp, Block, Expr, ExprKind, ItemKind, ParamKind, Pat, SelfKind, Span, SourceFile, Stmt, StmtKind, StructKind, TyKind};
 use crate::ir::{F32BinOp, F64BinOp, FCmpOp, IrBinOp, Instr, IrFn, IrTy, IrValue, Module};
 
 /// Enum variant registry: maps enum name → (variant name → (discriminant, field_names)).
@@ -1057,15 +1057,26 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     // generic free functions. The key is the base-mangled name `TypeName__method_name`.
     //
     // Cache-line note: built once; read-only during lowering. Not on any hot path.
-    let mut generic_method_defs: HashMap<String, (&crate::ast::FnDef, String)> = HashMap::new();
+    // FLS §12.1: Generic method registry. Key = base-mangled name
+    // (`TypeName__method_name`). Value = (fn_def, type_name, impl_generic_params).
+    // `impl_generic_params` holds the type params declared on the impl block itself
+    // (`impl<T>`) — the method may have 0 own generic params but still need
+    // monomorphization because the impl block provides the type parameter.
+    let mut generic_method_defs: HashMap<String, (&crate::ast::FnDef, String, Vec<Span>)> = HashMap::new();
     for item in &src.items {
         if let ItemKind::Impl(impl_def) = &item.kind {
             let type_name = impl_def.ty.text(source).to_owned();
             for method in &impl_def.methods {
-                if !method.generic_params.is_empty() {
+                // A method needs monomorphization if either:
+                // (a) the method itself has generic params (`fn apply<T>(...)`), or
+                // (b) the enclosing impl block has generic params (`impl<T> Pair<T>`).
+                if !method.generic_params.is_empty() || !impl_def.generic_params.is_empty() {
                     let method_name = method.name.text(source);
                     let base_mangled = format!("{type_name}__{method_name}");
-                    generic_method_defs.insert(base_mangled, (method.as_ref(), type_name.clone()));
+                    generic_method_defs.insert(
+                        base_mangled,
+                        (method.as_ref(), type_name.clone(), impl_def.generic_params.clone()),
+                    );
                 }
             }
         }
@@ -1271,9 +1282,11 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         .collect();
     // FLS §12.1: Also register generic methods with key `TypeName__method_name`.
     // This allows the method-call lowering path to apply the same mangle logic
-    // as free function calls.
-    for (base_mangled, (fn_def, _)) in &generic_method_defs {
-        generic_fn_param_counts.insert(base_mangled.clone(), fn_def.generic_params.len());
+    // as free function calls. The total param count is the method's own params
+    // plus any type params declared on the enclosing impl block.
+    for (base_mangled, (fn_def, _, impl_params)) in &generic_method_defs {
+        let count: usize = fn_def.generic_params.len() + impl_params.len();
+        generic_fn_param_counts.insert(base_mangled.clone(), count);
     }
 
     // Build method self-kind registry: mangled name → SelfKind.
@@ -1724,10 +1737,18 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                 // FLS §13: Trait method implementations lower identically to
                 // inherent methods — static dispatch uses the same mangling.
                 let type_name = impl_def.ty.text(source);
+                // FLS §12.1: If the impl block itself has generic params (`impl<T>`),
+                // all methods in it are monomorphized on demand — skip the whole block
+                // here. The post-pass monomorphization loop handles them.
+                if !impl_def.generic_params.is_empty() {
+                    // Still need to emit default trait methods for generic impls that
+                    // don't override them — handled by the trait default section below.
+                }
                 for method in &impl_def.methods {
                     // FLS §12.1: Generic methods are monomorphized at call sites.
                     // Skip here — they are lowered in the post-pass loop below.
-                    if !method.generic_params.is_empty() {
+                    // Also skip methods in a generic impl block (`impl<T>`).
+                    if !method.generic_params.is_empty() || !impl_def.generic_params.is_empty() {
                         continue;
                     }
                     let method_name = method.name.text(source);
@@ -1891,15 +1912,21 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         // `base_name` is either a free function name ("identity") or a
         // base-mangled method name ("Wrapper__apply"). Look up methods first
         // so that a method that shadows a free function resolves correctly.
-        let (fn_def, method_type_name): (&crate::ast::FnDef, Option<String>) =
-            if let Some((fn_def, type_name)) = generic_method_defs.get(&base_name) {
-                (*fn_def, Some(type_name.clone()))
-            } else if let Some(fn_def) = generic_fn_defs.get(&base_name) {
-                (*fn_def, None)
+        let method_entry = generic_method_defs.get(&base_name);
+        let free_fn_entry = generic_fn_defs.get(&base_name);
+        let (fn_def, method_type_name, impl_params_vec): (&crate::ast::FnDef, Option<String>, Vec<Span>) =
+            if let Some((fn_def, type_name, impl_ps)) = method_entry {
+                (*fn_def, Some(type_name.clone()), impl_ps.clone())
+            } else if let Some(fn_def) = free_fn_entry {
+                (*fn_def, None, Vec::new())
             } else {
                 continue; // should not happen
             };
-        let n_params = fn_def.generic_params.len();
+        let impl_params: &[Span] = &impl_params_vec;
+        // FLS §12.1: Total type params = method's own + impl block's params.
+        // For `impl<T> Pair<T> { fn get(&self) -> T }`, the method has 0 own params
+        // but the impl contributes `T`.
+        let n_params = fn_def.generic_params.len() + impl_params.len();
         let suffix = std::iter::repeat_n("i32", n_params).collect::<Vec<_>>().join("_");
         let mangled = format!("{base_name}__{suffix}");
 
@@ -1910,8 +1937,9 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         // Build the generic substitution: each type param name → IrTy::I32.
         // FLS §12.1: all type parameters are substituted with their concrete type.
         // At this milestone, all scalar type params default to i32.
+        // Include both the method's own type params and the impl block's type params.
         let mut generic_subst: HashMap<String, IrTy> = HashMap::new();
-        for param_span in &fn_def.generic_params {
+        for param_span in fn_def.generic_params.iter().chain(impl_params.iter()) {
             generic_subst.insert(param_span.text(source).to_owned(), IrTy::I32);
         }
 
