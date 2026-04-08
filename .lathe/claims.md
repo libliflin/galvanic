@@ -1633,3 +1633,62 @@ Galvanic uses (x0=data_ptr, x1=vtable_ptr), matching the parameter convention.
 - contains `mov     x0, #7` (result constant-folded)
 
 **Tests**: `cargo test --test e2e -- runtime_dyn_return_emits_fat_ptr_loads_and_stores runtime_dyn_return_not_folded`
+
+---
+
+## Claim 45: impl Trait return uses static bl dispatch (not vtable blr) and result is not constant-folded
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: A function with return type `impl Trait` must use static (monomorphized) dispatch —
+not vtable dispatch. The call to the `impl Trait`-returning function must emit `bl <fn_name>`,
+the subsequent method call must emit `bl <concrete_method>` (not `blr`), and the method result
+must NOT be constant-folded to an immediate.
+
+```rust
+trait Score { fn score(&self) -> i32; }
+struct Points { n: i32 }
+impl Score for Points { fn score(&self) -> i32 { self.n + 1 } }
+fn make_points(n: i32) -> impl Score { Points { n } }
+fn main() -> i32 { let p = make_points(6); p.score() }
+```
+
+Must emit:
+- `bl      make_points` — runtime call to the impl-Trait-returning function (not inlined/folded)
+- `bl` to the concrete method (static dispatch — monomorphized at compile time)
+- `add` — method body emits runtime arithmetic (not constant-folded)
+- NOT `blr` — vtable dispatch is wrong for `impl Trait` (only correct for `&dyn Trait`)
+
+**Why this claim matters**: Milestone 163 added `impl Trait` in return position. The key
+distinction from `&dyn Trait` (Claim 44) is the dispatch mechanism:
+- `&dyn Trait` → `blr` (vtable indirect dispatch)
+- `impl Trait` → `bl` (static monomorphized dispatch)
+
+Without this claim, a regression that accidentally emits vtable dispatch for `impl Trait`
+return (treating it like `&dyn Trait`) would pass all compile-and-run tests while
+violating the static dispatch guarantee. Similarly, constant-folding `make_points(6).score()`
+to `mov x0, #7` passes exit-code checks but breaks the "compiler not interpreter" premise.
+
+**Attack vectors**:
+1. Constant-fold `make_points(6).score()` to `mov x0, #7` — passes exit-code check.
+   Caught by `add` presence assertion.
+2. Emit `blr` for the method call (treating `impl Trait` return like `&dyn Trait`).
+   Caught by `!asm.contains("blr")` assertion in `runtime_impl_trait_return_emits_bl_not_blr`.
+3. Inline `make_points` and eliminate the `bl make_points` call entirely.
+   Caught by `bl make_points` presence assertion.
+
+**FLS §9**: Functions are called via `bl` at runtime. Static dispatch preserves this.
+**FLS §11**: `impl Trait` uses static dispatch — the concrete type is resolved at compile
+time, not through a vtable.
+**FLS §11 AMBIGUOUS**: The spec does not define the mechanism by which the concrete return
+type for `impl Trait` is determined at call sites. Galvanic infers from the body tail
+expression (struct literal).
+**FLS §6.1.2 Constraint 1**: `fn main()` is not a const context — even with literal
+arguments, method bodies must execute at runtime.
+
+**Violated if**: `compile_to_asm(IMPL_TRAIT_RETURN_BASIC)` returns assembly that:
+- lacks `bl      make_points` (call to impl-Trait-returning fn was inlined/folded), OR
+- contains `blr` (vtable dispatch used instead of static dispatch), OR
+- lacks `add` (method body constant-folded instead of emitting runtime arithmetic)
+
+**Tests**: `cargo test --test e2e -- runtime_impl_trait_return_emits_bl_not_blr runtime_impl_trait_return_not_folded`
