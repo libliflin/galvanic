@@ -2682,3 +2682,28 @@ immediately after the operation, not only at function boundaries.
 - the compound_u8 function body lacks `and ... #255` before the store-back
 
 **Tests**: `cargo test --test e2e -- runtime_u8_compound_add_emits_trunc_u8 runtime_i8_compound_add_emits_sext_i8 milestone_178_u8_compound_add_wraps_mid_body milestone_178_i8_compound_add_wraps_mid_body`
+
+---
+
+## Claim 67: `x as u8` and `x as i8` narrowing casts truncate correctly (not identity)
+
+**FLS §6.5.9**: An integer-to-integer cast to a narrower type retains only the low N bits
+of the source value. `300_i32 as u8` → 44 (300 & 255). `200_i32 as i8` → -56 (0xC8
+sign-extended). Previously galvanic treated these as identity casts.
+
+**ARM64 implementation**:
+- `as u8` → `and w{dst}, w{dst}, #255` (TruncU8)
+- `as i8` → `sxtb x{dst}, w{dst}` (SextI8)
+
+Without explicit truncation, `300_i32 as u8` would produce 300 in the destination
+register. Any subsequent comparison, store, or arithmetic would use the unwrapped value,
+producing incorrect results.
+
+**FLS §6.5.9**: "An integer-to-integer cast to a narrower integer type truncates to the
+least-significant bits." This is not ambiguous — truncation is required.
+
+**Violated if** for `fn f(x: i32) -> i32 { (x as u8) as i32 }` called with 300:
+- returns 300 instead of 44, OR
+- the function body lacks `and ... #255` in the assembly output
+
+**Tests**: `cargo test --test e2e -- runtime_cast_to_u8_emits_and_truncation runtime_cast_to_i8_emits_sxtb milestone_179_cast_u8_truncates_300_to_44 milestone_179_cast_i8_sign_extends_200_to_negative`

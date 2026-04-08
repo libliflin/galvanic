@@ -1,70 +1,66 @@
-# Changelog — Cycle 116
+# Changelog — Cycle 117
 
 ## Who This Helps
-- **William (researcher)**: A real latent codegen bug is fixed and fenced. Programs
-  using `u8`/`i8` compound assignment (`+=`, `*=`, etc.) now produce correct
-  wrapped values when the variable is read back mid-body — not only at function
-  return boundaries.
-- **CI / Validation Infrastructure**: Claim 66 and its four tests are now part of
-  `falsify.sh`, so this class of bug cannot silently regress.
+- **William (researcher)**: A real correctness bug is fixed. Programs that use
+  narrowing casts (`x as u8`, `x as i8`) now produce the correct truncated value
+  rather than silently returning the untruncated source. `300_i32 as u8` now gives
+  44 instead of 300. The fix is fenced by Claim 67 and 9 new tests.
+- **FLS / Ferrocene ecosystem**: §6.5.9 is now correctly implemented — narrowing
+  integer casts truncate to the low N bits. The previous "truncation deferred"
+  comment was masking a real spec violation.
 
 ## Observed
-- Previous cycle's changelog noted: "u8/i8 compound assignment (`+=`, `*=`) —
-  TruncU8/SextI8 is not emitted for compound-assignment paths."
-- Inspected `ExprKind::CompoundAssign` in `src/lower.rs`. The handler emits
-  `Load → BinOp → Store` with no narrow-type normalization. TruncU8/SextI8
-  was only applied at function return boundaries.
-- Adversarial test constructed: `fn test(a: u8, b: u8) -> i32 { let mut x: u8 = a; x += b; if x < 50 { 1 } else { 0 } }` called with (200, 100).
-  - Without fix: `x` slot held 300; `300 < 50` → false → returns 0.
-  - After fix: `x` slot holds 44 (300 & 255); `44 < 50` → true → returns 1.
-- Same bug affected `i8`: `100_i8 += 50_i8` left the slot with 150 (unsigned),
-  making `x < 0` false when it should be true (wrapped to -106).
+- The previous cycle's work on u8/i8 arithmetic and compound-assignment wrapping
+  prompted a review of all places where u8/i8 values are produced.
+- The `Cast` handler in `lower.rs` had an explicit "truncation deferred" comment
+  for `as u8` (line ~15982), treating it as identity — the inner expression was
+  lowered as U32 with no masking instruction emitted.
+- Adversarial test: `fn f(x: i32) -> i32 { (x as u8) as i32 }; f(300)` — without
+  the fix, returns 300. With the fix, returns 44 (300 & 255).
+- `fn f(x: i32) -> i32 { if (x as i8) < 0 { 1 } else { 0 } }; f(200)` — without
+  fix, 200 is not < 0 (no sign extension), returns 0. With fix, `sxtb` sign-extends
+  to -56, returns 1.
 
 ## Applied
 - **`src/lower.rs`**:
-  - Added `u8_locals: HashSet<&str>` and `i8_locals: HashSet<&str>` to `LowerCtx`.
-  - In parameter registration: u8/i8 parameters are now registered in the respective
-    set alongside `locals`, parallel to the existing `local_fn_ptr_slots` tracking.
-  - In let binding handler: detects `u8` and `i8` type annotations and registers
-    variable names. Falls through to existing init lowering (no duplicate code).
-  - In `ExprKind::CompoundAssign`: after `Instr::BinOp`, checks if the target
-    variable is in `u8_locals` (emit `TruncU8`) or `i8_locals` (emit `SextI8`)
-    before `Instr::Store`. Applies only to simple path targets (the field-access
-    and deref compound-assignment paths are handled separately above).
+  - Split `"u8"` out of the unsigned integer cast arm (`"u16" | "u32" | ...`) as
+    a separate match arm. After lowering the inner expression, emits
+    `Instr::TruncU8 { dst: r, src: r }` → `and w{dst}, w{dst}, #255`.
+  - Split `"i8"` out of the signed integer cast arm (`"i16" | "i32" | ...`) as a
+    separate match arm. For float sources (f64/f32 → i8), converts to integer first
+    then emits `SextI8`. For integer sources, emits `Instr::SextI8 { dst: r, src: r }`
+    → `sxtb x{dst}, w{dst}`.
+  - Updated comments: removed "truncation deferred" language; replaced with
+    accurate FLS §6.5.9 citation noting that `u8` and `i8` are handled above.
 - **`tests/e2e.rs`**:
-  - `runtime_u8_compound_add_emits_trunc_u8`: assembly inspection — `and #255`
-    must be present in the compound-assignment function body.
-  - `runtime_i8_compound_add_emits_sext_i8`: assembly inspection — `sxtb` must
-    be present in the compound-assignment function body.
-  - `milestone_178_u8_compound_add_wraps_mid_body`: compile-and-run — adversarial
-    mid-body comparison after u8 compound add.
-  - `milestone_178_i8_compound_add_wraps_mid_body`: compile-and-run — adversarial
-    mid-body comparison after i8 compound add.
-- **`.lathe/claims.md`**: Claim 66 added.
-- **`.lathe/falsify.sh`**: Claim 66 check added.
+  - `runtime_cast_to_u8_emits_and_truncation`: assembly inspection.
+  - `runtime_cast_to_i8_emits_sxtb`: assembly inspection.
+  - `milestone_179_cast_u8_truncates_300_to_44`: 300 as u8 = 44.
+  - `milestone_179_cast_u8_truncates_256_to_0`: 256 as u8 = 0.
+  - `milestone_179_cast_i8_sign_extends_200_to_negative`: 200 as i8 < 0.
+  - `milestone_179_cast_i8_127_stays_positive`: 127 as i8 >= 0.
+  - `milestone_179_cast_u8_result_in_arithmetic`: result used in arithmetic.
+  - `milestone_179_cast_u8_passed_to_fn`: result passed to function.
+  - `milestone_179_cast_i8_in_arithmetic`: i8 cast in arithmetic.
+- **`.lathe/claims.md`**: Claim 67 added.
+- **`.lathe/falsify.sh`**: Claim 67 check added.
 
 ## Validated
 - `cargo build` — clean
-- `cargo test` — 1770 passed; 0 failed (1528 e2e + 211 unit + 30 fls_fixtures + 1 smoke)
+- `cargo test` — 1779 passed; 0 failed (1537 e2e + 211 unit + 30 fls_fixtures + 1 smoke)
 - `cargo clippy -- -D warnings` — clean
-- `bash .lathe/falsify.sh` — 65 passed, 0 failed
+- `bash .lathe/falsify.sh` — 66 passed, 0 failed
 
 ## FLS Notes
-- **FLS §6.23**: The spec says wrapping semantics apply at runtime (in the Rust
-  release-mode sense). The spec does not explicitly say "at every store" vs "at
-  the point of use" — but the semantics require the variable's VALUE to be in
-  range whenever it is read. Galvanic's approach of normalizing at the store
-  (compound-assignment path) matches this: the slot always holds an in-range value.
-- **FLS §4.1, §6.23 AMBIGUOUS**: The spec describes the type's value range but
-  does not specify the implementation mechanism (normalize on write vs. normalize
-  on read). Galvanic chooses normalize-on-write for consistency with the existing
-  function-return-boundary approach.
+- **FLS §6.5.9**: The spec says narrowing integer casts truncate to the target
+  type's bit width. The previous comment called this "AMBIGUOUS" about the
+  mechanism, but the spec is clear: the result is the low N bits. The ambiguity
+  was about implementation mechanism, not semantics. Removed the misleading comment.
+- **FLS §6.5.9**: Signed narrowing (`as i8`) requires sign-extension from 8 bits,
+  not just masking. ARM64 `sxtb` handles this correctly in one instruction.
 
 ## Next
-- Regular assignment `x = expr` where `x: u8` does NOT apply TruncU8 at the
-  store site. This is a known remaining gap: `let mut x: u8 = 255; x = 300;`
-  would leave 300 in the slot. Fixing this requires the same `u8_locals` lookup
-  in the `Assign` handler.
-- The `ptr_capture_slots` compound-assignment path (mutable closure captures)
-  also does not apply narrow-type wrapping. This path is unlikely to be exercised
-  with u8/i8 captures at current milestones.
+- `as u16` / `as i16` casts are still identity. Adding u16/i16 narrowing follows
+  the same pattern: `and #65535` for u16 (TruncU16), `sxth` for i16 (SextI16).
+- Regular assignment `x = expr` where `x: u8` — now that `as u8` truncates, most
+  paths that produce u8 values do so correctly. The remaining gap is narrow.

@@ -1232,6 +1232,28 @@ else
     pass "Claim 66: u8/i8 compound assignment wraps correctly mid-body (not only at return boundaries)"
 fi
 
+# ── Claim 67: `x as u8` and `x as i8` narrowing casts truncate correctly ─────
+# FLS §6.5.9: Integer-to-integer casts to a narrower type must truncate to the
+# low N bits of the source value. `300_i32 as u8` → 44, `200_i32 as i8` → -56.
+# Previously galvanic treated these as identity casts (no truncation instruction
+# emitted), returning 300 / 200 unchanged. The fix emits TruncU8 / SextI8 in the
+# Cast lowering path.
+# Attack: returning 300 instead of 44 for `f(x) = (x as u8) as i32` with x=300
+# is a concrete wrong-answer test that cannot pass by accident.
+# References: claims.md Claim 67.
+
+echo "--- Claim 67: narrowing cast as u8/i8 truncates correctly (not identity) ---"
+if cargo test --test e2e --quiet -- \
+    runtime_cast_to_u8_emits_and_truncation \
+    runtime_cast_to_i8_emits_sxtb \
+    milestone_179_cast_u8_truncates_300_to_44 \
+    milestone_179_cast_i8_sign_extends_200_to_negative \
+    2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 67" "narrowing cast truncation test FAILED — `x as u8` or `x as i8` may be treating the cast as identity instead of truncating/sign-extending"
+else
+    pass "Claim 67: narrowing casts as u8/i8 truncate correctly (not identity)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 

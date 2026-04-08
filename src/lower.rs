@@ -15937,11 +15937,71 @@ impl<'src> LowerCtx<'src> {
                 };
 
                 match target_name {
+                    // FLS §6.5.9: Narrowing cast to u8.
+                    // `x as u8` retains only the low 8 bits of x. ARM64: `and w{dst}, w{dst}, #255`.
+                    // This must be emitted at cast time so that subsequent operations
+                    // (comparisons, further casts, stores) see the correctly truncated value.
+                    // Without this, `300_i32 as u8` would produce 300 instead of 44.
+                    "u8" => {
+                        let val = self.lower_expr(inner, &IrTy::I32)?;
+                        let r = match val {
+                            IrValue::Reg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "expected integer register for u8 cast source".into(),
+                            )),
+                        };
+                        self.instrs.push(Instr::TruncU8 { dst: r, src: r });
+                        Ok(IrValue::Reg(r))
+                    }
+
+                    // FLS §6.5.9: Narrowing cast to i8.
+                    // `x as i8` retains the low 8 bits and sign-extends to 64 bits.
+                    // ARM64: `sxtb x{dst}, w{src}`.
+                    // Without this, `200_i32 as i8` would produce 200 instead of -56.
+                    "i8" => {
+                        if self.is_f64_expr(inner) {
+                            let val = self.lower_expr(inner, &IrTy::F64)?;
+                            let src = match val {
+                                IrValue::FReg(r) => r,
+                                _ => return Err(LowerError::Unsupported(
+                                    "expected float register for f64-to-i8 cast source".into(),
+                                )),
+                            };
+                            let dst = self.alloc_reg()?;
+                            self.instrs.push(Instr::F64ToI32 { dst, src });
+                            self.instrs.push(Instr::SextI8 { dst, src: dst });
+                            Ok(IrValue::Reg(dst))
+                        } else if self.is_f32_expr(inner) {
+                            let val = self.lower_expr(inner, &IrTy::F32)?;
+                            let src = match val {
+                                IrValue::F32Reg(r) => r,
+                                _ => return Err(LowerError::Unsupported(
+                                    "expected f32 register for f32-to-i8 cast source".into(),
+                                )),
+                            };
+                            let dst = self.alloc_reg()?;
+                            self.instrs.push(Instr::F32ToI32 { dst, src });
+                            self.instrs.push(Instr::SextI8 { dst, src: dst });
+                            Ok(IrValue::Reg(dst))
+                        } else {
+                            let val = self.lower_expr(inner, &IrTy::I32)?;
+                            let r = match val {
+                                IrValue::Reg(r) => r,
+                                _ => return Err(LowerError::Unsupported(
+                                    "expected integer register for i8 cast source".into(),
+                                )),
+                            };
+                            self.instrs.push(Instr::SextI8 { dst: r, src: r });
+                            Ok(IrValue::Reg(r))
+                        }
+                    }
+
                     // FLS §6.5.9: Signed integer targets.
                     // Includes bool → i32 (0/1 → 0/1 identity), all signed
-                    // integer types. Narrowing (i64→i8, i64→i16) is identity
+                    // integer types. Narrowing (i64→i16) is identity
                     // at the register level for values within the target range.
-                    "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => {
+                    // Note: i8 is handled above with explicit SextI8.
+                    "i16" | "i32" | "i64" | "i128" | "isize" => {
                         // FLS §6.5.9: If the inner expression is f64-typed,
                         // emit FCVTZS (float-to-signed-integer, truncating toward zero).
                         // FLS §6.5.9: If the inner expression is f32-typed,
@@ -15979,9 +16039,8 @@ impl<'src> LowerCtx<'src> {
                     // FLS §6.5.9: Unsigned integer targets.
                     // Division uses `udiv` and right shift uses `lsr` when the
                     // result is subsequently used in arithmetic with U32 context.
-                    // Narrowing casts (u64→u8, u64→u16) are identity for small
-                    // values; truncation deferred (see FLS §6.5.9 AMBIGUOUS above).
-                    "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => {
+                    // Note: u8 is handled above with explicit TruncU8.
+                    "u16" | "u32" | "u64" | "u128" | "usize" => {
                         self.lower_expr(inner, &IrTy::U32)
                     }
 

@@ -30179,3 +30179,132 @@ fn milestone_178_i8_compound_add_wraps_mid_body() {
     };
     assert_eq!(exit, 1, "100_i8 + 50_i8 wraps to -106; -106 < 0 should be true");
 }
+
+// ── Milestone 179: narrowing casts `as u8` and `as i8` truncate correctly ────
+//
+// FLS §6.5.9: An integer-to-integer cast to a narrower type retains only the
+// low bits of the source value. `300_i32 as u8` → 44 (300 & 255). `200_i32 as
+// i8` → -56 (0xC8 sign-extended from 8 bits). Previously galvanic treated these
+// as identity casts, so `300_i32 as u8` would return 300 rather than 44.
+//
+// ARM64 implementation:
+//   `as u8` → `and w{dst}, w{dst}, #255`  (TruncU8)
+//   `as i8` → `sxtb x{dst}, w{dst}`       (SextI8)
+
+/// Assembly inspection: `x as u8` emits `and`-truncation (not identity).
+///
+/// FLS §6.5.9: Narrowing cast to u8 must truncate to 8 bits at runtime.
+#[test]
+fn runtime_cast_to_u8_emits_and_truncation() {
+    let asm = compile_to_asm(
+        "fn f(x: i32) -> i32 { (x as u8) as i32 }\nfn main() -> i32 { f(300) }\n",
+    );
+    assert!(
+        asm.contains("and"),
+        "cast to u8 must emit and-mask (TruncU8); got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #44"),
+        "cast to u8 must not constant-fold 300 to 44; got:\n{asm}"
+    );
+}
+
+/// Assembly inspection: `x as i8` emits `sxtb` sign-extension (not identity).
+///
+/// FLS §6.5.9: Narrowing cast to i8 must truncate to 8 bits and sign-extend.
+#[test]
+fn runtime_cast_to_i8_emits_sxtb() {
+    let asm = compile_to_asm(
+        "fn f(x: i32) -> i32 { if (x as i8) < 0 { 1 } else { 0 } }\nfn main() -> i32 { f(200) }\n",
+    );
+    assert!(
+        asm.contains("sxtb"),
+        "cast to i8 must emit sxtb sign-extension; got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #1"),
+        "cast to i8 must not constant-fold; got:\n{asm}"
+    );
+}
+
+/// Runtime: `300_i32 as u8` truncates to 44 (300 & 255 = 44).
+#[test]
+fn milestone_179_cast_u8_truncates_300_to_44() {
+    let Some(exit) = compile_and_run(
+        "fn f(x: i32) -> i32 { (x as u8) as i32 }\nfn main() -> i32 { f(300) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 44, "300 as u8 should give 44 (300 & 255)");
+}
+
+/// Runtime: `256_i32 as u8` wraps to 0.
+#[test]
+fn milestone_179_cast_u8_truncates_256_to_0() {
+    let Some(exit) = compile_and_run(
+        "fn f(x: i32) -> i32 { (x as u8) as i32 }\nfn main() -> i32 { f(256) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 0, "256 as u8 should give 0 (256 & 255)");
+}
+
+/// Runtime: `200_i32 as i8` is negative (200 = 0xC8 → sign-extended = -56).
+///
+/// Verifies that the i8 sign-extension makes the comparison `x < 0` true.
+#[test]
+fn milestone_179_cast_i8_sign_extends_200_to_negative() {
+    let Some(exit) = compile_and_run(
+        "fn f(x: i32) -> i32 { if (x as i8) < 0 { 1 } else { 0 } }\nfn main() -> i32 { f(200) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "200 as i8 = -56, which is < 0");
+}
+
+/// Runtime: `127_i32 as i8` is within range and positive.
+#[test]
+fn milestone_179_cast_i8_127_stays_positive() {
+    let Some(exit) = compile_and_run(
+        "fn f(x: i32) -> i32 { if (x as i8) >= 0 { 1 } else { 0 } }\nfn main() -> i32 { f(127) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "127 as i8 = 127, which is >= 0");
+}
+
+/// Runtime: `x as u8` used in arithmetic computes correctly with truncated value.
+#[test]
+fn milestone_179_cast_u8_result_in_arithmetic() {
+    // f(x) = (x as u8) as i32 + 1; f(511) = (511 & 255) + 1 = 255 + 1 = 256 → 0 mod 256
+    // But exit codes are 0-255 mod-style anyway; let's use f(510) = 254 + 1 = 255.
+    let Some(exit) = compile_and_run(
+        "fn f(x: i32) -> i32 { (x as u8) as i32 + 1 }\nfn main() -> i32 { f(510) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 255, "510 as u8 = 254, 254 + 1 = 255");
+}
+
+/// Runtime: `x as u8` passed to a function computes correctly.
+#[test]
+fn milestone_179_cast_u8_passed_to_fn() {
+    let Some(exit) = compile_and_run(
+        "fn id(x: i32) -> i32 { x }\nfn f(x: i32) -> i32 { id((x as u8) as i32) }\nfn main() -> i32 { f(300) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 44, "300 as u8 = 44, passed through id()");
+}
+
+/// Runtime: `x as i8` used in arithmetic with the truncated signed value.
+#[test]
+fn milestone_179_cast_i8_in_arithmetic() {
+    // f(x) = (x as i8) as i32 + 100; f(200) = (-56) + 100 = 44
+    let Some(exit) = compile_and_run(
+        "fn f(x: i32) -> i32 { (x as i8) as i32 + 100 }\nfn main() -> i32 { f(200) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 44, "200 as i8 = -56; -56 + 100 = 44");
+}
