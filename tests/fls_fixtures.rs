@@ -107,3 +107,8 @@ fn fls_12_1_generic_structs() {
 fn fls_12_1_generic_impl() {
     assert_galvanic_accepts("fls_12_1_generic_impl.rs");
 }
+
+#[test]
+fn fls_12_1_generic_enums() {
+    assert_galvanic_accepts("fls_12_1_generic_enums.rs");
+}
