@@ -20215,3 +20215,217 @@ fn main() -> i32 {
         "must emit get_val__B monomorphization (second concrete type): {asm}"
     );
 }
+
+// ── Milestone 140: where-clause syntax compiles to runtime ARM64 ─────────────
+// FLS §4.14: Trait and lifetime bounds — where clauses.
+// `fn apply<T>(t: T) -> i32 where T: Scalable { ... }` is equivalent to
+// inline bounds and must compile to the same runtime ARM64 code.
+
+#[test]
+fn milestone_140_where_clause_basic() {
+    let src = r#"
+trait Scalable { fn scale(&self, factor: i32) -> i32; }
+struct Foo { val: i32 }
+impl Scalable for Foo {
+    fn scale(&self, factor: i32) -> i32 { self.val * factor }
+}
+fn apply_scale<T>(t: T, n: i32) -> i32 where T: Scalable { t.scale(n) }
+fn main() -> i32 {
+    let f = Foo { val: 3 };
+    apply_scale(f, 4)
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 12);
+}
+
+#[test]
+fn milestone_140_where_clause_identity() {
+    let src = r#"
+trait Getter { fn get(&self) -> i32; }
+struct Box { inner: i32 }
+impl Getter for Box {
+    fn get(&self) -> i32 { self.inner }
+}
+fn extract<T>(t: T) -> i32 where T: Getter { t.get() }
+fn main() -> i32 {
+    let b = Box { inner: 7 };
+    extract(b)
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 7);
+}
+
+#[test]
+fn milestone_140_where_clause_in_arithmetic() {
+    let src = r#"
+trait Scalable { fn scale(&self, factor: i32) -> i32; }
+struct Foo { val: i32 }
+impl Scalable for Foo {
+    fn scale(&self, factor: i32) -> i32 { self.val * factor }
+}
+fn apply_scale<T>(t: T, n: i32) -> i32 where T: Scalable { t.scale(n) }
+fn main() -> i32 {
+    let f = Foo { val: 2 };
+    apply_scale(f, 5) + 1
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 11);
+}
+
+#[test]
+fn milestone_140_where_clause_result_passed_to_fn() {
+    let src = r#"
+trait Scalable { fn scale(&self, factor: i32) -> i32; }
+struct Foo { val: i32 }
+impl Scalable for Foo {
+    fn scale(&self, factor: i32) -> i32 { self.val * factor }
+}
+fn apply_scale<T>(t: T, n: i32) -> i32 where T: Scalable { t.scale(n) }
+fn double(x: i32) -> i32 { x * 2 }
+fn main() -> i32 {
+    let f = Foo { val: 3 };
+    double(apply_scale(f, 4))
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 24);
+}
+
+#[test]
+fn milestone_140_where_clause_two_types() {
+    let src = r#"
+trait Value { fn val(&self) -> i32; }
+struct A { x: i32 }
+struct B { y: i32 }
+impl Value for A { fn val(&self) -> i32 { self.x } }
+impl Value for B { fn val(&self) -> i32 { self.y + 1 } }
+fn get_val<T>(t: T) -> i32 where T: Value { t.val() }
+fn main() -> i32 {
+    let a = A { x: 5 };
+    let b = B { y: 6 };
+    get_val(a) + get_val(b)
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 12);
+}
+
+#[test]
+fn milestone_140_where_clause_called_from_non_generic() {
+    let src = r#"
+trait Scalable { fn scale(&self, factor: i32) -> i32; }
+struct Foo { val: i32 }
+impl Scalable for Foo {
+    fn scale(&self, factor: i32) -> i32 { self.val * factor }
+}
+fn apply_scale<T>(t: T, n: i32) -> i32 where T: Scalable { t.scale(n) }
+fn run() -> i32 {
+    let f = Foo { val: 4 };
+    apply_scale(f, 3)
+}
+fn main() -> i32 { run() }
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 12);
+}
+
+#[test]
+fn milestone_140_where_clause_called_twice() {
+    let src = r#"
+trait Scalable { fn scale(&self, factor: i32) -> i32; }
+struct Foo { val: i32 }
+impl Scalable for Foo {
+    fn scale(&self, factor: i32) -> i32 { self.val * factor }
+}
+fn apply_scale<T>(t: T, n: i32) -> i32 where T: Scalable { t.scale(n) }
+fn main() -> i32 {
+    let f1 = Foo { val: 2 };
+    let f2 = Foo { val: 3 };
+    apply_scale(f1, 4) + apply_scale(f2, 2)
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 14);
+}
+
+#[test]
+fn milestone_140_where_clause_on_parameter() {
+    let src = r#"
+trait Scalable { fn scale(&self, factor: i32) -> i32; }
+struct Foo { val: i32 }
+impl Scalable for Foo {
+    fn scale(&self, factor: i32) -> i32 { self.val * factor }
+}
+fn apply_scale<T>(t: T, n: i32) -> i32 where T: Scalable { t.scale(n) }
+fn run(n: i32) -> i32 {
+    let f = Foo { val: 3 };
+    apply_scale(f, n)
+}
+fn main() -> i32 { run(5) }
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 15);
+}
+
+// Assembly inspection: where-clause generic emits same runtime code as inline bound
+#[test]
+fn runtime_where_clause_emits_monomorphized_label() {
+    let src = r#"
+trait Scalable { fn scale(&self, factor: i32) -> i32; }
+struct Foo { val: i32 }
+impl Scalable for Foo {
+    fn scale(&self, factor: i32) -> i32 { self.val * factor }
+}
+fn apply_scale<T>(t: T, n: i32) -> i32 where T: Scalable { t.scale(n) }
+fn main() -> i32 {
+    let f = Foo { val: 3 };
+    apply_scale(f, 4)
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("apply_scale__Foo:"),
+        "where-clause generic must emit monomorphized label apply_scale__Foo: {asm}"
+    );
+    assert!(
+        asm.contains("bl      Foo__scale") || asm.contains("bl Foo__scale"),
+        "monomorphized body must call Foo__scale via bl: {asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #12"),
+        "result must not be constant-folded to mov x0, #12: {asm}"
+    );
+}
+
+#[test]
+fn runtime_where_clause_result_not_folded() {
+    let src = r#"
+trait Scalable { fn scale(&self, factor: i32) -> i32; }
+struct Foo { val: i32 }
+impl Scalable for Foo {
+    fn scale(&self, factor: i32) -> i32 { self.val * factor }
+}
+fn apply_scale<T>(t: T, n: i32) -> i32 where T: Scalable { t.scale(n) }
+fn run(n: i32) -> i32 {
+    let f = Foo { val: 3 };
+    apply_scale(f, n)
+}
+fn main() -> i32 { run(4) }
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("apply_scale__Foo:"),
+        "where-clause generic must emit monomorphized label: {asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #12"),
+        "result must not be constant-folded when input is runtime: {asm}"
+    );
+    assert!(
+        asm.contains("bl      Foo__scale") || asm.contains("bl Foo__scale"),
+        "trait method must dispatch via bl Foo__scale: {asm}"
+    );
+}

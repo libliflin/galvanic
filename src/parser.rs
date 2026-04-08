@@ -371,6 +371,11 @@ impl<'src> Parser<'src> {
             None
         };
 
+        // Optional `where` clause: `where T: Trait, U: A + B`.
+        // FLS §4.14: Trait and lifetime bounds via where clauses.
+        // Bounds are parsed and discarded — monomorphization uses call-site types.
+        self.parse_where_clause();
+
         // Function body: required for non-trait functions, optional for trait
         // method signatures (which end with `;` instead of a block).
         //
@@ -498,6 +503,10 @@ impl<'src> Parser<'src> {
         } else {
             (None, first_ident)
         };
+
+        // Optional `where` clause before the impl body.
+        // FLS §4.14: `impl<T> Trait for Type where T: Bound { ... }`.
+        self.parse_where_clause();
 
         self.expect(TokenKind::OpenBrace)?;
 
@@ -670,6 +679,77 @@ impl<'src> Parser<'src> {
         }
 
         None
+    }
+
+    /// Consume a `where` clause if present, discarding all bounds.
+    ///
+    /// FLS §4.14: Trait and lifetime bounds — `where T: Trait, U: A + B`.
+    /// The bounds are parsed and silently discarded; galvanic infers the
+    /// concrete type from the call-site argument type at monomorphization, not
+    /// from the where-clause annotation.
+    ///
+    /// FLS §4.14: AMBIGUOUS — The spec does not specify the disambiguation
+    /// rule between a `where` keyword and an identifier named `where` in older
+    /// Rust editions. In practice `where` here is always the keyword.
+    fn parse_where_clause(&mut self) {
+        if self.peek_kind() != TokenKind::KwWhere {
+            return;
+        }
+        self.advance(); // eat `where`
+        // Parse comma-separated predicates: `T: Bound + Bound, U: Other, ...`
+        loop {
+            // Each predicate starts with a type (identifier or `&`). We skip
+            // tokens until we see `,`, `{`, `;`, or EOF, which terminate the clause.
+            // For the simple case: `T: TraitA + TraitB`, we consume `T`, `:`,
+            // each bound name, and `+` separators.
+            if matches!(
+                self.peek_kind(),
+                TokenKind::OpenBrace | TokenKind::Semi | TokenKind::Eof
+            ) {
+                break;
+            }
+            // Consume the LHS type (identifier, possibly `&` for lifetime-bounded types).
+            if self.peek_kind() == TokenKind::Ident {
+                self.advance(); // skip type param name or path
+            } else if self.peek_kind() == TokenKind::And {
+                self.advance(); // skip `&`
+                if self.peek_kind() == TokenKind::Ident {
+                    self.advance(); // skip the type after `&`
+                }
+            } else {
+                // Unexpected token — stop consuming to avoid runaway parsing.
+                break;
+            }
+            // Consume the `:` and bounds.
+            if self.eat(TokenKind::Colon) {
+                loop {
+                    // Consume a bound identifier (plain trait name, e.g. `Scalable`).
+                    if self.peek_kind() == TokenKind::Ident {
+                        self.advance(); // skip bound trait name
+                        // Consume type args on the bound: `Iterator<Item = i32>`.
+                        if self.peek_kind() == TokenKind::Lt {
+                            self.advance(); // eat `<`
+                            let mut depth = 1usize;
+                            while depth > 0 && self.peek_kind() != TokenKind::Eof {
+                                match self.peek_kind() {
+                                    TokenKind::Lt => { self.advance(); depth += 1; }
+                                    TokenKind::Gt => { self.advance(); depth -= 1; }
+                                    _ => { self.advance(); }
+                                }
+                            }
+                        }
+                    }
+                    // `+` separates multiple bounds.
+                    if !self.eat(TokenKind::Plus) {
+                        break;
+                    }
+                }
+            }
+            // `,` separates multiple predicates.
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+        }
     }
 
     /// Parse a constant item declaration.
