@@ -1335,3 +1335,52 @@ FLS §6.1.2 Constraint 1 applies: only explicit const contexts trigger compile-t
 - contains `mov     x0, #12` or `mov x0, #12` (constant-folded result of `triple(4)`).
 
 **Test**: `cargo test --test e2e -- runtime_unsafe_block_emits_runtime_instructions_not_folded`
+
+---
+
+## Claim 39: `const fn` called from non-const context emits runtime `bl` (not folded)
+
+**Stakeholder**: William (researcher), Compiler Researchers, FLS / Ferrocene Ecosystem
+
+**Promise**: A `const fn` is only eligible for compile-time evaluation when called from a
+const context (FLS §9:41–43, Constraint 2 in `refs/fls-constraints.md`). When called from
+a regular function body (non-const context), it must emit a real runtime `bl` instruction —
+not be constant-folded. `fn main() -> i32 { add(20, 22) }` is not a const context even
+though `add` is declared `const fn`.
+
+```rust
+const fn add(a: i32, b: i32) -> i32 { a + b }
+fn main() -> i32 { add(20, 22) }
+```
+
+Must emit:
+- `bl add` — runtime call to the function (not folded)
+- NOT `mov x0, #42` — must not fold `add(20, 22)` to the literal result
+
+**Why this claim matters**: `milestone_123_const_fn_runtime_call` verifies exit code 42,
+which is correct whether galvanic emits a runtime call or constant-folds the result. Only
+the assembly inspection test distinguishes them. A regression that treated `const fn` as
+"always const-evaluated regardless of call context" would pass every compile-and-run test
+but violate FLS §9:41–43. This claim ensures the context-sensitivity of `const fn` dispatch
+is an adversarially-guarded invariant.
+
+**Attack vectors**:
+1. Evaluate `add(20, 22)` at compile time because the arguments are known constants, emit
+   `mov x0, #42; ret`. Exit code 42 is correct; the test would still pass. Only the assembly
+   inspection gate (no `#42`) catches this.
+2. Partially fold: evaluate the `const fn` body inline without emitting `bl add` at all.
+   Caught by `asm.contains("bl add")`.
+3. Conflate `const fn` with `const`: treat `const fn add(...)` as if every call site is a
+   const context. Same symptom as (1). Caught by both positive and negative assertions.
+
+**FLS §9:41–43 note**: The spec states that `const fn` bodies may be evaluated at compile time
+only when called from a const context. The spec does not prescribe how an implementation
+distinguishes const from non-const call contexts, but the rule is clear: without an explicit
+const context at the call site (const item, const block, array length, etc.), the call must
+execute at runtime.
+
+**Violated if**: `compile_to_asm(...)` for the program above returns assembly that:
+- lacks `bl add` (runtime call not emitted — `const fn` was constant-folded at call site), OR
+- contains `#42` (constant-folded result of `add(20, 22)` emitted as an immediate).
+
+**Test**: `cargo test --test e2e -- runtime_const_fn_runtime_call_emits_bl_not_folded`
