@@ -2875,3 +2875,24 @@ declared field type — not as a wider i32.
 - The assembly for `const LIMIT = i32::MAX; fn main() { LIMIT }` contains `ldr x0, [sp` (LIMIT was not inlined as an immediate)
 
 **Tests**: `cargo test --test e2e -- claim_74_const_chain_through_builtin_assoc_not_zero runtime_const_from_i32_max_emits_loadimm milestone_188_const_from_i32_max_positive milestone_188_const_from_i32_min_negative milestone_188_const_arithmetic_with_i32_max`
+
+
+---
+
+## Claim 75: Narrow integer const items wrap at their declared bit-width
+
+**Promise**: `const Z: u8 = 200 + 100` stores `44` (300 wrapped to 8 bits), not `300`. The const evaluator applies the declared type's narrowing (u8 → mask to 8 bits, i8 → sign-extend from 8 bits, u16 → mask to 16 bits, i16 → sign-extend from 16 bits) before storing the result in `const_vals`. Downstream uses of the const emit the correctly-wrapped immediate.
+
+**Why this matters**: `eval_const_expr` works entirely in `i32`. Without `narrow_const_value`, a `const X: u8 = 200 + 100` would store 300 in `const_vals`. The assembly for `fn main() -> i32 { X as i32 }` would emit `LoadImm(300)`, which is wrong — the u8 semantic requires wrapping. Since OS exit codes are truncated to 8 bits, exit(300) == exit(44) at the kernel level, making the bug invisible to naive runtime tests. Only assembly inspection and comparison-based runtime tests can distinguish the two.
+
+**ARM64 implementation**: `narrow_const_value(raw: i32, ty: &Ty, source: &str) -> i32` inspects the declared type of the const item. For `u8` it casts through `u8` (mask to 8 bits). For `i8` it casts through `i8` (sign-extend from 8 bits). For `u16`/`i16` similarly. `i32` and other types pass through unchanged.
+
+**FLS §6.23**: Arithmetic overflow in const contexts is a compile-time error per the spec; galvanic wraps instead as a pragmatic choice.
+**FLS §4.1**: Narrow integer types have specific bit-widths; values must be representable.
+**FLS §6.23 AMBIGUOUS**: The FLS does not explicitly enumerate which narrowing rules apply to non-i32 const item initializers. Galvanic wraps silently (does not error) which diverges from strict Rust behavior.
+
+**Violated if**:
+- `const Z: u8 = 200 + 100; fn check(v: i32) -> i32 { if v == 44 { 1 } else { 0 } } fn main() -> i32 { check(Z as i32) }` returns 0 (Z resolved to 300, not 44), OR
+- The assembly for `const X: u8 = 300; fn main() -> i32 { X as i32 }` contains `#300` or `#0x12c` (unwrapped immediate) instead of `#44` or `#0x2c`
+
+**Tests**: `cargo test --test e2e -- claim_75_u8_const_item_wraps_at_8_bits_not_i32 runtime_u8_const_wraps_emits_correct_loadimm milestone_189_u8_const_wraps_at_8_bits milestone_189_u16_const_addition_wraps`

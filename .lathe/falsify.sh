@@ -1367,6 +1367,19 @@ else
     pass "Claim 74: built-in associated constants in const item initializers resolve correctly (not silently zero)"
 fi
 
+echo "--- Claim 75: narrow integer const items wrap at declared bit-width (not i32 arithmetic) ---"
+if cargo test --test e2e -- \
+    claim_75_u8_const_item_wraps_at_8_bits_not_i32 \
+    runtime_u8_const_wraps_emits_correct_loadimm \
+    runtime_u16_const_wraps_emits_correct_loadimm \
+    milestone_189_u8_const_wraps_at_8_bits \
+    milestone_189_u16_const_addition_wraps \
+    2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 75" "narrow u8/u16 const items FAILED — eval_const_expr result not narrowed to declared width before storage"
+else
+    pass "Claim 75: narrow integer const items (u8/u16) wrap at declared bit-width (not raw i32 arithmetic)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 

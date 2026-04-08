@@ -403,10 +403,33 @@ fn expr_contains_labeled_break_with_value(expr: &Expr, target_label: &str) -> bo
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 
-/// Lower a parsed source file to the IR.
+/// Apply the narrowing semantics for a const item's declared type.
 ///
-/// FLS §18.1: A source file is a sequence of items. Each `fn` item is
-/// lowered to an `IrFn`. Struct items (FLS §14) are collected into a
+/// FLS §6.23, §4.1: Narrow integer types (u8, i8, u16, i16) have specific
+/// bit-widths. A const item declared as `const X: u8 = 200 + 100` must wrap
+/// its computed value to 8 bits before storage, yielding 44, not 300.
+/// `eval_const_expr` works entirely in i32; this function applies the final
+/// narrowing step based on the declared type annotation.
+///
+/// FLS §6.1.2:49–50 AMBIGUOUS: overflow in const contexts should be a
+/// compile-time error in strict Rust, but galvanic wraps as a pragmatic choice
+/// since the goal is FLS-faithful runtime codegen, not full const-eval
+/// diagnostics. i32 and wider types are passed through unchanged.
+fn narrow_const_value(raw: i32, ty: &crate::ast::Ty, source: &str) -> i32 {
+    if let crate::ast::TyKind::Path(segs) = &ty.kind
+        && segs.len() == 1
+    {
+        match segs[0].text(source) {
+            "u8"  => return (raw as u8)  as i32,
+            "i8"  => return (raw as i8)  as i32,
+            "u16" => return (raw as u16) as i32,
+            "i16" => return (raw as i16) as i32,
+            _ => {}
+        }
+    }
+    raw
+}
+
 /// Evaluate a constant expression to an `i32` at compile time.
 ///
 /// FLS §6.1.2:37–45: Constant initializers are evaluated at compile time.
@@ -421,8 +444,6 @@ fn expr_contains_labeled_break_with_value(expr: &Expr, target_label: &str) -> bo
 /// Returns `None` for unsupported forms (non-integer types, overflow, or
 /// division/remainder by zero). The caller silently skips const items whose
 /// initializers cannot be evaluated.
-///
-/// `const_fns` maps function names to their `FnDef`s for const fn calls.
 ///
 /// Cache-line note: called only during the compile-time const collection pass,
 /// not on any runtime hot path.
@@ -1328,9 +1349,18 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
             if let ItemKind::Const(c) = &item.kind {
                 let name = c.name.text(source).to_owned();
                 if !const_vals.contains_key(&name)
-                    && let Some(val) =
+                    && let Some(raw) =
                         eval_const_expr(&c.value, source, &const_vals, &builtin_assoc_consts, &const_fns)
                 {
+                    // FLS §6.23, §4.1: Narrow integer const items must wrap at
+                    // their declared width. `eval_const_expr` works in i32; the
+                    // result must be narrowed before storage so that downstream
+                    // uses see the already-wrapped value.
+                    // FLS §6.1.2:49–50: In const contexts, overflow is a
+                    // compile-time error — but galvanic currently silently wraps
+                    // as a pragmatic choice. AMBIGUOUS: the FLS does not enumerate
+                    // which narrowing rules apply to non-i32 const items.
+                    let val = narrow_const_value(raw, &c.ty, source);
                     const_vals.insert(name, val);
                 }
             }

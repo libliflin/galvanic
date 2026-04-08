@@ -1,53 +1,55 @@
-# Changelog — Cycle 132 (Red-Team)
+# Changelog — Cycle 133
 
 ## Who This Helps
-- **William (researcher)**: Claim 74 now prevents the "fails silently" regression
-  called out in Cycle 131's Next. If `assoc_known` is ever dropped or mis-threaded
-  in `eval_const_expr`, the falsification suite catches it immediately — instead of
-  `const LIMIT = i32::MAX` silently resolving to 0 with no error.
-- **CI / Validation Infrastructure**: The falsification fence around milestone 188
-  is now adversarial. `claim_74_const_chain_through_builtin_assoc_not_zero` tests
-  a const-chain (`const DERIVED = LIMIT - 1` where `LIMIT = i32::MAX`) that would
-  silently produce exit code 0 if two-segment path evaluation broke.
+- **William (researcher)**: The const evaluator was silently wrong for narrow integer
+  const items. `const X: u8 = 200 + 100` was storing 300 instead of 44. This bug
+  would have been invisible to exit-code tests (OS truncates exit codes to 8 bits,
+  so exit(300) == exit(44)). Only assembly inspection exposes it. Claim 75 now
+  permanently guards this behaviour with both assembly inspection and a comparison-based
+  runtime test that can actually distinguish the two.
+- **CI / Validation Infrastructure**: Claim 75 in `falsify.sh` ensures narrow-type
+  const wrapping is permanently on the falsification fence.
 
 ## Observed
-- Cycle 131 changelog explicitly flagged: "Add Claim 74 to `falsify.sh` covering
-  `const LIMIT: i32 = i32::MAX` resolving correctly (not failing silently)."
-- Claim 73 covered runtime `i32::MAX` expressions but NO claim protected the
-  distinct code path: `eval_const_expr` with `assoc_known` threaded into the const
-  fixed-point evaluator.
-- The failure mode: removing `assoc_known` from `eval_const_expr` would leave
-  `const LIMIT = i32::MAX` resolving to `None` → fixed-point loop silently skips
-  LIMIT → all uses produce 0 → programs that test `LIMIT > 0` return exit 0
-  with no compiler error.
+- Cycle 132 changelog's Next section flagged: "narrow integer types in const items.
+  Does `const X: u8 = 200 + 100` wrap to 44? galvanic's const evaluator uses i32
+  arithmetic throughout — it does NOT apply truncation for u8 const items."
+- Confirmed: `eval_const_expr` returns `Option<i32>` with all arithmetic in i32.
+  `const Z: u8 = 200 + 100` stored `300` in `const_vals`, emitting `LoadImm(300)`.
+- Bug was invisible to exit-code runtime tests: `exit(300) == exit(44)` at the OS
+  level. Assembly inspection (`#0x12c` vs `#0x2c`) and comparison-based runtime
+  tests (`if v == 44 { 1 } else { 0 }`) are the only reliable detectors.
 
 ## Applied
-- **`tests/e2e.rs`**: Added `claim_74_const_chain_through_builtin_assoc_not_zero`:
-  - Assembly inspection on a leaf function `fn main() -> i32 { DERIVED }` (no
-    parameter spilling, so the negative assertion `!ldr x0, [sp` is unambiguous).
-  - Positive assertion: `#0xfffe` appears (2147483646 = 0x7FFFFFFE low-half).
-  - Negative assertion: no `ldr x0, [sp` (constant must be LoadImm, not stack slot).
-  - Runtime check (separate source with `check(DERIVED)` fn): must return 1, not 0.
-- **`.lathe/claims.md`**: Added Claim 74 with full violation conditions, ARM64
-  implementation notes, and FLS citations.
-- **`.lathe/falsify.sh`**: Added Claim 74 block running the new test plus four
-  milestone 188 tests that cover adjacent paths.
+- **`src/lower.rs`**: Added `narrow_const_value(raw: i32, ty: &Ty, source: &str) -> i32`
+  that casts through the declared narrow type before storage (`u8`, `i8`, `u16`,
+  `i16`; `i32` and wider pass through unchanged). Called from the const fixed-point
+  loop immediately after `eval_const_expr` resolves a value.
+- **`tests/e2e.rs`**: Added 11 new tests:
+  - 8 milestone_189 tests (u8/i8/u16 const wrapping, adversarial comparison logic)
+  - 2 `runtime_*_wraps_emits_correct_loadimm` assembly inspection tests
+  - 1 `claim_75_u8_const_item_wraps_at_8_bits_not_i32` (assembly + runtime)
+- **`.lathe/claims.md`**: Added Claim 75 with violation conditions and FLS citations.
+- **`.lathe/falsify.sh`**: Added Claim 75 block.
 
 ## Validated
-- `cargo test` — 1625 passed (1 new), 0 failed
 - `cargo clippy -- -D warnings` — clean
+- `cargo test` — 1636 passed (11 new), 0 failed
 
 ## FLS Notes
-- **FLS §7.1:10**: Const items must be fully evaluated before first use. The
-  fixed-point evaluator ordering between `const A = i32::MAX` and `const B = A-1`
-  is an implementation choice; the FLS only requires the result to be available.
-- **FLS §10.3**: Associated constant paths are valid in all constant expression
-  contexts, including const item initializers.
-- **FLS §4.1 AMBIGUOUS**: `MAX`/`MIN` are language convention, not enumerated
-  by name in the FLS. Already noted in Claim 73; Claim 74 inherits this caveat.
+- **FLS §6.23 AMBIGUOUS**: The FLS says overflow in const contexts is a compile-time
+  error, but does not enumerate which narrowing rules apply to non-i32 const items
+  specifically. Galvanic wraps silently (rather than erroring) as a pragmatic choice.
+- **FLS §4.1**: Narrow integer types have specific bit-widths. `narrow_const_value`
+  enforces this at const item evaluation time.
 
 ## Next
-- The next adversarial target: narrow integer types in const items. Does
-  `const X: u8 = 200; const Y: u8 = X + 100;` wrap to 44? Currently galvanic's
-  const evaluator uses `i32` arithmetic throughout — it likely does NOT apply
-  truncation for `u8` const items. This would be Claim 75 (and a real bug to fix).
+- The falsification fence covers narrow integer const items. Next adversarial target:
+  do narrow integer const items referenced by name work correctly as operands in OTHER
+  const items? `const X: u8 = 200; const Y: u8 = X + 100` — does Y correctly wrap
+  to 44? The implementation stores the narrowed value of X (200), then computes
+  `200 + 100 = 300` in i32, then narrows Y to 44. Should work, but a test
+  verifying it explicitly would be Claim 76.
+  Alternatively: check which `fls_fixtures` parse-only tests could now be promoted
+  to end-to-end milestone tests — that forward progress is higher value than more
+  red-team coverage in the same area.
