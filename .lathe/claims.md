@@ -2790,3 +2790,44 @@ declared field type — not as a wider i32.
 - the assembly for `Narrow { val: a + b }` lacks `and ... #65535` before the Store
 
 **Tests**: `cargo test --test e2e -- runtime_u16_struct_field_construction_applies_trunc milestone_182_u16_struct_field_wraps_on_construction milestone_182_u8_struct_field_wraps_on_construction milestone_182_i16_struct_field_wraps_on_construction`
+
+---
+
+## Claim 71: Narrow integer enum tuple variant fields normalised at construction time
+
+**Promise**: When constructing an enum tuple variant whose field type is `u8`, `i8`, `u16`, or `i16`, galvanic normalises the stored value at construction time — truncating for unsigned types (`and w_, w_, #255` / `#65535`) or sign-extending for signed types (`sxtb` / `sxth`). This ensures that subsequent reads of the field see a correctly wrapped value, not the raw 32-bit arithmetic result.
+
+**Why this matters**: This is the last construction form that must normalise narrow types (named structs — Milestone 182; tuple structs — Milestone 183; enum tuple variants — Milestone 184). Without it, an enum variant `Wrap::Val(200_u8 + 100_u8)` would store 300 and the pattern binding `Wrap::Val(v)` would give `v = 300` instead of `44`, breaking the semantics of narrow integer types.
+
+**ARM64 implementation**: TruncU8/SextI8/TruncU16/SextI16 emitted immediately before the Store instruction for each narrow-typed field in every enum variant construction path (both tuple and named variants, both in let-binding and return contexts).
+
+**FLS §4.1**: Narrow integer types have their own value ranges.
+**FLS §6.23**: Runtime arithmetic wraps within the type's declared bounds.
+**FLS §15**: Enum variant constructors evaluate field initializers and store them as the declared field type.
+
+**Violated if** for `enum Wrap { Val(u8) }`, `fn build(a: u8, b: u8) -> Wrap`:
+- `match build(200, 100) { Wrap::Val(v) => v < 100 }` returns false instead of true (44 < 100), OR
+- the assembly for `Wrap::Val(a + b)` lacks `and w_, w_, #255` before the Store
+
+**Tests**: `cargo test --test e2e -- runtime_u8_enum_variant_field_construction_applies_trunc runtime_u16_enum_variant_field_construction_not_constant_folded milestone_184_u8_enum_tuple_variant_wraps_on_construction milestone_184_u16_enum_tuple_variant_wraps_on_construction milestone_184_i16_enum_tuple_variant_wraps_on_construction`
+
+
+---
+
+## Claim 72: Narrow integer named enum variant fields normalised at construction time
+
+**Promise**: When constructing a named-field enum variant whose field type is `u8`, `i8`, `u16`, or `i16`, galvanic normalises the stored value at construction time — truncating for unsigned types (`and w_, w_, #255` / `#65535`) or sign-extending for signed types (`sxtb` / `sxth`). This ensures that subsequent pattern bindings see a correctly wrapped value.
+
+**Why this matters**: Cycle 126 implemented narrow normalisation for named enum variants but added no tests. Without this claim, a regression in the named-variant construction path would be invisible — all existing tests use only tuple variants. `enum Color { Red { val: u8 } }` and `Wrap::Val(x: u8)` must both normalise on construction.
+
+**ARM64 implementation**: TruncU8/SextI8/TruncU16/SextI16 emitted immediately before the Store instruction for each narrow-typed named field, using `enum_variant_field_narrow_ty` with the field's positional index derived from the named field list.
+
+**FLS §4.1**: Narrow integer types have their own value ranges.
+**FLS §6.23**: Runtime arithmetic wraps within the type's declared bounds.
+**FLS §15**: Enum variant constructors evaluate field initializers and store them as the declared field type — named and tuple variants must behave identically.
+
+**Violated if** for `enum Wrap { Val { x: u8 } }`, `fn build(a: u8, b: u8) -> Wrap`:
+- `match build(200, 100) { Wrap::Val { x: v } => v < 100 }` returns false instead of true (44 < 100), OR
+- the assembly for `Wrap::Val { x: a + b }` lacks `and w_, w_, #255` before the Store
+
+**Tests**: `cargo test --test e2e -- runtime_u8_named_enum_variant_field_construction_applies_trunc runtime_i16_named_enum_variant_field_construction_applies_sxth milestone_185_u8_named_variant_wraps_on_construction milestone_185_u16_named_variant_wraps_on_construction milestone_185_i16_named_variant_wraps_on_construction`
