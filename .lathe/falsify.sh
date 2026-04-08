@@ -1119,6 +1119,15 @@ else
     pass "Claim 54: unsafe fn inside unsafe trait emits runtime bl and mul (not constant-folded)"
 fi
 
+# References: claims.md Claim 55.
+
+echo "--- Claim 55: unsafe impl<T> for a generic type emits runtime bl and mul (not constant-folded) ---"
+if cargo test --test e2e --quiet -- runtime_unsafe_generic_impl_body_emits_mul_not_folded runtime_unsafe_generic_impl_call_emits_bl_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 55" "runtime_unsafe_generic_impl_body_emits_mul_not_folded or runtime_unsafe_generic_impl_call_emits_bl_not_folded FAILED — unsafe impl<T> body may be constant-folded, bl missing, or mul missing"
+else
+    pass "Claim 55: unsafe impl<T> for a generic type emits runtime bl and mul (not constant-folded)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 

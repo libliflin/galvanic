@@ -2255,3 +2255,42 @@ must execute at runtime, identical to regular fn bodies.
 - contains `mov x0, #17` (result 3*4+5=17 constant-folded)
 
 **Tests**: `cargo test --test e2e -- runtime_unsafe_fn_in_unsafe_trait_emits_bl_and_mul_not_folded`
+
+---
+
+## Claim 55: `unsafe impl<T>` for a generic type emits runtime bl and mul (not constant-folded)
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: `unsafe impl<T> Trait for Wrapper<T>` codegen is identical to
+`impl<T> Trait for Wrapper<T>` (M138). The `unsafe` qualifier is a static
+safety contract — no difference in emitted assembly. A method body with an
+arithmetic expression (`self.inner * n`) must emit a runtime `mul` instruction,
+not a constant. The call site must emit `bl`.
+
+This is distinct from:
+- Claim 53: `unsafe impl` without generics (non-generic impl block)
+- Claim 9/12: generic trait impl without `unsafe`
+
+**What this guards against**:
+1. Treating `unsafe impl<T>` as a special case that folds the method body.
+2. Inlining the monomorphized call and constant-folding to `mov x0, #12`.
+3. Failing to emit `bl` at the call site for a generic unsafe method.
+
+**FLS §19 AMBIGUOUS**: The spec does not specify how `unsafe impl<T>` interacts
+with generic monomorphization. Galvanic defers enforcement — `is_unsafe` on
+`ImplDef` is recorded but not checked against the corresponding `unsafe trait`.
+
+**FLS §12.1 AMBIGUOUS**: The spec does not specify the disambiguation rule for
+`<` immediately after `unsafe impl`. Galvanic treats it as always starting a
+generic parameter list.
+
+**FLS §6.1.2 Constraint 1**: Method bodies are not const contexts — they must
+execute at runtime.
+
+**Violated if**: `compile_to_asm(UNSAFE_GENERIC_SCALE)` returns assembly that:
+- lacks `mul` in the method body, OR
+- lacks `bl` at the call site, OR
+- contains `mov x0, #12` (result 3*4=12 constant-folded)
+
+**Tests**: `cargo test --test e2e -- runtime_unsafe_generic_impl_body_emits_mul_not_folded runtime_unsafe_generic_impl_call_emits_bl_not_folded`
