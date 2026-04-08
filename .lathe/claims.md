@@ -2186,3 +2186,35 @@ contexts — they must execute at runtime.
 - contains `mov     x0, #7` (result constant-folded)
 
 **Tests**: `cargo test --test e2e -- runtime_unsafe_fn_body_emits_mul_not_folded runtime_unsafe_fn_call_emits_bl_not_folded`
+
+---
+
+## Claim 53: unsafe trait method call emits runtime bl and mul (not constant-folded)
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: `unsafe trait` + `unsafe impl` codegen is identical to regular
+trait + impl. The qualifier is a static safety contract only — no difference
+in emitted assembly. An `unsafe impl` method body must emit runtime instructions
+(e.g., `mul`), not compile-time constants. The call site must emit `bl`, not a
+folded constant.
+
+**What this guards against**:
+1. Treating `unsafe impl` as a special case that folds the method body.
+2. Inlining the call and constant-folding to `mov x0, #14`.
+3. Failing to emit `bl` at the call site.
+
+**FLS §19 AMBIGUOUS**: The spec requires `unsafe impl` when implementing an
+`unsafe trait`, but does not specify how the compiler verifies this pairing.
+Galvanic records `is_unsafe` on both `TraitDef` and `ImplDef` but does not
+yet enforce the pairing — enforcement is deferred.
+
+**FLS §6.1.2 Constraint 1**: Method bodies are not const contexts — they must
+execute at runtime.
+
+**Violated if**: `compile_to_asm(UNSAFE_TRAIT_SCALE)` returns assembly that:
+- lacks `mul` in the method body, OR
+- lacks `bl` at the call site, OR
+- contains `mov     x0, #14` (result constant-folded)
+
+**Tests**: `cargo test --test e2e -- runtime_unsafe_trait_method_emits_bl_not_folded runtime_unsafe_trait_body_emits_mul_not_folded`
