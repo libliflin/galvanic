@@ -390,6 +390,23 @@ else
     fi
 fi
 
+# ── Claim 20: @ binding patterns emit runtime sub-pattern checks ──────────────
+# Tests that `n @ 1..=5 => n * 2` with a function-parameter scrutinee:
+#   (a) emits `cmp` instructions for the range check (not unconditionally binding)
+#   (b) does NOT fold `n * 2` to `mov x0, #6` (binding value is runtime, not compile-time)
+# And that `n @ 42 => n + 1` emits `cmp` for the literal equality check.
+# Both use a function parameter as the scrutinee — constant folding the result
+# through the match arm is impossible given only compile-time information.
+# Introduced in cycle 40 (red-team, milestone 150, FLS §5.1.4).
+# References: claims.md Claim 20.
+
+echo "--- Claim 20: @ binding patterns emit runtime sub-pattern checks (not folded) ---"
+if cargo test --test e2e --quiet -- runtime_bound_pattern_range_emits_cmp_and_binding runtime_bound_pattern_literal_emits_eq_check 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 20" "runtime_bound_pattern_range_emits_cmp_and_binding or runtime_bound_pattern_literal_emits_eq_check FAILED — @ binding pattern may not be emitting sub-pattern checks or may be constant-folding the bound expression"
+else
+    pass "Claim 20: @ binding patterns emit runtime sub-pattern checks (not folded)"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

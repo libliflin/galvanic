@@ -394,6 +394,31 @@ falsify.sh Claim 19.
 
 ---
 
+## Claim 20: `@` binding patterns emit runtime sub-pattern checks before binding
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: When a pattern `n @ subpat` is matched (FLS §5.1.4), galvanic must:
+1. Emit a runtime comparison to check `subpat` (e.g., `cmp` for a range or literal check).
+2. Only install the binding `n` if the sub-pattern matches (conditional execution, not always-bind).
+3. NOT constant-fold the body expression that uses `n`: `n @ 1..=5 => n * 2` with `x=3` must emit `mul`, not `mov x0, #6`.
+
+This guards the full `at_bind` code path added in milestone 150 (cycle 39, FLS §5.1.4). The attack vector is:
+- Removing or breaking the `Pat::Bound` lowering → lower error, galvanic exits 1, `compile_and_run` skips (caught by CI e2e).
+- Binding `n` to a wrong value (e.g., always 0) → wrong exit code in compile-and-run tests.
+- Omitting the sub-pattern check → the arm fires even when `x` is out of range → wrong exit code.
+- Constant-folding through the binding → `n * 2` with `n=3` folds to `mov x0, #6` instead of emitting `mul`.
+
+The assembly inspection tests catch the last case without requiring cross tools. They use a function parameter `x` as the scrutinee so that constant folding through the match is impossible even if galvanic tried.
+
+**Violated if**: `compile_to_asm(...)` for `fn classify(x: i32) -> i32 { match x { n @ 1..=5 => n * 2, _ => 0 } }` returns assembly that:
+- does NOT contain `cmp` (sub-pattern check absent), OR
+- contains `mov     x0, #6` (result constant-folded, treating n=3 as compile-time known).
+
+**Test**: `cargo test --test e2e -- runtime_bound_pattern_range_emits_cmp_and_binding runtime_bound_pattern_literal_emits_eq_check`
+
+---
+
 ## Not Yet Claims (honest gaps)
 
 These are promises the project will eventually make but cannot yet be falsified:

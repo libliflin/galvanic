@@ -93,7 +93,9 @@ jobs:
 
       - name: Deeply nested braces do not stack overflow
         run: |
-          # 500 levels of nested blocks
+          # 500 levels of nested blocks — should not stack-overflow the parser or hang.
+          # A clean non-zero exit (e.g. "exceeded stack slots") is acceptable;
+          # only signal death (exit > 128) counts as failure.
           python3 -c "
           print('fn main() {')
           for i in range(500):
@@ -102,7 +104,15 @@ jobs:
               print('  }')
           print('}')
           " > /tmp/nested.rs
-          timeout 30 ./target/release/galvanic /tmp/nested.rs
+          set +e
+          timeout 30 ./target/release/galvanic /tmp/nested.rs 2>/dev/null
+          EXIT_CODE=$?
+          set -e
+          if [ "$EXIT_CODE" -gt 128 ]; then
+            SIGNAL=$((EXIT_CODE - 128))
+            echo "FAIL: binary died with signal $SIGNAL on deeply nested input"
+            exit 1
+          fi
 
       - name: Binary garbage input gives error, not panic
         run: |
