@@ -32186,6 +32186,122 @@ fn runtime_u8_const_chained_sub_emits_loadimm_246() {
     );
 }
 
+// ── Milestone 192: &str parameters with .len() (FLS §2.4.6 / §4.8) ──────────
+//
+// A function that receives `&str` can call `.len()` on its parameter.
+// Galvanic passes `&str` as a single byte-length register (the full fat-pointer
+// ABI — data pointer + length — is deferred until string dereferencing is needed).
+//
+// FLS §2.4.6: String literals. FLS §4.8: Reference types.
+// FLS §4.7 AMBIGUOUS: `str` is an unsized type; `&str` is a fat pointer in the
+// full Rust ABI, but galvanic uses a single-register byte-length convention.
+
+#[test]
+fn milestone_192_str_param_len_hello() {
+    let Some(exit_code) = compile_and_run(
+        "fn str_len(s: &str) -> usize { s.len() }\nfn main() -> i32 { str_len(\"hello\") as i32 }\n",
+    ) else { return; };
+    assert_eq!(exit_code, 5, "str_len(\"hello\") must return 5");
+}
+
+#[test]
+fn milestone_192_str_param_len_empty() {
+    let Some(exit_code) = compile_and_run(
+        "fn str_len(s: &str) -> usize { s.len() }\nfn main() -> i32 { str_len(\"\") as i32 }\n",
+    ) else { return; };
+    assert_eq!(exit_code, 0, "str_len(\"\") must return 0");
+}
+
+#[test]
+fn milestone_192_str_param_len_in_arithmetic() {
+    let Some(exit_code) = compile_and_run(
+        "fn str_len(s: &str) -> usize { s.len() }\nfn main() -> i32 { (str_len(\"hi\") * 3) as i32 }\n",
+    ) else { return; };
+    assert_eq!(exit_code, 6, "str_len(\"hi\") * 3 must be 6");
+}
+
+#[test]
+fn milestone_192_str_param_len_in_if() {
+    let Some(exit_code) = compile_and_run(
+        "fn str_len(s: &str) -> usize { s.len() }\nfn main() -> i32 { if str_len(\"hello\") > 3 { 1 } else { 0 } }\n",
+    ) else { return; };
+    assert_eq!(exit_code, 1, "if str_len > 3 must take true branch");
+}
+
+#[test]
+fn milestone_192_str_param_len_let_binding() {
+    let Some(exit_code) = compile_and_run(
+        "fn str_len(s: &str) -> usize { s.len() }\nfn main() -> i32 { let n = str_len(\"hello world\"); n as i32 }\n",
+    ) else { return; };
+    assert_eq!(exit_code, 11, "str_len(\"hello world\") must be 11");
+}
+
+#[test]
+fn milestone_192_str_param_len_passed_to_fn() {
+    let Some(exit_code) = compile_and_run(
+        "fn str_len(s: &str) -> usize { s.len() }\nfn double(n: usize) -> usize { n * 2 }\nfn main() -> i32 { double(str_len(\"abc\")) as i32 }\n",
+    ) else { return; };
+    assert_eq!(exit_code, 6, "double(str_len(\"abc\")) must be 6");
+}
+
+#[test]
+fn milestone_192_str_param_two_params() {
+    let Some(exit_code) = compile_and_run(
+        "fn combined_len(a: &str, b: &str) -> usize { a.len() + b.len() }\nfn main() -> i32 { combined_len(\"hi\", \"hello\") as i32 }\n",
+    ) else { return; };
+    assert_eq!(exit_code, 7, "combined_len(\"hi\", \"hello\") must be 7");
+}
+
+#[test]
+fn milestone_192_str_param_called_twice() {
+    let Some(exit_code) = compile_and_run(
+        "fn str_len(s: &str) -> usize { s.len() }\nfn main() -> i32 { (str_len(\"hi\") + str_len(\"hello world\")) as i32 }\n",
+    ) else { return; };
+    assert_eq!(exit_code, 13, "str_len(\"hi\") + str_len(\"hello world\") must be 13");
+}
+
+// Assembly inspection: &str parameter must emit ldr from slot (not a constant).
+//
+// A function receiving &str spills the byte-length from x0 to a stack slot,
+// then ldr from that slot when evaluating .len(). If galvanic constant-folded
+// the string length into the callee body, it would emit mov rather than ldr.
+//
+// FLS §6.1.2:37–45: non-const functions must emit runtime instructions.
+// FLS §4.8: reference parameter is a runtime value, not a compile-time constant.
+#[test]
+fn runtime_str_param_len_emits_ldr_not_constant() {
+    let asm = compile_to_asm(
+        "fn str_len(s: &str) -> usize { s.len() }\nfn main() -> i32 { str_len(\"hello\") as i32 }\n",
+    );
+    assert!(
+        asm.contains("ldr"),
+        "str_len must emit ldr to load s from stack slot (not a compile-time constant): {asm}"
+    );
+    assert!(
+        asm.contains("bl"),
+        "str_len must be called via bl (runtime dispatch, not inlined): {asm}"
+    );
+}
+
+#[test]
+fn runtime_str_param_len_not_folded() {
+    // Two calls with different string lengths. If str_len were constant-folded,
+    // both calls would emit the same constant. The ldr in the callee body proves
+    // the result comes from the parameter slot, not from a compile-time value.
+    let asm = compile_to_asm(
+        "fn str_len(s: &str) -> usize { s.len() }\nfn main() -> i32 { (str_len(\"hi\") + str_len(\"hello\")) as i32 }\n",
+    );
+    // Caller prepares argument lengths (2 and 5) as immediates; callee loads from slot.
+    assert!(
+        asm.contains("ldr"),
+        "str_len callee must emit ldr to load parameter from slot (not constant): {asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #7"),
+        "must not fold both calls to the combined constant #7: {asm}"
+    );
+}
+
 // Claim 77 adversarial: narrow integer const items wrap for sub/mul, not just add.
 //
 // Claim 75 tested addition (200+100=300→44). Claim 77 extends the fence to

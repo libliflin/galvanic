@@ -3587,6 +3587,23 @@ fn lower_fn(
         if param_ty == IrTy::FnPtr {
             ctx.local_fn_ptr_slots.insert(slot);
         }
+        // FLS §2.4.6 / §4.8: `&str` parameter — mark the slot in `local_str_slots`
+        // so `.len()` method calls can load the byte-length from the stack slot.
+        //
+        // FLS §4.8 / §4.7: AMBIGUOUS — `&str` is specified as a fat pointer
+        // (data pointer + byte length). Galvanic passes it as a single
+        // byte-length register (the pointer half is deferred: string data cannot
+        // be dereferenced yet). This is a known deviation from the full fat-pointer ABI.
+        //
+        // Cache-line note: one `str` spill (4 bytes) at function entry; `.len()`
+        // emits one `ldr` (4 bytes). Two instructions total — same cost as i32.
+        if let TyKind::Ref { inner, .. } = &param.ty.kind
+            && let TyKind::Path(segs) = &inner.kind
+            && segs.len() == 1
+            && segs[0].text(source) == "str"
+        {
+            ctx.local_str_slots.insert(slot);
+        }
         // FLS §4.1, §6.23: track narrow-type parameters so compound assignment
         // can apply the correct wrapping instruction (TruncU8 / SextI8 / TruncU16 / SextI16).
         if param_ty == IrTy::U8 {

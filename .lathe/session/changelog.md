@@ -1,56 +1,67 @@
-# Changelog — Cycle 136
+# Changelog — Cycle 137
 
 ## Who This Helps
-- **William (researcher)**: Claim 75 (cycle 133) only tested addition wrapping for
-  u8 const items. Subtraction underflow and multiplication overflow were explicitly
-  flagged in the cycle 133 "Next" section as untested. Claim 77 now closes that gap
-  permanently. Any future refactor of `narrow_const_value` that accidentally breaks
-  subtraction or multiplication narrowing will be caught immediately — before CI.
-- **CI / Validation Infrastructure**: 8 new tests and 1 new falsification block.
-  The fence now covers all three arithmetic directions for narrow const items.
+- **William (researcher)**: Programs can now pass `&str` to functions and call
+  `.len()` on the parameter. This is a concrete step from "only toy programs"
+  toward "programs that look like real Rust." A function that takes a string
+  argument and operates on it (e.g., `fn greeting_len(s: &str) -> usize { s.len() }`)
+  now compiles and produces correct ARM64 output. The FLS §4.7 ambiguity
+  (fat-pointer ABI for `str`) is documented explicitly in code.
+- **Compiler Researchers**: The `local_str_slots` mechanism is extended from
+  let-bindings to function parameters with a single targeted change. The comment
+  explains why galvanic deviates from the fat-pointer ABI.
 
 ## Observed
-- Cycle 133 "Next" section explicitly flagged: "The underflow analog is also untested:
-  `const X: u8 = 10; const Y: u8 = X - 20` should wrap to 246."
-- Claim 75 (`falsify.sh`) only runs `claim_75_u8_const_item_wraps_at_8_bits_not_i32`
-  which uses `200 + 100 = 300 → 44`. No subtraction or multiplication falsification.
-- The adversarial failure mode: if `narrow_const_value` were changed to clamp
-  negative raw values to 0 (e.g., `if raw >= 0 { raw as u8 as i32 } else { 0 }`),
-  `const X: u8 = 5 - 10` would yield 0 instead of 251. Claim 75 would still pass
-  (it only tests addition). This cycle adds the falsification fence for that scenario.
+- `fn foo(s: &str) -> usize { s.len() }` compiled without error but produced
+  wrong code: `s.len()` inside the function could not match the `local_str_slots`
+  path (Case B) because `local_str_slots` was only populated from `ExprKind::LitStr`
+  let-binding initializers, never from parameters.
+- The call site was already correct: `LitStr` lowering emits `LoadImm(r, byte_len)`,
+  so the byte length arrives in `x0` at the callee. The only gap was that the callee
+  didn't recognize its own parameter as a str slot.
+- No existing milestone test covered `fn f(s: &str) -> usize { s.len() }` —
+  all milestone 93 tests operate on let-bound string literals within `main`.
 
 ## Applied
-- **`tests/e2e.rs`**: Added 8 new tests:
-  - `milestone_191_u8_const_sub_underflow` — 5-10 wraps to 251 (compile_and_run)
-  - `milestone_191_u8_const_mul_wraps` — 100*3 wraps to 44 (compile_and_run)
-  - `milestone_191_u8_const_chained_sub_underflow` — X=10; Y=X-20 → 246 (compile_and_run)
-  - `milestone_191_i8_const_sub_underflow` — -100-50 wraps to 106 (compile_and_run)
-  - `runtime_u8_const_sub_underflow_emits_loadimm_251` — assembly inspection (#251 not #0)
-  - `runtime_u8_const_mul_wrap_emits_loadimm_44` — assembly inspection (#44 not #300)
-  - `runtime_u8_const_chained_sub_emits_loadimm_246` — assembly inspection (#246 not #0)
-  - `claim_77_u8_const_sub_and_mul_wrap_not_saturate` — adversarial (asm + runtime)
-- **`.lathe/claims.md`**: Added Claim 77 with three adversarial failure modes and
-  FLS citations.
-- **`.lathe/falsify.sh`**: Added Claim 77 block covering all 6 key tests.
+- **`src/lower.rs`** (scalar parameter loop): After spilling the parameter register
+  to its stack slot, check whether the declared type is `&str`
+  (`TyKind::Ref { inner: TyKind::Path(["str"]) }`). If so, insert the slot into
+  `ctx.local_str_slots`. The FLS §4.7 AMBIGUOUS deviation (single byte-length
+  register vs. fat pointer) is documented in the new comment block.
+- **`tests/e2e.rs`**: Added 10 new tests (milestone 192):
+  - `milestone_192_str_param_len_hello` — basic 5-byte string
+  - `milestone_192_str_param_len_empty` — empty string (0)
+  - `milestone_192_str_param_len_in_arithmetic` — `str_len("hi") * 3 == 6`
+  - `milestone_192_str_param_len_in_if` — `if str_len(...) > 3 { 1 } else { 0 }`
+  - `milestone_192_str_param_len_let_binding` — result stored in let, then returned
+  - `milestone_192_str_param_len_passed_to_fn` — result passed to second function
+  - `milestone_192_str_param_two_params` — `fn f(a: &str, b: &str) -> usize { a.len() + b.len() }`
+  - `milestone_192_str_param_called_twice` — two calls with different literals, summed
+  - `runtime_str_param_len_emits_ldr_not_constant` — callee emits `ldr` from slot + `bl`
+  - `runtime_str_param_len_not_folded` — combined result not folded to constant
 
 ## Validated
+- `cargo build` — clean
+- `cargo test --test e2e milestone_192` — 8 passed (compile_and_run skip on macOS)
+- `cargo test --test e2e runtime_str_param` — 2 passed
+- `cargo test` — 1661 e2e tests passed (was 1651), all suites clean
 - `cargo clippy -- -D warnings` — clean
-- `cargo test --test e2e` — 1651 passed (8 new), 0 failed
-- `.lathe/falsify.sh` — 76 passed, 0 failed
 
 ## FLS Notes
-- **FLS §6.23 AMBIGUOUS**: Underflow in const contexts should be a compile-time error.
-  Galvanic wraps instead (`-5 as u8 = 251`). The spec does not enumerate which
-  narrowing/wrapping rules apply to non-i32 const items specifically.
-- **FLS §4.1**: Narrow integer types have specific bit-widths. `narrow_const_value`
-  uses Rust's two's-complement `as u8` cast which handles both positive overflow
-  (300→44) and negative underflow (-5→251) correctly and uniformly.
+- **FLS §4.7 AMBIGUOUS**: The spec defines `str` as an "unsized slice of bytes
+  encoded in UTF-8" and `&str` as a fat pointer (data pointer + byte length). The
+  FLS does not specify the ABI for passing `&str` to functions. Galvanic passes
+  `&str` as a single byte-length register. This matches the useful subset (`.len()`)
+  while deferring pointer handling until string dereferencing is needed.
+- **FLS §4.8**: Reference types are not their own value kind in galvanic's IR;
+  `&str` resolves to `IrTy::I32` (the byte length). This is consistent with how
+  the existing str literal code works but is a known divergence from the spec's
+  fat-pointer semantics.
 
 ## Next
-- The const item falsification fence now covers add/sub/mul wrapping. Division and
-  bitwise operations cannot produce out-of-range results for u8/i8 inputs, so
-  add/sub/mul are the only operations that matter here.
-- The natural next gap: promote `fls_fixtures` parse-only tests to end-to-end
-  milestone tests. The frontier is currently at milestone 191 (red-team cycles).
-  Looking at the FLS TOC, §6.16 (range expressions), §6.18 (match exhaustiveness),
-  or §15 (ownership/drop) could be the next feature work cycle.
+- The `&str` parameter support opens the door to more string-intensive programs.
+  The next natural step is `&[T]` slice parameters (fat pointer: ptr + len) with
+  `.len()` method, enabling functions to operate on arrays of unknown size.
+- Alternatively, look at whether the two-parameter `&str` case would expose the
+  register window limit (each `&str` uses one register, so eight parameters work;
+  but a fat-pointer ABI would halve that capacity).
