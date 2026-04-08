@@ -176,3 +176,8 @@ fn fls_19_unsafe_trait() {
 fn fls_6_23_overflow() {
     assert_galvanic_accepts("fls_6_23_overflow.rs");
 }
+
+#[test]
+fn fls_4_9_slices() {
+    assert_galvanic_accepts("fls_4_9_slices.rs");
+}
