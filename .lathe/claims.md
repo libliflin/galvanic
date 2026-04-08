@@ -135,6 +135,29 @@ wrapper call (`bl use_identity`, `bl use_wrapper`) must be present in the assemb
 
 ---
 
+## Claim 8: Named block `break` emits an unconditional branch instruction
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: A `break 'label value` inside a named block expression must emit an
+unconditional branch instruction (`b .Lxxx`) that exits the block. If the break
+does not produce a branch, the code following the break point would execute
+unconditionally — the block's early-exit semantics would be silently lost.
+
+**Violated if**: `compile_to_asm(...)` for a function using `break 'work value`
+returns assembly that does NOT contain `b .Lxxx` (an unconditional branch to a
+generated exit label).
+
+**Red-team finding (2026-04-07)**: The original assertion was `asm.contains('b')`,
+which checks for the *character* `'b'` — vacuously true in any ARM64 program since
+`bl`, `blr`, `cbz`, `sub`, and virtually every instruction or label name contains
+that letter. The check was indistinguishable from a no-op. Replaced with a real
+assertion: `asm.contains("b       .L") || asm.contains("b .L")`.
+
+**Test**: `cargo test --test e2e -- runtime_named_block_emits_branch_not_folded`
+
+---
+
 ## Not Yet Claims (honest gaps)
 
 These are promises the project will eventually make but cannot yet be falsified:

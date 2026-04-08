@@ -18505,10 +18505,15 @@ fn compute(n: i32) -> i32 {
 fn main() -> i32 { compute(7) }
 "#;
     let asm = compile_to_asm(src);
-    // Must emit a branch to the exit label (the break).
+    // Must emit an unconditional branch to the block exit label (the `break 'work`).
+    // Red-team finding (2026-04-07): the original `asm.contains('b')` checked for
+    // the *character* 'b' — vacuously true in any ARM64 program since `bl`, `blr`,
+    // `cbz`, `sub`, and virtually every instruction or label contains the letter.
+    // The load-bearing assertion is that an unconditional `b .Lxxx` instruction
+    // appears — that is what `break 'work 0` must emit to bypass the rest of the block.
     assert!(
-        asm.contains('b'),
-        "named block must emit a branch instruction for break: {asm}"
+        asm.contains("b       .L") || asm.contains("b .L"),
+        "named block break must emit unconditional branch 'b .Lxxx' to exit label: {asm}"
     );
     // Must emit mul for n*3 (runtime computation).
     assert!(
