@@ -1110,3 +1110,77 @@ method calls through the concrete type, not vtable or generic-parameter dispatch
 - contains `mov     x0, #45` or `mov x0, #45` (constant-folded result).
 
 **Test**: `cargo test --test e2e -- runtime_assoc_type_method_emits_mul_not_folded`
+
+---
+
+## Claim 35: Generic functions with associated type bounds emit monomorphized calls (not folded)
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: When a generic function is bounded by a trait constraint that includes an
+associated type binding (`T: Container<Item = i32>`), galvanic must:
+1. Emit a monomorphized function label for each distinct concrete type (`extract__Wrapper`,
+   `extract__Doubler`).
+2. Emit a `bl` to the monomorphized label — not evaluate the result at compile time.
+3. NOT constant-fold the call result even when the struct is initialized with a literal.
+
+This covers the §10.2 + §12.1 associated type bound path (`T: Trait<Assoc = U>`), which is
+distinct from:
+- Claims 9–12 (plain trait bounds `T: Trait` without associated type binding)
+- Claim 34 (direct associated type method dispatch, not via generic parameter)
+
+```rust
+trait Container {
+    type Item;
+    fn get_val(&self) -> i32;
+}
+struct Wrapper { val: i32 }
+impl Container for Wrapper {
+    type Item = i32;
+    fn get_val(&self) -> i32 { self.val + 1 }
+}
+fn extract<T: Container<Item = i32>>(c: T) -> i32 { c.get_val() }
+fn main() -> i32 {
+    let w = Wrapper { val: 9 };
+    extract(w)
+}
+```
+
+Must emit `bl extract__Wrapper` and must NOT emit `mov x0, #10` (constant-folded result).
+
+The two-type variant also tests that `Wrapper__get_val` and `Doubler__get_val` both appear —
+two distinct monomorphizations for two distinct concrete types.
+
+**Why this claim matters**: The associated type binding in the bound (`<Item = i32>`) is
+parsed and lowered through a separate code path from plain bounds. A regression in the
+parser (failing to parse `<Item = i32>`) or in the lowerer (failing to match the bound
+during monomorphization) would cause programs using `T: Container<Item = i32>` to fail at
+compile time, or to dispatch to the wrong monomorphization. Without this claim, such a
+regression is invisible — the compile-and-run tests that exercise this path require QEMU.
+
+**FLS §10.2**: The spec defines associated type bindings in trait bounds but does not specify
+how implementations should match them during monomorphization. FLS §10.2: AMBIGUOUS — the
+spec does not distinguish between "associated type declared" (impl site) and "associated type
+constrained in a bound" (generic parameter). Galvanic resolves this by recording the assoc
+type binding in the trait bound and verifying the concrete type's impl satisfies it.
+
+**Attack vectors**:
+1. Parser regression: `T: Container<Item = i32>` fails to parse → compile error.
+   Caught by the test itself failing with a parse error.
+2. Lowerer ignores the `<Item = i32>` binding: it dispatches to any impl of `Container`,
+   including impls with a different associated type. Would produce wrong runtime behavior
+   for programs that depend on the type constraint.
+3. Constant-fold the call site: evaluate `extract(Wrapper { val: 9 })` → `10` and emit
+   `mov x0, #10`. Caught by `!asm.contains("mov     x0, #10")`.
+4. Two-type regression: only one of the two concrete types is monomorphized. The two-type
+   test asserts both `Wrapper__get_val` and `Doubler__get_val` labels exist.
+
+**Violated if**: `compile_to_asm(...)` for the program above returns assembly that:
+- lacks `bl      extract__Wrapper` (monomorphized call not emitted), OR
+- contains `mov     x0, #10` (constant-folded result of `extract(w)`).
+
+Or for the two-type variant:
+- lacks `Wrapper__get_val` or `Doubler__get_val` (one monomorphization missing), OR
+- contains `mov     x0, #17` (constant-folded sum `7 + 5*2 = 17`).
+
+**Test**: `cargo test --test e2e -- runtime_assoc_type_bound_emits_monomorphized_bl_not_folded runtime_assoc_type_bound_two_types_both_monomorphized`
