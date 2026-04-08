@@ -21174,3 +21174,275 @@ fn main() -> i32 {
         "monomorphized Wrapper get_val method must be emitted: {asm}"
     );
 }
+
+// ── Milestone 144: multiple trait bounds (FLS §12.1, §4.14) ──────────────────
+//
+// `fn foo<T: Trait1 + Trait2>(x: T)` — a generic parameter constrained by
+// multiple trait bounds. Both bounds are parsed via the `+` separator and
+// discarded; galvanic infers the concrete type at the call site. Inside the
+// generic body, methods from both traits must dispatch at runtime to the
+// concrete type's implementations.
+//
+// FLS §12.1: A type parameter may have multiple trait bounds separated by `+`.
+// FLS §4.14: Trait bounds may appear inline (`T: A + B`) or in where clauses
+//   (`where T: A + B`). Both syntaxes must be accepted.
+
+#[test]
+fn milestone_144_multiple_bounds_basic() {
+    // Two trait bounds; function calls one method from each trait.
+    let src = r#"
+trait Adder { fn add_one(&self) -> i32; }
+trait Doubler { fn double(&self) -> i32; }
+struct Num { val: i32 }
+impl Adder for Num { fn add_one(&self) -> i32 { self.val + 1 } }
+impl Doubler for Num { fn double(&self) -> i32 { self.val * 2 } }
+fn apply_both<T: Adder + Doubler>(x: T) -> i32 { x.add_one() + x.double() }
+fn main() -> i32 {
+    let n = Num { val: 5 };
+    apply_both(n) - 16
+}
+"#;
+    // (5+1) + (5*2) = 6 + 10 = 16; 16 - 16 = 0
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 0);
+}
+
+#[test]
+fn milestone_144_multiple_bounds_in_arithmetic() {
+    let src = r#"
+trait Adder { fn add_one(&self) -> i32; }
+trait Doubler { fn double(&self) -> i32; }
+struct Num { val: i32 }
+impl Adder for Num { fn add_one(&self) -> i32 { self.val + 1 } }
+impl Doubler for Num { fn double(&self) -> i32 { self.val * 2 } }
+fn apply_both<T: Adder + Doubler>(x: T) -> i32 { x.add_one() + x.double() }
+fn main() -> i32 {
+    let n = Num { val: 2 };
+    apply_both(n) + 1
+}
+"#;
+    // (2+1) + (2*2) = 3 + 4 = 7; 7 + 1 = 8
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 8);
+}
+
+#[test]
+fn milestone_144_multiple_bounds_result_passed_to_fn() {
+    let src = r#"
+trait Adder { fn add_one(&self) -> i32; }
+trait Doubler { fn double(&self) -> i32; }
+struct Num { val: i32 }
+impl Adder for Num { fn add_one(&self) -> i32 { self.val + 1 } }
+impl Doubler for Num { fn double(&self) -> i32 { self.val * 2 } }
+fn apply_both<T: Adder + Doubler>(x: T) -> i32 { x.add_one() + x.double() }
+fn identity(v: i32) -> i32 { v }
+fn main() -> i32 {
+    let n = Num { val: 4 };
+    identity(apply_both(n)) - 13
+}
+"#;
+    // (4+1) + (4*2) = 5 + 8 = 13; 13 - 13 = 0
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 0);
+}
+
+#[test]
+fn milestone_144_multiple_bounds_called_twice() {
+    let src = r#"
+trait Adder { fn add_one(&self) -> i32; }
+trait Doubler { fn double(&self) -> i32; }
+struct Num { val: i32 }
+impl Adder for Num { fn add_one(&self) -> i32 { self.val + 1 } }
+impl Doubler for Num { fn double(&self) -> i32 { self.val * 2 } }
+fn apply_both<T: Adder + Doubler>(x: T) -> i32 { x.add_one() + x.double() }
+fn main() -> i32 {
+    let a = Num { val: 1 };
+    let b = Num { val: 2 };
+    apply_both(a) + apply_both(b)
+}
+"#;
+    // apply_both(Num{1}) = (1+1)+(1*2) = 2+2 = 4
+    // apply_both(Num{2}) = (2+1)+(2*2) = 3+4 = 7
+    // 4 + 7 = 11
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 11);
+}
+
+#[test]
+fn milestone_144_multiple_bounds_on_parameter() {
+    // The multi-bound generic function is called from another function
+    // that takes the struct as a parameter, preventing folding.
+    let src = r#"
+trait Adder { fn add_one(&self) -> i32; }
+trait Doubler { fn double(&self) -> i32; }
+struct Num { val: i32 }
+impl Adder for Num { fn add_one(&self) -> i32 { self.val + 1 } }
+impl Doubler for Num { fn double(&self) -> i32 { self.val * 2 } }
+fn apply_both<T: Adder + Doubler>(x: T) -> i32 { x.add_one() + x.double() }
+fn run(n: Num) -> i32 { apply_both(n) }
+fn main() -> i32 {
+    let n = Num { val: 6 };
+    run(n) - 19
+}
+"#;
+    // (6+1) + (6*2) = 7 + 12 = 19; 19 - 19 = 0
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 0);
+}
+
+#[test]
+fn milestone_144_multiple_bounds_where_clause() {
+    // Same semantics as inline bounds but written as a `where` clause.
+    // FLS §4.14: `where T: Adder + Doubler` is equivalent to `<T: Adder + Doubler>`.
+    let src = r#"
+trait Adder { fn add_one(&self) -> i32; }
+trait Doubler { fn double(&self) -> i32; }
+struct Num { val: i32 }
+impl Adder for Num { fn add_one(&self) -> i32 { self.val + 1 } }
+impl Doubler for Num { fn double(&self) -> i32 { self.val * 2 } }
+fn apply_both<T>(x: T) -> i32 where T: Adder + Doubler { x.add_one() + x.double() }
+fn main() -> i32 {
+    let n = Num { val: 5 };
+    apply_both(n) - 16
+}
+"#;
+    // (5+1) + (5*2) = 16; 16 - 16 = 0
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 0);
+}
+
+#[test]
+fn milestone_144_multiple_bounds_three_traits() {
+    // FLS §4.14: any number of bounds may be combined with `+`.
+    let src = r#"
+trait Adder { fn add_one(&self) -> i32; }
+trait Doubler { fn double(&self) -> i32; }
+trait Negater { fn negate(&self) -> i32; }
+struct Num { val: i32 }
+impl Adder for Num { fn add_one(&self) -> i32 { self.val + 1 } }
+impl Doubler for Num { fn double(&self) -> i32 { self.val * 2 } }
+impl Negater for Num { fn negate(&self) -> i32 { self.val * -1 } }
+fn combine<T: Adder + Doubler + Negater>(x: T) -> i32 {
+    x.add_one() + x.double() + x.negate()
+}
+fn main() -> i32 {
+    let n = Num { val: 4 };
+    combine(n) - 9
+}
+"#;
+    // add_one(4)=5, double(4)=8, negate(4)=-4; 5+8+(-4)=9; 9-9=0
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 0);
+}
+
+#[test]
+fn milestone_144_multiple_bounds_two_types() {
+    // Two different concrete types both satisfy the same multi-bound.
+    // Both monomorphized variants must be generated.
+    // Small{val:1}: (1+1)+(1*2)=2+2=4
+    // Large{val:1}: (1+10)+(1*3)=11+3=14; 4+14=18; 18-18=0
+    let src = r#"
+trait Adder { fn add_one(&self) -> i32; }
+trait Doubler { fn double(&self) -> i32; }
+struct Small { val: i32 }
+struct Large { val: i32 }
+impl Adder for Small { fn add_one(&self) -> i32 { self.val + 1 } }
+impl Doubler for Small { fn double(&self) -> i32 { self.val * 2 } }
+impl Adder for Large { fn add_one(&self) -> i32 { self.val + 10 } }
+impl Doubler for Large { fn double(&self) -> i32 { self.val * 3 } }
+fn apply_both<T: Adder + Doubler>(x: T) -> i32 { x.add_one() + x.double() }
+fn main() -> i32 {
+    let s = Small { val: 1 };
+    let l = Large { val: 1 };
+    apply_both(s) + apply_both(l) - 18
+}
+"#;
+    // Small{1}: 2+2=4; Large{1}: 11+3=14; 4+14=18; 18-18=0
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 0);
+}
+
+// ── Assembly inspection for milestone 144 ────────────────────────────────────
+
+#[test]
+fn runtime_multiple_bounds_emits_both_trait_calls() {
+    // When `T: Adder + Doubler`, a function calling both `x.add_one()` and
+    // `x.double()` must emit runtime `bl` instructions for both methods.
+    // Neither call may be constant-folded into the result.
+    //
+    // FLS §6.1.2:37-45: Regular function bodies are not const contexts; all
+    // method dispatch must happen via runtime instructions, not compile-time
+    // evaluation.
+    let src = r#"
+trait Adder { fn add_one(&self) -> i32; }
+trait Doubler { fn double(&self) -> i32; }
+struct Num { val: i32 }
+impl Adder for Num { fn add_one(&self) -> i32 { self.val + 1 } }
+impl Doubler for Num { fn double(&self) -> i32 { self.val * 2 } }
+fn apply_both<T: Adder + Doubler>(x: T) -> i32 { x.add_one() + x.double() }
+fn main() -> i32 {
+    let n = Num { val: 5 };
+    apply_both(n) - 16
+}
+"#;
+    let asm = compile_to_asm(src);
+    // Both method bodies must be emitted as labels (not elided).
+    assert!(
+        asm.contains("Num__add_one:"),
+        "Num__add_one method body must be emitted: {asm}"
+    );
+    assert!(
+        asm.contains("Num__double:"),
+        "Num__double method body must be emitted: {asm}"
+    );
+    // Both method calls must be present in the monomorphized apply_both body.
+    assert!(
+        asm.contains("Num__add_one") && (asm.contains("bl      Num__add_one") || asm.contains("bl Num__add_one")),
+        "apply_both must call Num__add_one at runtime: {asm}"
+    );
+    assert!(
+        asm.contains("Num__double") && (asm.contains("bl      Num__double") || asm.contains("bl Num__double")),
+        "apply_both must call Num__double at runtime: {asm}"
+    );
+    // Must not fold the result to a compile-time constant.
+    assert!(
+        !asm.contains("mov     x0, #16") && !asm.contains("mov x0, #16"),
+        "apply_both(Num{{val:5}}) must not be folded to constant 16: {asm}"
+    );
+}
+
+#[test]
+fn runtime_multiple_bounds_not_folded() {
+    // Same as above but uses a non-generic wrapper function so the input is
+    // not known at compile time, making folding impossible.
+    //
+    // The wrapper `run(n: Num) -> i32 { apply_both(n) }` ensures `n.val` is
+    // a runtime value. If galvanic incorrectly constant-folds `apply_both`,
+    // it would emit `mov x0, #<constant>` inside `run`, which would fail for
+    // any input other than the one used in the test.
+    let src = r#"
+trait Adder { fn add_one(&self) -> i32; }
+trait Doubler { fn double(&self) -> i32; }
+struct Num { val: i32 }
+impl Adder for Num { fn add_one(&self) -> i32 { self.val + 1 } }
+impl Doubler for Num { fn double(&self) -> i32 { self.val * 2 } }
+fn apply_both<T: Adder + Doubler>(x: T) -> i32 { x.add_one() + x.double() }
+fn run(n: Num) -> i32 { apply_both(n) }
+fn main() -> i32 {
+    let n = Num { val: 3 };
+    run(n) - 10
+}
+"#;
+    // (3+1)+(3*2) = 4+6 = 10; 10-10 = 0
+    let asm = compile_to_asm(src);
+    // The `run` function must call `apply_both__Num` at runtime.
+    assert!(
+        asm.contains("apply_both"),
+        "run must call apply_both at runtime (not inlined): {asm}"
+    );
+    // Inside `run`, the result must not be a hardcoded constant.
+    assert!(
+        !asm.contains("mov     x0, #10") && !asm.contains("mov x0, #10"),
+        "run(Num{{val:3}}) must not fold apply_both to constant 10: {asm}"
+    );
+}
