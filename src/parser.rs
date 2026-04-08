@@ -1887,22 +1887,11 @@ impl<'src> Parser<'src> {
         self.eat(TokenKind::KwMut);
 
         // Pattern — FLS §8.1: any irrefutable pattern is permitted.
-        // Common forms: identifier, `_`, or tuple `(a, b)` (FLS §5.10.3).
-        // FLS §5.1.11: OR patterns are also allowed in let-else position.
-        let first_pat = self.parse_let_pattern()?;
-        let pat = if self.peek_kind() == TokenKind::Or {
-            // OR pattern: `let A | B | C = x else { ... };`
-            // FLS §5.1.11: Each alternative must match the same set of bindings.
-            // Galvanic supports scalar/enum-unit alternatives (no bindings).
-            let mut alts = vec![first_pat];
-            while self.peek_kind() == TokenKind::Or {
-                self.advance(); // consume `|`
-                alts.push(self.parse_let_pattern()?);
-            }
-            Pat::Or(alts)
-        } else {
-            first_pat
-        };
+        // Common forms: identifier, `_`, tuple `(a, b)` (FLS §5.10.3), or
+        // a refutable pattern for let-else. FLS §5.1.11: OR patterns are also
+        // allowed. `parse_pattern` handles OR collection; `parse_single_pattern`
+        // is the unified single-alternative parser for all pattern positions.
+        let pat = self.parse_pattern()?;
 
         // Optional type annotation `: Type`.
         let ty = if self.eat(TokenKind::Colon) {
@@ -1942,228 +1931,6 @@ impl<'src> Parser<'src> {
             kind: StmtKind::Let { pat, ty, init, else_block },
             span: start.to(end),
         })
-    }
-
-    /// Parse a pattern in `let` position.
-    ///
-    /// FLS §8.1: The pattern in a let statement is irrefutable for plain let,
-    /// or refutable for let-else. Supports: identifier, `_` (wildcard), tuple
-    /// patterns, struct patterns, tuple struct patterns, and two-segment enum
-    /// variant paths (for let-else).
-    ///
-    /// FLS §5.10.3: Tuple patterns — `(p0, p1, ...)`.
-    /// FLS §5.4: Tuple struct / variant — `Enum::Variant(p0, p1, ...)`.
-    fn parse_let_pattern(&mut self) -> Result<Pat, ParseError> {
-        match self.peek_kind() {
-            // Wildcard `_`. FLS §5.11.
-            TokenKind::Underscore => {
-                self.advance();
-                Ok(Pat::Wildcard)
-            }
-            // Identifier, struct, tuple struct, or path pattern.
-            // FLS §5.2 (ident), FLS §5.10.2 (struct), FLS §5.10.4 (tuple struct),
-            // FLS §5.5 (path/enum variant).
-            //
-            // If followed by `::`, parses a multi-segment path (e.g. `Enum::Variant`).
-            // If followed by `{`, begins a struct pattern.
-            // If followed by `(`, begins a tuple struct pattern.
-            // Otherwise it is a plain binding.
-            TokenKind::Ident => {
-                let span = self.current_span();
-                self.advance();
-                // Multi-segment path: `Enum::Variant`, `Enum::Variant(fields)`.
-                // FLS §5.4: Tuple struct/variant pattern.
-                // FLS §5.5: Path pattern (unit variant).
-                if self.peek_kind() == TokenKind::ColonColon {
-                    let mut segs = vec![span];
-                    while self.peek_kind() == TokenKind::ColonColon {
-                        self.advance(); // consume `::`
-                        if self.peek_kind() != TokenKind::Ident {
-                            return Err(self.error(
-                                "expected identifier after `::` in let pattern".to_owned(),
-                            ));
-                        }
-                        let seg = self.advance();
-                        segs.push(Self::span_of(&seg));
-                    }
-                    // Tuple struct/variant: `Enum::Variant(p0, p1, ...)`.
-                    if self.peek_kind() == TokenKind::OpenParen {
-                        self.advance(); // consume `(`
-                        let mut fields = Vec::new();
-                        while self.peek_kind() != TokenKind::CloseParen {
-                            fields.push(self.parse_let_pattern()?);
-                            if !self.eat(TokenKind::Comma) {
-                                break;
-                            }
-                            if self.peek_kind() == TokenKind::CloseParen {
-                                break; // trailing comma
-                            }
-                        }
-                        self.expect(TokenKind::CloseParen)?;
-                        return Ok(Pat::TupleStruct { path: segs, fields });
-                    }
-                    // Unit variant / path pattern: `Enum::Variant`.
-                    return Ok(Pat::Path(segs));
-                }
-                // Peek ahead: `{` means struct pattern (FLS §5.10.2).
-                if self.peek_kind() == TokenKind::OpenBrace {
-                    self.advance(); // consume `{`
-                    let mut pat_fields: Vec<(crate::ast::Span, Pat)> = Vec::new();
-                    while self.peek_kind() != TokenKind::CloseBrace {
-                        let field_name = self.expect(TokenKind::Ident)?;
-                        let field_pat = if self.peek_kind() == TokenKind::Colon {
-                            self.advance(); // consume `:`
-                            // Recursive sub-pattern: supports nested struct/tuple
-                            // patterns after `:` (FLS §5.10.2). e.g.,
-                            // `let Outer { x, inner: Inner { a } } = ...;`
-                            self.parse_let_pattern()?
-                        } else {
-                            // Shorthand `{ field }` — bind as `{ field: field }`.
-                            Pat::Ident(field_name)
-                        };
-                        pat_fields.push((field_name, field_pat));
-                        if !self.eat(TokenKind::Comma) {
-                            break;
-                        }
-                        // Allow trailing comma before `}`.
-                        if self.peek_kind() == TokenKind::CloseBrace {
-                            break;
-                        }
-                    }
-                    self.expect(TokenKind::CloseBrace)?;
-                    Ok(Pat::StructVariant { path: vec![span], fields: pat_fields })
-                } else if self.peek_kind() == TokenKind::OpenParen {
-                    // Tuple struct pattern `StructName(p0, p1, ...)`. FLS §5.10.4.
-                    //
-                    // Parses the positional field patterns using the same recursive
-                    // `parse_let_pattern` call so nested tuple/struct patterns
-                    // would work in future. For now only Ident and Wildcard are
-                    // handled in lowering.
-                    self.advance(); // consume `(`
-                    let mut fields = Vec::new();
-                    while self.peek_kind() != TokenKind::CloseParen {
-                        fields.push(self.parse_let_pattern()?);
-                        if !self.eat(TokenKind::Comma) {
-                            break;
-                        }
-                        if self.peek_kind() == TokenKind::CloseParen {
-                            break; // trailing comma
-                        }
-                    }
-                    self.expect(TokenKind::CloseParen)?;
-                    Ok(Pat::TupleStruct { path: vec![span], fields })
-                } else {
-                    Ok(Pat::Ident(span))
-                }
-            }
-            // Tuple pattern `(p0, p1, ...)`. FLS §5.10.3.
-            //
-            // Parses `(` then a comma-separated list of sub-patterns then `)`.
-            // The empty form `()` produces `Pat::Tuple(vec![])` (unit value).
-            // A single element requires a trailing comma: `(p,)`.
-            // Two or more elements: `(p0, p1)`.
-            TokenKind::OpenParen => {
-                self.advance(); // consume `(`
-                // Empty tuple `()` → unit pattern.
-                if self.peek_kind() == TokenKind::CloseParen {
-                    self.advance(); // consume `)`
-                    return Ok(Pat::Tuple(vec![]));
-                }
-                let mut pats = Vec::new();
-                loop {
-                    pats.push(self.parse_let_pattern()?);
-                    if !self.eat(TokenKind::Comma) {
-                        break;
-                    }
-                    if self.peek_kind() == TokenKind::CloseParen {
-                        break; // trailing comma
-                    }
-                }
-                self.expect(TokenKind::CloseParen)?;
-                Ok(Pat::Tuple(pats))
-            }
-            // Slice/array pattern `[p0, p1, ...]`. FLS §5.1.8.
-            //
-            // Matches a fixed-size array, binding each element to the corresponding
-            // sub-pattern. Only `Pat::Ident` and `Pat::Wildcard` sub-patterns are
-            // supported in lowering at this milestone.
-            //
-            // FLS §5.1.8 AMBIGUOUS: The spec allows rest patterns `..` inside
-            // slice patterns. Galvanic does not yet support `..` in slice patterns.
-            TokenKind::OpenBracket => {
-                self.advance(); // consume `[`
-                let mut pats = Vec::new();
-                while self.peek_kind() != TokenKind::CloseBracket {
-                    pats.push(self.parse_let_pattern()?);
-                    if !self.eat(TokenKind::Comma) {
-                        break;
-                    }
-                    if self.peek_kind() == TokenKind::CloseBracket {
-                        break; // trailing comma
-                    }
-                }
-                self.expect(TokenKind::CloseBracket)?;
-                Ok(Pat::Slice(pats))
-            }
-            // Integer literal pattern. FLS §5.2.
-            // Also handles range patterns `lo..=hi` and `lo..hi`. FLS §5.1.9.
-            // Used in let-else OR patterns: `let 1 | 2..=5 = x else { ... };`
-            // FLS §8.1: let-else accepts refutable patterns.
-            TokenKind::LitInteger => {
-                let tok = self.advance();
-                let val = parse_int_literal(tok.text(self.src));
-                // FLS §5.1.9: `lo..=hi` — inclusive range pattern.
-                if self.peek_kind() == TokenKind::DotDotEq {
-                    self.advance(); // consume `..=`
-                    let hi = self.parse_range_bound()?;
-                    return Ok(Pat::RangeInclusive { lo: val as i128, hi });
-                }
-                // FLS §5.1.9: `lo..hi` — exclusive range pattern.
-                if self.peek_kind() == TokenKind::DotDot {
-                    self.advance(); // consume `..`
-                    let hi = self.parse_range_bound()?;
-                    return Ok(Pat::RangeExclusive { lo: val as i128, hi });
-                }
-                Ok(Pat::LitInt(val))
-            }
-            // Negative integer literal pattern `-n`. FLS §5.2.
-            // Also handles negative lower bounds in range patterns. FLS §5.1.9.
-            TokenKind::Minus => {
-                self.advance(); // consume `-`
-                if self.peek_kind() != TokenKind::LitInteger {
-                    return Err(self.error(
-                        "expected integer literal after `-` in pattern".to_owned(),
-                    ));
-                }
-                let tok = self.advance();
-                let val = parse_int_literal(tok.text(self.src));
-                // FLS §5.1.9: `-lo..=hi` — inclusive range with negative lower bound.
-                if self.peek_kind() == TokenKind::DotDotEq {
-                    self.advance(); // consume `..=`
-                    let hi = self.parse_range_bound()?;
-                    return Ok(Pat::RangeInclusive { lo: -(val as i128), hi });
-                }
-                // FLS §5.1.9: `-lo..hi` — exclusive range with negative lower bound.
-                if self.peek_kind() == TokenKind::DotDot {
-                    self.advance(); // consume `..`
-                    let hi = self.parse_range_bound()?;
-                    return Ok(Pat::RangeExclusive { lo: -(val as i128), hi });
-                }
-                Ok(Pat::NegLitInt(val))
-            }
-            // Boolean literal patterns. FLS §5.2.
-            TokenKind::KwTrue => {
-                self.advance();
-                Ok(Pat::LitBool(true))
-            }
-            TokenKind::KwFalse => {
-                self.advance();
-                Ok(Pat::LitBool(false))
-            }
-            kind => Err(self.error(format!(
-                "expected identifier, `_`, `(`, or `[` in let pattern, found {kind:?}"
-            ))),
-        }
     }
 
     // ── Expressions ───────────────────────────────────────────────────────────
@@ -3528,6 +3295,26 @@ impl<'src> Parser<'src> {
                     }
                     self.expect(TokenKind::CloseBrace)?;
                     Ok(Pat::StructVariant { path: vec![first_span], fields: pat_fields })
+                } else if self.peek_kind() == TokenKind::OpenParen {
+                    // Single-segment tuple struct / variant pattern — `Name(p0, p1, …)`.
+                    // FLS §5.4: Tuple struct and tuple variant patterns.
+                    //
+                    // A bare identifier followed by `(` is a tuple struct pattern.
+                    // Equivalent to `Name::Name(p0, …)` but with a single-segment path.
+                    // Handles both let position and match position uniformly.
+                    self.advance(); // consume `(`
+                    let mut fields = Vec::new();
+                    while self.peek_kind() != TokenKind::CloseParen {
+                        fields.push(self.parse_single_pattern()?);
+                        if !self.eat(TokenKind::Comma) {
+                            break;
+                        }
+                        if self.peek_kind() == TokenKind::CloseParen {
+                            break; // trailing comma
+                        }
+                    }
+                    self.expect(TokenKind::CloseParen)?;
+                    Ok(Pat::TupleStruct { path: vec![first_span], fields })
                 } else if self.peek_kind() == TokenKind::At {
                     // FLS §5.1.4: Binding pattern `name @ subpat`.
                     //
@@ -3635,8 +3422,33 @@ impl<'src> Parser<'src> {
                 self.expect(TokenKind::CloseBracket)?;
                 Ok(Pat::Slice(pats))
             }
+            // Tuple pattern `(p0, p1, ...)`. FLS §5.10.3.
+            //
+            // Matches a tuple by destructuring each position. The empty form `()`
+            // is the unit pattern. A single element requires a trailing comma `(p,)`.
+            // Valid in both let and match position (e.g. `let (a, b) = t;`,
+            // `match t { (a, b) => ... }`).
+            TokenKind::OpenParen => {
+                self.advance(); // consume `(`
+                if self.peek_kind() == TokenKind::CloseParen {
+                    self.advance(); // consume `)`
+                    return Ok(Pat::Tuple(vec![]));
+                }
+                let mut pats = Vec::new();
+                loop {
+                    pats.push(self.parse_single_pattern()?);
+                    if !self.eat(TokenKind::Comma) {
+                        break;
+                    }
+                    if self.peek_kind() == TokenKind::CloseParen {
+                        break; // trailing comma
+                    }
+                }
+                self.expect(TokenKind::CloseParen)?;
+                Ok(Pat::Tuple(pats))
+            }
             kind => Err(self.error(format!(
-                "expected pattern (identifier, integer literal, `-` integer, `true`, `false`, `_`, or `[`), found {kind:?}"
+                "expected pattern (identifier, integer literal, `-` integer, `true`, `false`, `_`, `[`, or `(`), found {kind:?}"
             ))),
         }
     }
