@@ -862,6 +862,25 @@ else
     pass "Claim 42: while loop emits runtime cmp+cset+cbz+back-edge and result not folded to #5"
 fi
 
+# ── Claim 43: if expression emits runtime conditional branch (not constant-folded) ─
+# Promise: `if true { 7 } else { 0 }` must emit a runtime cbz + phi slot str/ldr
+# and must NOT fold the then-branch result to `mov x0, #7`.
+# The condition `true` is statically known — an interpreter could short-circuit
+# branching entirely. The negative assertion closes that gap.
+#
+# FLS §6.17: If expressions evaluate their condition at runtime.
+# FLS §6.1.2 Constraint 1: fn main() is not a const context — if must execute at runtime.
+#
+# Introduced in cycle 80 (if expression falsification, FLS §6.17, §6.1.2).
+# References: claims.md Claim 43.
+
+echo "--- Claim 43: if expression emits runtime cbz (not constant-folded) ---"
+if cargo test --test e2e --quiet -- runtime_if_emits_cbz 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 43" "if expression test FAILED — cbz may be missing or result 7 was constant-folded to mov x0, #7"
+else
+    pass "Claim 43: if expression emits runtime cbz and result not folded to #7"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 

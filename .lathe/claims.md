@@ -1527,3 +1527,49 @@ gap: the result value 5 must not appear as a literal move instruction.
 - contains `mov     x0, #5` (loop result was constant-folded)
 
 **Test**: `cargo test --test e2e -- runtime_while_emits_cmp_cset_cbz_and_b`
+
+---
+
+## Claim 43: if expression emits runtime conditional branch (not constant-folded)
+
+**Stakeholder**: William (researcher), Compiler Researchers, FLS / Ferrocene Ecosystem
+
+**Promise**: An `if` expression with a statically-known boolean condition must emit
+a runtime conditional branch (`cbz`) and store the result through the phi slot
+(`str`/`ldr`). The result must NOT be constant-folded to an immediate. An if
+expression is not a const context (FLS §6.17, §6.1.2 Constraint 1).
+
+```rust
+fn main() -> i32 { if true { 7 } else { 0 } }
+```
+
+Must emit:
+- `cbz` — runtime conditional branch on the boolean condition
+- `str` and `ldr` — phi slot stores/loads to merge the two branches
+- NOT `mov     x0, #7` — must not fold the then-branch result to a compile-time constant
+
+**Why this claim matters**: The condition `true` is statically known — an interpreter
+could skip branching entirely and emit `mov x0, #7`. The positive assertions (cbz, str/ldr)
+verify that branching infrastructure is present, but they would pass even if dead branch
+code co-existed with a constant-folded result. The negative assertion closes this gap:
+the result value 7 must not appear as a direct literal move into the return register.
+
+**Attack vectors**:
+1. Fold `if true { 7 } else { 0 }` to `mov x0, #7`. The condition is `true` (always true),
+   so always returns 7. Positive assertions (cbz/str/ldr) might still pass with dead code.
+   Caught by absence of `mov x0, #7`.
+2. Eliminate the else branch entirely (since condition is statically true), producing a
+   codegen path with no conditional branch. Caught by `cbz` presence assertion.
+3. Replace runtime phi slot merge with direct register assignment. Caught by `str`/`ldr`
+   presence assertions.
+
+**FLS §6.17**: If expressions evaluate their condition at runtime and branch accordingly.
+**FLS §6.1.2 Constraint 1**: `fn main()` is not a const context — even statically-known
+conditions must be evaluated at runtime; the if expression result must not be folded.
+
+**Violated if**: `compile_to_asm(IF_SOURCE)` returns assembly that:
+- lacks `cbz` (condition not checked at runtime), OR
+- lacks `str`/`ldr` (phi slot not used for branch merge), OR
+- contains `mov     x0, #7` (result was constant-folded, bypassing the runtime branch)
+
+**Test**: `cargo test --test e2e -- runtime_if_emits_cbz`
