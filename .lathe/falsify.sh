@@ -548,6 +548,30 @@ else
     pass "Claim 27: @ binding OR sub-pattern emits runtime orr accumulation (not folded)"
 fi
 
+# ── Claim 28: @ binding with OR sub-pattern in if-let and match positions ────
+#
+# Promise: `n @ (pat1 | pat2)` in if-let and match positions must emit `orr` for
+# OR accumulation and must NOT constant-fold the bound value.
+# These are distinct lowering paths from the let-else path tested by Claim 27.
+# The milestone 158 compile-and-run tests for if-let and match require QEMU;
+# without this claim, a regression in those paths is invisible locally.
+#
+# Tests two positions:
+#   (a) if-let: `if let n @ (1 | 5..=10) = x { n * 2 } else { 0 }` with x param
+#       — must emit orr, must NOT emit `mov x0, #12` (n*2 where n=6).
+#   (b) match: `match x { n @ (1 | 5..=10) => n * 2, _ => 0 }` with x param
+#       — same assertions.
+#
+# Introduced in cycle 64 (red-team, FLS §5.1.4 + §5.1.11 + §6.17 + §6.18).
+# References: claims.md Claim 28.
+
+echo "--- Claim 28: @ binding with OR sub-pattern in if-let/match emits runtime orr (not folded) ---"
+if cargo test --test e2e --quiet -- runtime_at_bound_or_subpat_if_let_emits_orr_not_folded runtime_at_bound_or_subpat_match_emits_orr_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 28" "runtime_at_bound_or_subpat_if_let_emits_orr_not_folded or runtime_at_bound_or_subpat_match_emits_orr_not_folded FAILED — @ binding OR sub-pattern in if-let or match may not emit orr accumulation, or result was constant-folded"
+else
+    pass "Claim 28: @ binding OR sub-pattern in if-let and match emit runtime orr accumulation (not folded)"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

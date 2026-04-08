@@ -25147,6 +25147,55 @@ fn runtime_at_bound_or_subpat_result_not_folded() {
     );
 }
 
+/// Assembly inspection: `if let n @ (1 | 5..=10) = x { n * 2 } else { 0 }` must emit
+/// `orr` for OR accumulation across alternatives. Tests the if-let lowering path for
+/// `Pat::Bound` with `Pat::Or` sub-pattern — a different code path from let-else.
+///
+/// The parameter `x` prevents constant folding; result `n * 2` where x=6 → 12
+/// must not appear as a constant.
+///
+/// FLS §5.1.4 + §5.1.11 + §6.17: @ binding with OR sub-pattern in if-let.
+/// Claim 28: guards against regression where if-let Pat::Bound+Or silently drops
+/// OR accumulation or constant-folds the bound value.
+#[test]
+fn runtime_at_bound_or_subpat_if_let_emits_orr_not_folded() {
+    let asm = compile_to_asm(
+        "fn f(x: i32) -> i32 { if let n @ (1 | 5..=10) = x { n * 2 } else { 0 } }\n\
+         fn main() -> i32 { f(6) }\n",
+    );
+    assert!(
+        asm.contains("orr"),
+        "if-let n @ (1|5..=10): expected orr for OR accumulation;\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #12"),
+        "if-let n @ (1|5..=10): must not constant-fold n*2=12;\n{asm}"
+    );
+}
+
+/// Assembly inspection: `match x { n @ (1 | 5..=10) => n * 2, _ => 0 }` must emit
+/// `orr` for OR accumulation across alternatives. Tests the match-arm lowering path
+/// for `Pat::Bound` with `Pat::Or` sub-pattern.
+///
+/// FLS §5.1.4 + §5.1.11 + §6.18: @ binding with OR sub-pattern in match arms.
+/// Claim 28: guards against regression where match Pat::Bound+Or silently drops
+/// OR accumulation or constant-folds the bound value.
+#[test]
+fn runtime_at_bound_or_subpat_match_emits_orr_not_folded() {
+    let asm = compile_to_asm(
+        "fn f(x: i32) -> i32 { match x { n @ (1 | 5..=10) => n * 2, _ => 0 } }\n\
+         fn main() -> i32 { f(6) }\n",
+    );
+    assert!(
+        asm.contains("orr"),
+        "match n @ (1|5..=10): expected orr for OR accumulation;\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #12"),
+        "match n @ (1|5..=10): must not constant-fold n*2=12;\n{asm}"
+    );
+}
+
 #[test]
 fn milestone_158_let_else_or_subpat_first_alt_matches() {
     let Some(exit_code) = compile_and_run(

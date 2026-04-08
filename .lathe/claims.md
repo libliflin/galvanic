@@ -785,3 +785,50 @@ arm from `accum_or_alt` (or that constant-folds the OR check) would go undetecte
 - contains `mov     x0, #12` (result constant-folded).
 
 **Test**: `cargo test --test e2e -- runtime_at_bound_or_subpat_emits_orr_accumulation runtime_at_bound_or_subpat_result_not_folded`
+
+---
+
+## Claim 28: @ binding with OR sub-pattern in if-let and match positions emit runtime orr accumulation
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: `n @ (pat1 | pat2)` in **if-let** and **match** positions (not just let-else) must emit
+`orr` for OR alternative accumulation and must NOT constant-fold the bound value.
+
+Claim 27 covers the let-else lowering path. The if-let and match lowering paths for `Pat::Bound`
+with `Pat::Or` sub-pattern are **distinct code paths** in `lower.rs` — a regression in one
+would not be caught by Claim 27's tests.
+
+For example:
+
+```rust
+// if-let position:
+fn f(x: i32) -> i32 { if let n @ (1 | 5..=10) = x { n * 2 } else { 0 } }
+fn main() -> i32 { f(6) }
+
+// match position:
+fn f(x: i32) -> i32 { match x { n @ (1 | 5..=10) => n * 2, _ => 0 } }
+fn main() -> i32 { f(6) }
+```
+
+Both must emit `orr` and must NOT emit `mov x0, #12` (the constant-folded result).
+
+**Why this claim matters**: Cycle 63 added the `Pat::Or` arm in the if-let `Pat::Bound` handler
+(line ~10466) and match `Pat::Bound` handler. These are separate from the let-else path tested
+by Claim 27. The milestone 158 tests for if-let and match positions are all compile-and-run
+(require QEMU on CI); without this claim, a regression in those paths would be invisible locally
+and would only surface on CI.
+
+**Attack vector**:
+1. Removing the `Pat::Or` arm from the if-let `Pat::Bound` handler causes any
+   `if let n @ (p1 | p2) = x { ... }` to fail with "@ binding sub-pattern not yet supported in if-let".
+2. Removing the `Pat::Or` arm from the match `Pat::Bound` handler causes similar failure in match.
+3. Constant-folding `f(6)` in either position emits `mov x0, #12`.
+4. Dropping OR accumulation in either position means only the first alternative is checked
+   (e.g., `n @ (1 | 5..=10)` would only check `= 1`, silently failing for `x = 6`).
+
+**Violated if**: `compile_to_asm(...)` for the if-let or match programs above returns assembly that:
+- lacks `orr` (OR accumulation dropped for that position), OR
+- contains `mov     x0, #12` (result constant-folded for `n*2` with `n=6`).
+
+**Test**: `cargo test --test e2e -- runtime_at_bound_or_subpat_if_let_emits_orr_not_folded runtime_at_bound_or_subpat_match_emits_orr_not_folded`
