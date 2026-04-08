@@ -908,6 +908,33 @@ else
     pass "Claim 44: dyn-returning fn emits bl forward + fat ptr ldr/str + blr dispatch (not folded to #7)"
 fi
 
+# ── Claim 45: impl Trait return uses static bl dispatch (not vtable blr) ─────
+#
+# Promise: a function returning `impl Trait` must use static (monomorphized) dispatch:
+#   (a) `bl make_points` — runtime call to the impl-Trait-returning fn (not folded)
+#   (b) `bl` to the concrete method — static dispatch (NOT `blr` vtable dispatch)
+#   (c) `add` — method body emits runtime arithmetic (not constant-folded)
+#   (d) NOT `blr` — vtable dispatch is only correct for `&dyn Trait`, not `impl Trait`
+#
+# Attack vectors:
+#   1. Constant-fold `make_points(6).score()` to `mov x0, #7` — exit code still 7.
+#   2. Emit `blr` for the method call (treating impl Trait return like &dyn Trait).
+#   3. Inline make_points entirely, dropping the `bl make_points` call.
+#
+# FLS §11: impl Trait uses static dispatch — concrete type resolved at compile time.
+# FLS §11 AMBIGUOUS: spec does not define how concrete return type is resolved.
+# FLS §6.1.2 Constraint 1: fn main() is not a const context — runtime arithmetic required.
+#
+# Introduced in cycle 84 (impl Trait return falsification, FLS §9, §11, Milestone 163).
+# References: claims.md Claim 45.
+
+echo "--- Claim 45: impl Trait return uses static bl dispatch (not vtable blr) and result not folded ---"
+if cargo test --test e2e --quiet -- runtime_impl_trait_return_emits_bl_not_blr runtime_impl_trait_return_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 45" "runtime_impl_trait_return_emits_bl_not_blr or runtime_impl_trait_return_not_folded FAILED — impl Trait return may use vtable blr instead of static bl, or result was constant-folded (add missing)"
+else
+    pass "Claim 45: impl Trait return emits static bl (not blr) and runtime add (not folded)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 
