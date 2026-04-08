@@ -190,6 +190,20 @@ else
     pass "Claim 8: named block break emits unconditional branch to exit label"
 fi
 
+# ── Claim 9: Generic trait impl calls emit monomorphized runtime branch ───────
+# Tests that a generic trait impl produces:
+#   (a) a monomorphized label (Wrapper__get__i32) in the assembly
+#   (b) a runtime bl to the outer wrapper (bl use_wrapper) — not constant-folded
+# Extends Claims 6–7 to the trait impl monomorphization path (milestone 138).
+# References: claims.md Claim 9.
+
+echo "--- Claim 9: generic trait impl emits monomorphized call (not folded) ---"
+if cargo test --test e2e --quiet -- runtime_generic_trait_impl_emits_mangled_call 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 9" "runtime_generic_trait_impl_emits_mangled_call FAILED — generic trait impl may not be monomorphizing or may be constant-folding the result"
+else
+    pass "Claim 9: generic trait impl emits monomorphized runtime call (not folded)"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

@@ -158,6 +158,24 @@ assertion: `asm.contains("b       .L") || asm.contains("b .L")`.
 
 ---
 
+## Claim 9: Generic trait impl calls emit monomorphized runtime branch, not folded constants
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: Galvanic's generic trait impl monomorphization produces runtime code. When
+`impl<T> Trait for Type<T>` is used, the emitted assembly must contain (a) a label for
+the monomorphized specialization (e.g., `Wrapper__get__i32`) and (b) a runtime `bl` to
+the outer caller (not constant-folded away). This extends Claims 6–7 to the trait impl
+code path, which combines the `generic_method_defs` pass with trait name resolution.
+
+**Violated if**: `compile_to_asm(...)` for a generic trait impl + caller fails to contain
+`Wrapper__get__i32` (monomorphization absent) or fails to contain `bl use_wrapper`
+(outer call was constant-folded away).
+
+**Test**: `cargo test --test e2e -- runtime_generic_trait_impl_emits_mangled_call`
+
+---
+
 ## Not Yet Claims (honest gaps)
 
 These are promises the project will eventually make but cannot yet be falsified:
