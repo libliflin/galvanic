@@ -22332,3 +22332,64 @@ fn milestone_147_dyn_trait_asm_inspection() {
         "dyn Trait dispatch must NOT be constant-folded to 25: {asm}"
     );
 }
+
+#[test]
+fn runtime_dyn_trait_two_concrete_types_both_vtables_emitted() {
+    // FLS §4.13: when two concrete types are used behind the same dyn Trait
+    // parameter, BOTH vtables must be emitted in the assembly — not just the
+    // first one. This guards against a regression where pending_vtables
+    // accumulation silently stops after the first concrete type, leaving the
+    // second type's dispatch broken.
+    //
+    // This is adversarial against a specific implementation bug: the vtable
+    // accumulator could correctly register the first (trait, concrete_type) pair
+    // but fail to register subsequent pairs, causing the second vtable to be
+    // absent from the assembly. The two_concrete_types compile-and-run test
+    // would still pass IF the second vtable shim happened to read the right
+    // memory by accident — but the label would be missing, breaking any call
+    // from a different context.
+    let src = "
+trait Shape {
+    fn area(&self) -> i32;
+}
+struct Circle { r: i32 }
+struct Square { side: i32 }
+impl Shape for Circle {
+    fn area(&self) -> i32 { self.r * self.r }
+}
+impl Shape for Square {
+    fn area(&self) -> i32 { self.side * self.side }
+}
+fn print_area(s: &dyn Shape) -> i32 {
+    s.area()
+}
+fn main() -> i32 {
+    let c = Circle { r: 3 };
+    let sq = Square { side: 4 };
+    print_area(&c) + print_area(&sq)
+}
+";
+    let asm = compile_to_asm(src);
+    // Both concrete types must have their vtable labels emitted:
+    assert!(
+        asm.contains("vtable_Shape_Circle"),
+        "first concrete type vtable `vtable_Shape_Circle` must be emitted: {asm}"
+    );
+    assert!(
+        asm.contains("vtable_Shape_Square"),
+        "second concrete type vtable `vtable_Shape_Square` must be emitted: {asm}"
+    );
+    assert!(
+        asm.contains("blr"),
+        "vtable dispatch must emit `blr` (indirect call): {asm}"
+    );
+    // Neither method result must be constant-folded (Circle area=9, Square area=16):
+    assert!(
+        !asm.contains("mov     x0, #9"),
+        "Circle::area result (9) must NOT be constant-folded: {asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #16"),
+        "Square::area result (16) must NOT be constant-folded: {asm}"
+    );
+}
