@@ -30642,3 +30642,167 @@ fn milestone_181_u16_mul_wraps() {
     };
     assert_eq!(exit, 1, "300_u16 * 300_u16 = 90000 → 90000 mod 65536 = 24464");
 }
+
+// ── Milestone 182: narrow integer types (u8/i8/u16/i16) in struct fields ────
+//
+// FLS §4.1, §6.23: Struct fields declared with narrow integer types must store
+// the correctly wrapped value at construction time. Without the fix, a field
+// `val: u16` initialised with `a + b` where the sum overflows stores the raw
+// i32 result; subsequent comparisons against the field see the wrong value.
+//
+// Tests have three layers:
+//   Layer 1 (assembly): TruncU16/SextI16 emitted before the Store.
+//   Layer 2 (runtime): comparisons inside the program detect the wrong value.
+//
+// The litmus test: `S { x: a + b }` where `a` and `b` are u16 params whose
+// sum exceeds 65535 must compare as < 65535 after construction, not > 65535.
+
+#[test]
+fn runtime_u16_struct_field_construction_applies_trunc() {
+    // FLS §4.1, §6.23: When a struct with a u16 field is constructed from an
+    // overflowing arithmetic expression, TruncU16 (and w{r}, #65535) must be
+    // emitted before the Store instruction.
+    let asm = compile_to_asm(
+        "struct Narrow { val: u16 }\n\
+         fn build(a: u16, b: u16) -> Narrow { Narrow { val: a + b } }\n\
+         fn main() -> i32 { 0 }\n",
+    );
+    // The `and` from TruncU16 must appear before/alongside the struct field store.
+    assert!(
+        asm.contains("and"),
+        "expected TruncU16 (and) for u16 struct field construction; got:\n{asm}"
+    );
+}
+
+#[test]
+fn runtime_u16_struct_field_not_constant_folded() {
+    // Adversarial: the construction must not constant-fold — the `and` truncation
+    // The `add` for `a + b` must be present (not folded away) when constructing
+    // a struct with a u16 field from parameters. The TruncU16 `and` must follow.
+    let asm = compile_to_asm(
+        "struct Narrow { val: u16 }\n\
+         fn build(a: u16, b: u16) -> Narrow { Narrow { val: a + b } }\n\
+         fn main() -> i32 { 0 }\n",
+    );
+    assert!(
+        asm.contains("add"),
+        "expected runtime add for u16 field initializer `a + b`; got:\n{asm}"
+    );
+}
+
+#[test]
+fn milestone_182_u16_struct_field_wraps_on_construction() {
+    // FLS §4.1, §6.23: u16 struct field stores the wrapped value at construction
+    // time. 65000 + 1000 = 66000; as u16 = 464. The comparison 464 < 500 must be
+    // true (exit 1). Without the fix, the field holds 66000 > 500 → exit 0.
+    let Some(exit) = compile_and_run(
+        "struct Narrow { val: u16 }\n\
+         fn build(a: u16, b: u16) -> Narrow { Narrow { val: a + b } }\n\
+         fn main() -> i32 {\n\
+             let n = build(65000, 1000);\n\
+             if n.val < 500 { 1 } else { 0 }\n\
+         }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "65000_u16 + 1000_u16 wraps to 464; 464 < 500 should be true");
+}
+
+#[test]
+fn milestone_182_u16_struct_field_in_arithmetic() {
+    // FLS §4.1, §6.23: A u16 struct field used in subsequent arithmetic after
+    // overflowing construction must produce the wrapped value.
+    // 60000 + 10000 = 70000; as u16 = 70000 - 65536 = 4464. 4464 + 36 = 4500.
+    let Some(exit) = compile_and_run(
+        "struct Narrow { val: u16 }\n\
+         fn build(a: u16, b: u16) -> Narrow { Narrow { val: a + b } }\n\
+         fn main() -> i32 {\n\
+             let n = build(60000, 10000);\n\
+             if n.val as i32 + 36 == 4500 { 1 } else { 0 }\n\
+         }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "60000_u16 + 10000_u16 wraps to 4464; 4464 + 36 == 4500");
+}
+
+#[test]
+fn milestone_182_i16_struct_field_wraps_on_construction() {
+    // FLS §4.1, §6.23: i16 struct field stores the sign-extended wrapped value.
+    // 30000 + 5000 = 35000; 35000 - 32768 = 2232 BUT actually i16 wraps to
+    // (35000 as i16): 35000 > 32767 so as i16 = 35000 - 65536 = -30536.
+    // The comparison -30536 < 0 must be true (exit 1).
+    let Some(exit) = compile_and_run(
+        "struct Narrow { val: i16 }\n\
+         fn build(a: i16, b: i16) -> Narrow { Narrow { val: a + b } }\n\
+         fn main() -> i32 {\n\
+             let n = build(30000, 5000);\n\
+             if n.val as i32 < 0 { 1 } else { 0 }\n\
+         }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "30000_i16 + 5000_i16 wraps to -30536; -30536 < 0 should be true");
+}
+
+#[test]
+fn milestone_182_u16_struct_identity_field() {
+    // FLS §4.1: A u16 struct field set to a non-overflowing value is preserved.
+    let Some(exit) = compile_and_run(
+        "struct Narrow { val: u16 }\n\
+         fn build(a: u16) -> Narrow { Narrow { val: a } }\n\
+         fn main() -> i32 { build(42).val as i32 }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 42);
+}
+
+#[test]
+fn milestone_182_u16_struct_field_passed_to_fn() {
+    // FLS §4.1, §6.23: u16 struct field passed to a function after overflowing
+    // construction produces the wrapped value, not the raw i32 result.
+    let Some(exit) = compile_and_run(
+        "struct Narrow { val: u16 }\n\
+         fn build(a: u16, b: u16) -> Narrow { Narrow { val: a + b } }\n\
+         fn check(v: u16) -> i32 { if v < 500 { 1 } else { 0 } }\n\
+         fn main() -> i32 { check(build(65000, 1000).val) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "65000_u16 + 1000_u16 wraps to 464; check(464) should return 1");
+}
+
+#[test]
+fn milestone_182_u8_struct_field_wraps_on_construction() {
+    // FLS §4.1, §6.23: u8 struct field stores the wrapped value at construction.
+    // 200 + 100 = 300; as u8 = 300 - 256 = 44. 44 < 100 must be true (exit 1).
+    let Some(exit) = compile_and_run(
+        "struct Narrow { val: u8 }\n\
+         fn build(a: u8, b: u8) -> Narrow { Narrow { val: a + b } }\n\
+         fn main() -> i32 {\n\
+             let n = build(200, 100);\n\
+             if n.val < 100 { 1 } else { 0 }\n\
+         }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "200_u8 + 100_u8 wraps to 44; 44 < 100 should be true");
+}
+
+#[test]
+fn milestone_182_u16_struct_two_narrow_fields() {
+    // FLS §4.1, §6.23: Both narrow fields in a struct are correctly wrapped.
+    let Some(exit) = compile_and_run(
+        "struct Pair { a: u16, b: u16 }\n\
+         fn build(x: u16, y: u16) -> Pair { Pair { a: x, b: y + x } }\n\
+         fn main() -> i32 {\n\
+             let p = build(60000, 10000);\n\
+             if p.a as i32 == 60000 && p.b < 5000 { 1 } else { 0 }\n\
+         }\n",
+    ) else {
+        return;
+    };
+    // p.a = 60000 (no overflow), p.b = 10000 + 60000 = 70000 wraps to 4464 < 5000
+    assert_eq!(exit, 1, "p.a = 60000; p.b = 70000 wraps to 4464 < 5000");
+}

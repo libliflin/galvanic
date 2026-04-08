@@ -2760,3 +2760,33 @@ two's complement. The wrapping must be observable at the type's own boundaries.
 - the function body lacks `and ... #65535` in the assembly output
 
 **Tests**: `cargo test --test e2e -- runtime_u16_add_emits_and_truncation runtime_i16_add_emits_sxth milestone_181_u16_add_wraps milestone_181_i16_add_wraps milestone_181_u16_compound_add_wraps_mid_body milestone_181_i16_compound_add_wraps_mid_body`
+
+---
+
+## Claim 70: narrow integer types in struct fields are normalised at construction time
+
+**Stakeholder**: William (researcher), FLS / Ferrocene ecosystem
+
+**Promise**: When a named struct has a field declared as `u8`, `i8`, `u16`, or
+`i16`, constructing the struct with an overflowing arithmetic expression for that
+field stores the correctly wrapped value. A subsequent comparison against the
+field (not a return) must see the wrapped value.
+
+Previously, `Narrow { val: a + b }` where `val: u16` stored the raw i32 sum
+(e.g., 66000) instead of the wrapped u16 value (464). A comparison `n.val < 500`
+then incorrectly returned false (66000 > 500) instead of true (464 < 500).
+
+**ARM64 implementation**: TruncU8/SextI8/TruncU16/SextI16 emitted immediately
+before the Store instruction for each narrow-typed field in every struct literal
+construction path.
+
+**FLS §4.1**: Narrow integer types have their own value ranges.
+**FLS §6.23**: Runtime arithmetic wraps within the type's declared bounds.
+**FLS §6.11**: Struct literal field initializers are evaluated and stored as the
+declared field type — not as a wider i32.
+
+**Violated if** for `struct Narrow { val: u16 }`, `fn build(a: u16, b: u16) -> Narrow`:
+- `build(65000, 1000).val < 500` returns false instead of true (464 < 500), OR
+- the assembly for `Narrow { val: a + b }` lacks `and ... #65535` before the Store
+
+**Tests**: `cargo test --test e2e -- runtime_u16_struct_field_construction_applies_trunc milestone_182_u16_struct_field_wraps_on_construction milestone_182_u8_struct_field_wraps_on_construction milestone_182_i16_struct_field_wraps_on_construction`
