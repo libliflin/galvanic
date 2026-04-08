@@ -384,8 +384,15 @@ pub struct AssocTypeDef {
 /// FLS §11 AMBIGUOUS: The spec allows `impl<T>` with generic parameters,
 /// but the interaction between generics and impl resolution is complex.
 /// Generic impls are future work.
+///
+/// FLS §19 AMBIGUOUS: `unsafe impl` signals that implementing the trait satisfies
+/// its safety invariant. The spec requires `unsafe impl` when the trait is
+/// declared `unsafe trait`, but does not specify how the compiler enforces this
+/// pairing. Galvanic records `is_unsafe` and defers enforcement.
 #[derive(Debug)]
 pub struct ImplDef {
+    /// Whether this is an `unsafe impl`. FLS §19.
+    pub is_unsafe: bool,
     /// The type being implemented (always the struct/enum name).
     pub ty: Span,
     /// Generic type parameters declared on the impl block itself.
@@ -431,8 +438,18 @@ pub struct ImplDef {
 /// trait definition and its implementations within a crate; we assume the
 /// standard Rust rule (trait must be defined before use in type checking,
 /// but galvanic does not type-check at this milestone).
+///
+/// FLS §19 AMBIGUOUS: `unsafe trait` is defined in FLS §19 as a trait that
+/// may only be implemented using `unsafe impl`. The spec states that
+/// implementing an unsafe trait is an unsafe operation, but does not specify
+/// how the compiler verifies that `unsafe impl` is paired with `unsafe trait`.
+/// Galvanic records `is_unsafe` and defers enforcement — no type-system check
+/// is performed to ensure `unsafe impl Foo for Bar` only appears when `Foo` is
+/// declared `unsafe trait Foo`.
 #[derive(Debug)]
 pub struct TraitDef {
+    /// Whether this is an `unsafe trait`. FLS §19.
+    pub is_unsafe: bool,
     /// The trait name (span of the identifier token).
     pub name: Span,
     /// Supertrait bounds: the traits this trait extends. FLS §4.14.

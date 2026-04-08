@@ -166,3 +166,8 @@ fn fls_10_2_where_clause_proj() {
 fn fls_19_unsafe_fn() {
     assert_galvanic_accepts("fls_19_unsafe_fn.rs");
 }
+
+#[test]
+fn fls_19_unsafe_trait() {
+    assert_galvanic_accepts("fls_19_unsafe_trait.rs");
+}

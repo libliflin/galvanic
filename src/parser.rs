@@ -224,6 +224,29 @@ impl<'src> Parser<'src> {
                 let span = start.to(end);
                 Ok(Item { kind: ItemKind::Fn(Box::new(fn_def)), span })
             }
+            // FLS §19: `unsafe trait` — a trait that may only be implemented with
+            // `unsafe impl`. The `unsafe` keyword is consumed here; `parse_trait_def`
+            // is called with `is_unsafe = true`.
+            //
+            // FLS §19 AMBIGUOUS: The spec requires implementors to use `unsafe impl`,
+            // but does not specify how the compiler verifies this pairing. Enforcement
+            // is deferred.
+            TokenKind::KwUnsafe if self.peek_nth(1) == TokenKind::KwTrait => {
+                self.advance(); // consume `unsafe`
+                let trait_def = self.parse_trait_def(vis, true)?;
+                let span = start.to(trait_def.span);
+                Ok(Item { kind: ItemKind::Trait(Box::new(trait_def)), span })
+            }
+            // FLS §19: `unsafe impl` — implementing an unsafe trait satisfies its
+            // safety invariant. The `unsafe` keyword is consumed here.
+            //
+            // FLS §19 AMBIGUOUS: See TraitDef.is_unsafe note. Enforcement deferred.
+            TokenKind::KwUnsafe if self.peek_nth(1) == TokenKind::KwImpl => {
+                self.advance(); // consume `unsafe`
+                let impl_def = self.parse_impl_def(true)?;
+                let span = start.to(impl_def.span);
+                Ok(Item { kind: ItemKind::Impl(Box::new(impl_def)), span })
+            }
             TokenKind::KwStruct => {
                 let struct_def = self.parse_struct_def(vis)?;
                 let span = start.to(struct_def.span);
@@ -235,12 +258,12 @@ impl<'src> Parser<'src> {
                 Ok(Item { kind: ItemKind::Enum(Box::new(enum_def)), span })
             }
             TokenKind::KwImpl => {
-                let impl_def = self.parse_impl_def()?;
+                let impl_def = self.parse_impl_def(false)?;
                 let span = start.to(impl_def.span);
                 Ok(Item { kind: ItemKind::Impl(Box::new(impl_def)), span })
             }
             TokenKind::KwTrait => {
-                let trait_def = self.parse_trait_def(vis)?;
+                let trait_def = self.parse_trait_def(vis, false)?;
                 let span = start.to(trait_def.span);
                 Ok(Item { kind: ItemKind::Trait(Box::new(trait_def)), span })
             }
@@ -452,7 +475,7 @@ impl<'src> Parser<'src> {
     ///
     /// FLS §11 NOTE: Trait impls (`impl Trait for Type`) and generic impls
     /// (`impl<T>`) are not yet implemented.
-    fn parse_impl_def(&mut self) -> Result<ImplDef, ParseError> {
+    fn parse_impl_def(&mut self, is_unsafe: bool) -> Result<ImplDef, ParseError> {
         let start = self.current_span();
         self.expect(TokenKind::KwImpl)?;
 
@@ -639,7 +662,7 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::CloseBrace)?;
         let span = start.to(end);
 
-        Ok(ImplDef { ty, generic_params, trait_name, methods, assoc_consts, assoc_types, span })
+        Ok(ImplDef { is_unsafe, ty, generic_params, trait_name, methods, assoc_consts, assoc_types, span })
     }
 
     /// Parse a trait definition.
@@ -660,7 +683,7 @@ impl<'src> Parser<'src> {
     /// FLS §13 AMBIGUOUS: The FLS allows default method bodies in traits
     /// (`fn foo(&self) -> i32 { 0 }`). This implementation only supports
     /// signatures without a body (the common case for galvanic's milestone).
-    fn parse_trait_def(&mut self, _vis: Visibility) -> Result<TraitDef, ParseError> {
+    fn parse_trait_def(&mut self, _vis: Visibility, is_unsafe: bool) -> Result<TraitDef, ParseError> {
         let start = self.current_span();
         self.expect(TokenKind::KwTrait)?;
 
@@ -766,7 +789,7 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::CloseBrace)?;
         let span = start.to(end);
 
-        Ok(TraitDef { name, supertraits, methods, assoc_consts, assoc_types, span })
+        Ok(TraitDef { is_unsafe, name, supertraits, methods, assoc_consts, assoc_types, span })
     }
 
     /// Consume a `self`, `&self`, or `&mut self` parameter if present.

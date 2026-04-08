@@ -28570,3 +28570,157 @@ fn main() -> i32 { unsafe { add(3, 4) } }
         "result must NOT be constant-folded to #7; got:\n{asm}"
     );
 }
+
+// --- Milestone 171: unsafe trait / unsafe impl — FLS §19 ---
+//
+// FLS §19: An `unsafe trait` may only be implemented with `unsafe impl`.
+// The safety qualifier is a static contract — codegen is identical to
+// a non-unsafe trait impl. The qualifier is stored on the AST but no
+// enforcement pass exists yet (deferred — see FLS §19 AMBIGUOUS note).
+
+#[test]
+fn milestone_171_unsafe_trait_basic() {
+    let Some(exit_code) = compile_and_run(r#"
+unsafe trait Value { fn value(&self) -> i32; }
+struct S(i32);
+unsafe impl Value for S { fn value(&self) -> i32 { self.0 } }
+fn main() -> i32 { let s = S(7); s.value() }
+"#) else { return; };
+    assert_eq!(exit_code, 7);
+}
+
+#[test]
+fn milestone_171_unsafe_trait_two_impls() {
+    let Some(exit_code) = compile_and_run(r#"
+unsafe trait Value { fn value(&self) -> i32; }
+struct A(i32);
+struct B(i32);
+unsafe impl Value for A { fn value(&self) -> i32 { self.0 } }
+unsafe impl Value for B { fn value(&self) -> i32 { self.0 * 2 } }
+fn main() -> i32 {
+    let a = A(3);
+    let b = B(4);
+    a.value() + b.value()
+}
+"#) else { return; };
+    assert_eq!(exit_code, 11); // 3 + 4*2
+}
+
+#[test]
+fn milestone_171_unsafe_trait_result_in_arithmetic() {
+    let Some(exit_code) = compile_and_run(r#"
+unsafe trait Scale { fn scale(&self, n: i32) -> i32; }
+struct S(i32);
+unsafe impl Scale for S { fn scale(&self, n: i32) -> i32 { self.0 * n } }
+fn main() -> i32 { let s = S(3); s.scale(4) + 1 }
+"#) else { return; };
+    assert_eq!(exit_code, 13); // 3*4 + 1
+}
+
+#[test]
+fn milestone_171_unsafe_trait_on_parameter() {
+    let Some(exit_code) = compile_and_run(r#"
+unsafe trait Value { fn value(&self) -> i32; }
+struct S(i32);
+unsafe impl Value for S { fn value(&self) -> i32 { self.0 } }
+fn get_value(s: S) -> i32 { s.value() }
+fn main() -> i32 { get_value(S(9)) }
+"#) else { return; };
+    assert_eq!(exit_code, 9);
+}
+
+#[test]
+fn milestone_171_unsafe_trait_result_passed_to_fn() {
+    let Some(exit_code) = compile_and_run(r#"
+unsafe trait Value { fn value(&self) -> i32; }
+struct S(i32);
+unsafe impl Value for S { fn value(&self) -> i32 { self.0 } }
+fn add_one(x: i32) -> i32 { x + 1 }
+fn main() -> i32 { let s = S(5); add_one(s.value()) }
+"#) else { return; };
+    assert_eq!(exit_code, 6);
+}
+
+#[test]
+fn milestone_171_unsafe_trait_result_in_if() {
+    let Some(exit_code) = compile_and_run(r#"
+unsafe trait Check { fn check(&self) -> i32; }
+struct S(i32);
+unsafe impl Check for S { fn check(&self) -> i32 { self.0 } }
+fn main() -> i32 { let s = S(3); if s.check() > 0 { 1 } else { 0 } }
+"#) else { return; };
+    assert_eq!(exit_code, 1);
+}
+
+#[test]
+fn milestone_171_unsafe_trait_called_twice() {
+    let Some(exit_code) = compile_and_run(r#"
+unsafe trait Value { fn value(&self) -> i32; }
+struct S(i32);
+unsafe impl Value for S { fn value(&self) -> i32 { self.0 } }
+fn main() -> i32 { let s = S(4); s.value() + s.value() }
+"#) else { return; };
+    assert_eq!(exit_code, 8);
+}
+
+#[test]
+fn milestone_171_unsafe_trait_multiple_methods() {
+    let Some(exit_code) = compile_and_run(r#"
+unsafe trait Pair { fn first(&self) -> i32; fn second(&self) -> i32; }
+struct P(i32, i32);
+unsafe impl Pair for P {
+    fn first(&self) -> i32 { self.0 }
+    fn second(&self) -> i32 { self.1 }
+}
+fn main() -> i32 { let p = P(3, 4); p.first() + p.second() }
+"#) else { return; };
+    assert_eq!(exit_code, 7);
+}
+
+// Assembly inspection: unsafe trait method call emits runtime bl (not folded).
+//
+// FLS §19: `unsafe trait` + `unsafe impl` codegen is identical to regular
+// trait + impl. The method call must emit a `bl` instruction, not a constant.
+// FLS §6.1.2:37–45: Non-const calls emit runtime instructions.
+//
+// Positive: `bl` instruction emitted for the method call.
+// Negative: result NOT folded to `mov x0, #14` (= 7 * 2).
+#[test]
+fn runtime_unsafe_trait_method_emits_bl_not_folded() {
+    let asm = compile_to_asm(r#"
+unsafe trait Scale { fn scale(&self, n: i32) -> i32; }
+struct S(i32);
+unsafe impl Scale for S { fn scale(&self, n: i32) -> i32 { self.0 * n } }
+fn main() -> i32 { let s = S(7); s.scale(2) }
+"#);
+    assert!(
+        asm.contains("bl"),
+        "unsafe trait method call must emit runtime bl; got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #14") && !asm.contains("mov x0, #14"),
+        "result must NOT be constant-folded to #14; got:\n{asm}"
+    );
+}
+
+// Assembly inspection: unsafe trait method body emits runtime mul (not folded).
+//
+// Positive: `mul` emitted in the method body.
+// Negative: result NOT folded to `mov x0, #14`.
+#[test]
+fn runtime_unsafe_trait_body_emits_mul_not_folded() {
+    let asm = compile_to_asm(r#"
+unsafe trait Scale { fn scale(&self, n: i32) -> i32; }
+struct S(i32);
+unsafe impl Scale for S { fn scale(&self, n: i32) -> i32 { self.0 * n } }
+fn main() -> i32 { let s = S(7); s.scale(2) }
+"#);
+    assert!(
+        asm.contains("mul"),
+        "unsafe trait method body must emit runtime mul; got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #14") && !asm.contains("mov x0, #14"),
+        "result must NOT be constant-folded to #14; got:\n{asm}"
+    );
+}

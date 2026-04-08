@@ -1074,6 +1074,15 @@ else
     pass "Claim 52: unsafe fn body emits runtime mul and call emits runtime bl (not constant-folded)"
 fi
 
+# References: claims.md Claim 53.
+
+echo "--- Claim 53: unsafe trait method call emits runtime bl and mul (not constant-folded) ---"
+if cargo test --test e2e --quiet -- runtime_unsafe_trait_method_emits_bl_not_folded runtime_unsafe_trait_body_emits_mul_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 53" "runtime_unsafe_trait_method_emits_bl_not_folded or runtime_unsafe_trait_body_emits_mul_not_folded FAILED — unsafe trait method may be constant-folded or bl/mul missing"
+else
+    pass "Claim 53: unsafe trait method emits runtime bl and mul (not constant-folded)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 
