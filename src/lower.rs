@@ -9913,6 +9913,20 @@ impl<'src> LowerCtx<'src> {
             // zero panics at runtime; galvanic does not yet insert a check
             // (FLS §6.23 AMBIGUOUS: the panic mechanism is not yet specified).
             //
+            // FLS §6.23 AMBIGUOUS — Arithmetic Overflow:
+            // The spec requires integer overflow to panic in debug mode and wrap
+            // in release mode (two's complement). Galvanic does not distinguish
+            // debug vs release mode. ARM64 `add`/`sub`/`mul` instructions operate
+            // on 64-bit registers (xN), so i32 operations use 64-bit arithmetic
+            // without 32-bit wrapping — a value that would overflow i32::MAX stays
+            // positive in a 64-bit register rather than wrapping to a negative value.
+            // This matches neither Rust debug mode (panic) nor release mode (32-bit
+            // two's complement wrap) for values that exceed i32::MAX.
+            //
+            // Galvanic's arithmetic overflow semantics are: ARM64 64-bit wrapping,
+            // which is not what the FLS specifies for i32. The conformance gap is
+            // documented here as a research output.
+            //
             // FLS §6.5.6: "The type of a bit expression is the type of the left
             // operand." Both operands must have the same integer type.
             //

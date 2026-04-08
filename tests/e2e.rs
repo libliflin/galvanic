@@ -29139,3 +29139,165 @@ fn main() -> i32 {
         "unsafe impl<T: Bound> must emit monomorphized function label; got:\n{asm}"
     );
 }
+
+// ── Milestone 174: §6.23 Arithmetic Overflow — runtime wrapping semantics ────
+
+/// Milestone 174: basic parameter addition returns correct sum.
+///
+/// FLS §6.5.5: The addition operator.
+/// FLS §6.23: Arithmetic overflow — galvanic emits 64-bit ARM64 `add`, no
+/// panic check inserted (release-mode wrapping semantics, §6.23 AMBIGUOUS).
+#[test]
+fn milestone_174_basic_add_params() {
+    let Some(exit_code) = compile_and_run("fn add_i32(x: i32, y: i32) -> i32 { x + y }\nfn main() -> i32 { add_i32(100, 24) }\n") else {
+        return;
+    };
+    assert_eq!(exit_code, 124, "expected 100+24=124, got {exit_code}");
+}
+
+/// Milestone 174: basic parameter subtraction returns correct result.
+///
+/// FLS §6.5.5: The subtraction operator.
+/// FLS §6.23: Subtraction wraps on underflow in 64-bit (§6.23 AMBIGUOUS).
+#[test]
+fn milestone_174_basic_sub_params() {
+    let Some(exit_code) = compile_and_run("fn sub_i32(x: i32, y: i32) -> i32 { x - y }\nfn main() -> i32 { sub_i32(200, 50) }\n") else {
+        return;
+    };
+    assert_eq!(exit_code, 150, "expected 200-50=150, got {exit_code}");
+}
+
+/// Milestone 174: basic parameter multiplication returns correct product.
+///
+/// FLS §6.5.5: The multiplication operator.
+/// FLS §6.23: Multiplication wraps on overflow in 64-bit (§6.23 AMBIGUOUS).
+#[test]
+fn milestone_174_basic_mul_params() {
+    let Some(exit_code) = compile_and_run("fn mul_i32(x: i32, y: i32) -> i32 { x * y }\nfn main() -> i32 { mul_i32(12, 9) }\n") else {
+        return;
+    };
+    assert_eq!(exit_code, 108, "expected 12*9=108, got {exit_code}");
+}
+
+/// Milestone 174: arithmetic result stored in let binding, then returned.
+///
+/// FLS §6.23: Runtime let binding with arithmetic operands.
+#[test]
+fn milestone_174_large_add_in_let() {
+    let Some(exit_code) = compile_and_run(
+        "fn f(x: i32, y: i32) -> i32 { x + y }\nfn main() -> i32 { let r = f(80, 40); r }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 120, "expected 80+40=120, got {exit_code}");
+}
+
+/// Milestone 174: arithmetic result used in an if-else condition.
+///
+/// FLS §6.23: Arithmetic in conditional; non-const runtime evaluation.
+#[test]
+fn milestone_174_large_add_result_in_if() {
+    let src = r#"
+fn f(x: i32, y: i32) -> i32 { x + y }
+fn main() -> i32 { if f(50, 50) > 90 { 1 } else { 0 } }
+"#;
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "expected 50+50=100 > 90 → 1, got {exit_code}");
+}
+
+/// Milestone 174: arithmetic result passed as argument to another function.
+///
+/// FLS §6.23: Result of addition flows into a function call argument.
+#[test]
+fn milestone_174_large_add_passed_to_fn() {
+    let src = r#"
+fn double(x: i32) -> i32 { x * 2 }
+fn add_then_double(a: i32, b: i32) -> i32 { double(a + b) }
+fn main() -> i32 { add_then_double(30, 33) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 126, "expected (30+33)*2=126, got {exit_code}");
+}
+
+/// Milestone 174: chained addition of three parameters.
+///
+/// FLS §6.5.5: Left-associative; FLS §6.23: no overflow here.
+#[test]
+fn milestone_174_add_chain_three() {
+    let src = r#"
+fn sum3(x: i32, y: i32, z: i32) -> i32 { x + y + z }
+fn main() -> i32 { sum3(40, 50, 30) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 120, "expected 40+50+30=120, got {exit_code}");
+}
+
+/// Milestone 174: subtraction from large value returns difference.
+///
+/// FLS §6.23: Large-value subtraction emits ARM64 `sub`, no underflow check.
+#[test]
+fn milestone_174_large_sub_near_min() {
+    let src = r#"
+fn diff(x: i32, y: i32) -> i32 { x - y }
+fn main() -> i32 { diff(1000000, 999900) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 100, "expected 1000000-999900=100, got {exit_code}");
+}
+
+/// Assembly inspection: large-value addition emits `add`, not a constant.
+///
+/// FLS §6.23: Runtime arithmetic with large inputs must emit ARM64 `add`.
+/// The result (2_000_000_000 + 1) must not be constant-folded into a `mov`.
+#[test]
+fn runtime_large_int_add_emits_add_not_folded() {
+    let asm = compile_to_asm(
+        "fn f(x: i32, y: i32) -> i32 { x + y }\nfn main() -> i32 { f(2000000000, 1) }\n",
+    );
+    assert!(
+        asm.contains("add"),
+        "large-value addition must emit ARM64 add instruction; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("bl"),
+        "call to f must emit runtime bl (not inlined); got:\n{asm}"
+    );
+    // FLS §6.23: 2000000000 + 1 = 2000000001. A folding compiler might emit
+    // `mov x0, #2000000001` (as a MOVZ+MOVK sequence). Assert neither appears.
+    assert!(
+        !asm.contains("2000000001"),
+        "result 2000000001 must NOT be constant-folded; got:\n{asm}"
+    );
+}
+
+/// Assembly inspection: large-value multiplication emits `mul`, not a constant.
+///
+/// FLS §6.23: Runtime multiplication with large inputs must emit ARM64 `mul`.
+/// The result must not be constant-folded into a `mov` or immediate sequence.
+#[test]
+fn runtime_large_int_mul_emits_mul_not_folded() {
+    let asm = compile_to_asm(
+        "fn f(x: i32, y: i32) -> i32 { x * y }\nfn main() -> i32 { f(1000000, 2000) }\n",
+    );
+    assert!(
+        asm.contains("mul"),
+        "large-value multiplication must emit ARM64 mul instruction; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("bl"),
+        "call to f must emit runtime bl (not inlined); got:\n{asm}"
+    );
+    // 1000000 * 2000 = 2000000000; assert not constant-folded.
+    assert!(
+        !asm.contains("2000000000"),
+        "result 2000000000 must NOT be constant-folded; got:\n{asm}"
+    );
+}

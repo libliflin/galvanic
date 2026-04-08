@@ -2335,3 +2335,41 @@ execute at runtime regardless of trait bounds on the type parameter.
 - contains `mov x0, #12` (result 3*4=12 constant-folded)
 
 **Tests**: `cargo test --test e2e -- runtime_unsafe_bounded_impl_body_emits_mul_not_folded runtime_unsafe_bounded_impl_call_emits_bl_not_folded`
+
+---
+
+## Claim 57: large-value integer arithmetic emits runtime instructions, not constant-folded
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: Integer arithmetic with large operands (e.g., `f(2000000000, 1)`)
+must emit runtime ARM64 `add`/`mul` instructions at the call site. The result
+must not be constant-folded into an immediate load sequence. This guards against
+a regression where the constant propagation pass evaluates function-call arguments
+at compile time and replaces the call with a `mov #result`.
+
+This also documents FLS §6.23 conformance: galvanic emits 64-bit ARM64 arithmetic
+instructions and does not insert overflow checks. This differs from both Rust
+debug mode (which panics on overflow) and release mode (which wraps at 32-bit
+two's complement boundaries) because galvanic uses 64-bit registers for i32
+arithmetic throughout.
+
+**FLS §6.23 AMBIGUOUS**: The spec requires:
+- Debug mode: integer overflow panics at runtime.
+- Release mode: integer overflow wraps in two's complement.
+Galvanic does neither — it uses 64-bit arithmetic without a mode distinction.
+The conformance gap is a research output of this project.
+
+**FLS §6.5.5**: The addition and multiplication operators must emit `add` and
+`mul` ARM64 instructions respectively.
+
+**FLS §6.1.2 Constraint 1**: Function call bodies are not const contexts —
+the arithmetic must execute at runtime even when inputs are statically known.
+
+**Violated if**: `compile_to_asm(LARGE_ADD)` or `compile_to_asm(LARGE_MUL)` returns
+assembly that:
+- lacks `add`/`mul` in the function body, OR
+- lacks `bl` at the call site, OR
+- contains the folded constant (`2000000001` or `2000000000`) as an immediate
+
+**Tests**: `cargo test --test e2e -- runtime_large_int_add_emits_add_not_folded runtime_large_int_mul_emits_mul_not_folded`

@@ -171,3 +171,8 @@ fn fls_19_unsafe_fn() {
 fn fls_19_unsafe_trait() {
     assert_galvanic_accepts("fls_19_unsafe_trait.rs");
 }
+
+#[test]
+fn fls_6_23_overflow() {
+    assert_galvanic_accepts("fls_6_23_overflow.rs");
+}
