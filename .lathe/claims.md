@@ -2461,3 +2461,43 @@ statically known when the function is called with runtime parameters.
 - contains `mov x0, #1` (constant-folded result of 10 % 3) in main
 
 **Tests**: `cargo test --test e2e -- runtime_rem_emits_sdiv_and_msub_not_folded`
+
+## Claim 61: Shift operators emit runtime `lsl`/`asr` instructions with function parameters (not constant-folded)
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: The left-shift (`<<`) and right-shift (`>>`) operators must emit
+ARM64 `lsl` and `asr` instructions at runtime when the operands are function
+parameters (unknown at compile time). The call site must emit `bl`. The result
+must not be constant-folded into an immediate. For signed `i32` right-shift,
+the instruction must be `asr` (arithmetic, sign-extending) and NOT `lsr`
+(logical, zero-filling).
+
+The original `runtime_shl_emits_lsl_instruction` and `runtime_shr_emits_asr_instruction`
+tests used `fn main() -> i32 { 1 << 3 }` / `fn main() -> i32 { 16 >> 2 }` —
+inline literals in `main`. A constant-folding interpreter could emit `mov x0, #8`
+or `mov x0, #4` respectively. These tests had positive assertions only (no check
+that the folded constant is absent), and no falsification claim.
+
+Claim 61 uses function parameters (`fn shl(x: i32, n: i32) -> i32 { x << n }`,
+`fn shr_i32(x: i32, n: i32) -> i32 { x >> n }`) which are unknown at compile time.
+It also adds negative assertions confirming the folded constants are absent, and
+guards the signed/unsigned correctness: `i32 >> n` must use `asr`, not `lsr`.
+
+**FLS §6.5.7**: Shift operators. Right shift on signed integers is arithmetic
+(sign-extending). Right shift on unsigned integers is logical (zero-filling).
+**FLS §6.1.2 Constraint 1**: Function bodies are not const contexts; shift operands
+from function parameters are not statically known.
+
+**Violated if** `compile_to_asm("fn shl(x: i32, n: i32) -> i32 { x << n } ...")`:
+- lacks `lsl` in the function body, OR
+- lacks `bl shl` at the call site, OR
+- contains `mov x0, #8` (constant-folded result of shl(1, 3))
+
+**Violated if** `compile_to_asm("fn shr_i32(x: i32, n: i32) -> i32 { x >> n } ...")`:
+- lacks `asr` in the function body, OR
+- lacks `bl shr_i32` at the call site, OR
+- contains `mov x0, #4` (constant-folded result of shr_i32(16, 2)), OR
+- contains `lsr` (wrong instruction for signed right-shift)
+
+**Tests**: `cargo test --test e2e -- runtime_shl_emits_lsl_not_folded runtime_shr_emits_asr_not_folded`
