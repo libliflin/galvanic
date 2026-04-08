@@ -709,14 +709,18 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
         }
 
         // FLS §4.1, §6.23: Sign-extend from 8 signed bits for i8 return values.
-        // ARM64: `sxtb w{dst}, w{src}` sign-extends the low 8 bits to 32 bits.
-        // If bit 7 of src is 1, the upper bits are filled with 1s; otherwise 0s.
-        // This gives two's complement wrapping: 150 (0x96) → -106 (0xFFFFFF96).
+        // ARM64: `sxtb x{dst}, w{src}` sign-extends the low 8 bits to 64 bits.
+        // If bit 7 of src is 1, all upper bits are filled with 1s; otherwise 0s.
+        // This gives two's complement wrapping: 150 (0x96) → -106 (0xFFFFFFFFFFFFFF96).
+        // IMPORTANT: must use x{dst} (64-bit dest) so that subsequent 64-bit cmp
+        // instructions see the correct sign-extended value. Using w{dst} (32-bit dest)
+        // zeros the upper 32 bits of the x register, causing cmp x2, x4 to treat
+        // 0x00000000FFFFFF96 ≠ 0xFFFFFFFFFFFFFF96 when x4 holds a 64-bit -106.
         // Cache-line note: one 4-byte instruction.
         Instr::SextI8 { dst, src } => {
             writeln!(
                 out,
-                "    sxtb    w{dst}, w{src}                  // FLS §6.23: sign-extend i8 (wrap at 128/-128)"
+                "    sxtb    x{dst}, w{src}                  // FLS §6.23: sign-extend i8 to 64-bit (wrap at 128/-128)"
             )?;
         }
 

@@ -1,39 +1,51 @@
-# Changelog — Cycle 114
+# Changelog — Cycle 115
 
 ## Who This Helps
-- **CI / Validation Infrastructure**: The e2e job was failing due to timeout,
-  blocking all merges. This restores CI health.
-- **William (researcher)**: A broken CI gate means nothing can merge. Fixing it
-  is the prerequisite for all forward progress.
+- **CI / Validation Infrastructure**: CI was failing on `milestone_177_i8_add_wraps`
+  and `milestone_177_i8_sub_wraps`. This fix unblocks all merges.
+- **William (researcher)**: i8 wrapping semantics now actually correct on real
+  ARM64 hardware (not just in the assembly text). The compile-and-run tests were
+  catching a real codegen bug.
 
 ## Observed
-- Previous CI run (#24142834053) showed: `e2e: fail` with annotation
-  "The job has exceeded the maximum execution time of 10m0s."
-- The e2e job runs `cargo test --test e2e` on ubuntu-latest with the ARM64
-  cross toolchain + QEMU. Each compile-and-run test spawns cross-assembler,
-  cross-linker, and qemu-aarch64.
-- The test suite has grown to 1524 e2e tests (up from ~1400 in recent cycles),
-  and the cumulative subprocess overhead now exceeds 10 minutes on CI runners.
-- Falsification: all 65 claims pass locally. Tests: 1766 passed, 0 failed locally.
-  The timeout is a CI capacity issue, not a correctness issue.
+- CI run #24143573639 reported two failures:
+  ```
+  milestone_177_i8_add_wraps: left: 0, right: 1
+  milestone_177_i8_sub_wraps: left: 0, right: 1
+  ```
+- The assembly inspection tests (`runtime_i8_add_emits_sxtb_sign_extension`) passed
+  locally and on CI — the `sxtb` instruction was present. But the runtime execution
+  gave the wrong result.
+- Root cause: `sxtb w{dst}, w{src}` sign-extends from byte to **32 bits**. Writing
+  to a w-register on AArch64 zeroes the upper 32 bits of the corresponding x-register.
+  So after `sxtb w2, w2` with input 150 (0x96), x2 = `0x00000000FFFFFF96`.
+- When main compared this with `-106` via `neg x4, x3` (64-bit operation), x4 =
+  `0xFFFFFFFFFFFFFF96`. The 64-bit `cmp x2, x4` found `0x00000000FFFFFF96 ≠
+  0xFFFFFFFFFFFFFF96` → condition false → returned 0 instead of 1.
+- The assembly inspection test only checked that `sxtb` was present — not that the
+  sign extension reached 64 bits. A valid way for a CI failure to slip through.
 
 ## Applied
-- **`.github/workflows/ci.yml`**: Increased `timeout-minutes` for the `e2e` job
-  from 10 to 20.
+- **`src/codegen.rs`**: Changed `Instr::SextI8` codegen from `sxtb w{dst}, w{src}`
+  to `sxtb x{dst}, w{src}`. The x-register destination causes sign-extension to fill
+  all 64 bits with the sign bit, giving `0xFFFFFFFFFFFFFF96` for 150 (0x96 → -106).
+- Updated the comment to explain why the 64-bit destination is required.
 
 ## Validated
-- `cargo build` — clean (no source changes)
-- `cargo test` — 1766 passed, 0 failed
+- `cargo build` — clean
+- `cargo test` — 1766 passed; 0 failed
 - `cargo clippy -- -D warnings` — clean
+- `bash .lathe/falsify.sh` — 64 passed, 0 failed
+- Assembly for `fn add_i8(a: i8, b: i8) -> i8 { a + b }` now emits
+  `sxtb x2, w2` — sign-extends 150 to `0xFFFFFFFFFFFFFF96` (-106 as 64-bit).
 
 ## FLS Notes
-- None — no FLS sections touched this cycle.
+- **FLS §4.1**: Confirmed no ambiguity in value semantics. The AArch64 ABI issue
+  (32-bit vs 64-bit sign extension) is implementation-defined, not spec-defined.
+- No new FLS ambiguities discovered.
 
 ## Next
-- Once CI passes, the natural next step is **u16/i16 narrow integer types**.
-  Both currently map to I32/U32 without wrapping, the same gap that u8/i8 had.
-  A u16 function returning 40000_u16 + 30000_u16 would return 70000 instead
-  of 4464 — wrong. The u8/i8 pattern (TruncU8/SextI8 at return boundaries)
-  is the template.
-- Alternatively: u8/i8 compound assignment (`+=`, `*=`) is unguarded —
-  `let mut x: u8 = 200; x += 100;` would not wrap correctly.
+- u16/i16 narrow integer types — both map to I32/U32 without wrapping. The same
+  class of bug (wrong truncation/extension) could exist there.
+- u8/i8 compound assignment (`+=`, `*=`) — TruncU8/SextI8 is not emitted for
+  compound-assignment paths, which go through the stack directly.
