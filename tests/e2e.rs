@@ -1362,6 +1362,68 @@ fn runtime_shr_emits_asr_instruction() {
     );
 }
 
+/// Adversarial (Claim 61): left-shift with function parameters must emit `lsl` at runtime.
+///
+/// FLS §6.5.7: Left shift. FLS §6.1.2:37–45: Function parameters are not
+/// statically known — the shift must be emitted as a runtime `lsl` instruction.
+/// A constant-folding interpreter could fold `1 << 3` to `mov x0, #8`, but
+/// cannot fold `x << n` when x and n are unknown at compile time.
+///
+/// Attack vector: Claim 61. `1 << 3 = 8`. If galvanic constant-folds,
+/// it emits `mov x0, #8` instead of `lsl`. This test uses function parameters
+/// to force runtime codegen and asserts the folded constant is absent.
+#[test]
+fn runtime_shl_emits_lsl_not_folded() {
+    let src = "fn shl(x: i32, n: i32) -> i32 { x << n }\nfn main() -> i32 { shl(1, 3) }\n";
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("lsl"),
+        "expected `lsl` instruction for `x << n`, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("bl      shl"),
+        "expected `bl shl` call at call site, got:\n{asm}"
+    );
+    // Must NOT constant-fold shl(1, 3) = 8 into an immediate.
+    assert!(
+        !asm.contains("mov     x0, #8"),
+        "assembly must not constant-fold `shl(1, 3)` to #8:\n{asm}"
+    );
+}
+
+/// Adversarial (Claim 61): right-shift with function parameters must emit `asr` at runtime.
+///
+/// FLS §6.5.7: Right shift on signed integers. FLS §6.1.2:37–45: Function
+/// parameters are unknown at compile time — the shift must emit a runtime `asr`.
+/// `16 >> 2 = 4`. If constant-folded, galvanic emits `mov x0, #4` instead of `asr`.
+///
+/// Also guards the signed/unsigned distinction: `i32 >> n` must use `asr`
+/// (arithmetic/sign-extending), never `lsr` (logical/zero-filling).
+#[test]
+fn runtime_shr_emits_asr_not_folded() {
+    let src =
+        "fn shr_i32(x: i32, n: i32) -> i32 { x >> n }\nfn main() -> i32 { shr_i32(16, 2) }\n";
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("asr"),
+        "expected `asr` for signed right-shift `x >> n`, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("bl      shr_i32"),
+        "expected `bl shr_i32` call at call site, got:\n{asm}"
+    );
+    // Must NOT constant-fold shr_i32(16, 2) = 4 into an immediate.
+    assert!(
+        !asm.contains("mov     x0, #4"),
+        "assembly must not constant-fold `shr_i32(16, 2)` to #4:\n{asm}"
+    );
+    // Must NOT use logical shift right (lsr) for a signed type.
+    assert!(
+        !asm.lines().any(|l| l.trim_start().starts_with("lsr")),
+        "must NOT emit `lsr` for signed i32 right-shift — should be `asr`:\n{asm}"
+    );
+}
+
 // ── Milestone 13: compound assignment operators ───────────────────────────────
 //
 // FLS §6.5.11: Compound assignment expressions. `x op= e` is equivalent to

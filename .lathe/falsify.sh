@@ -1173,6 +1173,15 @@ else
     pass "Claim 60: remainder operator emits runtime sdiv+msub (not constant-folded)"
 fi
 
+# References: claims.md Claim 61.
+
+echo "--- Claim 61: shift operators emit runtime lsl/asr with function parameters (not constant-folded) ---"
+if cargo test --test e2e --quiet -- runtime_shl_emits_lsl_not_folded runtime_shr_emits_asr_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 61" "runtime_shl_emits_lsl_not_folded or runtime_shr_emits_asr_not_folded FAILED — shift may be constant-folded instead of emitting runtime lsl/asr"
+else
+    pass "Claim 61: shift operators emit runtime lsl/asr with function parameters (not constant-folded)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 
