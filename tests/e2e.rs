@@ -23684,3 +23684,236 @@ fn main() -> i32 { run(10) }
         "must not fold the sum of two calls to a constant: {asm}"
     );
 }
+
+// ── Milestone 153: let-else statements (FLS §8.1) ─────────────────────────────
+//
+// `let PAT = EXPR else { BLOCK };` — a let-else binding. The pattern is
+// matched at runtime. If it does not match, the else block (which must
+// diverge) executes. Variables bound by the pattern are in scope after the
+// let-else statement.
+//
+// Codegen invariant: the discriminant check must be emitted at runtime —
+// it cannot be constant-folded even when the scrutinee is a literal
+// or a parameter. The branch to the else block must appear in the assembly.
+//
+// FLS §8.1: Let statements.
+// FLS §5.4: Tuple struct / variant patterns.
+// FLS §6.19: Return expressions (used in else blocks).
+
+#[test]
+fn milestone_153_let_else_basic() {
+    // Basic let-else: pattern matches, binding available after.
+    let Some(exit) = compile_and_run(
+        r#"
+enum Opt { Some(i32), None }
+fn make() -> Opt { Opt::Some(7) }
+fn main() -> i32 {
+    let o = make();
+    let Opt::Some(v) = o else { return 1 };
+    v
+}
+"#,
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 7);
+}
+
+#[test]
+fn milestone_153_let_else_else_taken() {
+    // Let-else: pattern does NOT match, else block returns 0.
+    let Some(exit) = compile_and_run(
+        r#"
+enum Opt { Some(i32), None }
+fn make_none() -> Opt { Opt::None }
+fn main() -> i32 {
+    let o = make_none();
+    let Opt::Some(v) = o else { return 0 };
+    v + 1
+}
+"#,
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 0);
+}
+
+#[test]
+fn milestone_153_let_else_on_parameter() {
+    // Let-else with parameter as scrutinee — runtime discriminant check.
+    let Some(exit) = compile_and_run(
+        r#"
+enum Opt { Some(i32), None }
+fn extract(o: Opt) -> i32 {
+    let Opt::Some(v) = o else { return 0 };
+    v
+}
+fn main() -> i32 {
+    extract(Opt::Some(5))
+}
+"#,
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 5);
+}
+
+#[test]
+fn milestone_153_let_else_else_taken_on_parameter() {
+    // Let-else with non-matching parameter — else path taken.
+    let Some(exit) = compile_and_run(
+        r#"
+enum Opt { Some(i32), None }
+fn extract(o: Opt) -> i32 {
+    let Opt::Some(v) = o else { return 99 };
+    v
+}
+fn main() -> i32 {
+    extract(Opt::None)
+}
+"#,
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 99);
+}
+
+#[test]
+fn milestone_153_let_else_result_in_arithmetic() {
+    // Binding from let-else used in arithmetic expression.
+    let Some(exit) = compile_and_run(
+        r#"
+enum Opt { Some(i32), None }
+fn make(x: i32) -> Opt { Opt::Some(x) }
+fn main() -> i32 {
+    let o = make(3);
+    let Opt::Some(v) = o else { return 0 };
+    v * 2 + 1
+}
+"#,
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 7);
+}
+
+#[test]
+fn milestone_153_let_else_two_variants() {
+    // Let-else works for both variants of a two-variant enum.
+    let Some(exit) = compile_and_run(
+        r#"
+enum Dir { Left(i32), Right(i32) }
+fn choose(go_right: i32) -> Dir {
+    if go_right != 0 { Dir::Right(10) } else { Dir::Left(20) }
+}
+fn main() -> i32 {
+    let d = choose(1);
+    let Dir::Right(v) = d else { return 0 };
+    v
+}
+"#,
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 10);
+}
+
+#[test]
+fn milestone_153_let_else_called_from_non_generic() {
+    // Let-else inside a helper function called from main.
+    let Some(exit) = compile_and_run(
+        r#"
+enum Opt { Some(i32), None }
+fn double_inner(o: Opt) -> i32 {
+    let Opt::Some(v) = o else { return 0 };
+    v * 2
+}
+fn main() -> i32 {
+    double_inner(Opt::Some(21))
+}
+"#,
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 42);
+}
+
+#[test]
+fn milestone_153_let_else_result_passed_to_fn() {
+    // Binding extracted by let-else is passed to another function.
+    let Some(exit) = compile_and_run(
+        r#"
+enum Opt { Some(i32), None }
+fn add_one(x: i32) -> i32 { x + 1 }
+fn main() -> i32 {
+    let o = Opt::Some(6);
+    let Opt::Some(v) = o else { return 0 };
+    add_one(v)
+}
+"#,
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 7);
+}
+
+/// Assembly check: let-else emits a discriminant comparison at runtime.
+///
+/// `let Opt::Some(v) = o else { return 0 }` must emit a `cmp` instruction
+/// to compare the discriminant against the expected variant number. This
+/// check cannot be elided even when the pattern always matches in the test.
+///
+/// FLS §6.1.2 (Constraint 1): Non-const code must emit runtime instructions.
+/// FLS §8.1: The pattern check is a runtime operation.
+#[test]
+fn runtime_let_else_emits_discriminant_check() {
+    let src = r#"
+enum Opt { Some(i32), None }
+fn extract(o: Opt) -> i32 {
+    let Opt::Some(v) = o else { return 0 };
+    v
+}
+fn main() -> i32 { extract(Opt::Some(5)) }
+"#;
+    let asm = compile_to_asm(src);
+    // Must emit a comparison for the discriminant at runtime.
+    assert!(
+        asm.contains("cmp") || asm.contains("cbz") || asm.contains("cbnz"),
+        "let-else must emit a runtime discriminant check (cmp/cbz/cbnz): {asm}"
+    );
+    // Must emit a conditional branch (cbz) to the else path.
+    assert!(
+        asm.contains("cbz"),
+        "let-else must emit cbz to branch to the else block on mismatch: {asm}"
+    );
+}
+
+/// Assembly check: let-else binding is not constant-folded.
+///
+/// When the scrutinee is a function parameter, the extracted value must be
+/// loaded from the enum's field slot at runtime — not replaced by a constant.
+///
+/// FLS §6.1.2 (Constraint 1): `extract(o)` where `o` is a parameter is not
+/// a const context. The field load must emit a runtime `ldr` instruction.
+#[test]
+fn runtime_let_else_binding_not_folded() {
+    let src = r#"
+enum Opt { Some(i32), None }
+fn extract(o: Opt) -> i32 {
+    let Opt::Some(v) = o else { return 0 };
+    v
+}
+fn main() -> i32 { extract(Opt::Some(5)) }
+"#;
+    let asm = compile_to_asm(src);
+    // Must emit a load instruction to fetch the field at runtime.
+    assert!(
+        asm.contains("ldr"),
+        "let-else field binding must emit ldr (runtime load): {asm}"
+    );
+    // Must NOT constant-fold the result to mov x0, #5.
+    assert!(
+        !asm.contains("mov     x0, #5"),
+        "let-else must not constant-fold extracted value to #5: {asm}"
+    );
+}

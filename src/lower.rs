@@ -6693,7 +6693,173 @@ impl<'src> LowerCtx<'src> {
             //
             // FLS §6.1.2:37–45: Any store instruction is a runtime instruction;
             // the initializer (when present) is evaluated at runtime.
-            StmtKind::Let { pat, ty, init } => {
+            StmtKind::Let { pat, ty, init, else_block } => {
+                // FLS §8.1: let-else — `let PAT = EXPR else { BLOCK };`.
+                //
+                // When an else block is present, the pattern may be refutable.
+                // At runtime: evaluate EXPR, check if PAT matches, if not
+                // execute the else block (which must diverge). Variables bound
+                // by PAT are in scope after the let-else statement.
+                //
+                // Supported patterns at this milestone:
+                //   - TupleStruct with two-segment path: `Enum::Variant(v0, v1)`
+                //     Requires the scrutinee to be a local enum variable.
+                //
+                // FLS §8.1 AMBIGUOUS: The spec does not define the memory
+                // layout for let-else bindings — galvanic allocates fresh stack
+                // slots and loads field values from the enum's existing slots.
+                //
+                // Cache-line note: discriminant check + conditional branch ~5
+                // instructions; N field bindings cost 2N instructions (Load +
+                // Store per field); Branch to end_label + else block overhead.
+                if let Some(else_blk) = else_block {
+                    let init_expr = init.as_ref().ok_or_else(|| {
+                        LowerError::Unsupported(
+                            "let-else requires an initializer".into(),
+                        )
+                    })?;
+
+                    // Detect if scrutinee is a local enum variable so we can
+                    // access its field slots (base + 1 + field_idx).
+                    // FLS §15: Enum values are stored as discriminant at slot N,
+                    // fields at N+1, N+2, … in galvanic's stack layout.
+                    let enum_base_slot: Option<u8> =
+                        if let ExprKind::Path(segs) = &init_expr.kind
+                            && segs.len() == 1
+                        {
+                            let var_name = segs[0].text(self.source);
+                            self.locals
+                                .get(var_name)
+                                .copied()
+                                .filter(|s| self.local_enum_types.contains_key(s))
+                        } else {
+                            None
+                        };
+
+                    // Lower the scrutinee to get the discriminant value.
+                    // FLS §6.1.2:37–45: All loads are runtime instructions.
+                    let scrut_val = self.lower_expr(init_expr, &IrTy::I32)?;
+                    let scrut_reg = self.val_to_reg(scrut_val)?;
+                    let scrut_slot = self.alloc_slot()?;
+                    self.instrs.push(Instr::Store { src: scrut_reg, slot: scrut_slot });
+
+                    let else_label = self.alloc_label();
+                    let end_label = self.alloc_label();
+
+                    // Emit the pattern check and install bindings.
+                    // On mismatch: CondBranch → else_label.
+                    // On match: field bindings are installed in the outer scope.
+                    match pat {
+                        // FLS §5.4: TupleStruct variant pattern with two-segment path.
+                        // `let Enum::Variant(v0, v1) = scrutinee else { ... };`
+                        //
+                        // Strategy:
+                        //   1. Load discriminant from scrut_slot.
+                        //   2. Compare against expected variant discriminant.
+                        //   3. Branch to else_label on mismatch.
+                        //   4. Load each field from enum_base_slot + 1 + fi into
+                        //      a fresh slot; insert binding into self.locals.
+                        //
+                        // After end_label the bindings are valid (match succeeded).
+                        // FLS §6.1.2:37–45: All instructions are runtime.
+                        // Cache-line note: ~5 + 2×N instructions per variant
+                        // match (discriminant check + N field copies).
+                        Pat::TupleStruct { path: segs, fields } => {
+                            if segs.len() != 2 {
+                                return Err(LowerError::Unsupported(
+                                    "let-else TupleStruct pattern path must have two segments \
+                                     (e.g. `Enum::Variant`)"
+                                        .into(),
+                                ));
+                            }
+                            let enum_name = segs[0].text(self.source);
+                            let variant_name = segs[1].text(self.source);
+                            let discriminant = self
+                                .enum_defs
+                                .get(enum_name)
+                                .and_then(|v| v.get(variant_name))
+                                .map(|(disc, _)| *disc)
+                                .ok_or_else(|| {
+                                    LowerError::Unsupported(format!(
+                                        "unknown enum variant \
+                                         `{enum_name}::{variant_name}` in let-else"
+                                    ))
+                                })?;
+                            let base = enum_base_slot.ok_or_else(|| {
+                                LowerError::Unsupported(
+                                    "let-else TupleStruct pattern requires an enum \
+                                     variable as scrutinee"
+                                        .into(),
+                                )
+                            })?;
+
+                            // Discriminant check: branch to else on mismatch.
+                            let s_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                            let p_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::LoadImm(p_reg, discriminant));
+                            let cmp_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::BinOp {
+                                op: IrBinOp::Eq,
+                                dst: cmp_reg,
+                                lhs: s_reg,
+                                rhs: p_reg,
+                            });
+                            // CondBranch branches when reg == 0 (false), i.e., no match.
+                            self.instrs.push(Instr::CondBranch {
+                                reg: cmp_reg,
+                                label: else_label,
+                            });
+
+                            // Match succeeded: install field bindings in outer scope.
+                            // FLS §8.1: Bindings are visible after the let-else statement.
+                            for (fi, fp) in fields.iter().enumerate() {
+                                match fp {
+                                    Pat::Ident(span) => {
+                                        let fname = span.text(self.source);
+                                        let fslot = base + 1 + fi as u8;
+                                        let bslot = self.alloc_slot()?;
+                                        let breg = self.alloc_reg()?;
+                                        self.instrs
+                                            .push(Instr::Load { dst: breg, slot: fslot });
+                                        self.instrs
+                                            .push(Instr::Store { src: breg, slot: bslot });
+                                        self.locals.insert(fname, bslot);
+                                    }
+                                    Pat::Wildcard => {}
+                                    _ => {
+                                        return Err(LowerError::Unsupported(
+                                            "only ident/wildcard sub-patterns supported \
+                                             in let-else TupleStruct pattern"
+                                                .into(),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        _ => {
+                            return Err(LowerError::Unsupported(
+                                "let-else only supports TupleStruct (Enum::Variant(..)) \
+                                 patterns at this milestone"
+                                    .into(),
+                            ));
+                        }
+                    }
+
+                    // Jump over the else block (pattern matched, bindings valid).
+                    self.instrs.push(Instr::Branch(end_label));
+
+                    // Else block (diverges via return/break/continue).
+                    // FLS §8.1: The else block must be a diverging expression.
+                    // FLS §6.19: return expressions emit Ret instructions.
+                    self.instrs.push(Instr::Label(else_label));
+                    let _ = self.lower_block_to_value(else_blk, &IrTy::I32)?;
+
+                    // Continuation point: bindings are in scope.
+                    self.instrs.push(Instr::Label(end_label));
+                    return Ok(());
+                }
+
                 // FLS §5.10.3: Tuple pattern in let position — `let (a, b) = t;`.
                 //
                 // Handled before the scalar special-case chain since it
