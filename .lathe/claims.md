@@ -1832,3 +1832,83 @@ must execute at runtime.
 - contains `mov     x0, #12` (chain result for n=3 was folded)
 
 **Tests**: `cargo test --test e2e -- runtime_supertrait_default_call_emits_bl_not_folded runtime_supertrait_default_chain_not_folded`
+
+---
+
+## Claim 48: Self::AssocType in method signatures emits runtime dispatch (not constant-folded)
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: When `Self::AssocType` is used in a method signature (return type or
+parameter type), the emitted assembly must dispatch via `bl` to the concrete
+monomorphized label at runtime. The associated type projection is resolved per-impl
+at lowering time — not constant-folded at compile time.
+
+```rust
+// Pattern 1: Self::AssocType in return position
+trait Wrapper {
+    type Output;
+    fn value(&self) -> Self::Output;
+}
+struct IntWrap { x: i32 }
+impl Wrapper for IntWrap {
+    type Output = i32;
+    fn value(&self) -> Self::Output { self.x }
+}
+fn make_wrap(n: i32) -> IntWrap { IntWrap { x: n } }
+// main: make_wrap(7).value() → 7
+
+// Pattern 2: Self::AssocType in parameter position
+trait Scalable {
+    type Factor;
+    fn scale(&self, f: Self::Factor) -> i32;
+}
+struct Val { n: i32 }
+impl Scalable for Val {
+    type Factor = i32;
+    fn scale(&self, f: Self::Factor) -> i32 { self.n * f }
+}
+fn make_val(n: i32) -> Val { Val { n } }
+// main: make_val(3).scale(4) → 12
+```
+
+Must emit (Pattern 1):
+- `bl      IntWrap__value` — method with Self::Output return must dispatch at runtime
+- NOT `mov x0, #7` — result for n=7 must not be folded
+
+Must emit (Pattern 2):
+- `mul` — Self::Factor parameter method must emit runtime multiply
+- NOT `mov x0, #12` — result for n=3, f=4 must not be constant-folded
+
+**Why this claim matters**: Milestone 166 added `Self::AssocType` in method signatures.
+Without this claim, a regression that constant-folds the method call (e.g., evaluates
+`make_wrap(7).value()` at compile time and emits `mov x0, #7`) would pass all exit-code
+tests invisibly. The method body must execute at runtime.
+
+**Attack vectors**:
+1. Constant-fold `make_wrap(7).value()` to `mov x0, #7` — exit code correct, folded.
+   Caught by `!asm.contains("mov     x0, #7")`.
+2. Fail to emit `bl IntWrap__value` (inlined or skipped).
+   Caught by `asm.contains("bl      IntWrap__value")`.
+3. Constant-fold `make_val(3).scale(4)` to `mov x0, #12` — exit code correct, folded.
+   Caught by `!asm.contains("mov     x0, #12")`.
+4. Skip the `mul` instruction in `Val__scale` (constant multiply instead).
+   Caught by `asm.contains("mul")`.
+
+**FLS §10.2**: Associated types in trait definitions — `Self::X` refers to the concrete
+type bound by the implementing type's associated type declaration.
+**FLS §10.2 AMBIGUOUS**: The spec does not specify how `Self::X` projections are resolved
+when `Self` appears in a trait method signature vs. impl method signature. Galvanic
+resolves via per-impl type alias registry (impl override takes precedence over default).
+**FLS §6.1.2 Constraint 1**: `fn main()` is not a const context — method calls with
+Self::AssocType signatures must execute at runtime.
+
+**Violated if**: `compile_to_asm(SELF_ASSOC_TYPE_RETURN)` returns assembly that:
+- lacks `bl      IntWrap__value` (dispatch was inlined/folded), OR
+- contains `mov     x0, #7` (result for n=7 was constant-folded)
+
+**Violated if**: `compile_to_asm(SELF_ASSOC_TYPE_PARAM)` returns assembly that:
+- lacks `mul` (Self::Factor multiply was constant-folded), OR
+- contains `mov     x0, #12` (result for n=3,f=4 was constant-folded)
+
+**Tests**: `cargo test --test e2e -- runtime_self_assoc_type_return_emits_bl_not_folded runtime_self_assoc_type_param_emits_mul_not_folded`

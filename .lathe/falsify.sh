@@ -981,6 +981,30 @@ else
     pass "Claim 47: default method calling supertrait emits runtime bl (not constant-folded)"
 fi
 
+# ── Claim 48: Self::AssocType in method signatures emits runtime dispatch (not folded) ─
+#
+# Promise: Methods with Self::AssocType in return or parameter position must dispatch
+# via bl to the concrete monomorphized label at runtime. The associated type projection
+# is resolved per-impl at lowering — not constant-folded.
+#
+# Pattern 1: Self::Output in return type → must emit bl IntWrap__value, not fold #7
+# Pattern 2: Self::Factor in parameter type → must emit mul, not fold #12
+#
+# FLS §10.2: Associated types in trait definitions.
+# FLS §10.2 AMBIGUOUS: Spec does not specify how Self::X projections resolve across
+#   trait method vs. impl method signatures.
+# FLS §6.1.2 Constraint 1: fn main() is not a const context.
+#
+# Introduced in cycle 90 (M166 Self::AssocType falsification).
+# References: claims.md Claim 48.
+
+echo "--- Claim 48: Self::AssocType in method signatures emits runtime dispatch (not constant-folded) ---"
+if cargo test --test e2e --quiet -- runtime_self_assoc_type_return_emits_bl_not_folded runtime_self_assoc_type_param_emits_mul_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 48" "runtime_self_assoc_type_return_emits_bl_not_folded or runtime_self_assoc_type_param_emits_mul_not_folded FAILED — Self::AssocType method may be constant-folded or bl/mul missing"
+else
+    pass "Claim 48: Self::AssocType in method signatures emits runtime dispatch (not constant-folded)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 
