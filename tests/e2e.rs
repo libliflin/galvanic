@@ -25472,3 +25472,273 @@ fn milestone_158_while_let_or_subpat_counts() {
     };
     assert_eq!(exit_code, 3); // 0+1+2=3; exits when x=3 ∉ {0,1,2}
 }
+
+// ── Milestone 159: &dyn Trait let bindings (FLS §4.13) ───────────────────────
+//
+// `let x: &dyn Trait = &val;` creates a fat pointer local. The variable can
+// be used for vtable method dispatch (`x.method()`) and passed to functions
+// that take `&dyn Trait` parameters. This extends milestone 147 which only
+// supported inline borrows `f(&val)` at call sites.
+//
+// FLS §4.13: "A trait object is an opaque value of another type that implements
+// a set of traits." Galvanic represents &dyn Trait fat pointers as two
+// consecutive stack slots: data_ptr at slot S, vtable_ptr at slot S+1.
+//
+// FLS §4.13: AMBIGUOUS — The spec does not define how fat pointer locals are
+// stored. Galvanic's layout mirrors the parameter spill convention.
+
+const DYN_TRAIT_LET_BINDING_BASIC: &str = "
+trait Shape {
+    fn area(&self) -> i32;
+}
+struct Circle { r: i32 }
+impl Shape for Circle {
+    fn area(&self) -> i32 { self.r * self.r }
+}
+fn print_area(s: &dyn Shape) -> i32 {
+    s.area()
+}
+fn main() -> i32 {
+    let c = Circle { r: 5 };
+    let s: &dyn Shape = &c;
+    print_area(s)
+}
+";
+
+#[test]
+fn milestone_159_dyn_trait_let_binding_basic() {
+    // let s: &dyn Shape = &c; then pass s to a fn(&dyn Shape).
+    let Some(exit_code) = compile_and_run(DYN_TRAIT_LET_BINDING_BASIC) else {
+        return;
+    };
+    assert_eq!(exit_code, 25); // 5 * 5 = 25
+}
+
+#[test]
+fn milestone_159_dyn_trait_let_binding_method_call() {
+    // Call a method directly on the &dyn Trait local: s.area().
+    let src = "
+trait Shape {
+    fn area(&self) -> i32;
+}
+struct Square { side: i32 }
+impl Shape for Square {
+    fn area(&self) -> i32 { self.side * self.side }
+}
+fn main() -> i32 {
+    let sq = Square { side: 4 };
+    let s: &dyn Shape = &sq;
+    s.area()
+}
+";
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 16); // 4 * 4 = 16
+}
+
+#[test]
+fn milestone_159_dyn_trait_let_binding_two_types() {
+    // Two different concrete types bound to &dyn Trait locals; both dispatch correctly.
+    let src = "
+trait Compute {
+    fn value(&self) -> i32;
+}
+struct A { n: i32 }
+struct B { n: i32 }
+impl Compute for A {
+    fn value(&self) -> i32 { self.n + 1 }
+}
+impl Compute for B {
+    fn value(&self) -> i32 { self.n * 2 }
+}
+fn run(c: &dyn Compute) -> i32 { c.value() }
+fn main() -> i32 {
+    let a = A { n: 3 };
+    let b = B { n: 5 };
+    let ca: &dyn Compute = &a;
+    let cb: &dyn Compute = &b;
+    run(ca) + run(cb)
+}
+";
+    // (3+1) + (5*2) = 4 + 10 = 14
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 14);
+}
+
+#[test]
+fn milestone_159_dyn_trait_let_binding_result_in_arithmetic() {
+    let src = "
+trait Val {
+    fn get(&self) -> i32;
+}
+struct Wrap { v: i32 }
+impl Val for Wrap {
+    fn get(&self) -> i32 { self.v * 3 }
+}
+fn fetch(v: &dyn Val) -> i32 { v.get() }
+fn main() -> i32 {
+    let w = Wrap { v: 4 };
+    let dv: &dyn Val = &w;
+    fetch(dv) + 2
+}
+";
+    // 4*3 + 2 = 14
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 14);
+}
+
+#[test]
+fn milestone_159_dyn_trait_let_binding_called_twice() {
+    let src = "
+trait Counter {
+    fn count(&self) -> i32;
+}
+struct Num { n: i32 }
+impl Counter for Num {
+    fn count(&self) -> i32 { self.n }
+}
+fn sum_twice(c: &dyn Counter) -> i32 { c.count() + c.count() }
+fn main() -> i32 {
+    let x = Num { n: 7 };
+    let dc: &dyn Counter = &x;
+    sum_twice(dc)
+}
+";
+    // 7 + 7 = 14
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 14);
+}
+
+#[test]
+fn milestone_159_dyn_trait_let_binding_on_parameter() {
+    let src = "
+trait Measure {
+    fn size(&self) -> i32;
+}
+struct Box1 { w: i32 }
+impl Measure for Box1 {
+    fn size(&self) -> i32 { self.w * 2 }
+}
+fn wrap(b: Box1) -> i32 {
+    let dm: &dyn Measure = &b;
+    dm.size()
+}
+fn main() -> i32 {
+    wrap(Box1 { w: 6 })
+}
+";
+    // 6 * 2 = 12
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 12);
+}
+
+#[test]
+fn milestone_159_dyn_trait_let_binding_passed_to_fn() {
+    let src = "
+trait Greet {
+    fn hello(&self) -> i32;
+}
+struct Point { x: i32, y: i32 }
+impl Greet for Point {
+    fn hello(&self) -> i32 { self.x + self.y }
+}
+fn use_greet(g: &dyn Greet) -> i32 { g.hello() }
+fn identity(n: i32) -> i32 { n }
+fn main() -> i32 {
+    let p = Point { x: 3, y: 8 };
+    let dg: &dyn Greet = &p;
+    identity(use_greet(dg))
+}
+";
+    // 3 + 8 = 11
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 11);
+}
+
+#[test]
+fn milestone_159_dyn_trait_let_binding_result_in_if() {
+    let src = "
+trait Toggle {
+    fn val(&self) -> i32;
+}
+struct Flag { on: i32 }
+impl Toggle for Flag {
+    fn val(&self) -> i32 { self.on }
+}
+fn get_flag(t: &dyn Toggle) -> i32 { t.val() }
+fn main() -> i32 {
+    let f = Flag { on: 1 };
+    let dt: &dyn Toggle = &f;
+    if get_flag(dt) > 0 { 42 } else { 0 }
+}
+";
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 42);
+}
+
+// Assembly inspection: &dyn Trait let binding must emit a load for the
+// data pointer (ldr from the data_slot), NOT constant-fold the result.
+//
+// The key adversarial assertion: if galvanic folded 5*5=25 at compile time,
+// it would emit `mov x0, #25`. This test ensures that a fat pointer load
+// is emitted at the call site (the data slot is read at runtime, not
+// inlined as a constant).
+#[test]
+fn runtime_dyn_trait_let_binding_not_folded() {
+    // The fat pointer stored in `s` must be loaded at runtime; the area()
+    // dispatch must emit blr (vtable dispatch), not mov x0, #25.
+    let asm = compile_to_asm(DYN_TRAIT_LET_BINDING_BASIC);
+    assert!(
+        asm.contains("blr"),
+        "dyn Trait let binding dispatch must emit `blr`; got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #25"),
+        "dyn Trait let binding must NOT constant-fold area to 25; got:\n{asm}"
+    );
+    // The vtable label for Circle must be emitted.
+    assert!(
+        asm.contains("vtable_Shape_Circle"),
+        "vtable label `vtable_Shape_Circle` must be emitted; got:\n{asm}"
+    );
+}
+
+// Adversarial: the data pointer loaded from the fat-pointer local must
+// actually come from a stack load (ldr), not be constant-folded.
+// If galvanic skips the fat pointer and directly emits the struct field
+// address as a constant, the test would still pass on CI — but this
+// assembly inspection catches it locally without QEMU.
+#[test]
+fn runtime_dyn_trait_let_binding_emits_load_from_slot() {
+    // Use a function parameter so the struct address is NOT statically known.
+    let src = "
+trait Shape {
+    fn area(&self) -> i32;
+}
+struct Circle { r: i32 }
+impl Shape for Circle {
+    fn area(&self) -> i32 { self.r * self.r }
+}
+fn print_area(s: &dyn Shape) -> i32 { s.area() }
+fn make_circle(r: i32) -> i32 {
+    let c = Circle { r };
+    let s: &dyn Shape = &c;
+    print_area(s)
+}
+fn main() -> i32 { make_circle(5) }
+";
+    let asm = compile_to_asm(src);
+    // Must emit a load (ldr) from the fat pointer's data slot.
+    assert!(
+        asm.contains("ldr"),
+        "fat pointer local must emit ldr to load stored pointer; got:\n{asm}"
+    );
+    // Must NOT fold the result.
+    assert!(
+        !asm.contains("mov     x0, #25"),
+        "make_circle(5) must NOT be folded to 25; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("blr"),
+        "vtable dispatch must use blr; got:\n{asm}"
+    );
+}
