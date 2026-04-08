@@ -2429,6 +2429,30 @@ fn lower_fn(
     for (name, irt) in generic_subst {
         effective_aliases.insert(name.clone(), *irt);
     }
+    // FLS §10.2 / §12.1: For each generic type param T substituted with a concrete
+    // type CT (via generic_type_subst), also add "T::X" → irt for every "CT::X"
+    // entry in the alias map. This lets `C::Item` in a generic function's return
+    // or parameter type resolve when C is monomorphized to Counter (and
+    // Counter::Item is already in the global alias map from the impl block scan).
+    //
+    // Example: fn use_it<C: Container>(c: C) -> C::Item
+    //   generic_type_subst["C"] = "Counter"
+    //   type_aliases["Counter::Item"] = IrTy::I32
+    //   → adds effective_aliases["C::Item"] = IrTy::I32
+    for (param_name, concrete_name) in generic_type_subst {
+        let prefix = format!("{concrete_name}::");
+        let entries: Vec<(String, IrTy)> = effective_aliases
+            .iter()
+            .filter(|(k, _)| k.starts_with(prefix.as_str()))
+            .map(|(k, &v)| {
+                let assoc_name = &k[prefix.len()..];
+                (format!("{param_name}::{assoc_name}"), v)
+            })
+            .collect();
+        for (key, irt) in entries {
+            effective_aliases.entry(key).or_insert(irt);
+        }
+    }
     let type_aliases = &effective_aliases;
 
     // For associated functions, impl_type = None and self_kind = None.

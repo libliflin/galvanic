@@ -27495,3 +27495,295 @@ fn main() -> i32 {
         "Self::Factor param type must NOT constant-fold to #12; got:\n{asm}"
     );
 }
+
+
+// ── Milestone 167: T::AssocType in generic function return and parameter position ──
+// FLS §10.2 / §12.1: Associated type projections on generic type parameters
+// in generic free function signatures. `fn use_it<C: Container>(c: C) -> C::Item`
+// resolves `C::Item` via per-monomorphization type alias expansion.
+
+/// Milestone 167: basic T::Item in return position.
+#[test]
+fn milestone_167_proj_return_basic() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Container {
+    type Item;
+    fn get(&self) -> Self::Item;
+}
+struct Counter { val: i32 }
+impl Container for Counter {
+    type Item = i32;
+    fn get(&self) -> Self::Item { self.val }
+}
+fn use_it<C: Container>(c: C) -> C::Item {
+    c.get()
+}
+fn main() -> i32 {
+    let c = Counter { val: 5 };
+    use_it(c)
+}
+"#) else { return; };
+    assert_eq!(exit_code, 5);
+}
+
+/// Milestone 167: T::Item in return position, on parameter.
+#[test]
+fn milestone_167_proj_return_on_parameter() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Extractor {
+    type Output;
+    fn extract(&self) -> Self::Output;
+}
+struct Wrapper { n: i32 }
+impl Extractor for Wrapper {
+    type Output = i32;
+    fn extract(&self) -> Self::Output { self.n }
+}
+fn call<E: Extractor>(e: E) -> E::Output {
+    e.extract()
+}
+fn get(w: Wrapper) -> i32 {
+    call(w)
+}
+fn main() -> i32 {
+    get(Wrapper { n: 9 })
+}
+"#) else { return; };
+    assert_eq!(exit_code, 9);
+}
+
+/// Milestone 167: T::Item result used in arithmetic.
+#[test]
+fn milestone_167_proj_result_in_arithmetic() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Provider {
+    type Value;
+    fn value(&self) -> Self::Value;
+}
+struct Src { x: i32 }
+impl Provider for Src {
+    type Value = i32;
+    fn value(&self) -> Self::Value { self.x }
+}
+fn doubled<P: Provider>(p: P) -> i32 {
+    let v: i32 = p.value();
+    v * 2
+}
+fn main() -> i32 {
+    doubled(Src { x: 6 })
+}
+"#) else { return; };
+    assert_eq!(exit_code, 12);
+}
+
+/// Milestone 167: T::Item result passed to fn.
+#[test]
+fn milestone_167_proj_result_passed_to_fn() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Source {
+    type Data;
+    fn get(&self) -> Self::Data;
+}
+struct Val { n: i32 }
+impl Source for Val {
+    type Data = i32;
+    fn get(&self) -> Self::Data { self.n }
+}
+fn add_one(x: i32) -> i32 { x + 1 }
+fn fetch<S: Source>(s: S) -> i32 {
+    add_one(s.get())
+}
+fn main() -> i32 {
+    fetch(Val { n: 7 })
+}
+"#) else { return; };
+    assert_eq!(exit_code, 8);
+}
+
+/// Milestone 167: two concrete types, both monomorphized.
+#[test]
+fn milestone_167_proj_two_impls() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Measure {
+    type Unit;
+    fn measure(&self) -> Self::Unit;
+}
+struct Meters { val: i32 }
+struct Feet { val: i32 }
+impl Measure for Meters {
+    type Unit = i32;
+    fn measure(&self) -> Self::Unit { self.val }
+}
+impl Measure for Feet {
+    type Unit = i32;
+    fn measure(&self) -> Self::Unit { self.val * 3 }
+}
+fn get_measure<M: Measure>(m: M) -> M::Unit {
+    m.measure()
+}
+fn main() -> i32 {
+    let m = Meters { val: 2 };
+    let f = Feet { val: 1 };
+    get_measure(m) + get_measure(f)
+}
+"#) else { return; };
+    assert_eq!(exit_code, 5); // 2 + 3
+}
+
+/// Milestone 167: T::Item result used in if expression.
+#[test]
+fn milestone_167_proj_result_in_if() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Rated {
+    type Score;
+    fn score(&self) -> Self::Score;
+}
+struct Player { pts: i32 }
+impl Rated for Player {
+    type Score = i32;
+    fn score(&self) -> Self::Score { self.pts }
+}
+fn grade<R: Rated>(r: R) -> i32 {
+    if r.score() > 5 { 1 } else { 0 }
+}
+fn main() -> i32 {
+    grade(Player { pts: 8 }) + grade(Player { pts: 2 })
+}
+"#) else { return; };
+    assert_eq!(exit_code, 1); // 1 + 0
+}
+
+/// Milestone 167: called twice with the same type.
+#[test]
+fn milestone_167_proj_called_twice() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Sensor {
+    type Reading;
+    fn read(&self) -> Self::Reading;
+}
+struct Therm { temp: i32 }
+impl Sensor for Therm {
+    type Reading = i32;
+    fn read(&self) -> Self::Reading { self.temp }
+}
+fn sample<S: Sensor>(s: S) -> S::Reading {
+    s.read()
+}
+fn main() -> i32 {
+    let a = Therm { temp: 3 };
+    let b = Therm { temp: 4 };
+    sample(a) + sample(b)
+}
+"#) else { return; };
+    assert_eq!(exit_code, 7);
+}
+
+/// Milestone 167: T::Item combined with an associated const.
+#[test]
+fn milestone_167_proj_with_assoc_const() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Scaled {
+    type Value;
+    const FACTOR: i32;
+    fn raw(&self) -> Self::Value;
+}
+struct Unit { n: i32 }
+impl Scaled for Unit {
+    type Value = i32;
+    const FACTOR: i32 = 10;
+    fn raw(&self) -> Self::Value { self.n }
+}
+fn scale<S: Scaled>(s: S) -> i32 {
+    s.raw() * S::FACTOR
+}
+fn main() -> i32 {
+    scale(Unit { n: 3 })
+}
+"#) else { return; };
+    assert_eq!(exit_code, 30);
+}
+
+// ── Assembly inspection: milestone 167 ───────────────────────────────────────
+
+/// Assembly inspection: T::Item in return position emits a bl to the monomorphized
+/// method (not a folded constant). The value is passed through a function parameter
+/// so no literal appears in the generic fn body — only a runtime load + bl.
+#[test]
+fn runtime_proj_return_emits_bl_not_folded() {
+    let asm = compile_to_asm(r#"
+trait Container {
+    type Item;
+    fn get(&self) -> Self::Item;
+}
+struct Counter { val: i32 }
+impl Container for Counter {
+    type Item = i32;
+    fn get(&self) -> Self::Item { self.val }
+}
+fn use_it<C: Container>(c: C) -> C::Item {
+    c.get()
+}
+fn make_and_call(n: i32) -> i32 {
+    let c = Counter { val: n };
+    use_it(c)
+}
+fn main() -> i32 {
+    make_and_call(5)
+}
+"#);
+    // Positive: monomorphized label emitted.
+    assert!(
+        asm.contains("use_it__Counter"),
+        "T::Item generic fn must emit monomorphized label; got:\n{asm}"
+    );
+    // Positive: body dispatches via bl at runtime.
+    assert!(
+        asm.contains("bl      Counter__get"),
+        "T::Item generic return must emit bl Counter__get; got:\n{asm}"
+    );
+    // Negative: generic fn body must not fold to a constant return.
+    // A folded use_it__Counter would be `mov x0, #N; ret` with no bl.
+    // Confirmed absent since n is a parameter throughout.
+    assert!(
+        !asm.contains("mov     x0, #0"),
+        "use_it must NOT return a folded zero; got:\n{asm}"
+    );
+}
+
+/// Assembly inspection: two-impl monomorphization for T::Item return — both
+/// concrete specialisations are emitted, neither is folded.
+#[test]
+fn runtime_proj_two_types_both_monomorphized() {
+    let asm = compile_to_asm(r#"
+trait Measure {
+    type Unit;
+    fn measure(&self) -> Self::Unit;
+}
+struct Meters { val: i32 }
+struct Feet { val: i32 }
+impl Measure for Meters {
+    type Unit = i32;
+    fn measure(&self) -> Self::Unit { self.val }
+}
+impl Measure for Feet {
+    type Unit = i32;
+    fn measure(&self) -> Self::Unit { self.val * 3 }
+}
+fn get_measure<M: Measure>(m: M) -> M::Unit {
+    m.measure()
+}
+fn main() -> i32 {
+    let m = Meters { val: 2 };
+    let f = Feet { val: 1 };
+    get_measure(m) + get_measure(f)
+}
+"#);
+    assert!(
+        asm.contains("Meters") && asm.contains("Feet"),
+        "both concrete type labels must be emitted; got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #5"),
+        "result must NOT be constant-folded to #5; got:\n{asm}"
+    );
+}
