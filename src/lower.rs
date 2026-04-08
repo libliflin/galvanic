@@ -515,6 +515,24 @@ fn eval_const_expr(
             }
             None
         }
+        // FLS §6.5.10: Numeric type casts in const contexts. `expr as Ty` is
+        // evaluated by applying the same narrowing/widening rules as
+        // `narrow_const_value`: u8/i8/u16/i16 truncate; i32 and wider are
+        // identity. Non-numeric target types (references, etc.) return None.
+        ExprKind::Cast { expr: inner, ty } => {
+            let val = eval_const_expr(inner, source, known, assoc_known, const_fns)?;
+            if let crate::ast::TyKind::Path(segs) = &ty.kind
+                && segs.len() == 1 {
+                    return Some(match segs[0].text(source) {
+                        "u8"  => (val as u8)  as i32,
+                        "i8"  => (val as i8)  as i32,
+                        "u16" => (val as u16) as i32,
+                        "i16" => (val as i16) as i32,
+                        _ => val, // i32, u32, i64, usize etc — identity in our i32 IR
+                    });
+                }
+            None
+        }
         // FLS §6.7: Parenthesized expressions — strip the grouping.
         // The parser does not emit a separate Group node; parenthesized
         // sub-expressions are already the inner node.  This arm is a
