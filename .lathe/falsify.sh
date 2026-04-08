@@ -725,6 +725,41 @@ else
     pass "Claim 35: generic fn with assoc type bound emits monomorphized bl (not folded)"
 fi
 
+# ── Claim 36: impl FnMut trampoline passes capture by address, mutation not folded ─
+#
+# When a mutable closure is passed as `impl FnMut`, galvanic must:
+#   (a) emit `_trampoline` — the wrapper that receives closure state via x27
+#   (b) use x27 for the capture-state pointer (capture by address, not by copy)
+#   (c) emit `blr` in the consuming function for indirect closure call
+#   (d) emit `add` — n+=1 in the closure body is a runtime instruction
+#   (e) NOT emit `mov x0, #23` (correct result constant-folded from run(10))
+#   (f) NOT emit `mov x0, #3` (snapshot-from-zero fold: two calls return 1+2=3)
+#
+# fn apply_mut(mut f: impl FnMut() -> i32) -> i32 { f() + f() }
+# fn run(start: i32) -> i32 { let mut n = start; apply_mut(|| { n += 1; n }) }
+# fn main() -> i32 { run(10) }
+#
+# Distinct from:
+#   Claim 32 = direct FnMut closure (no generic dispatch, no trampoline)
+#   Claim 33 = FnOnce via impl FnOnce (move capture, single call, no write-back)
+# This claim covers the impl FnMut trampoline mechanism — a separate code path
+# where galvanic must emit a trampoline that shuttles x27 (capture address) into
+# the closure call, enabling mutable state accumulation across multiple calls.
+#
+# Attack vector: snapshot capture (copy n, not &n) causes each call to see the
+# initial value → wrong result (2 or 22 depending on where snapshot is taken).
+# Constant-fold: evaluate run(10) = 23 at compile time → mov x0, #23.
+#
+# Introduced in cycle 72 (red-team, milestone 152 path, FLS §6.22 + §4.13).
+# References: claims.md Claim 36.
+
+echo "--- Claim 36: impl FnMut trampoline mutation not folded ---"
+if cargo test --test e2e --quiet -- runtime_fn_mut_as_impl_fn_mut_emits_trampoline runtime_fn_mut_as_impl_fn_mut_mutation_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 36" "runtime_fn_mut_as_impl_fn_mut_emits_trampoline or runtime_fn_mut_as_impl_fn_mut_mutation_not_folded FAILED — impl FnMut trampoline may be missing, capture may be by copy (not address), or mutation result was constant-folded"
+else
+    pass "Claim 36: impl FnMut trampoline passes capture address (x27) and mutation is not folded"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

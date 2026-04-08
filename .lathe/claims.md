@@ -1184,3 +1184,75 @@ Or for the two-type variant:
 - contains `mov     x0, #17` (constant-folded sum `7 + 5*2 = 17`).
 
 **Test**: `cargo test --test e2e -- runtime_assoc_type_bound_emits_monomorphized_bl_not_folded runtime_assoc_type_bound_two_types_both_monomorphized`
+
+---
+
+## Claim 36: `impl FnMut` dispatch through trampoline passes capture by address and does not fold mutation results
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: When a mutable closure is passed as `impl FnMut` to a generic function, galvanic must:
+1. Emit a `_trampoline` function for the closure (the mechanism that receives the closure
+   state pointer in x27 and dispatches to the actual closure body).
+2. Use x27 to pass the closure's mutable capture by address — not by copy (snapshot).
+3. Emit `blr` in the consuming function for the indirect call through the function pointer.
+4. NOT constant-fold the accumulated mutation result even when the capture is initialized
+   from a function parameter.
+
+```rust
+fn apply_mut(mut f: impl FnMut() -> i32) -> i32 { f() + f() }
+fn run(start: i32) -> i32 {
+    let mut n = start;
+    apply_mut(|| { n += 1; n })
+}
+fn main() -> i32 { run(10) }
+```
+
+`run(10)` must produce 23 at runtime:
+- First `f()`: n = 10+1 = 11, returns 11
+- Second `f()`: n = 11+1 = 12, returns 12
+- 11 + 12 = 23
+
+Must emit `_trampoline`, `x27` (capture address), `blr`, and `add` — and must NOT emit:
+- `mov x0, #23` (constant-folded correct result from run(10))
+- `mov x0, #3` (snapshot-from-zero: two calls each start from 0, return 1 and 2, sum = 3)
+
+**Why this claim matters**: This covers a distinct codegen path from Claims 32 and 33:
+- Claim 32: Direct FnMut closure mutation in the same scope (no generic dispatch, no trampoline).
+  `let mut inc = || { n += 1; n }; inc(); inc()` — capture address passed at each call site.
+- Claim 33: FnOnce move-capture via `impl FnOnce` (single call, no write-back needed).
+- Claim 36: FnMut via `impl FnMut` bound — requires a trampoline function that receives the
+  capture-state pointer in x27 and enables write-back across multiple calls through a generic
+  function that doesn't know the concrete closure type.
+
+A regression in the trampoline generation (dropping `_trampoline`, forgetting x27, or
+snapshot-copying the capture) produces wrong runtime behavior: `run(10)` returns 3 (from
+snapshot starting at 0) or 2 (snapshot starting at start but resetting). Neither 3 nor 23
+appears in the source — neither is a literal. But a folding interpreter would compute 23 and
+emit `mov x0, #23`. All three failure modes produce exit codes that differ from 23, and are
+caught by CI compile-and-run tests — but only on CI with QEMU. Assembly inspection catches
+them locally and without cross tools.
+
+**Attack vectors**:
+1. Trampoline dropped: galvanic forgets to emit `_trampoline` for the `impl FnMut` path.
+   The `apply_mut` call then has no function pointer to dereference. Compile error or
+   wrong code. Caught by `asm.contains("_trampoline")`.
+2. Snapshot-by-value (copy n, not &n): x27 holds the value of n (e.g., 10) instead of its
+   address. The closure body mutates a local register, never writes back to the caller's n.
+   First call returns 11 (10+1), second call also sees start=10, returns 11. Sum = 22.
+   Or from initial 0: both calls return 1, sum = 2. Exit code wrong, caught by CI.
+   Caught locally by absence of `x27` as address register.
+3. Constant-fold `run(10)` → evaluate 11+12=23 at compile time → `mov x0, #23`.
+   Caught by `!asm.contains("mov     x0, #23")`.
+4. Snapshot-from-zero fold: fold two calls each returning 1 and 2 → `mov x0, #3`.
+   Caught by `!asm.contains("mov     x0, #3")`.
+
+**Violated if**: `compile_to_asm(...)` for the program above returns assembly that:
+- lacks `_trampoline` (trampoline function not emitted — impl FnMut path broken), OR
+- lacks `x27` (capture-state pointer convention dropped — write-back impossible), OR
+- lacks `blr` (indirect call through function pointer absent), OR
+- lacks `add` (mutation n += 1 was not emitted as a runtime instruction), OR
+- contains `mov     x0, #23` (correct result constant-folded), OR
+- contains `mov     x0, #3` (snapshot-from-zero result constant-folded).
+
+**Test**: `cargo test --test e2e -- runtime_fn_mut_as_impl_fn_mut_emits_trampoline runtime_fn_mut_as_impl_fn_mut_mutation_not_folded`
