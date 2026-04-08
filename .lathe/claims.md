@@ -1692,3 +1692,59 @@ arguments, method bodies must execute at runtime.
 - lacks `add` (method body constant-folded instead of emitting runtime arithmetic)
 
 **Tests**: `cargo test --test e2e -- runtime_impl_trait_return_emits_bl_not_blr runtime_impl_trait_return_not_folded`
+
+---
+
+## Claim 46: Supertrait method dispatch uses static bl (not constant-folded) and both methods emit runtime code
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: A generic function with a supertrait bound (`T: Derived` where `Derived: Base`)
+must dispatch both supertrait and subtrait method calls via `bl` to monomorphized labels.
+Neither the supertrait call (`t.base_val()`) nor the combined result of calling both methods
+must be constant-folded to an immediate.
+
+```rust
+trait Base { fn base_val(&self) -> i32; }
+trait Derived: Base { fn derived_val(&self) -> i32; }
+struct Foo { x: i32 }
+impl Base for Foo { fn base_val(&self) -> i32 { self.x + 3 } }
+impl Derived for Foo { fn derived_val(&self) -> i32 { self.x + 1 } }
+fn get_base<T: Derived>(t: T) -> i32 { t.base_val() }
+fn sum_both<T: Derived>(t: T) -> i32 { t.base_val() + t.derived_val() }
+```
+
+Must emit:
+- `add` — supertrait method bodies emit runtime arithmetic
+- NOT `mov x0, #11` — `base_val` result for `x=8` must not be folded
+- NOT `mov x0, #9` — `base_val + derived_val` for `x=4` must not be folded
+
+**Why this claim matters**: Milestone 164 added supertrait bounds (`trait D: B { ... }`).
+The monomorphization path for supertrait methods (`t.base_val()` when `T: Derived`) goes
+through the same generic dispatch as regular trait methods, but traverses the supertrait
+relationship. Without this claim, a regression that either folds supertrait results or
+drops the supertrait method call entirely would pass all exit-code tests.
+
+**Attack vectors**:
+1. Constant-fold `get_base(Foo { x: 8 })` to `mov x0, #11` — exit code correct, folded.
+   Caught by `!asm.contains("mov     x0, #11")`.
+2. Fold `sum_both(Foo { x: 4 })` to `mov x0, #9` — exit code correct, folded.
+   Caught by `!asm.contains("mov     x0, #9")`.
+3. Fail to emit `add` for supertrait method body (`self.x + 3` or `self.x + something`).
+   Caught by `asm.contains("add")`.
+
+**FLS §4.14**: Supertrait bounds require that any type satisfying `T: Derived` also satisfies
+`T: Base`. The compiler must resolve supertrait method calls through the same monomorphization
+path as regular trait calls.
+**FLS §4.14 AMBIGUOUS**: The spec does not specify how supertrait method availability
+propagates to generic call sites. Galvanic resolves via monomorphization: `T__base_val`
+exists because the concrete type implements `Base`.
+**FLS §6.1.2 Constraint 1**: `fn main()` is not a const context — supertrait method
+bodies must execute at runtime.
+
+**Violated if**: `compile_to_asm(SUPERTRAIT_BASIC)` or `compile_to_asm(SUPERTRAIT_BOTH)` returns assembly that:
+- lacks `add` (supertrait method body constant-folded), OR
+- contains `mov     x0, #11` (base_val result folded for x=8), OR
+- contains `mov     x0, #9` (sum of both method results folded for x=4)
+
+**Tests**: `cargo test --test e2e -- runtime_supertrait_call_emits_bl_not_folded runtime_supertrait_both_methods_not_folded`
