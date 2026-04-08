@@ -454,6 +454,44 @@ else
     pass "Claim 22: while-let OR pattern emits runtime orr+cbz+back-edge (not folded)"
 fi
 
+# ── Claim 23: while-let OR enum variants emit runtime orr accumulation ────────
+# Tests that `while let Status::Active | Status::Pending = s { ... }` emits:
+#   (a) `orr` to accumulate discriminant equality across both variants (not just first)
+#   (b) `cbz` for the conditional loop exit
+#   (c) result NOT constant-folded to `mov x0, #1`
+# Extends Claim 22 (scalar literals) to enum-variant patterns — a different code path.
+# A regression that drops OR accumulation for enum-variant while-let would be invisible
+# to Claim 22. Introduced in cycle 56 (red-team, milestone 154 follow-up, FLS §5.1.11).
+# References: claims.md Claim 23.
+
+echo "--- Claim 23: while-let OR enum variants emit runtime orr+cbz ---"
+if cargo test --test e2e --quiet -- runtime_while_let_or_enum_emits_orr_accumulation 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 23" "runtime_while_let_or_enum_emits_orr_accumulation FAILED — while-let OR pattern with enum variants may not emit orr accumulation for all variants, cbz exit, or result was constant-folded"
+else
+    pass "Claim 23: while-let OR enum variant pattern emits runtime orr+cbz (not folded)"
+fi
+
+# ── Claim 24: match guard with function parameter emits runtime comparison ─────
+# Tests that `fn guarded(n: i32) -> i32 { match n { x if x > 5 => x + 10, _ => 0 } }`
+# compiled with `guarded(7)` in main:
+#   (a) emits `cmp` or `cset` — guard comparison is runtime (not folded away)
+#   (b) emits `cbz` or `cbnz` — conditional branch for guard evaluation
+#   (c) does NOT emit `mov x0, #17` — result is NOT constant-folded from guarded(7)
+#
+# This is the FLS §6.1.2 litmus test for match guards: the existing test
+# `runtime_match_guard_emits_cbz_for_guard_condition` uses `let x = 7` (literal);
+# this claim uses a function parameter, which cannot be folded by any correct compiler.
+# A folding interpreter would evaluate `7 > 5 → 7 + 10 = 17` at compile time.
+# Introduced in cycle 56 (red-team, FLS §6.18 + §6.1.2:37–45).
+# References: claims.md Claim 24.
+
+echo "--- Claim 24: match guard with param emits runtime comparison (not folded) ---"
+if cargo test --test e2e --quiet -- runtime_match_guard_with_param_emits_runtime_comparison 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 24" "runtime_match_guard_with_param_emits_runtime_comparison FAILED — match guard may not be emitting runtime comparison/branch, or guard result was constant-folded to 17"
+else
+    pass "Claim 24: match guard with function parameter emits runtime comparison (not folded)"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

@@ -600,3 +600,61 @@ correct compiler. A folded result (`mov x0, #7`) is conclusive evidence of an in
 - contains `mov x0, #7` (3+4 was folded at the call site).
 
 **Test**: `cargo test --test e2e -- runtime_let_else_emits_discriminant_check runtime_let_else_binding_not_folded runtime_let_else_binding_combined_with_param_not_folded`
+
+---
+
+## Claim 23: while-let OR patterns with enum variants emit runtime orr accumulation
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: When a `while let Enum::A | Enum::B = s { ... }` loop is compiled with an
+enum-variant OR pattern, galvanic must emit `orr` to accumulate discriminant equality
+results across all variants — not just check the first variant. The exit condition must
+emit `cbz`. The loop body must not be constant-folded even when the call site passes a
+literal enum value.
+
+This extends Claim 22 (scalar literals in while-let OR) to the enum-variant case. The
+code path diverges: scalar OR patterns compare integer values; enum-variant OR patterns
+compare discriminants. A regression could drop OR accumulation for the enum-variant path
+while leaving the scalar path intact.
+
+**Attack vector**: Dropping OR accumulation for enum variants makes `while let A | B = s`
+behave like `while let A = s`. A call with `Status::Pending` would exit immediately instead
+of executing the body — wrong behavior, invisible without assembly inspection locally.
+
+**Violated if**: `compile_to_asm(...)` for `while let Status::Active | Status::Pending = s { return 1; }` returns assembly that:
+- lacks `orr` (OR accumulation for enum variants dropped), OR
+- lacks `cbz` (loop exit branch absent), OR
+- contains `mov     x0, #1\n\tret` (result constant-folded for the enum-variant case).
+
+**Test**: `cargo test --test e2e -- runtime_while_let_or_enum_emits_orr_accumulation`
+
+---
+
+## Claim 24: match guard predicates with function parameters emit runtime comparison code
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: When a match arm has a guard (`n if n > 5`), the guard condition must be
+evaluated at runtime via a comparison instruction. This must hold even when the match
+scrutinee is a function parameter (not a local literal) — the FLS §6.1.2 litmus test.
+
+The existing `runtime_match_guard_emits_cbz_for_guard_condition` uses `let x = 7` as the
+scrutinee (a local variable with a literal initializer). This claim uses a function
+parameter, which is the definitive "compiler not interpreter" test: if replacing a literal
+with a parameter would break the implementation, galvanic is interpreting, not compiling.
+
+The adversarial scenario: for `fn guarded(n: i32) -> i32 { match n { x if x > 5 => x + 10, _ => 0 } }`,
+a folding interpreter would evaluate `guarded(7)` at compile time:
+1. `7 > 5` → true → take arm 1
+2. `7 + 10` → 17
+3. Emit `mov x0, #17; ret` in main
+
+The negative assertion (`!asm.contains("mov     x0, #17")`) directly catches this.
+
+**Violated if**: `compile_to_asm(...)` for `fn guarded(n: i32) -> i32 { match n { x if x > 5 => x + 10, _ => 0 } }` called as `guarded(7)` returns assembly that:
+- lacks `cmp` or `cset` (guard comparison absent — guard not evaluated at runtime), OR
+- lacks `cbz` or `cbnz` (conditional branch absent — guard not tested at runtime), OR
+- contains `mov     x0, #17` (guard result constant-folded to the literal call-site value).
+
+**Test**: `cargo test --test e2e -- runtime_match_guard_with_param_emits_runtime_comparison`
