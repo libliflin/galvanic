@@ -8783,6 +8783,114 @@ impl<'src> LowerCtx<'src> {
                     }
                 }
 
+                // FLS §4.13: `let x: &dyn Trait = &val;` — fat pointer local binding.
+                //
+                // When the type annotation is `&dyn Trait` and the initializer is
+                // `&variable` (borrow of a named concrete struct), allocate two
+                // consecutive stack slots to hold a fat pointer:
+                //   - data_slot (base):     address of the concrete value
+                //   - vtable_slot (base+1): address of the rodata vtable
+                //
+                // The variable name maps to data_slot and is registered in
+                // `local_dyn_types` so that subsequent `.method()` calls emit
+                // `CallVtable` (existing path) and calls to `fn f(&dyn Trait)`
+                // can pass both slots as the fat pointer pair.
+                //
+                // FLS §4.13: AMBIGUOUS — The spec does not define the memory layout
+                // of fat pointer locals. Galvanic stores (data_ptr, vtable_ptr) in
+                // two consecutive 8-byte stack slots, consistent with parameter
+                // spilling convention used for `&dyn Trait` function parameters.
+                //
+                // Cache-line note: two 8-byte slots per fat-pointer local — double
+                // the cost of a scalar. The two stores (AddrOf + LoadFnAddr) are
+                // unavoidable: every &dyn Trait binding requires a vtable reference.
+                if let Some(ty_ann) = ty.as_ref()
+                    && let crate::ast::TyKind::Ref { inner: ty_inner, .. } = &ty_ann.kind
+                    && let crate::ast::TyKind::DynTrait(trait_span) = &ty_inner.kind
+                {
+                    let trait_name = trait_span.text(self.source).to_owned();
+                    let init_expr = init.as_ref().ok_or_else(|| {
+                        LowerError::Unsupported(
+                            "let x: &dyn Trait requires an initializer".into(),
+                        )
+                    })?;
+                    // Initializer must be `&variable` (borrow of a concrete struct local).
+                    if let ExprKind::Unary {
+                        op: crate::ast::UnaryOp::Ref,
+                        operand: borrow_inner,
+                    } = &init_expr.kind
+                        && let ExprKind::Path(segs) = &borrow_inner.kind
+                        && segs.len() == 1
+                    {
+                        let src_var = segs[0].text(self.source).to_owned();
+                        let src_base_slot =
+                            *self.locals.get(src_var.as_str()).ok_or_else(|| {
+                                LowerError::Unsupported(format!(
+                                    "undefined variable `{src_var}` in &dyn Trait binding"
+                                ))
+                            })?;
+                        let concrete_type = self
+                            .local_struct_types
+                            .get(&src_base_slot)
+                            .cloned()
+                            .ok_or_else(|| {
+                                LowerError::Unsupported(format!(
+                                    "variable `{src_var}` is not a struct; \
+                                     &dyn Trait binding requires a concrete struct local"
+                                ))
+                            })?;
+                        let vtable_label =
+                            format!("vtable_{trait_name}_{concrete_type}");
+
+                        // Allocate two consecutive slots: data_slot and vtable_slot.
+                        // FLS §4.13: fat pointer layout — data ptr at slot S, vtable
+                        // ptr at slot S+1 (matching the parameter spill convention).
+                        let data_slot = self.alloc_slot()?;
+                        let vtable_slot = self.alloc_slot()?;
+                        let _ = vtable_slot; // index is implicit: data_slot + 1
+
+                        // Emit data pointer: address of first slot of the concrete struct.
+                        // FLS §6.1.2:37–45: AddrOf and Store are runtime instructions.
+                        let data_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::AddrOf {
+                            dst: data_reg,
+                            slot: src_base_slot,
+                        });
+                        self.instrs.push(Instr::Store {
+                            src: data_reg,
+                            slot: data_slot,
+                        });
+
+                        // Emit vtable pointer: address of the rodata vtable.
+                        // FLS §4.13: vtable layout is implementation-defined (AMBIGUOUS).
+                        let vtable_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadFnAddr {
+                            dst: vtable_reg,
+                            name: vtable_label,
+                        });
+                        self.instrs.push(Instr::Store {
+                            src: vtable_reg,
+                            slot: data_slot + 1,
+                        });
+
+                        // Register the variable: locals maps name → data_slot,
+                        // local_dyn_types maps data_slot → trait_name (enabling
+                        // `x.method()` dispatch via the existing CallVtable path).
+                        self.locals.insert(var_name, data_slot);
+                        self.local_dyn_types.insert(data_slot, trait_name.clone());
+
+                        // Record vtable requirement for generation at module end.
+                        self.pending_vtables.push((trait_name, concrete_type));
+
+                        return Ok(());
+                    }
+                    return Err(LowerError::Unsupported(
+                        "let x: &dyn Trait initializer must be `&variable` \
+                         (borrow of a concrete struct local)"
+                            .into(),
+                    ));
+                }
+
                 // Normal (non-struct) let binding.
                 //
                 // FLS §8.1: The introduced binding comes into scope for the
@@ -12426,7 +12534,8 @@ impl<'src> LowerCtx<'src> {
                     if let Some(dyn_params) = self.fn_dyn_param_traits.get(&base_fn_name)
                         && let Some(Some(trait_name)) = dyn_params.get(arg_idx) {
                             let trait_name = trait_name.clone();
-                            // arg must be &x (borrow of a named variable)
+                            // Case A: arg is `&x` (borrow of a concrete struct variable) —
+                            // emit a new fat pointer (AddrOf data + LoadFnAddr vtable).
                             if let ExprKind::Unary { op: crate::ast::UnaryOp::Ref, operand: inner } = &arg.kind
                                 && let ExprKind::Path(segs) = &inner.kind
                                 && segs.len() == 1
@@ -12455,11 +12564,39 @@ impl<'src> LowerCtx<'src> {
                                 // Register vtable requirement for generation at end of lower().
                                 self.pending_vtables.push((trait_name, concrete_type));
                                 continue;
-                            } else {
-                                return Err(LowerError::Unsupported(format!(
-                                    "dyn Trait argument at position {arg_idx} must be `&variable`"
-                                )));
                             }
+                            // Case B: arg is `x` where `x` is a `&dyn Trait` fat-pointer local
+                            // (created by `let x: &dyn Trait = &val;`). Load both slots.
+                            //
+                            // FLS §4.13: Fat pointer locals store data_ptr at slot S and
+                            // vtable_ptr at slot S+1 (matching the parameter spill layout).
+                            // Passing such a local to a `&dyn Trait` parameter loads both
+                            // slots and pushes them as consecutive arg registers — no new
+                            // vtable reference is needed (vtable is already materialized).
+                            //
+                            // FLS §6.1.2:37–45: All loads are runtime instructions.
+                            if let ExprKind::Path(segs) = &arg.kind
+                                && segs.len() == 1
+                            {
+                                let var_name = segs[0].text(self.source);
+                                if let Some(&data_slot) = self.locals.get(var_name)
+                                    && self.local_dyn_types.contains_key(&data_slot)
+                                {
+                                    // Load data pointer from data_slot.
+                                    let data_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::Load { dst: data_reg, slot: data_slot });
+                                    arg_regs.push(data_reg);
+                                    // Load vtable pointer from data_slot + 1.
+                                    let vtable_reg = self.alloc_reg()?;
+                                    self.instrs.push(Instr::Load { dst: vtable_reg, slot: data_slot + 1 });
+                                    arg_regs.push(vtable_reg);
+                                    continue;
+                                }
+                            }
+                            return Err(LowerError::Unsupported(format!(
+                                "dyn Trait argument at position {arg_idx} must be \
+                                 `&variable` (concrete borrow) or a `&dyn Trait` local"
+                            )));
                     }
                     // Check whether this argument is a struct variable.
                     //

@@ -1256,3 +1256,30 @@ them locally and without cross tools.
 - contains `mov     x0, #3` (snapshot-from-zero result constant-folded).
 
 **Test**: `cargo test --test e2e -- runtime_fn_mut_as_impl_fn_mut_emits_trampoline runtime_fn_mut_as_impl_fn_mut_mutation_not_folded`
+
+---
+
+## Claim 37: &dyn Trait let binding emits fat pointer load (not constant-folded)
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: When `let x: &dyn Trait = &val;` is compiled, galvanic materializes a
+fat pointer (data_ptr, vtable_ptr) in two stack slots and loads them at runtime.
+The vtable dispatch must use `blr` (indirect call), and the result must not be
+constant-folded. This is distinct from the inline-borrow path (`f(&val)` at a
+call site) — the fat pointer is stored in a local variable and loaded on demand.
+
+**Why this matters**: The let binding path introduces a new mechanism: storing a fat
+pointer in local slots and reloading both slots when passing to a `&dyn Trait`
+parameter. A regression that skips the slot store/load (e.g., inlining the address
+as a constant) would produce wrong behavior when the concrete value is in a different
+stack frame or when multiple fat-pointer locals coexist. The distinction between
+"inline borrow" and "stored fat pointer" is FLS-relevant: both paths must produce
+correct vtable dispatch via `blr`, not constant folding.
+
+**Violated if**: `compile_to_asm` for a program using `let s: &dyn Shape = &c; print_area(s)`:
+- lacks `blr` (vtable dispatch not emitted), OR
+- contains `mov     x0, #25` (Circle{r:5}.area()=25 constant-folded), OR
+- lacks `vtable_Shape_Circle` (vtable label not emitted for the concrete type).
+
+**Test**: `cargo test --test e2e -- runtime_dyn_trait_let_binding_not_folded runtime_dyn_trait_let_binding_emits_load_from_slot`

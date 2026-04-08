@@ -760,6 +760,13 @@ else
     pass "Claim 36: impl FnMut trampoline passes capture address (x27) and mutation is not folded"
 fi
 
+echo "--- Claim 37: &dyn Trait let binding emits fat pointer load and blr (not folded) ---"
+if cargo test --test e2e --quiet -- runtime_dyn_trait_let_binding_not_folded runtime_dyn_trait_let_binding_emits_load_from_slot 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 37" "runtime_dyn_trait_let_binding_not_folded or runtime_dyn_trait_let_binding_emits_load_from_slot FAILED — &dyn Trait let binding may not be materializing the fat pointer, may be missing blr dispatch, or the result was constant-folded"
+else
+    pass "Claim 37: &dyn Trait let binding stores fat pointer and dispatches via blr (not folded)"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""
