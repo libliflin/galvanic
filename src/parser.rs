@@ -1383,6 +1383,27 @@ impl<'src> Parser<'src> {
                     }
                 }
 
+                // FLS §12.1: A generic type in type position may have angle-bracket
+                // type arguments, e.g. `Pair<i32>` or `Vec<T>`. Consume and discard
+                // them — galvanic monomorphizes generic types to i32 and does not
+                // carry type arguments through the IR.
+                //
+                // FLS §12.1: AMBIGUOUS — the FLS does not specify the disambiguation
+                // rule for `<` in type position (generic type args vs. less-than).
+                // Galvanic uses a greedy depth-counting strategy: if `<` immediately
+                // follows a type name, it is treated as a type argument list.
+                if self.peek_kind() == TokenKind::Lt {
+                    self.advance(); // consume `<`
+                    let mut depth = 1usize;
+                    while depth > 0 && self.peek_kind() != TokenKind::Eof {
+                        match self.peek_kind() {
+                            TokenKind::Lt => { self.advance(); depth += 1; }
+                            TokenKind::Gt => { self.advance(); depth -= 1; }
+                            _ => { self.advance(); }
+                        }
+                    }
+                }
+
                 let end = *segments.last().unwrap();
                 Ok(Ty { kind: TyKind::Path(segments), span: start.to(end) })
             }
