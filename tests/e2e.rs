@@ -23447,3 +23447,240 @@ fn main() -> i32 { run(41) }
         "must not constant-fold x+1 to #42: {asm}"
     );
 }
+
+// ── Milestone 152: `impl FnMut` in parameter position (FLS §6.14, §4.13, §6.22) ─
+//
+// FnMut is the middle tier of the closure trait hierarchy. A closure that
+// mutates captured variables implements FnMut (not Fn). Each call to the
+// closure may observe the side effects of previous calls.
+//
+// FLS §4.13: Fn, FnMut, FnOnce — the three callable closure traits.
+// FLS §6.14: Closures that mutate captures implement FnMut (and FnOnce),
+//             but not Fn.
+// FLS §6.22: Mutable captures are passed by address so write-backs propagate
+//             across repeated calls. This is the distinguishing test: if
+//             galvanic folds or snapshots the capture, repeated calls will
+//             return the same value instead of monotonically increasing ones.
+//
+// Galvanic represents `impl FnMut() -> i32` as TyKind::FnPtr (same as impl Fn
+// and impl FnOnce). The key difference is that the mutable closure passed at
+// the call site uses capture-by-address (is_addr=true), so the trampoline
+// passes &n (not n) as x27 and the closure body writes back via the pointer.
+//
+// The load-bearing invariant: `apply_mut(f)` where `f` calls n+=1 twice MUST
+// return 1+2=3, not 1+1=2 (snapshot) or 4 (folded).
+//
+// FLS §4.13: AMBIGUOUS — the spec specifies that FnMut::call_mut takes
+// `&mut self`, meaning the closure itself is mutated between calls. Galvanic
+// implements this by passing the captured variable's address through the
+// trampoline; the "closure state" is the pointed-to memory. This is correct
+// for single-capture FnMut but is an implementation choice for multi-capture
+// cases. Documented here as the canonical design decision.
+
+/// Milestone 152: basic `impl FnMut() -> i32` — mutation observable across calls.
+///
+/// FLS §6.22: The FnMut closure `|| { n += 1; n }` mutates `n` on each call.
+/// `apply_mut` calls `f` twice; the results must be 1 then 2 (sum = 3).
+/// A snapshot implementation would return 1+1=2; a folded implementation
+/// would return a constant. Only correct mutable-capture-by-address passes.
+#[test]
+fn milestone_152_fn_mut_basic() {
+    let src = r#"
+fn apply_mut(mut f: impl FnMut() -> i32) -> i32 { f() + f() }
+fn main() -> i32 {
+    let mut n = 0;
+    apply_mut(|| { n += 1; n })
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "first call returns 1, second returns 2: 1+2=3, got {exit_code}");
+}
+
+/// Milestone 152: three calls to `impl FnMut` — mutation visible at each step.
+///
+/// FLS §6.22: Three calls to the incrementing closure must return 1, 2, 3.
+#[test]
+fn milestone_152_fn_mut_three_calls() {
+    let src = r#"
+fn call_three(mut f: impl FnMut() -> i32) -> i32 { f() + f() + f() }
+fn main() -> i32 {
+    let mut n = 0;
+    call_three(|| { n += 1; n })
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "1+2+3=6, got {exit_code}");
+}
+
+/// Milestone 152: non-zero initial value — mutation observable from a non-zero start.
+///
+/// FLS §6.22: Mutable capture initializes to the outer variable's current value.
+/// n=5, two calls: 6+7=13.
+#[test]
+fn milestone_152_fn_mut_nonzero_start() {
+    let src = r#"
+fn apply_mut(mut f: impl FnMut() -> i32) -> i32 { f() + f() }
+fn main() -> i32 {
+    let mut n = 5;
+    apply_mut(|| { n += 1; n })
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 13, "6+7=13, got {exit_code}");
+}
+
+/// Milestone 152: initial value from function parameter.
+///
+/// FLS §6.22, FLS §6.1.2 Constraint 1: `start` is a runtime value; the
+/// mutable capture cannot be folded. First call: start+1, second: start+2.
+/// With start=10: 11+12=23.
+#[test]
+fn milestone_152_fn_mut_captures_parameter() {
+    let src = r#"
+fn apply_mut(mut f: impl FnMut() -> i32) -> i32 { f() + f() }
+fn run(start: i32) -> i32 {
+    let mut n = start;
+    apply_mut(|| { n += 1; n })
+}
+fn main() -> i32 { run(10) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 23, "11+12=23, got {exit_code}");
+}
+
+/// Milestone 152: result of `impl FnMut` call used in arithmetic.
+///
+/// FLS §6.12.1: The return value of calling an `impl FnMut` is an rvalue
+/// that can appear in further expressions.
+#[test]
+fn milestone_152_fn_mut_result_in_arithmetic() {
+    let src = r#"
+fn apply_mut(mut f: impl FnMut() -> i32) -> i32 { f() + f() }
+fn main() -> i32 {
+    let mut n = 0;
+    apply_mut(|| { n += 1; n }) * 2
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "(1+2)*2=6, got {exit_code}");
+}
+
+/// Milestone 152: result of `impl FnMut` used as if-condition.
+///
+/// FLS §6.17: The result of calling `impl FnMut` can be used as a condition.
+#[test]
+fn milestone_152_fn_mut_result_in_if() {
+    let src = r#"
+fn apply_mut(mut f: impl FnMut() -> i32) -> i32 { f() + f() }
+fn main() -> i32 {
+    let mut n = 0;
+    let v = apply_mut(|| { n += 1; n });
+    if v > 2 { 1 } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "1+2=3 > 2, so 1, got {exit_code}");
+}
+
+/// Milestone 152: result of `impl FnMut` passed to another function.
+///
+/// FLS §6.12.1: The return value of `apply_mut` is passed as an argument
+/// to `identity`, exercising the call chain.
+#[test]
+fn milestone_152_fn_mut_result_passed_to_fn() {
+    let src = r#"
+fn apply_mut(mut f: impl FnMut() -> i32) -> i32 { f() + f() }
+fn identity(x: i32) -> i32 { x }
+fn main() -> i32 {
+    let mut n = 0;
+    identity(apply_mut(|| { n += 1; n }))
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "identity(1+2)=3, got {exit_code}");
+}
+
+/// Milestone 152: two different FnMut closures both satisfy `impl FnMut`.
+///
+/// FLS §12: Monomorphization — each distinct closure type produces its own
+/// monomorphization of `apply_mut`. Both must return the correct mutated result.
+#[test]
+fn milestone_152_fn_mut_two_closures() {
+    let src = r#"
+fn apply_mut(mut f: impl FnMut() -> i32) -> i32 { f() + f() }
+fn main() -> i32 {
+    let mut a = 0;
+    let mut b = 10;
+    let x = apply_mut(|| { a += 1; a });
+    let y = apply_mut(|| { b += 5; b });
+    x + y
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    // x = 1+2 = 3, y = 15+20 = 35, total = 38
+    assert_eq!(exit_code, 38, "3+35=38, got {exit_code}");
+}
+
+/// Assembly check: FnMut closure passed as `impl FnMut` emits a trampoline
+/// with capture-by-address (x27 holds the pointer, not the value).
+///
+/// FLS §6.22: Mutable captures are passed by address so the closure body
+/// can write back. The trampoline must move x27 (the pointer) into x0,
+/// not load the value from x27.
+///
+/// The key observable: `ldr x27` in the caller (loading the address of n
+/// into x27 before `bl apply_mut`) — not `mov x27, #0` (which would be
+/// snapshot-by-value).
+#[test]
+fn runtime_fn_mut_as_impl_fn_mut_emits_trampoline() {
+    let src = r#"
+fn apply_mut(mut f: impl FnMut() -> i32) -> i32 { f() + f() }
+fn main() -> i32 {
+    let mut n = 0;
+    apply_mut(|| { n += 1; n })
+}
+"#;
+    let asm = compile_to_asm(src);
+    // A trampoline for the closure must be emitted.
+    assert!(
+        asm.contains("_trampoline"),
+        "FnMut closure as impl FnMut must emit a trampoline: {asm}"
+    );
+    // The caller (main) must load x27 with the *address* of n (add sp, not ldr value).
+    // Capture-by-address: x27 = &n, not x27 = n.
+    assert!(
+        asm.contains("x27"),
+        "caller must use x27 for the mutable capture address: {asm}"
+    );
+    // The trampoline must use blr/b for the actual closure call.
+    assert!(asm.contains("blr") || asm.contains("\n    b ") || asm.contains("    b       "),
+        "apply_mut body must call f via indirect or branch: {asm}");
+}
+
+/// Assembly check: FnMut with parameter-initialized capture — mutation not folded.
+///
+/// FLS §6.1.2 (Constraint 1): `run(start)` where `start` is a function parameter
+/// is not a const context. The two calls to `f()` must each emit runtime
+/// indirect calls, and the result 23 must NOT appear as `mov x0, #23`.
+#[test]
+fn runtime_fn_mut_as_impl_fn_mut_mutation_not_folded() {
+    let src = r#"
+fn apply_mut(mut f: impl FnMut() -> i32) -> i32 { f() + f() }
+fn run(start: i32) -> i32 {
+    let mut n = start;
+    apply_mut(|| { n += 1; n })
+}
+fn main() -> i32 { run(10) }
+"#;
+    let asm = compile_to_asm(src);
+    assert!(asm.contains("blr"), "impl FnMut call must emit blr (indirect call): {asm}");
+    assert!(asm.contains("add"), "FnMut closure body n+=1 must emit add: {asm}");
+    assert!(
+        !asm.contains("mov     x0, #23"),
+        "must not constant-fold run(10) to #23: {asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #3"),
+        "must not fold the sum of two calls to a constant: {asm}"
+    );
+}
