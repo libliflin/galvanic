@@ -203,6 +203,35 @@ contains `mov     x0, #42` when called with a runtime argument.
 
 ---
 
+## Claim 11: Closures compile to hidden function labels with runtime body instructions
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: Galvanic compiles closures to named hidden functions, not inline code. A closure
+`|x: i32| -> i32 { x * 2 }` must produce a label like `__closure_*` in the assembly, and
+the body of that hidden function must contain runtime instructions (e.g., `mul` for `x * 2`).
+
+This guards two things simultaneously:
+1. The closure is emitted as a callable function, not inlined/elided.
+2. The closure body emits runtime instructions — not a constant folded from the
+   statically-known operand `2`.
+
+For capturing closures, the mechanism changes: the hidden function must still be emitted
+(`__closure_main_0`) and the call site must use an indirect call (`blr`) to reach it via
+the function pointer stored in the closure environment. If capturing closures regress to
+direct inline expansion, the `blr` would disappear.
+
+These two checks together guard both the non-capturing path (FLS §6.14) and the capturing
+path (FLS §6.22) — the two closure archetypes in galvanic's current implementation.
+
+**Violated if**: `compile_to_asm(...)` for a non-capturing closure fails to contain a
+`__closure_*` label, or the closure body lacks a `mul` instruction for `x * 2`;
+OR for a capturing closure, the assembly fails to contain `__closure_main_0` or `blr`.
+
+**Test**: `cargo test --test e2e -- runtime_closure_emits_hidden_function_label runtime_capturing_closure_emits_capture_load_before_explicit_arg`
+
+---
+
 ## Not Yet Claims (honest gaps)
 
 These are promises the project will eventually make but cannot yet be falsified:
