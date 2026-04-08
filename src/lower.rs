@@ -2741,6 +2741,26 @@ fn lower_fn(
                 }
                 ctx.locals.insert(param_name, base_slot);
                 ctx.local_struct_types.insert(base_slot, type_name.to_owned());
+                // FLS §12.1: For monomorphized functions, propagate concrete types for
+                // generic fields into slot_generic_type. E.g., if `w: Wrapper<T>` and
+                // `generic_type_subst["T"] = "Counter"`, and `Wrapper.val: T` is at
+                // offset 0, then slot_generic_type[base_slot + 0] = "Counter". This
+                // enables method dispatch (`w.get_val()`) to infer T=Counter without
+                // overwriting local_struct_types at the base slot.
+                if let Some(gf) = struct_generic_field_types.get(type_name) {
+                    let field_offs = struct_field_offsets.get(type_name);
+                    for (fi, param_opt) in gf.iter().enumerate() {
+                        if let Some(param_name_str) = param_opt
+                            && let Some(concrete) = generic_type_subst.get(param_name_str.as_str())
+                        {
+                            let offset = field_offs
+                                .and_then(|o| o.get(fi))
+                                .copied()
+                                .unwrap_or(fi);
+                            ctx.slot_generic_type.insert(base_slot + offset as u8, concrete.clone());
+                        }
+                    }
+                }
                 // Spill each slot register to its stack slot.
                 for fi in 0..n_slots {
                     ctx.instrs.push(Instr::Store {
@@ -4104,6 +4124,23 @@ struct LowerCtx<'src> {
     /// access. Not on any critical-path loop.
     slot_float_ty: HashMap<u8, IrTy>,
 
+    /// Maps a field slot to the concrete struct type stored there for a generic field.
+    ///
+    /// FLS §12.1: When a struct with a generic-typed field (e.g., `struct Wrapper<T>
+    /// { val: T }`) is initialized with a concrete struct value (e.g., `Counter`),
+    /// the concrete type is recorded here keyed by the field's slot index.
+    ///
+    /// This is separate from `local_struct_types` (which records the *outer* struct's
+    /// type at the base slot) to avoid collision when the generic field is at offset 0
+    /// and shares the base slot. Without this separation, `local_struct_types[base]`
+    /// would be overwritten from "Wrapper" to "Counter", causing method dispatch on
+    /// `w.get_val()` to resolve `recv_type_name = "Counter"` and emit a call to the
+    /// non-existent `Counter__get_val` instead of `Wrapper__get_val__Counter`.
+    ///
+    /// Cache-line note: populated during struct literal lowering; read during method
+    /// call type inference. Not on a hot path.
+    slot_generic_type: HashMap<u8, String>,
+
     /// Maps generic function name → number of type parameters.
     ///
     /// FLS §12.1: When a call site calls a generic function `foo<T, U>`,
@@ -4391,6 +4428,7 @@ impl<'src> LowerCtx<'src> {
             type_aliases,
             struct_float_field_types,
             slot_float_ty: HashMap::new(),
+            slot_generic_type: HashMap::new(),
             generic_fn_param_counts,
             needed_monos: Vec::new(),
             generic_type_subst,
@@ -6726,14 +6764,19 @@ impl<'src> LowerCtx<'src> {
                                                 if let Some(&vslot) = self.locals.get(vname)
                                                     && let Some(cty) = self.local_struct_types.get(&vslot).cloned()
                                                 {
-                                                    self.local_struct_types.insert(slot, cty);
+                                                    // Use slot_generic_type to avoid overwriting
+                                                    // local_struct_types at the base slot when
+                                                    // the field is at offset 0 (FLS §12.1).
+                                                    self.slot_generic_type.insert(slot, cty);
                                                 }
                                             }
                                             // Struct literal: store into slot and register concrete type.
                                             if let ExprKind::StructLit { name: iname, .. } = &field_init.1.kind {
                                                 let inner_sname = iname.text(self.source).to_owned();
                                                 if self.struct_defs.contains_key(&inner_sname) {
-                                                    self.local_struct_types.insert(slot, inner_sname.clone());
+                                                    // Use slot_generic_type to avoid overwriting
+                                                    // local_struct_types at the base slot (FLS §12.1).
+                                                    self.slot_generic_type.insert(slot, inner_sname.clone());
                                                     self.store_nested_struct_lit(&field_init.1, slot, &inner_sname)?;
                                                     continue;
                                                 }
@@ -7325,14 +7368,19 @@ impl<'src> LowerCtx<'src> {
                                                     if let Some(&vslot) = self.locals.get(vname)
                                                         && let Some(cty) = self.local_struct_types.get(&vslot).cloned()
                                                     {
-                                                        self.local_struct_types.insert(dst_slot, cty);
+                                                        // Use slot_generic_type to avoid overwriting
+                                                        // local_struct_types at the base slot when
+                                                        // the field is at offset 0 (FLS §12.1).
+                                                        self.slot_generic_type.insert(dst_slot, cty);
                                                     }
                                                 }
                                                 // Struct literal: store and register concrete type.
                                                 if let ExprKind::StructLit { name: iname, .. } = &field_init.1.kind {
                                                     let inner_sname = iname.text(self.source).to_owned();
                                                     if self.struct_defs.contains_key(&inner_sname) {
-                                                        self.local_struct_types.insert(dst_slot, inner_sname.clone());
+                                                        // Use slot_generic_type to avoid overwriting
+                                                        // local_struct_types at the base slot (FLS §12.1).
+                                                        self.slot_generic_type.insert(dst_slot, inner_sname.clone());
                                                         self.store_nested_struct_lit(&field_init.1, dst_slot, &inner_sname)?;
                                                         continue;
                                                     }
@@ -14468,8 +14516,10 @@ impl<'src> LowerCtx<'src> {
                 // name to `TypeName__method_name__ConcreteType` (one concrete type per
                 // type param). Concrete types are inferred by scanning the receiver's
                 // generic fields via `struct_generic_field_types` and looking up each
-                // field slot in `local_struct_types`. Falls back to `i32` when no
-                // concrete type can be recovered (e.g. the field slot was never written).
+                // field slot in `slot_generic_type` (preferred) or `local_struct_types`
+                // (fallback with disambiguation). Falls back to `i32` when no concrete
+                // type can be recovered. The `slot_generic_type` map avoids a collision
+                // at offset-0 fields where the base slot also records the outer struct type.
                 // Record the base mangled name in `needed_monos` so the outer
                 // monomorphization loop emits the specialised method body.
                 let mangled = if let Some(&n_params) =
@@ -14487,7 +14537,10 @@ impl<'src> LowerCtx<'src> {
                         }
                     }
                     // For each param, find the first field carrying it and resolve the
-                    // concrete struct type from `local_struct_types`.
+                    // concrete struct type. Check slot_generic_type first (no disambiguation
+                    // needed — it only contains concrete field types). Fall back to
+                    // local_struct_types with a disambiguation guard that rejects the
+                    // receiver's own type registration at the base slot.
                     let mut inferred: Vec<String> = Vec::with_capacity(param_order.len());
                     for param_name in &param_order {
                         let mut found: Option<String> = None;
@@ -14497,17 +14550,21 @@ impl<'src> LowerCtx<'src> {
                             for (fi, p) in gf.iter().enumerate() {
                                 if p.as_deref() == Some(param_name.as_str()) {
                                     let slot = recv_base_slot + fi as u8;
-                                    // Only accept the entry if it names a different struct
-                                    // than the receiver itself. If it equals `recv_type_name`,
-                                    // the slot carries the receiver's own registration (from
-                                    // struct-variable tracking) rather than a concrete field
-                                    // type (from generic-field propagation), so we fall back
-                                    // to `i32`.
-                                    let candidate =
-                                        self.local_struct_types.get(&slot).cloned();
-                                    if candidate.as_deref() != Some(recv_type_name.as_str()) {
-                                        found = candidate;
-                                    }
+                                    // Prefer slot_generic_type: set at struct-literal and
+                                    // param-spill time without overwriting local_struct_types.
+                                    found = self.slot_generic_type.get(&slot).cloned()
+                                        .or_else(|| {
+                                            // Fallback: local_struct_types with disambiguation.
+                                            // Reject if the candidate equals recv_type_name —
+                                            // that means the slot holds the outer struct's own
+                                            // registration, not a concrete field type.
+                                            let c = self.local_struct_types.get(&slot).cloned();
+                                            if c.as_deref() != Some(recv_type_name.as_str()) {
+                                                c
+                                            } else {
+                                                None
+                                            }
+                                        });
                                     break;
                                 }
                             }
