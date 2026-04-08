@@ -1424,3 +1424,59 @@ execute at runtime.
 - contains `#42` (constant-folded result of `add(20, 22)` emitted as an immediate).
 
 **Test**: `cargo test --test e2e -- runtime_const_fn_runtime_call_emits_bl_not_folded`
+
+---
+
+## Claim 41: &dyn Trait fat pointer re-bind copies fat pointer and dispatches via blr (not folded)
+
+**Stakeholder**: William (researcher), Compiler Researchers, FLS / Ferrocene Ecosystem
+
+**Promise**: When a `&dyn Trait` fat pointer local is re-bound (`let y = x`), galvanic
+copies both the data pointer and the vtable pointer to new consecutive stack slots and
+registers `y` in `local_dyn_types`. Subsequent method calls on `y` and calls passing `y`
+to `fn f(&dyn Trait)` must emit vtable dispatch (`blr`) at runtime — not constant-fold
+the result (FLS §4.13, §6.1.2 Constraint 1).
+
+```rust
+trait Shape { fn area(&self) -> i32; }
+struct Rect { w: i32, h: i32 }
+impl Shape for Rect { fn area(&self) -> i32 { self.w * self.h } }
+fn use_shape(s: &dyn Shape) -> i32 { s.area() }
+fn main() -> i32 {
+    let r = Rect { w: 3, h: 4 };
+    let x: &dyn Shape = &r;
+    let y = x;        // fat pointer re-bind
+    use_shape(y)      // must dispatch via blr, result = 12
+}
+```
+
+Must emit:
+- `ldr` — loading the fat pointer slots (data_ptr, vtable_ptr) from stack
+- `blr` — vtable dispatch (indirect call through the vtable pointer)
+- `vtable_Shape_Rect` label — the vtable for the concrete type
+- NOT `mov     x0, #12` — must not fold 3*4=12 to a compile-time constant
+
+**Why this claim matters**: The re-bind case copies an existing fat pointer without
+creating a new vtable entry. An implementation that treated `let y = x` as a thin
+copy (missing the vtable slot copy) would produce wrong results when `y` is used for
+dispatch. An implementation that constant-folded `3*4` because the Rect dimensions are
+statically known would pass every compile-and-run test but violate FLS §6.1.2.
+
+**Attack vectors**:
+1. Copy only the data_slot during re-bind, leaving the vtable slot uninitialised. Dispatch
+   via `y` would read garbage or crash. Caught by `blr` presence.
+2. Fold `Rect{w:3, h:4}.area()` to `mov x0, #12` because both fields are literals. Caught
+   by absence of `mov     x0, #12`.
+3. Skip the re-bind entirely and treat `y` as an alias for `x`. Would work for single-use
+   but is not a correct copy — caught indirectly by the `ldr` assertion.
+
+**FLS §4.13 note**: AMBIGUOUS — The spec does not define how `&dyn Trait` type information
+propagates through unannotated let bindings. Galvanic's choice: propagate `local_dyn_types`
+registration to `y` using the same two-slot layout as the source binding.
+
+**Violated if**: `compile_to_asm(DYN_TRAIT_REBIND_BASIC)` returns assembly that:
+- lacks `ldr` (fat pointer slots not copied from stack), OR
+- lacks `blr` (vtable dispatch not emitted — folded or direct call), OR
+- contains `mov     x0, #12` (result constant-folded)
+
+**Tests**: `cargo test --test e2e -- runtime_dyn_trait_rebind_emits_load_for_fat_pointer runtime_dyn_trait_rebind_not_folded`
