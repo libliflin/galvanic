@@ -653,6 +653,27 @@ else
     pass "Claim 32: FnMut mutable capture passes address and writes back through pointer (not snapshot)"
 fi
 
+# ── Claim 33: FnOnce closures capture by value and emit runtime add ───────────
+#
+# A `move || x + 1` closure called via `impl FnOnce() -> i32` must:
+#   (a) emit `blr` — indirect call through the closure function pointer
+#   (b) emit `add` — `x + 1` is a runtime instruction (not folded)
+#   (c) NOT emit `mov x0, #42` — `run(41)` must not be constant-folded through the capture
+#
+# This completes the Fn/FnMut/FnOnce falsification triangle:
+#   Claim 11 = Fn (non-capturing + capturing, hidden function label + blr)
+#   Claim 32 = FnMut (mutable capture by address + write-back)
+#   Claim 33 = FnOnce (move capture, runtime body, blr dispatch)
+#
+# References: claims.md Claim 33.
+
+echo "--- Claim 33: FnOnce closure capture emits runtime add and blr (not folded) ---"
+if cargo test --test e2e --quiet -- runtime_fn_once_capture_emits_runtime_add 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 33" "runtime_fn_once_capture_emits_runtime_add FAILED — FnOnce closure may be constant-folding the body (mov x0, #42) instead of emitting runtime add, or blr dispatch is missing"
+else
+    pass "Claim 33: FnOnce capture emits runtime add and blr (not constant-folded)"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

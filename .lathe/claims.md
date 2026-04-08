@@ -1012,3 +1012,49 @@ address-of pattern (`add x, sp, #N`) combined with indirect-through-register loa
 - contains `mov x0, #2` (constant-folded result of second `inc()`).
 
 **Test**: `cargo test --test e2e -- runtime_fn_mut_emits_addr_of_and_load_store_ptr`
+
+---
+
+## Claim 33: FnOnce closures capture by value and emit runtime add for closure body
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: A `FnOnce` closure that captures a variable by move must emit a runtime `add`
+instruction for the closure body — not fold the result to a constant — and must use `blr`
+for the indirect call through the function pointer. This completes the Fn/FnMut/FnOnce
+falsification triangle alongside Claims 11 (Fn, non-capturing) and 32 (FnMut, mutable
+captures by address).
+
+```rust
+fn consume(f: impl FnOnce() -> i32) -> i32 { f() }
+fn run(x: i32) -> i32 { consume(move || x + 1) }
+fn main() -> i32 { run(41) }
+```
+
+Must emit:
+- `blr` — indirect call through function pointer (not a direct `bl __closure_*`)
+- `add` — `x + 1` in the closure body is a runtime instruction (not folded)
+- NOT `mov     x0, #42` — `run(41)` must not be constant-folded through the capture
+
+**Why this claim matters**: An interpreter-style galvanic could fold `run(41)` by evaluating:
+`consume(move || 41 + 1)` → `42` and emit `mov x0, #42; ret`. The compile-and-run test
+passes (exit code 42 is correct), but galvanic is not a compiler — it never emitted `add`.
+The distinction between `impl FnOnce` and `impl Fn`/`impl FnMut` is that FnOnce moves the
+capture rather than borrowing or mutably borrowing it. A regression that copies the capture
+into a `blr`-called closure but folds the body would be invisible to Claims 11 and 32.
+
+**Attack vectors**:
+1. Constant-fold the call site: evaluate `run(41)` → `42` and emit `mov x0, #42`.
+   Caught by `!asm.contains("mov     x0, #42")`.
+2. Inline the closure body without emitting `add`: emit result constant directly.
+   Caught by `asm.contains("add")`.
+3. Use a direct call instead of `blr`: emit `bl __closure_run_0` instead of loading the
+   function pointer and calling via `blr`.
+   Caught by `asm.contains("blr")`.
+
+**Violated if**: `compile_to_asm(...)` for the program above returns assembly that:
+- lacks `blr` (indirect call through function pointer not emitted), OR
+- lacks `add` (closure body `x + 1` was not emitted as a runtime instruction), OR
+- contains `mov     x0, #42` (constant-folded result of `run(41)`).
+
+**Test**: `cargo test --test e2e -- runtime_fn_once_capture_emits_runtime_add`
