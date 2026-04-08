@@ -444,3 +444,34 @@ two concrete types returns assembly that:
 - contains `mov x0, #9` or `mov x0, #16` (either method result was constant-folded).
 
 **Test**: `cargo test --test e2e -- runtime_dyn_trait_two_concrete_types_both_vtables_emitted`
+
+---
+
+## Claim 18: The second method in a dyn Trait vtable is accessed at offset 8, not offset 0
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: When a trait has two methods, galvanic lays out their fn-ptrs in the vtable at
+offsets 0 and 8 (8 bytes per slot, in trait declaration order). Calling the SECOND method
+(index 1) must emit `ldr x10, [x9, #8]` — NOT `ldr x10, [x9, #0]` (which would dispatch to
+the FIRST method regardless of which method was called).
+
+This is adversarial against a specific implementation bug: if `method_idx` lookup in the
+`trait_method_order` map silently returns 0 for all methods, every vtable dispatch would call
+method 0, producing wrong behavior only when method 1 is actually called. The two-method
+compile-and-run test (`milestone_147_dyn_trait_two_method_vtable`) catches this at runtime on
+CI — but requires qemu. This claim catches it in assembly without cross tools.
+
+Galvanic's vtable layout (FLS §4.13 AMBIGUOUS — layout is implementation-defined):
+- Dense `.rodata` array of 8-byte fn-ptrs in trait declaration order.
+- Method at declaration index i → vtable offset i * 8.
+- First method: offset 0; second method: offset 8.
+
+**Violated if**: `compile_to_asm` for a two-method trait where the second method is called
+returns assembly that:
+- lacks `ldr x10, [x9, #8]` (second method loaded at wrong offset), OR
+- lacks `ldr x10, [x9, #0]` (first method offset incorrect), OR
+- lacks `blr` (no indirect dispatch), OR
+- contains `mov x0, #12` (result of 3*4 constant-folded).
+
+**Test**: `cargo test --test e2e -- runtime_dyn_trait_second_method_emits_vtable_offset_8`

@@ -22393,3 +22393,58 @@ fn main() -> i32 {
         "Square::area result (16) must NOT be constant-folded: {asm}"
     );
 }
+
+#[test]
+fn runtime_dyn_trait_second_method_emits_vtable_offset_8() {
+    // FLS §4.13: When a trait has two methods, the vtable lays them out at
+    // offsets 0 and 8 (one 8-byte fn-ptr per slot, in trait declaration order).
+    // Calling the SECOND method (index 1) must emit:
+    //   ldr x10, [x9, #8]   // NOT #0
+    //
+    // This is adversarial against a specific implementation bug: if method_idx
+    // is always 0 (e.g., the index lookup is broken), both method calls would
+    // emit `ldr x10, [x9, #0]` and `#8` would never appear. The two-method
+    // compile-and-run test (`milestone_147_dyn_trait_two_method_vtable`) catches
+    // this at runtime on CI — but only when cross tools are available. This
+    // assembly inspection test catches it without qemu, on every host.
+    //
+    // FLS §4.13: AMBIGUOUS — vtable layout is implementation-defined.
+    // Galvanic's choice: dense array of 8-byte fn-ptrs in trait declaration order.
+    // method 0 (width) → offset 0; method 1 (height) → offset 8.
+    let src = "
+trait Widget {
+    fn width(&self) -> i32;
+    fn height(&self) -> i32;
+}
+struct Rect { w: i32, h: i32 }
+impl Widget for Rect {
+    fn width(&self) -> i32 { self.w }
+    fn height(&self) -> i32 { self.h }
+}
+fn area(w: &dyn Widget) -> i32 {
+    w.width() * w.height()
+}
+fn main() -> i32 {
+    let r = Rect { w: 3, h: 4 };
+    area(&r)
+}
+";
+    let asm = compile_to_asm(src);
+    // First method (width, index 0) must be loaded at offset 0:
+    assert!(
+        asm.contains("ldr     x10, [x9,  #0"),
+        "first method (index 0) must load fn-ptr at vtable offset #0: {asm}"
+    );
+    // Second method (height, index 1) must be loaded at offset 8:
+    assert!(
+        asm.contains("ldr     x10, [x9,  #8"),
+        "second method (index 1) must load fn-ptr at vtable offset #8, not #0: {asm}"
+    );
+    // Vtable dispatch must use indirect call:
+    assert!(asm.contains("blr"), "vtable dispatch must use blr: {asm}");
+    // Result must not be constant-folded (3 * 4 = 12):
+    assert!(
+        !asm.contains("mov     x0, #12"),
+        "area result (12) must NOT be constant-folded: {asm}"
+    );
+}
