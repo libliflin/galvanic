@@ -26265,3 +26265,246 @@ fn runtime_dyn_trait_chained_rebind_not_folded() {
         "chained dyn Trait re-bind must NOT fold area to 12; got:\n{asm}"
     );
 }
+
+// ── Milestone 162: `&dyn Trait` as function return type ─────────────────────
+//
+// FLS §4.13: A function may declare `-> &dyn Trait` as its return type,
+// returning a fat pointer (data ptr, vtable ptr) to the caller. The caller
+// receives both halves in (x0, x1) and stores them as a local `&dyn Trait`.
+//
+// The simplest form: a function that takes `&dyn Trait` and returns it.
+// The fat pointer is passed through unchanged — no new vtable is needed.
+//
+// FLS §4.13 AMBIGUOUS: The spec does not define the fat pointer return ABI.
+// Galvanic uses (x0=data_ptr, x1=vtable_ptr) matching the parameter ABI.
+
+const DYN_TRAIT_RETURN_BASIC: &str = "
+trait Animal {
+    fn sound(&self) -> i32;
+}
+struct Dog { v: i32 }
+impl Animal for Dog {
+    fn sound(&self) -> i32 { self.v }
+}
+fn forward(a: &dyn Animal) -> &dyn Animal { a }
+fn main() -> i32 {
+    let d = Dog { v: 7 };
+    let r: &dyn Animal = &d;
+    let s = forward(r);
+    s.sound()
+}
+";
+
+#[test]
+fn milestone_162_dyn_return_basic() {
+    // forward returns &dyn Animal unchanged; caller uses result for dispatch.
+    let Some(exit_code) = compile_and_run(DYN_TRAIT_RETURN_BASIC) else {
+        return;
+    };
+    assert_eq!(exit_code, 7);
+}
+
+#[test]
+fn milestone_162_dyn_return_method_call() {
+    // Call method directly on variable bound from dyn-returning fn.
+    let src = "
+trait Shape {
+    fn area(&self) -> i32;
+}
+struct Rect { w: i32, h: i32 }
+impl Shape for Rect {
+    fn area(&self) -> i32 { self.w * self.h }
+}
+fn wrap(s: &dyn Shape) -> &dyn Shape { s }
+fn main() -> i32 {
+    let r = Rect { w: 4, h: 5 };
+    let x: &dyn Shape = &r;
+    let y = wrap(x);
+    y.area()
+}
+";
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 20); // 4 * 5 = 20
+}
+
+#[test]
+fn milestone_162_dyn_return_two_types() {
+    // Two different concrete types; both returned through dyn-returning fn.
+    let src = "
+trait Value {
+    fn get(&self) -> i32;
+}
+struct A { x: i32 }
+struct B { y: i32 }
+impl Value for A { fn get(&self) -> i32 { self.x } }
+impl Value for B { fn get(&self) -> i32 { self.y } }
+fn passthrough(v: &dyn Value) -> &dyn Value { v }
+fn main() -> i32 {
+    let a = A { x: 3 };
+    let b = B { y: 11 };
+    let ra: &dyn Value = &a;
+    let rb: &dyn Value = &b;
+    let sa = passthrough(ra);
+    let sb = passthrough(rb);
+    sa.get() + sb.get()
+}
+";
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 14); // 3 + 11 = 14
+}
+
+#[test]
+fn milestone_162_dyn_return_result_in_arithmetic() {
+    let src = "
+trait Num {
+    fn val(&self) -> i32;
+}
+struct N { v: i32 }
+impl Num for N { fn val(&self) -> i32 { self.v } }
+fn fwd(n: &dyn Num) -> &dyn Num { n }
+fn main() -> i32 {
+    let x = N { v: 6 };
+    let r: &dyn Num = &x;
+    let s = fwd(r);
+    s.val() + 1
+}
+";
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 7); // 6 + 1 = 7
+}
+
+#[test]
+fn milestone_162_dyn_return_result_in_if() {
+    let src = "
+trait Flag {
+    fn val(&self) -> i32;
+}
+struct Toggle { on: i32 }
+impl Flag for Toggle { fn val(&self) -> i32 { self.on } }
+fn relay(f: &dyn Flag) -> &dyn Flag { f }
+fn main() -> i32 {
+    let t = Toggle { on: 1 };
+    let r: &dyn Flag = &t;
+    let s = relay(r);
+    if s.val() != 0 { 42 } else { 0 }
+}
+";
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 42);
+}
+
+#[test]
+fn milestone_162_dyn_return_called_twice() {
+    let src = "
+trait Counter {
+    fn count(&self) -> i32;
+}
+struct Num { n: i32 }
+impl Counter for Num { fn count(&self) -> i32 { self.n } }
+fn ident(c: &dyn Counter) -> &dyn Counter { c }
+fn main() -> i32 {
+    let x = Num { n: 6 };
+    let r: &dyn Counter = &x;
+    let s = ident(r);
+    let t = ident(s);
+    t.count() + t.count()
+}
+";
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 12); // 6 + 6 = 12
+}
+
+#[test]
+fn milestone_162_dyn_return_on_parameter() {
+    // Forward a `&dyn Trait` parameter through a dyn-returning fn.
+    let src = "
+trait Measure {
+    fn size(&self) -> i32;
+}
+struct Box1 { w: i32 }
+impl Measure for Box1 { fn size(&self) -> i32 { self.w } }
+fn relay(m: &dyn Measure) -> &dyn Measure { m }
+fn use_measure(m: &dyn Measure) -> i32 { m.size() * 2 }
+fn main() -> i32 {
+    let b = Box1 { w: 5 };
+    let r: &dyn Measure = &b;
+    let s = relay(r);
+    use_measure(s)
+}
+";
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 10); // 5 * 2 = 10
+}
+
+#[test]
+fn milestone_162_dyn_return_result_passed_to_fn() {
+    let src = "
+trait Greet {
+    fn hello(&self) -> i32;
+}
+struct G { x: i32, y: i32 }
+impl Greet for G { fn hello(&self) -> i32 { self.x + self.y } }
+fn fwd(g: &dyn Greet) -> &dyn Greet { g }
+fn extract(g: &dyn Greet) -> i32 { g.hello() }
+fn main() -> i32 {
+    let g = G { x: 3, y: 8 };
+    let r: &dyn Greet = &g;
+    let s = fwd(r);
+    extract(s)
+}
+";
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 11); // 3 + 8 = 11
+}
+
+// ── Assembly inspection tests for milestone 162 ──────────────────────────────
+
+#[test]
+fn runtime_dyn_return_emits_fat_ptr_loads_and_stores() {
+    // The `forward` function must emit RetFields (ldr x0, ldr x1) for the fat
+    // pointer. The call site must emit two stores after the bl (str x0, str x1).
+    // This distinguishes a real fat-pointer return from a scalar return.
+    let asm = compile_to_asm(DYN_TRAIT_RETURN_BASIC);
+    // Callee (forward) loads both fat pointer slots into x0, x1 before ret.
+    assert!(
+        asm.contains("ldr     x0,"),
+        "dyn-returning fn must load data ptr into x0; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("ldr     x1,"),
+        "dyn-returning fn must load vtable ptr into x1; got:\n{asm}"
+    );
+    // Call site must store returned fat pointer halves to the destination slots.
+    assert!(
+        asm.contains("str     x0,"),
+        "call site must store returned data ptr (x0) to slot; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("str     x1,"),
+        "call site must store returned vtable ptr (x1) to slot; got:\n{asm}"
+    );
+}
+
+#[test]
+fn runtime_dyn_return_not_folded() {
+    // A function returning `&dyn Trait` must use runtime vtable dispatch (blr)
+    // to call the method on the returned fat pointer, not constant-fold the result.
+    // If galvanic folded the dispatch, it would emit a scalar return without
+    // any indirect call instruction (blr).
+    let asm = compile_to_asm(DYN_TRAIT_RETURN_BASIC);
+    // Vtable dispatch must be present — the method is called indirectly via blr.
+    assert!(
+        asm.contains("blr"),
+        "dyn Trait return must dispatch via vtable blr; got:\n{asm}"
+    );
+    // The call to `forward` must not be inlined/folded away.
+    assert!(
+        asm.contains("bl      forward"),
+        "call to dyn-returning fn must emit `bl forward`; got:\n{asm}"
+    );
+    // CallRetFatPtr must store both fat pointer halves: str x0 and str x1.
+    assert!(
+        asm.contains("str     x1,"),
+        "call site must store vtable ptr (x1) from dyn-returning fn; got:\n{asm}"
+    );
+}
