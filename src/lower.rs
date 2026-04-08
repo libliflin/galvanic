@@ -1598,6 +1598,21 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                     struct_return_free_fns.insert(fn_name.to_owned(), ret_name.to_owned());
                 }
             }
+            // FLS §9, §11: Functions with `-> impl Trait` return use static dispatch.
+            // The concrete struct type is inferred from the body tail expression.
+            // Register them in `struct_return_free_fns` so call sites treat them
+            // identically to explicit-struct-return functions (RetFields ABI).
+            if let Some(ret_ty) = &fn_def.ret_ty
+                && matches!(ret_ty.kind, TyKind::ImplTrait(_))
+                && let Some(body) = &fn_def.body
+                && let Some(tail) = body.tail.as_deref()
+                && let ExprKind::StructLit { name: sname_span, .. } = &tail.kind
+            {
+                let sname = sname_span.text(source);
+                if struct_defs.contains_key(sname) {
+                    struct_return_free_fns.insert(fn_name.to_owned(), sname.to_owned());
+                }
+            }
         }
     }
 
@@ -2425,6 +2440,37 @@ fn lower_fn(
                             }
                         } else {
                             return Err(LowerError::Unsupported("multi-segment return type".into()));
+                        }
+                    } else if let TyKind::ImplTrait(_) = &ty.kind {
+                        // FLS §9, §11: `impl Trait` in return position — opaque return type
+                        // with static dispatch. The concrete struct type is inferred from
+                        // the function body's tail expression.
+                        //
+                        // FLS §11: AMBIGUOUS — The FLS does not specify how the concrete
+                        // return type for `impl Trait` is resolved at call sites. Galvanic
+                        // infers it from the body tail expression (struct literal only).
+                        //
+                        // This is identical to an explicit struct return from the caller's
+                        // perspective: fields are returned in x0..x{N-1} via RetFields.
+                        // No vtable is needed — dispatch is monomorphized at compile time.
+                        //
+                        // Cache-line note: same RetFields path as named struct return.
+                        if let Some(body) = &fn_def.body
+                            && let Some(tail) = body.tail.as_deref()
+                            && let ExprKind::StructLit { name: sname_span, .. } = &tail.kind
+                        {
+                            let sname = sname_span.text(source);
+                            if struct_defs.contains_key(sname) {
+                                (IrTy::Unit, Some(sname.to_owned()), None, None)
+                            } else {
+                                return Err(LowerError::Unsupported(format!(
+                                    "impl Trait return: tail struct `{sname}` is not a known struct"
+                                )));
+                            }
+                        } else {
+                            return Err(LowerError::Unsupported(
+                                "impl Trait return: only struct-literal tail expressions are supported".into(),
+                            ));
                         }
                     } else {
                         return Err(LowerError::Unsupported("complex return type".into()));

@@ -26508,3 +26508,208 @@ fn runtime_dyn_return_not_folded() {
         "call site must store vtable ptr (x1) from dyn-returning fn; got:\n{asm}"
     );
 }
+
+// ── Milestone 163: impl Trait in return position — FLS §9, §11 ────────────────
+//
+// `fn foo(n: i32) -> impl Trait` is an opaque return type using static dispatch.
+// The caller does not see the concrete struct type; the compiler monomorphizes
+// the method call based on the concrete type inferred from the function body.
+//
+// This is fundamentally different from `&dyn Trait` return (M162):
+//   - No vtable: dispatch is monomorphized at compile time (bl, not blr).
+//   - No fat pointer: the concrete struct fields are returned in x0..x{N-1}.
+//   - The concrete type leaks only to the compiler, not to the call site.
+//
+// FLS §11: AMBIGUOUS — The spec does not define the mechanism by which the
+// concrete return type for `impl Trait` is determined at call sites. Galvanic
+// infers it from the body tail expression (struct literal).
+//
+// Cache-line note: identical to explicit struct return — RetFields N-ldr sequence.
+
+const IMPL_TRAIT_RETURN_BASIC: &str = "
+trait Score { fn score(&self) -> i32; }
+struct Points { n: i32 }
+impl Score for Points { fn score(&self) -> i32 { self.n + 1 } }
+fn make_points(n: i32) -> impl Score {
+    Points { n }
+}
+fn main() -> i32 {
+    let p = make_points(6);
+    p.score()
+}
+";
+
+#[test]
+fn milestone_163_impl_trait_return_basic() {
+    // FLS §9, §11: impl Trait return dispatches through the concrete type's method.
+    // Bind the result to a variable, then call the method — standard let-binding ABI.
+    let Some(exit_code) = compile_and_run(IMPL_TRAIT_RETURN_BASIC) else {
+        return;
+    };
+    assert_eq!(exit_code, 7); // 6 + 1
+}
+
+#[test]
+fn milestone_163_impl_trait_return_method_call() {
+    // Method called on variable bound from impl-Trait-returning function.
+    let src = "
+trait Double { fn double(&self) -> i32; }
+struct Wrap { v: i32 }
+impl Double for Wrap { fn double(&self) -> i32 { self.v * 2 } }
+fn wrap(n: i32) -> impl Double { Wrap { v: n } }
+fn main() -> i32 { let w = wrap(5); w.double() }
+";
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 10); // 5 * 2 = 10
+}
+
+#[test]
+fn milestone_163_impl_trait_return_two_types() {
+    // Two concrete types both returned via impl Trait; each uses its own method.
+    let src = "
+trait Val { fn val(&self) -> i32; }
+struct A { x: i32 }
+struct B { y: i32 }
+impl Val for A { fn val(&self) -> i32 { self.x } }
+impl Val for B { fn val(&self) -> i32 { self.y + 10 } }
+fn make_a(n: i32) -> impl Val { A { x: n } }
+fn make_b(n: i32) -> impl Val { B { y: n } }
+fn main() -> i32 {
+    let a = make_a(3);
+    let b = make_b(2);
+    a.val() + b.val()
+}
+";
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 15); // 3 + (2 + 10) = 15
+}
+
+#[test]
+fn milestone_163_impl_trait_return_result_in_arithmetic() {
+    // Method result from impl-Trait return used in arithmetic.
+    let src = "
+trait Num { fn num(&self) -> i32; }
+struct N { v: i32 }
+impl Num for N { fn num(&self) -> i32 { self.v } }
+fn make_n(v: i32) -> impl Num { N { v } }
+fn main() -> i32 { let n = make_n(4); n.num() * 3 }
+";
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 12); // 4 * 3
+}
+
+#[test]
+fn milestone_163_impl_trait_return_result_in_if() {
+    // Branch on result of impl Trait method call.
+    let src = "
+trait Threshold { fn get(&self) -> i32; }
+struct T { x: i32 }
+impl Threshold for T { fn get(&self) -> i32 { self.x } }
+fn make_t(x: i32) -> impl Threshold { T { x } }
+fn main() -> i32 {
+    let t = make_t(5);
+    if t.get() > 3 { 1 } else { 0 }
+}
+";
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 1);
+}
+
+#[test]
+fn milestone_163_impl_trait_return_called_twice() {
+    // impl-Trait-returning function called twice; both produce correct concrete structs.
+    let src = "
+trait Incr { fn incr(&self) -> i32; }
+struct Counter { n: i32 }
+impl Incr for Counter { fn incr(&self) -> i32 { self.n + 1 } }
+fn make_counter(n: i32) -> impl Incr { Counter { n } }
+fn main() -> i32 {
+    let c1 = make_counter(3);
+    let c2 = make_counter(7);
+    c1.incr() + c2.incr()
+}
+";
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 12); // (3+1) + (7+1) = 12
+}
+
+#[test]
+fn milestone_163_impl_trait_return_on_parameter() {
+    // Parameter flows through impl-Trait-returning function into struct.
+    let src = "
+trait Calc { fn calc(&self) -> i32; }
+struct Pair { a: i32, b: i32 }
+impl Calc for Pair { fn calc(&self) -> i32 { self.a + self.b } }
+fn make_pair(a: i32, b: i32) -> impl Calc { Pair { a, b } }
+fn helper(x: i32, y: i32) -> i32 {
+    let p = make_pair(x, y);
+    p.calc()
+}
+fn main() -> i32 { helper(3, 4) }
+";
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 7); // 3 + 4
+}
+
+#[test]
+fn milestone_163_impl_trait_return_result_passed_to_fn() {
+    // Method result from impl-Trait return passed to another function.
+    let src = "
+trait Produce { fn produce(&self) -> i32; }
+struct Item { v: i32 }
+impl Produce for Item { fn produce(&self) -> i32 { self.v * 2 } }
+fn make_item(v: i32) -> impl Produce { Item { v } }
+fn use_val(n: i32) -> i32 { n + 1 }
+fn main() -> i32 {
+    let item = make_item(5);
+    use_val(item.produce())
+}
+";
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 11); // 5*2 + 1 = 11
+}
+
+// ── Assembly inspection: impl Trait in return position ────────────────────────
+
+/// FLS §9, §11: A function with `-> impl Trait` return type must emit a `bl`
+/// to call the impl-Trait-returning function (static dispatch, not vtable `blr`).
+///
+/// The key assertions:
+/// 1. The maker function is called via `bl` (not inlined/folded).
+/// 2. The method is called via a direct `bl` to the concrete method label
+///    (static dispatch — no `blr` vtable indirection).
+#[test]
+fn runtime_impl_trait_return_emits_bl_not_blr() {
+    let asm = compile_to_asm(IMPL_TRAIT_RETURN_BASIC);
+    // Static dispatch: maker function must be called via bl.
+    assert!(
+        asm.contains("bl      make_points") || asm.contains("bl\tmake_points"),
+        "impl Trait return must call maker function via bl; got:\n{asm}"
+    );
+    // The score method must be called as a direct bl to the concrete label.
+    let has_score_bl = asm.lines().any(|l| {
+        (l.contains("bl") && l.contains("score") && !l.contains("blr"))
+    });
+    assert!(
+        has_score_bl,
+        "impl Trait method must dispatch via static bl (not blr); got:\n{asm}"
+    );
+}
+
+/// FLS §9, §11, §6.1.2: The result of calling a method on an `impl Trait`
+/// return must not be constant-folded — `n` is a runtime parameter.
+///
+/// If galvanic folded it, `main` would emit `mov x0, #7` (6+1) directly.
+/// Instead, it must emit `add` (from the struct field `n + 1`).
+#[test]
+fn runtime_impl_trait_return_not_folded() {
+    let asm = compile_to_asm(IMPL_TRAIT_RETURN_BASIC);
+    assert!(
+        asm.contains("add"),
+        "impl Trait method body must emit add (not constant-folded); got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #7"),
+        "impl Trait return must NOT fold result to #7 (interpreter, not compiler); got:\n{asm}"
+    );
+}
