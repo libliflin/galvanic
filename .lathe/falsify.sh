@@ -330,6 +330,23 @@ else
     pass "Claim 17: both concrete type vtables emitted, no constant folding"
 fi
 
+# ── Claim 18: Second dyn Trait method accesses vtable at offset 8 ─────────────
+# Tests that calling the second method (index 1) of a two-method dyn Trait emits
+# `ldr x10, [x9, #8]` — NOT `ldr x10, [x9, #0]`. A bug where method_idx is always
+# 0 would make every vtable call dispatch to the first method, producing wrong behavior
+# silently when method 1 is called.
+# This complements Claim 16 (single method, vtable present) and Claim 17 (two concrete
+# types) by testing the vtable OFFSET calculation for methods beyond index 0.
+# Introduced in cycle 33 (red-team, milestone 147 follow-up, FLS §4.13).
+# References: claims.md Claim 18.
+
+echo "--- Claim 18: second dyn Trait method emits vtable offset #8 (not #0) ---"
+if cargo test --test e2e --quiet -- runtime_dyn_trait_second_method_emits_vtable_offset_8 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 18" "runtime_dyn_trait_second_method_emits_vtable_offset_8 FAILED — second method may be loading from vtable offset #0 instead of #8, meaning method_idx computation is broken"
+else
+    pass "Claim 18: second dyn Trait method loads fn-ptr at vtable offset #8"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""
