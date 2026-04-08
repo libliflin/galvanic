@@ -2896,3 +2896,25 @@ declared field type — not as a wider i32.
 - The assembly for `const X: u8 = 300; fn main() -> i32 { X as i32 }` contains `#300` or `#0x12c` (unwrapped immediate) instead of `#44` or `#0x2c`
 
 **Tests**: `cargo test --test e2e -- claim_75_u8_const_item_wraps_at_8_bits_not_i32 runtime_u8_const_wraps_emits_correct_loadimm milestone_189_u8_const_wraps_at_8_bits milestone_189_u16_const_addition_wraps`
+
+---
+
+## Claim 76: Chained narrow integer const item references preserve bit-width
+
+**Stakeholder**: William (researcher), CI / Validation Infrastructure
+
+**Promise**: When a narrow-typed `const` item references another narrow-typed `const` item, the narrowing is applied per-item at storage time. `const X: u8 = 200; const Y: u8 = X + 100` must yield Y = 44 (not 300). The evaluator fetches X's already-narrowed value (200), computes 200+100=300 in i32, then narrows the result to the declared u8 width (300 % 256 = 44) before inserting Y into `const_vals`.
+
+**Why this is load-bearing**: Without the call to `narrow_const_value` at storage time, Y would store 300. Since `exit(300) == exit(44)` at the OS level (exit codes are 8-bit), this bug is invisible to compile-and-run tests. Only assembly inspection or comparison-based runtime tests (`check(Y) { if Y == 44 { 1 } else { 0 } }`) can catch it.
+
+**ARM64 implementation**: The const fixed-point loop in `lower()` calls `narrow_const_value(raw, &c.ty, source)` before every `const_vals.insert(name, val)`. This applies the declared type's bit-width constraint to the evaluated result regardless of how the result was computed (literal, arithmetic, or reference to another const).
+
+**FLS §7.1:10**: Every use of a constant is replaced with its value.
+**FLS §4.1**: Narrow integer types have specific bit-widths; stored values must be representable.
+**FLS §6.23 AMBIGUOUS**: Overflow in const contexts should be a compile-time error; galvanic wraps instead as a pragmatic choice. The FLS does not specify per-item narrowing rules for non-i32 types.
+
+**Violated if**:
+- `const X: u8 = 200; const Y: u8 = X + 100; fn check(v: i32) -> i32 { if v == 44 { 1 } else { 0 } } fn main() -> i32 { check(Y as i32) }` returns 0 (Y stored as 300), OR
+- The assembly for that program contains `#300` or `#0x12c` instead of `#44` or `#0x2c`
+
+**Tests**: `cargo test --test e2e -- claim_76_u8_chained_const_ref_wraps_at_8_bits runtime_u8_const_chain_ref_emits_correct_loadimm milestone_190_u8_const_ref_chain_wraps milestone_190_u16_const_ref_chain_wraps`

@@ -1380,6 +1380,18 @@ else
     pass "Claim 75: narrow integer const items (u8/u16) wrap at declared bit-width (not raw i32 arithmetic)"
 fi
 
+echo "--- Claim 76: chained narrow integer const item references preserve bit-width ---"
+if cargo test --test e2e -- \
+    claim_76_u8_chained_const_ref_wraps_at_8_bits \
+    runtime_u8_const_chain_ref_emits_correct_loadimm \
+    milestone_190_u8_const_ref_chain_wraps \
+    milestone_190_u16_const_ref_chain_wraps \
+    2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 76" "chained u8/u16 const refs FAILED — narrow_const_value not applied after reference-chain evaluation (Y stores 300 instead of 44)"
+else
+    pass "Claim 76: chained narrow integer const item references preserve bit-width (X+ref wraps at declared width)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 
