@@ -31592,3 +31592,122 @@ fn runtime_i32_max_emits_loadimm() {
         "i32::MAX must not be loaded from stack (must be a LoadImm): {asm}"
     );
 }
+
+// ── Milestone 188: built-in integer type constants in const item initializers ─
+//
+// FLS §10.3, §4.1: Built-in associated constants (`i32::MAX`, `i32::MIN`,
+// `u8::MAX`, etc.) must be usable in `const` item initializers, not just
+// in runtime expressions.
+//
+// Previously `eval_const_expr` only handled single-segment paths. Two-segment
+// paths like `i32::MAX` returned `None`, so `const LIMIT: i32 = i32::MAX;`
+// would silently fail to resolve and later error at the use site.
+
+/// `const LIMIT: i32 = i32::MAX;` evaluates at compile time and can be used in comparisons.
+///
+/// FLS §7.1:10, §10.3, §4.1: The const item initializer must be fully evaluated
+/// before its first use. The result is substituted as a compile-time immediate.
+#[test]
+fn milestone_188_const_from_i32_max_positive() {
+    let src = r#"
+const LIMIT: i32 = i32::MAX;
+fn main() -> i32 { if LIMIT > 0 { 1 } else { 0 } }
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 1, "const from i32::MAX must be positive");
+}
+
+/// `const LIMIT: i32 = i32::MIN;` evaluates to the minimum negative value.
+#[test]
+fn milestone_188_const_from_i32_min_negative() {
+    let src = r#"
+const LIMIT: i32 = i32::MIN;
+fn main() -> i32 { if LIMIT < 0 { 1 } else { 0 } }
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 1, "const from i32::MIN must be negative");
+}
+
+/// `const LIMIT: i32 = i8::MAX;` evaluates to 127.
+#[test]
+fn milestone_188_const_from_i8_max() {
+    let src = r#"
+const LIMIT: i32 = i8::MAX;
+fn main() -> i32 { LIMIT }
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 127, "const from i8::MAX must equal 127");
+}
+
+/// `const LIMIT: i32 = u8::MAX;` evaluates to 255.
+#[test]
+fn milestone_188_const_from_u8_max() {
+    let src = r#"
+const LIMIT: i32 = u8::MAX;
+fn main() -> i32 { if LIMIT == 255 { 1 } else { 0 } }
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 1, "const from u8::MAX must equal 255");
+}
+
+/// `const LIMIT: i32 = i32::MAX - 1;` — arithmetic on built-in assoc const in const context.
+///
+/// FLS §6.5, §10.3: Binary arithmetic in const initializers must resolve
+/// two-segment paths as operands.
+#[test]
+fn milestone_188_const_arithmetic_with_i32_max() {
+    let src = r#"
+const LIMIT: i32 = i32::MAX - 1;
+fn main() -> i32 { if LIMIT > 0 { 1 } else { 0 } }
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 1, "i32::MAX - 1 must still be positive");
+}
+
+/// Two const items derived from built-in associated constants.
+#[test]
+fn milestone_188_two_consts_from_builtin_assoc() {
+    let src = r#"
+const HI: i32 = i32::MAX;
+const LO: i32 = i32::MIN;
+fn main() -> i32 { if HI > LO { 1 } else { 0 } }
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 1, "i32::MAX must be greater than i32::MIN");
+}
+
+/// Const derived from i32::MAX passed to a function (prevents compile-time folding
+/// of the comparison itself — the const resolves at compile time, but the runtime
+/// branch is still emitted).
+#[test]
+fn milestone_188_const_from_i32_max_passed_to_fn() {
+    let src = r#"
+const LIMIT: i32 = i32::MAX;
+fn is_max(x: i32) -> i32 { if x == 2147483647 { 1 } else { 0 } }
+fn main() -> i32 { is_max(LIMIT) }
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 1, "const LIMIT = i32::MAX passed to fn must equal 2147483647");
+}
+
+/// Assembly inspection: `const LIMIT: i32 = i32::MAX;` emits a LoadImm at the use site.
+///
+/// The const item is resolved at compile time; at the use site it emits `movz`/`movk`
+/// for the value 2_147_483_647 (0x7FFFFFFF), not a stack load or data section access.
+///
+/// Negative assertion: no `ldr x0, [sp` — the value must not come from a stack slot.
+#[test]
+fn runtime_const_from_i32_max_emits_loadimm() {
+    let asm = compile_to_asm(
+        "const LIMIT: i32 = i32::MAX;\nfn main() -> i32 { LIMIT }\n",
+    );
+    // i32::MAX = 0x7FFFFFFF → movz lo16=0xffff, movk hi16=0x7fff
+    assert!(
+        asm.contains("#0x7fff"),
+        "const LIMIT = i32::MAX must emit movk #0x7fff at use site: {asm}"
+    );
+    assert!(
+        !asm.contains("ldr     x0, [sp"),
+        "const LIMIT = i32::MAX must not load from stack (must be LoadImm): {asm}"
+    );
+}

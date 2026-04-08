@@ -430,6 +430,7 @@ fn eval_const_expr(
     expr: &Expr,
     source: &str,
     known: &HashMap<String, i32>,
+    assoc_known: &HashMap<String, i32>,
     const_fns: &HashMap<String, &crate::ast::FnDef>,
 ) -> Option<i32> {
     match &expr.kind {
@@ -439,17 +440,23 @@ fn eval_const_expr(
         }
         // FLS §6.5.3: Arithmetic negation in const context.
         ExprKind::Unary { op: crate::ast::UnaryOp::Neg, operand } => {
-            eval_const_expr(operand, source, known, const_fns)?.checked_neg()
+            eval_const_expr(operand, source, known, assoc_known, const_fns)?.checked_neg()
         }
         // FLS §7.1:10: A single-segment path that names a known const is
         // replaced by its value.
         ExprKind::Path(segs) if segs.len() == 1 => {
             known.get(segs[0].text(source)).copied()
         }
+        // FLS §10.3, §4.1: A two-segment path like `i32::MAX` or `MyType::CONST`
+        // is resolved from the associated constant map (built-in and user-defined).
+        ExprKind::Path(segs) if segs.len() == 2 => {
+            let key = format!("{}::{}", segs[0].text(source), segs[1].text(source));
+            assoc_known.get(&key).copied()
+        }
         // FLS §6.5: Binary arithmetic and bitwise operators in const context.
         ExprKind::Binary { op, lhs, rhs } => {
-            let l = eval_const_expr(lhs, source, known, const_fns)?;
-            let r = eval_const_expr(rhs, source, known, const_fns)?;
+            let l = eval_const_expr(lhs, source, known, assoc_known, const_fns)?;
+            let r = eval_const_expr(rhs, source, known, assoc_known, const_fns)?;
             match op {
                 BinOp::Add    => l.checked_add(r),
                 BinOp::Sub    => l.checked_sub(r),
@@ -479,10 +486,10 @@ fn eval_const_expr(
                     // Evaluate each argument at compile time.
                     let arg_vals: Option<Vec<i32>> = args
                         .iter()
-                        .map(|a| eval_const_expr(a, source, known, const_fns))
+                        .map(|a| eval_const_expr(a, source, known, assoc_known, const_fns))
                         .collect();
                     let arg_vals = arg_vals?;
-                    return eval_const_fn_body(fn_def, &arg_vals, source, known, const_fns, 0);
+                    return eval_const_fn_body(fn_def, &arg_vals, source, known, assoc_known, const_fns, 0);
                 }
             }
             None
@@ -512,6 +519,7 @@ fn eval_const_fn_body(
     args: &[i32],
     source: &str,
     global_known: &HashMap<String, i32>,
+    assoc_known: &HashMap<String, i32>,
     const_fns: &HashMap<String, &crate::ast::FnDef>,
     depth: u8,
 ) -> Option<i32> {
@@ -538,7 +546,7 @@ fn eval_const_fn_body(
         match &stmt.kind {
             StmtKind::Let { pat: Pat::Ident(span), init, .. } => {
                 let init_val =
-                    eval_const_expr(init.as_ref()?, source, &local, const_fns)?;
+                    eval_const_expr(init.as_ref()?, source, &local, assoc_known, const_fns)?;
                 local.insert(span.text(source).to_owned(), init_val);
             }
             StmtKind::Let { .. } => {
@@ -549,7 +557,7 @@ fn eval_const_fn_body(
         }
     }
     // Evaluate the tail expression.
-    eval_const_expr(body.tail.as_ref()?, source, &local, const_fns)
+    eval_const_expr(body.tail.as_ref()?, source, &local, assoc_known, const_fns)
 }
 
 /// Evaluate a const block body at compile time.
@@ -573,6 +581,7 @@ fn eval_const_block(
     block: &crate::ast::Block,
     source: &str,
     global_known: &HashMap<String, i32>,
+    assoc_known: &HashMap<String, i32>,
 ) -> Option<i32> {
     let mut local: HashMap<String, i32> = global_known.clone();
     // Empty map: calling const fns inside a const block is not yet supported.
@@ -582,7 +591,7 @@ fn eval_const_block(
         match &stmt.kind {
             // Simple `let x = expr;` binding — evaluate and add to local scope.
             StmtKind::Let { pat: Pat::Ident(span), init, .. } => {
-                let init_val = eval_const_expr(init.as_ref()?, source, &local, &empty_fns)?;
+                let init_val = eval_const_expr(init.as_ref()?, source, &local, assoc_known, &empty_fns)?;
                 local.insert(span.text(source).to_owned(), init_val);
             }
             // Complex patterns not const-evaluable at this milestone.
@@ -592,7 +601,7 @@ fn eval_const_block(
             _ => return None,
         }
     }
-    eval_const_expr(block.tail.as_ref()?, source, &local, &empty_fns)
+    eval_const_expr(block.tail.as_ref()?, source, &local, assoc_known, &empty_fns)
 }
 
 /// Evaluate a float const initializer at compile time.
@@ -1278,10 +1287,41 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         }
     }
 
+    // FLS §10.3, §4.1: Built-in integer type associated constants.
+    //
+    // Primitive integer types expose MAX and MIN as inherent associated constants.
+    // These are seeded here — before the const_vals evaluation loop — so that
+    // const item initializers can reference them: `const LIMIT: i32 = i32::MAX;`.
+    //
+    // FLS §4.1 AMBIGUOUS: The spec does not enumerate the built-in associated
+    // constants by name; it specifies that each integer type has a value range.
+    // Galvanic derives MAX/MIN from the range bounds as compile-time immediates.
+    //
+    // Limitation: u32::MAX (4_294_967_295) and larger unsigned values do not fit
+    // in Galvanic's internal i32 representation and are deferred to a future
+    // milestone when the IR gains wider integer support.
+    //
+    // Cache-line note: emitted as a single LoadImm per use site (1–3 ARM64
+    // instructions depending on value magnitude) — no runtime memory access.
+    let builtin_assoc_consts: HashMap<String, i32> = [
+        ("i8::MAX",  127_i32),
+        ("i8::MIN",  -128_i32),
+        ("u8::MAX",  255_i32),
+        ("u8::MIN",  0_i32),
+        ("i16::MAX", 32_767_i32),
+        ("i16::MIN", -32_768_i32),
+        ("u16::MAX", 65_535_i32),
+        ("u16::MIN", 0_i32),
+        ("i32::MAX", 2_147_483_647_i32),
+        ("i32::MIN", -2_147_483_648_i32),
+    ].into_iter().map(|(k, v)| (k.to_owned(), v)).collect();
+
     let mut const_vals: HashMap<String, i32> = HashMap::new();
     // FLS §6.1.2:37–45: Evaluate all const initializers via the compile-time
     // evaluator. Repeat until no new consts are discovered (handles consts
     // that reference other consts defined later in the file).
+    // `builtin_assoc_consts` is passed as `assoc_known` so that initializers
+    // like `const LIMIT: i32 = i32::MAX;` resolve correctly (FLS §10.3, §4.1).
     loop {
         let prev_len = const_vals.len();
         for item in &src.items {
@@ -1289,7 +1329,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                 let name = c.name.text(source).to_owned();
                 if !const_vals.contains_key(&name)
                     && let Some(val) =
-                        eval_const_expr(&c.value, source, &const_vals, &const_fns)
+                        eval_const_expr(&c.value, source, &const_vals, &builtin_assoc_consts, &const_fns)
                 {
                     const_vals.insert(name, val);
                 }
@@ -1313,34 +1353,10 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     //
     // Cache-line note: this map is built once and shared read-only across all
     // `lower_fn` calls — not on any hot runtime path.
-    let mut assoc_const_vals: HashMap<String, i32> = HashMap::new();
-
-    // FLS §10.3, §4.1: Built-in integer type associated constants.
     //
-    // Primitive integer types expose MAX and MIN as inherent associated constants.
-    // These are seeded before user-defined impl blocks so that user code can
-    // reference them as `i32::MAX`, `u8::MAX`, etc. in runtime expressions.
-    //
-    // FLS §4.1 AMBIGUOUS: The spec does not enumerate the built-in associated
-    // constants by name; it specifies that each integer type has a value range.
-    // Galvanic derives MAX/MIN from the range bounds as compile-time immediates.
-    //
-    // Limitation: u32::MAX (4_294_967_295) and larger unsigned values do not fit
-    // in Galvanic's internal i32 representation and are deferred to a future
-    // milestone when the IR gains wider integer support.
-    //
-    // Cache-line note: emitted as a single LoadImm per use site (1–3 ARM64
-    // instructions depending on value magnitude) — no runtime memory access.
-    assoc_const_vals.insert("i8::MAX".to_owned(), 127_i32);
-    assoc_const_vals.insert("i8::MIN".to_owned(), -128_i32);
-    assoc_const_vals.insert("u8::MAX".to_owned(), 255_i32);
-    assoc_const_vals.insert("u8::MIN".to_owned(), 0_i32);
-    assoc_const_vals.insert("i16::MAX".to_owned(), 32_767_i32);
-    assoc_const_vals.insert("i16::MIN".to_owned(), -32_768_i32);
-    assoc_const_vals.insert("u16::MAX".to_owned(), 65_535_i32);
-    assoc_const_vals.insert("u16::MIN".to_owned(), 0_i32);
-    assoc_const_vals.insert("i32::MAX".to_owned(), 2_147_483_647_i32);
-    assoc_const_vals.insert("i32::MIN".to_owned(), -2_147_483_648_i32);
+    // Seed from built-in integer type constants so runtime expressions like
+    // `i32::MAX` are always resolvable regardless of impl block ordering.
+    let mut assoc_const_vals: HashMap<String, i32> = builtin_assoc_consts;
 
     for item in &src.items {
         if let ItemKind::Impl(impl_def) = &item.kind {
@@ -1349,7 +1365,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                 let ac_name = ac.name.text(source);
                 let key = format!("{type_name}::{ac_name}");
                 if let Some(expr) = &ac.value
-                    && let Some(val) = eval_const_expr(expr, source, &const_vals, &const_fns)
+                    && let Some(val) = eval_const_expr(expr, source, &const_vals, &assoc_const_vals, &const_fns)
                 {
                     assoc_const_vals.insert(key, val);
                 }
@@ -15865,7 +15881,7 @@ impl<'src> LowerCtx<'src> {
             // Cache-line note: emits one `LoadImm` = 4 bytes (one instruction
             // slot). Identical footprint to a named `const` item reference.
             ExprKind::ConstBlock(block) => {
-                let val = eval_const_block(block, self.source, self.const_vals)
+                let val = eval_const_block(block, self.source, self.const_vals, self.assoc_const_vals)
                     .ok_or_else(|| LowerError::Unsupported(
                         "const block body is not const-evaluable (FLS §6.4.2): \
                          only integer arithmetic, bitwise ops, and const name \
