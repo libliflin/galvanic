@@ -33211,6 +33211,50 @@ fn runtime_for_arr_borrow_emits_indexed_load() {
     );
 }
 
+/// Claim 81 adversarial test: `for x in &arr` with an array function parameter emits
+/// indexed loads at runtime — never constant-folded from call-site array contents.
+///
+/// Adversarial design: `sum_borrow` takes `a: [i32; 3]` as a parameter — the element
+/// values are unknown inside the function body. An interpreter that tried to fold the
+/// loop at compile time would have nothing to fold from. A correct compiler emits `ldr`
+/// instructions to load each element at runtime.
+///
+/// The same function is called with two arrays of DIFFERENT element values (sums differ:
+/// 6 vs 60). If galvanic incorrectly inlined call-site array contents and folded, it
+/// would produce the wrong sum for at least one call. Combined result must not appear
+/// as any of the three fold targets: #6, #60, or #66.
+///
+/// FLS §6.15.1: for expressions iterate at runtime.
+/// FLS §4.9: `&[T; N]` coerces to a slice at runtime.
+/// FLS §6.1.2:37–45: non-const function bodies emit runtime instructions.
+#[test]
+fn claim_81_for_arr_borrow_param_emits_indexed_load_not_folded() {
+    let asm = compile_to_asm(
+        "fn sum_borrow(a: [i32; 3]) -> i32 { let mut s = 0; for x in &a { s = s + x; } s }\n\
+fn main() -> i32 { sum_borrow([1, 2, 3]) + sum_borrow([10, 20, 30]) }\n",
+    );
+    // Must emit ldr for runtime indexed element loads inside the loop body.
+    assert!(
+        asm.contains("ldr"),
+        "for-arr-borrow with param must emit ldr for indexed element loads: {asm}"
+    );
+    // Must not constant-fold to first array's sum.
+    assert!(
+        !asm.contains("mov     x0, #6"),
+        "sum_borrow result must not be folded to #6 (first array sum): {asm}"
+    );
+    // Must not constant-fold to second array's sum.
+    assert!(
+        !asm.contains("mov     x0, #60"),
+        "sum_borrow result must not be folded to #60 (second array sum): {asm}"
+    );
+    // Must not constant-fold the combined result.
+    assert!(
+        !asm.contains("mov     x0, #66"),
+        "combined result must not be constant-folded to #66: {asm}"
+    );
+}
+
 /// Assembly inspection: `for x in &arr` with two different arrays does not fold
 /// either result to a compile-time constant.
 ///
