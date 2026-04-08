@@ -1058,3 +1058,55 @@ into a `blr`-called closure but folds the body would be invisible to Claims 11 a
 - contains `mov     x0, #42` (constant-folded result of `run(41)`).
 
 **Test**: `cargo test --test e2e -- runtime_fn_once_capture_emits_runtime_add`
+
+---
+
+## Claim 34: Associated type method results are not constant-folded
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: A trait method that uses an associated type (`type Area = i32`) must emit
+runtime `mul` instructions — not fold the result to a constant — even when the call
+arguments happen to be literals. This covers the §10.2 associated type dispatch path,
+which is distinct from the generic trait dispatch paths in Claims 9–12.
+
+```rust
+trait Shape {
+    type Area;
+    fn scaled_area(&self, scale: i32) -> i32;
+}
+struct Square { side: i32 }
+impl Shape for Square {
+    type Area = i32;
+    fn scaled_area(&self, scale: i32) -> i32 { self.side * self.side * scale }
+}
+fn main() -> i32 {
+    let s = Square { side: 3 };
+    s.scaled_area(5)
+}
+```
+
+Must emit:
+- `mul` — `self.side * self.side * scale` emits runtime multiply instructions
+- NOT `mov     x0, #45` — must not fold `3 * 3 * 5 = 45` to a constant
+
+**Why this claim matters**: Associated types are resolved at monomorphization time, but
+the method body executes at runtime. An interpreter-style galvanic could evaluate the
+entire method at compile time when the receiver fields and arguments are known literals,
+folding `3 * 3 * 5` to `45` and emitting `mov x0, #45; ret`. The compile-and-run test
+passes (exit code 45 is correct), but galvanic is not a compiler. The §10.2 associated
+type path is separate from the generic dispatch paths (Claims 9–12) — it uses direct
+method calls through the concrete type, not vtable or generic-parameter dispatch.
+
+**Attack vectors**:
+1. Fold the entire method body at compile time: evaluate `3 * 3 * 5 = 45` when the
+   `Square` literal and `scale` literal are both known at the call site.
+   Caught by `!asm.contains("mov     x0, #45")`.
+2. Emit a single `mul` but fold the second multiplication: `9 * 5 = 45` partially
+   constant-folded. Still caught by the negative assertion (`mov x0, #45` absent).
+
+**Violated if**: `compile_to_asm(...)` for the program above returns assembly that:
+- lacks `mul` (runtime multiply not emitted), OR
+- contains `mov     x0, #45` or `mov x0, #45` (constant-folded result).
+
+**Test**: `cargo test --test e2e -- runtime_assoc_type_method_emits_mul_not_folded`
