@@ -122,3 +122,8 @@ fn fls_12_1_generic_trait_impl() {
 fn fls_12_1_trait_bounds() {
     assert_galvanic_accepts("fls_12_1_trait_bounds.rs");
 }
+
+#[test]
+fn fls_4_14_where_clauses() {
+    assert_galvanic_accepts("fls_4_14_where_clauses.rs");
+}
