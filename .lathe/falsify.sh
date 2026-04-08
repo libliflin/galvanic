@@ -1354,6 +1354,19 @@ else
     pass "Claim 73: built-in integer type constants (i32::MAX, i32::MIN, u8::MAX, i8::MAX) resolve to compile-time immediates"
 fi
 
+echo "--- Claim 74: built-in associated constants work in const item initializers (not just runtime expressions) ---"
+if cargo test --test e2e -- \
+    claim_74_const_chain_through_builtin_assoc_not_zero \
+    runtime_const_from_i32_max_emits_loadimm \
+    milestone_188_const_from_i32_max_positive \
+    milestone_188_const_from_i32_min_negative \
+    milestone_188_const_arithmetic_with_i32_max \
+    2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 74" "built-in constants in const items FAILED — i32::MAX in const item initializer silently resolved to wrong value (assoc_known not threaded through eval_const_expr)"
+else
+    pass "Claim 74: built-in associated constants in const item initializers resolve correctly (not silently zero)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 

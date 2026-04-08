@@ -2853,3 +2853,25 @@ declared field type — not as a wider i32.
 - The assembly for `i32::MAX` contains `ldr x0, [sp` (stack load) instead of `movz`/`movk`
 
 **Tests**: `cargo test --test e2e -- runtime_i32_max_emits_loadimm milestone_187_i32_max_is_positive milestone_187_i32_min_is_negative milestone_187_u8_max_as_i32 milestone_187_i8_max_as_i32`
+
+
+---
+
+## Claim 74: Built-in integer associated constants work in const item initializers (not just runtime expressions)
+
+**Promise**: `i32::MAX`, `i32::MIN`, and their narrow-integer counterparts can appear as operands in `const` item initializers. `const LIMIT: i32 = i32::MAX;` evaluates correctly at compile time, and a subsequent `const DERIVED: i32 = LIMIT - 1;` also resolves correctly via the fixed-point evaluator. Neither resolves to zero, None, or fails silently.
+
+**Why this matters**: Claim 73 verifies that `i32::MAX` works in *runtime expressions* (the two-segment path is lowered as an `Instr::LoadImm`). Claim 74 verifies the distinct code path: `eval_const_expr` with `assoc_known` threaded correctly, so that two-segment paths inside const item initializers can look up built-in constants. If this parameter is ever dropped or mis-threaded, `const LIMIT = i32::MAX` silently resolves to `None`, the fixed-point loop fails to populate `LIMIT`, and any program that uses `LIMIT` produces the wrong value (likely 0) with no error message. This is the "fails silently" failure mode the previous cycle's Next section called out.
+
+**ARM64 implementation**: `eval_const_expr` accepts an `assoc_known: &HashMap<String, i32>` parameter that is built from `builtin_assoc_consts` before the const fixed-point loop runs. Two-segment path arms (`Type::CONST`) are looked up in this map. The fixed-point loop re-evaluates consts that returned `None` on earlier passes, so ordering between `const A = i32::MAX` and `const B = A - 1` does not matter.
+
+**FLS §7.1:10**: Const items must be fully evaluated before first use.
+**FLS §10.3**: All constant expression forms — including associated constant paths — are valid in const item initializers.
+**FLS §4.1 AMBIGUOUS**: The spec does not name `MAX`/`MIN` explicitly; they are a language convention derived from value ranges.
+
+**Violated if**:
+- `const LIMIT: i32 = i32::MAX; fn main() -> i32 { if LIMIT > 0 { 1 } else { 0 } }` returns 0, OR
+- `const LIMIT = i32::MAX; const DERIVED = LIMIT - 1; fn check(x: i32) -> i32 { if x == 2147483646 { 1 } else { 0 } } fn main() -> i32 { check(DERIVED) }` returns 0, OR
+- The assembly for `const LIMIT = i32::MAX; fn main() { LIMIT }` contains `ldr x0, [sp` (LIMIT was not inlined as an immediate)
+
+**Tests**: `cargo test --test e2e -- claim_74_const_chain_through_builtin_assoc_not_zero runtime_const_from_i32_max_emits_loadimm milestone_188_const_from_i32_max_positive milestone_188_const_from_i32_min_negative milestone_188_const_arithmetic_with_i32_max`
