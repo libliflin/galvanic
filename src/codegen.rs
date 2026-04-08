@@ -99,6 +99,46 @@ pub fn emit_asm(module: &Module) -> Result<String, CodegenError> {
         emit_trampoline(&mut out, trampoline)?;
     }
 
+    // Emit vtable shim functions for dyn Trait dispatch (FLS §4.13).
+    //
+    // Each shim adapts the vtable calling convention (one data pointer in x0)
+    // to the concrete method's calling convention (N struct fields in x0..x{N-1}).
+    //
+    // Shim layout (for n_fields > 0):
+    //   vtable_shim_Trait_Type_N:
+    //     mov  x9, x0                  // save data pointer in scratch x9
+    //     ldr  x0,  [x9, #0]           // load field 0
+    //     ldr  x1,  [x9, #8]           // load field 1
+    //     ...
+    //     b    Type__method             // tail-call concrete method
+    //
+    // For n_fields == 0 (unit struct):
+    //   vtable_shim_Trait_Type_N:
+    //     b    Type__method
+    //
+    // FLS §4.13 AMBIGUOUS: The FLS does not specify vtable shim layout.
+    // Galvanic uses a load-from-data-pointer convention.
+    // ARM64 note: x9 is an intra-procedure scratch register (ABI §6.1.1).
+    // Cache-line note: each shim is 1 + n_fields + 1 instructions = n_fields + 2 words.
+    if !module.vtable_shims.is_empty() {
+        writeln!(out)?;
+        writeln!(out, "    // FLS §4.13: vtable dispatch shims")?;
+        for shim in &module.vtable_shims {
+            writeln!(out)?;
+            writeln!(out, "    .global {}", shim.name)?;
+            writeln!(out, "    .align 2")?;
+            writeln!(out, "{}:", shim.name)?;
+            if shim.n_fields > 0 {
+                writeln!(out, "    mov     x9, x0                       // FLS §4.13: save data ptr in scratch x9")?;
+                for fi in 0..shim.n_fields {
+                    let offset = fi * 8;
+                    writeln!(out, "    ldr     x{fi}, [x9, #{offset:<16}] // FLS §4.13: load field {fi} from data ptr")?;
+                }
+            }
+            writeln!(out, "    b       {:<28} // FLS §4.13: tail-call concrete method", shim.target)?;
+        }
+    }
+
     // Emit the bare _start entry point.
     writeln!(out)?;
     emit_start(&mut out)?;
@@ -191,6 +231,37 @@ pub fn emit_asm(module: &Module) -> Result<String, CodegenError> {
                     out,
                     "    .word 0x{bits:08x}            // f32 {val} (FLS §2.4.4.2)"
                 )?;
+            }
+        }
+    }
+
+    // Emit vtable data sections for dyn Trait dispatch (FLS §4.13).
+    //
+    // Each vtable is an array of 8-byte function pointers in .rodata, one per
+    // trait method in declaration order. The label matches the `vtable_label`
+    // computed in lower.rs (`vtable_{trait}_{type}`).
+    //
+    // Layout (for a trait with M methods):
+    //   .section .rodata
+    //   .align 3
+    //   vtable_Trait_Type:
+    //     .quad vtable_shim_Trait_Type_0
+    //     .quad vtable_shim_Trait_Type_1
+    //     ...
+    //
+    // FLS §4.13 AMBIGUOUS: The FLS does not specify vtable layout.
+    // Galvanic uses a dense array of shim addresses, method 0 at offset 0.
+    // Cache-line note: M methods = M × 8 bytes. For M ≤ 8, the vtable fits in
+    // one 64-byte cache line.
+    if !module.vtables.is_empty() {
+        writeln!(out)?;
+        writeln!(out, "    .section .rodata")?;
+        for vtable in &module.vtables {
+            writeln!(out, "    .align 3")?;
+            writeln!(out, "    .global {}", vtable.label)?;
+            writeln!(out, "{}:", vtable.label)?;
+            for shim_label in &vtable.method_shim_labels {
+                writeln!(out, "    .quad {shim_label:<32} // FLS §4.13: vtable entry")?;
             }
         }
     }
@@ -1328,6 +1399,33 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
             };
             writeln!(out, "    fcmp    s{lhs}, s{rhs}               // FLS §6.5.3: f32 compare")?;
             writeln!(out, "    cset    x{dst}, {cond}                    // FLS §6.5.3: x{dst} = (s{lhs} {cond} s{rhs})")?;
+        }
+
+        // FLS §4.13: Vtable dispatch for `dyn Trait` method calls.
+        //
+        // Fat pointer layout: data_slot holds the data pointer, vtable_slot holds
+        // the vtable pointer (= data_slot + 1 in spill order).
+        //
+        // Sequence (FLS §4.13 AMBIGUOUS — layout is implementation-defined):
+        //   ldr x9,  [sp, #{vtable_slot*8}]    // load vtable pointer
+        //   ldr x10, [x9, #{method_idx*8}]      // load method fn-ptr from vtable
+        //   ldr x0,  [sp, #{data_slot*8}]       // load data pointer into arg 0
+        //   blr x10                              // indirect call via vtable entry
+        //   mov x{dst}, x0                       // capture return value (if dst != 0)
+        //
+        // Scratch registers x9/x10 are intra-procedure temporaries per ARM64 ABI.
+        // Cache-line note: 4–5 instructions = 16–20 bytes.
+        Instr::CallVtable { dst, data_slot, vtable_slot, method_idx } => {
+            let vtable_offset = *vtable_slot as usize * 8;
+            let method_offset = method_idx * 8;
+            let data_offset   = *data_slot as usize * 8;
+            writeln!(out, "    ldr     x9,  [sp, #{vtable_offset:<14}] // FLS §4.13: load vtable ptr from slot {vtable_slot}")?;
+            writeln!(out, "    ldr     x10, [x9,  #{method_offset:<14}] // FLS §4.13: load method[{method_idx}] fn-ptr from vtable")?;
+            writeln!(out, "    ldr     x0,  [sp, #{data_offset:<14}] // FLS §4.13: load data ptr into x0")?;
+            writeln!(out, "    blr     x10                          // FLS §4.13: indirect call via vtable")?;
+            if *dst != 0 {
+                writeln!(out, "    mov     x{dst}, x0              // FLS §4.13: capture return value → x{dst}")?;
+            }
         }
     }
     Ok(())

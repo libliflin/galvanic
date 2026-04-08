@@ -939,6 +939,55 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         }
     }
 
+    // Build trait method order map: trait_name → Vec<method_name> in declaration order.
+    //
+    // FLS §4.13: Vtable layout for `dyn Trait` is determined by the order of
+    // method declarations in the trait definition. The vtable slot for method `m`
+    // is `position_of(m) * 8` bytes from the vtable base. Galvanic uses
+    // declaration order as the vtable order (consistent with the Rust ABI).
+    //
+    // Cache-line note: built once; read-only after construction.
+    let mut trait_method_order: HashMap<String, Vec<String>> = HashMap::new();
+    for item in &src.items {
+        if let ItemKind::Trait(td) = &item.kind {
+            let trait_name = td.name.text(source).to_owned();
+            let methods: Vec<String> = td.methods.iter()
+                .map(|m| m.name.text(source).to_owned())
+                .collect();
+            trait_method_order.insert(trait_name, methods);
+        }
+    }
+
+    // Build dyn-param registry: fn_name → Vec<Option<String>>.
+    //
+    // FLS §4.13: When a free function has a `&dyn Trait` parameter, call sites
+    // must pass a fat pointer (data ptr, vtable ptr) instead of a single value.
+    // This map records which parameter positions are `&dyn Trait` and which
+    // trait each expects, so call-site lowering can emit the right vtable.
+    //
+    // Only free functions (not methods) are tracked here; dyn method calls use
+    // the `local_dyn_types` map instead.
+    //
+    // Cache-line note: built once; read-only after construction.
+    let mut fn_dyn_param_traits: HashMap<String, Vec<Option<String>>> = HashMap::new();
+    for item in &src.items {
+        if let ItemKind::Fn(fn_def) = &item.kind {
+            let fn_name = fn_def.name.text(source).to_owned();
+            let dyn_info: Vec<Option<String>> = fn_def.params.iter().map(|p| {
+                // A `&dyn Trait` parameter is a Ref whose inner type is DynTrait.
+                if let TyKind::Ref { inner, .. } = &p.ty.kind
+                    && let TyKind::DynTrait(trait_span) = &inner.kind
+                {
+                    return Some(trait_span.text(source).to_owned());
+                }
+                None
+            }).collect();
+            if dyn_info.iter().any(|d| d.is_some()) {
+                fn_dyn_param_traits.insert(fn_name, dyn_info);
+            }
+        }
+    }
+
     // Collect type alias IrTy mappings: maps alias name → resolved IrTy.
     //
     // FLS §4.10: A type alias defines a new name for an existing type.
@@ -1734,6 +1783,10 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     let mut fns = Vec::new();
     let mut trampolines: Vec<crate::ir::ClosureTrampoline> = Vec::new();
     let mut label_base: u32 = 0;
+    // FLS §4.13: Accumulated vtable requirements from dyn Trait call sites.
+    // Each entry is (trait_name, concrete_type_name). Deduplicated by seen_vtables.
+    let mut pending_vtable_reqs: Vec<(String, String)> = Vec::new();
+    let mut seen_vtables: std::collections::HashSet<String> = std::collections::HashSet::new();
     // FLS §12.1: Accumulated monomorphization requests from call sites.
     // Each entry is `(base_name, concrete_types)` where `concrete_types` lists
     // the concrete type for each type parameter (e.g., `"Foo"` for a struct
@@ -1752,12 +1805,13 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                 if !fn_def.generic_params.is_empty() || has_impl_trait {
                     continue;
                 }
-                let (ir_fn, closure_fns, fn_trampolines, next_label, needed) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &tuple_struct_float_field_types, &enum_defs, &enum_variant_float_field_types, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &const_f64_vals, &const_f32_vals, &assoc_const_vals, &static_names, &static_f64_names, &static_f32_names, &fn_names, &struct_raw_field_types, &struct_generic_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, &generic_fn_param_counts, &HashMap::new(), &HashMap::new(), None, label_base)?;
+                let (ir_fn, closure_fns, fn_trampolines, next_label, needed, vtable_reqs) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &tuple_struct_float_field_types, &enum_defs, &enum_variant_float_field_types, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &const_f64_vals, &const_f32_vals, &assoc_const_vals, &static_names, &static_f64_names, &static_f32_names, &fn_names, &struct_raw_field_types, &struct_generic_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, &generic_fn_param_counts, &HashMap::new(), &HashMap::new(), &trait_method_order, &fn_dyn_param_traits, None, label_base)?;
                 label_base = next_label;
                 fns.push(ir_fn);
                 fns.extend(closure_fns);
                 trampolines.extend(fn_trampolines);
                 pending_monos.extend(needed);
+                pending_vtable_reqs.extend(vtable_reqs);
             }
             ItemKind::Impl(impl_def) => {
                 // FLS §11: Inherent impl and trait impl. Each method becomes a
@@ -1793,7 +1847,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         mangled_name: &mangled,
                         self_kind: method.self_param,
                     });
-                    let (ir_fn, closure_fns, fn_trampolines, next_label, needed) = lower_fn(
+                    let (ir_fn, closure_fns, fn_trampolines, next_label, needed, vtable_reqs) = lower_fn(
                         method,
                         source,
                         &struct_defs,
@@ -1827,6 +1881,8 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         &generic_fn_param_counts,
                         &HashMap::new(),
                         &HashMap::new(),
+                        &trait_method_order,
+                        &fn_dyn_param_traits,
                         mctx,
                         label_base,
                     )?;
@@ -1835,6 +1891,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                     fns.extend(closure_fns);
                     trampolines.extend(fn_trampolines);
                     pending_monos.extend(needed);
+                    pending_vtable_reqs.extend(vtable_reqs);
                 }
                 // FLS §10.1.1: Emit default trait methods that are not overridden.
                 //
@@ -1864,7 +1921,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                                 mangled_name: &mangled,
                                 self_kind: default_method.self_param,
                             });
-                            let (ir_fn, closure_fns, fn_trampolines, next_label, needed) = lower_fn(
+                            let (ir_fn, closure_fns, fn_trampolines, next_label, needed, vtable_reqs) = lower_fn(
                                 default_method,
                                 source,
                                 &struct_defs,
@@ -1898,6 +1955,8 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                                 &generic_fn_param_counts,
                                 &HashMap::new(),
                                 &HashMap::new(),
+                                &trait_method_order,
+                                &fn_dyn_param_traits,
                                 mctx,
                                 label_base,
                             )?;
@@ -1906,6 +1965,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                             fns.extend(closure_fns);
                             trampolines.extend(fn_trampolines);
                             pending_monos.extend(needed);
+                            pending_vtable_reqs.extend(vtable_reqs);
                         }
                     }
                 }
@@ -2040,7 +2100,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
             self_kind: fn_def.self_param,
         });
 
-        let (ir_fn, closure_fns, fn_trampolines, next_label, more_needed) = lower_fn(
+        let (ir_fn, closure_fns, fn_trampolines, next_label, more_needed, vtable_reqs) = lower_fn(
             fn_def,
             source,
             &struct_defs,
@@ -2074,6 +2134,8 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
             &generic_fn_param_counts,
             &generic_subst,
             &generic_type_subst,
+            &trait_method_order,
+            &fn_dyn_param_traits,
             mctx,
             label_base,
         )?;
@@ -2082,9 +2144,50 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         fns.extend(closure_fns);
         trampolines.extend(fn_trampolines);
         pending_monos.extend(more_needed);
+        pending_vtable_reqs.extend(vtable_reqs);
     }
 
-    Ok(Module { fns, statics: static_data, trampolines })
+    // FLS §4.13: Build vtable shims and vtable data sections from accumulated requirements.
+    //
+    // Each (trait_name, concrete_type) pair requires:
+    //   1. One `VtableShim` per trait method: loads struct fields from a data
+    //      pointer and tail-calls the concrete method.
+    //   2. One `VtableSpec`: a `.rodata` table of shim addresses in method
+    //      declaration order.
+    //
+    // Shims are deduplicated by label to avoid duplicate function definitions
+    // when the same (trait, type) pair appears in multiple call sites.
+    //
+    // Cache-line note: each shim is (n_fields + 1) × 4-byte instructions.
+    let mut vtable_shims: Vec<crate::ir::VtableShim> = Vec::new();
+    let mut vtables: Vec<crate::ir::VtableSpec> = Vec::new();
+    for (trait_name, concrete_type) in pending_vtable_reqs {
+        let vtable_label = format!("vtable_{trait_name}_{concrete_type}");
+        if seen_vtables.contains(&vtable_label) {
+            continue;
+        }
+        seen_vtables.insert(vtable_label.clone());
+
+        let methods = match trait_method_order.get(&trait_name) {
+            Some(m) => m,
+            None => continue, // unknown trait — skip
+        };
+        let n_fields = struct_sizes.get(concrete_type.as_str()).copied()
+            .unwrap_or_else(|| struct_defs.get(concrete_type.as_str()).map(|f| f.len()).unwrap_or(1));
+        let mut shim_labels = Vec::new();
+        for (method_idx, method_name) in methods.iter().enumerate() {
+            let shim_name = format!("vtable_shim_{trait_name}_{concrete_type}_{method_idx}");
+            let target = format!("{concrete_type}__{method_name}");
+            shim_labels.push(shim_name.clone());
+            // Only add shim if not already present (dedup across call sites).
+            if !vtable_shims.iter().any(|s: &crate::ir::VtableShim| s.name == shim_name) {
+                vtable_shims.push(crate::ir::VtableShim { name: shim_name, target, n_fields });
+            }
+        }
+        vtables.push(crate::ir::VtableSpec { label: vtable_label, method_shim_labels: shim_labels });
+    }
+
+    Ok(Module { fns, statics: static_data, trampolines, vtable_shims, vtables })
 }
 
 // ── Function lowering ────────────────────────────────────────────────────────
@@ -2158,7 +2261,7 @@ fn collect_tuple_param_leaves(pats: &[Pat]) -> Result<Vec<Option<&crate::ast::Sp
 /// functions it generated, the next fresh label counter, and the list of
 /// generic base names that were called and need monomorphization.
 type LowerFnResult = Result<
-    (IrFn, Vec<IrFn>, Vec<crate::ir::ClosureTrampoline>, u32, Vec<(String, Vec<String>)>),
+    (IrFn, Vec<IrFn>, Vec<crate::ir::ClosureTrampoline>, u32, Vec<(String, Vec<String>)>, Vec<(String, String)>),
     LowerError,
 >;
 
@@ -2208,6 +2311,10 @@ fn lower_fn(
     // of that type dispatch through the existing struct method mechanism.
     // Empty for non-generic functions and scalar-only monomorphizations.
     generic_type_subst: &HashMap<String, String>,
+    // FLS §4.13: Trait method declaration order for vtable index resolution.
+    trait_method_order: &HashMap<String, Vec<String>>,
+    // FLS §4.13: Which function params are `&dyn Trait`, keyed by trait name.
+    fn_dyn_param_traits: &HashMap<String, Vec<Option<String>>>,
     method: Option<MethodCtx<'_>>,
     start_label: u32,
 ) -> LowerFnResult {
@@ -2289,7 +2396,7 @@ fn lower_fn(
         Some(block) => block,
     };
 
-    let mut ctx = LowerCtx::new(source, &name, ret_ty, struct_defs, tuple_struct_defs, tuple_struct_float_field_types, enum_defs, enum_variant_float_field_types, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, f64_return_fns, f32_return_fns, const_vals, const_f64_vals, const_f32_vals, assoc_const_vals, static_names, static_f64_names, static_f32_names, fn_names, struct_field_types, struct_generic_field_types, struct_field_offsets, struct_sizes, type_aliases, struct_float_field_types, generic_fn_param_counts.clone(), generic_type_subst, start_label);
+    let mut ctx = LowerCtx::new(source, &name, ret_ty, struct_defs, tuple_struct_defs, tuple_struct_float_field_types, enum_defs, enum_variant_float_field_types, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, f64_return_fns, f32_return_fns, const_vals, const_f64_vals, const_f32_vals, assoc_const_vals, static_names, static_f64_names, static_f32_names, fn_names, struct_field_types, struct_generic_field_types, struct_field_offsets, struct_sizes, type_aliases, struct_float_field_types, generic_fn_param_counts.clone(), generic_type_subst, trait_method_order, fn_dyn_param_traits, start_label);
 
     // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
     // to stack slots. Each parameter slot is allocated in parameter order
@@ -2757,6 +2864,42 @@ fn lower_fn(
                 ctx.instrs.push(Instr::Store { src: reg_idx as u8, slot });
                 reg_idx += 1;
             }
+            continue;
+        }
+
+        // FLS §4.13: `&dyn Trait` parameter — fat pointer (data ptr, vtable ptr).
+        //
+        // A `&dyn Trait` parameter arrives as TWO consecutive integer registers:
+        //   x{reg_idx}   = data pointer (points to the concrete value on the caller's stack)
+        //   x{reg_idx+1} = vtable pointer (points to the vtable for this (trait, type) pair)
+        //
+        // Both pointers are spilled to two consecutive stack slots. The `data_slot`
+        // (base) is registered in `locals` and `local_dyn_types` so that method-call
+        // lowering can emit `CallVtable` when it sees a dyn-typed receiver.
+        //
+        // FLS §4.13: AMBIGUOUS — The FLS does not specify the fat pointer ABI.
+        // Galvanic uses (data_ptr, vtable_ptr) matching the Rust ABI convention.
+        //
+        // Cache-line note: 2 spills per fat pointer (vs 1 for thin). The extra
+        // vtable pointer is the unavoidable cost of dynamic dispatch.
+        if let TyKind::Ref { inner, .. } = &param.ty.kind
+            && let TyKind::DynTrait(trait_span) = &inner.kind
+        {
+            let trait_name = trait_span.text(source).to_owned();
+            if reg_idx + 2 > 8 {
+                return Err(LowerError::Unsupported(
+                    "&dyn Trait parameter exceeds ARM64 register window (>8 registers)".into(),
+                ));
+            }
+            let data_slot = ctx.alloc_slot()?;
+            let vtable_slot = ctx.alloc_slot()?;
+            // Spill data pointer from x{reg_idx}.
+            ctx.instrs.push(Instr::Store { src: reg_idx as u8, slot: data_slot });
+            // Spill vtable pointer from x{reg_idx+1}.
+            ctx.instrs.push(Instr::Store { src: (reg_idx + 1) as u8, slot: vtable_slot });
+            ctx.locals.insert(param_name, data_slot);
+            ctx.local_dyn_types.insert(data_slot, trait_name);
+            reg_idx += 2;
             continue;
         }
 
@@ -3255,7 +3398,8 @@ fn lower_fn(
     let float_consts = ctx.float_consts;
     let float32_consts = ctx.float32_consts;
     let needed_monos = ctx.needed_monos;
-    Ok((IrFn { name, ret_ty, body: body_instrs, stack_slots, saves_lr, float_consts, float32_consts }, pending_closures, pending_trampolines, next_label, needed_monos))
+    let pending_vtables = ctx.pending_vtables;
+    Ok((IrFn { name, ret_ty, body: body_instrs, stack_slots, saves_lr, float_consts, float32_consts }, pending_closures, pending_trampolines, next_label, needed_monos, pending_vtables))
 }
 
 // ── Type lowering ────────────────────────────────────────────────────────────
@@ -4247,6 +4391,44 @@ struct LowerCtx<'src> {
     ///
     /// Cache-line note: typically empty or very small. Not on a hot path.
     needed_monos: Vec<(String, Vec<String>)>,
+
+    /// Vtable requirements: (trait_name, concrete_type) pairs needed by dyn Trait call sites.
+    ///
+    /// FLS §4.13: When lowering a call `f(&s)` where `f` takes `&dyn Trait`, we
+    /// record which (Trait, ConcreteType) vtable is required. The module-level
+    /// lower() generates the vtable data and shims from these requirements.
+    ///
+    /// Cache-line note: typically empty or very small (one per dyn call site).
+    pending_vtables: Vec<(String, String)>,
+
+    /// Maps stack slot (base of a fat pointer pair) to the dyn trait name.
+    ///
+    /// FLS §4.13: A `&dyn Trait` parameter occupies two consecutive stack slots:
+    ///   - data_slot (base): pointer to the concrete value
+    ///   - vtable_slot (base+1): pointer to the vtable
+    ///
+    /// This map lets method-call lowering detect dyn trait receivers and emit
+    /// `CallVtable` instead of the usual struct-dispatch path.
+    ///
+    /// Cache-line note: one entry per `&dyn Trait` parameter.
+    local_dyn_types: HashMap<u8, String>,
+
+    /// Trait method order: trait_name → Vec<method_name> in declaration order.
+    ///
+    /// FLS §4.13: The vtable slot for method `m` is `position_of(m) * 8` bytes.
+    /// Used by method-call lowering to determine the `method_idx` for `CallVtable`.
+    ///
+    /// Cache-line note: shared reference; read-only during lowering.
+    trait_method_order: &'src HashMap<String, Vec<String>>,
+
+    /// Dyn param info: fn_name → Vec<Option<trait_name>>.
+    ///
+    /// FLS §4.13: When a free function takes `&dyn Trait` at position i, this
+    /// map records `Some(trait_name)` at that position. Call-site lowering
+    /// uses this to emit (data_ptr, vtable_ptr) instead of a plain value.
+    ///
+    /// Cache-line note: shared reference; read-only during lowering.
+    fn_dyn_param_traits: &'src HashMap<String, Vec<Option<String>>>,
 }
 
 /// Collect all free variables in `expr` that are present in `outer_locals`
@@ -4452,6 +4634,8 @@ impl<'src> LowerCtx<'src> {
         struct_float_field_types: &'src HashMap<String, Vec<Option<IrTy>>>,
         generic_fn_param_counts: HashMap<String, usize>,
         generic_type_subst: &'src HashMap<String, String>,
+        trait_method_order: &'src HashMap<String, Vec<String>>,
+        fn_dyn_param_traits: &'src HashMap<String, Vec<Option<String>>>,
         start_label: u32,
     ) -> Self {
         LowerCtx {
@@ -4519,6 +4703,10 @@ impl<'src> LowerCtx<'src> {
             generic_fn_param_counts,
             needed_monos: Vec::new(),
             generic_type_subst,
+            pending_vtables: Vec::new(),
+            local_dyn_types: HashMap::new(),
+            trait_method_order,
+            fn_dyn_param_traits,
         }
     }
 
@@ -8347,6 +8535,8 @@ impl<'src> LowerCtx<'src> {
                     self.struct_float_field_types,
                     self.generic_fn_param_counts.clone(),
                     self.generic_type_subst,
+                    self.trait_method_order,
+                    self.fn_dyn_param_traits,
                     inner_start_label,
                 );
 
@@ -11349,6 +11539,10 @@ impl<'src> LowerCtx<'src> {
                     }
                 };
 
+                // Capture the base function name before monomorphization renaming.
+                // Used below for `fn_dyn_param_traits` lookup (FLS §4.13).
+                let base_fn_name = fn_name.clone();
+
                 // FLS §12.1: If calling a generic function, remap the base name to
                 // the mangled specialisation name (`identity` → `identity__i32` or
                 // `apply__Foo` for a struct-typed type parameter) and record it so
@@ -11418,11 +11612,57 @@ impl<'src> LowerCtx<'src> {
                 // discriminant in the first, fields in subsequent registers.
                 // This matches the enum parameter calling convention in `lower_fn`.
                 //
+                // FLS §4.13: If an argument is `&x` where the callee expects `&dyn Trait`
+                // at this parameter position, emit a fat pointer: two consecutive
+                // registers — data_ptr (AddrOf x) and vtable_ptr (LoadFnAddr vtable_label).
+                //
                 // FLS §6.1.2:37–45: All loads are runtime instructions.
                 let mut arg_regs = Vec::with_capacity(args.len());
                 // FLS §4.2: Float arguments go in d0–d7; collected separately.
                 let mut float_arg_regs: Vec<u8> = Vec::new();
-                for arg in args {
+                for (arg_idx, arg) in args.iter().enumerate() {
+                    // FLS §4.13: &dyn Trait fat-pointer argument.
+                    // If the callee's parameter at this index is &dyn Trait, emit
+                    // (data_ptr, vtable_ptr) instead of a single register, and
+                    // register the vtable requirement for generation later.
+                    if let Some(dyn_params) = self.fn_dyn_param_traits.get(&base_fn_name)
+                        && let Some(Some(trait_name)) = dyn_params.get(arg_idx) {
+                            let trait_name = trait_name.clone();
+                            // arg must be &x (borrow of a named variable)
+                            if let ExprKind::Unary { op: crate::ast::UnaryOp::Ref, operand: inner } = &arg.kind
+                                && let ExprKind::Path(segs) = &inner.kind
+                                && segs.len() == 1
+                            {
+                                let var_name = segs[0].text(self.source).to_owned();
+                                let base_slot = *self.locals.get(var_name.as_str())
+                                    .ok_or_else(|| LowerError::Unsupported(format!(
+                                        "dyn Trait arg `{var_name}` not found in locals"
+                                    )))?;
+                                let concrete_type = self.local_struct_types
+                                    .get(&base_slot)
+                                    .cloned()
+                                    .ok_or_else(|| LowerError::Unsupported(format!(
+                                        "dyn Trait arg `{var_name}` has unknown concrete type; \
+                                         must be a struct variable"
+                                    )))?;
+                                let vtable_label = format!("vtable_{trait_name}_{concrete_type}");
+                                // Emit data pointer (address of first slot of the struct).
+                                let data_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::AddrOf { dst: data_reg, slot: base_slot });
+                                arg_regs.push(data_reg);
+                                // Emit vtable pointer (address of rodata vtable).
+                                let vtable_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::LoadFnAddr { dst: vtable_reg, name: vtable_label });
+                                arg_regs.push(vtable_reg);
+                                // Register vtable requirement for generation at end of lower().
+                                self.pending_vtables.push((trait_name, concrete_type));
+                                continue;
+                            } else {
+                                return Err(LowerError::Unsupported(format!(
+                                    "dyn Trait argument at position {arg_idx} must be `&variable`"
+                                )));
+                            }
+                    }
                     // Check whether this argument is a struct variable.
                     //
                     // For nested structs, use the total slot count from `struct_sizes`
@@ -14526,6 +14766,46 @@ impl<'src> LowerCtx<'src> {
                     }
                 }
 
+                // FLS §4.13: `&dyn Trait` method call — dispatch through vtable.
+                //
+                // If the receiver is a variable registered in `local_dyn_types`, the
+                // call is a dynamic dispatch through the vtable stored in the adjacent
+                // slot (data_slot + 1). We look up the method index from the trait's
+                // declaration order and emit `CallVtable`.
+                //
+                // Restriction: dyn Trait method calls must take `&self` only (no extra
+                // arguments) at this milestone. Args is checked to be empty.
+                //
+                // FLS §4.13: AMBIGUOUS — The spec does not specify vtable call ABI.
+                // Cache-line note: 4 fixed instructions (ldr vtable, ldr method, ldr
+                // data, blr) = 16 bytes. Fits in one 64-byte instruction cache line.
+                if let ExprKind::Path(segs) = &receiver.kind
+                    && segs.len() == 1
+                {
+                    let var_name = segs[0].text(self.source);
+                    if let Some(&data_slot) = self.locals.get(var_name)
+                        && let Some(trait_name) = self.local_dyn_types.get(&data_slot).cloned()
+                    {
+                        let vtable_slot = data_slot + 1;
+                        // Look up method index in trait declaration order.
+                        let method_idx = self.trait_method_order
+                            .get(&trait_name)
+                            .and_then(|methods| methods.iter().position(|m| m == method_name))
+                            .ok_or_else(|| LowerError::Unsupported(format!(
+                                "method `{method_name}` not found in trait `{trait_name}` for dyn dispatch"
+                            )))?;
+                        if !args.is_empty() {
+                            return Err(LowerError::Unsupported(
+                                "dyn Trait method calls with extra arguments not yet supported".into(),
+                            ));
+                        }
+                        let dst = self.alloc_reg()?;
+                        self.instrs.push(Instr::CallVtable { dst, data_slot, vtable_slot, method_idx });
+                        self.has_calls = true;
+                        return Ok(IrValue::Reg(dst));
+                    }
+                }
+
                 // Resolve the receiver to a struct or enum variable's base slot and type.
                 //
                 // FLS §6.12.2: Method call expressions — `receiver.method(args)`.
@@ -15089,6 +15369,8 @@ impl<'src> LowerCtx<'src> {
                     self.struct_float_field_types,
                     self.generic_fn_param_counts.clone(),
                     self.generic_type_subst,
+                    self.trait_method_order,
+                    self.fn_dyn_param_traits,
                     closure_start_label,
                 );
 

@@ -87,6 +87,75 @@ pub struct Module {
     /// Cache-line note: each trampoline is 3–6 instructions (12–24 bytes),
     /// fitting in less than half a 64-byte cache line.
     pub trampolines: Vec<ClosureTrampoline>,
+
+    /// Vtable shim functions for `dyn Trait` dispatch. FLS §4.13.
+    ///
+    /// Each shim adapts the "fields spread across registers" calling convention
+    /// used by galvanic's struct methods to the "data pointer in x0" convention
+    /// expected by vtable callers. A shim for method `m` on type `T` with N
+    /// fields:
+    ///   1. Receives x0 = ptr to T's data on the caller's stack frame.
+    ///   2. Loads fields from offsets 0, 8, 16, … in reverse order (field N-1
+    ///      first so that overwriting x0 with field 0 is safe).
+    ///   3. Tail-calls `T__m` with the fields in x0..x{N-1}.
+    ///
+    /// Cache-line note: N+1 instructions (N loads + 1 branch), ≤ 20 bytes
+    /// for typical 4-field structs — fits in a single 64-byte cache line.
+    pub vtable_shims: Vec<VtableShim>,
+
+    /// Vtable data sections for `dyn Trait`. FLS §4.13.
+    ///
+    /// One `VtableSpec` per (trait, concrete_type) pair used in the program.
+    /// Each vtable is a read-only array of function pointer addresses, one
+    /// per trait method in declaration order.
+    ///
+    /// Cache-line note: each vtable occupies N × 8 bytes in `.rodata`.
+    /// For a single-method trait, the vtable fits in one 64-byte cache line
+    /// alongside 7 other vtables.
+    pub vtables: Vec<VtableSpec>,
+}
+
+/// A vtable shim for `dyn Trait` dispatch. FLS §4.13.
+///
+/// Bridges the gap between the vtable call convention (receives a single data
+/// pointer in x0) and galvanic's struct method convention (receives each field
+/// in a separate register x0..x{N-1}).
+///
+/// ARM64 design: loads fields from the data pointer in reverse order (highest
+/// index first) to avoid clobbering x0 (which holds the pointer) before field
+/// 0 is loaded. Uses a tail-call (`b`, not `bl`) so the return from the
+/// target method goes directly back to the vtable caller.
+///
+/// Cache-line note: (n_fields + 1) × 4-byte instructions. For a 1-field
+/// struct: 2 instructions (8 bytes). For a 4-field struct: 5 instructions
+/// (20 bytes). All fit in a single 64-byte instruction cache line.
+pub struct VtableShim {
+    /// Assembly label for this shim (e.g., `vtable_shim_MyTrait_MyStruct_0`).
+    pub name: String,
+    /// Mangled name of the target method (e.g., `MyStruct__my_method`).
+    pub target: String,
+    /// Number of integer fields in the concrete struct type.
+    ///
+    /// Each field occupies one register (x0..x{n-1}) after the shim loads
+    /// them from the data pointer. Float fields are not supported at this
+    /// milestone (dyn Trait dispatch for float-field structs is deferred).
+    pub n_fields: usize,
+}
+
+/// A vtable data record for one (trait, concrete_type) pair. FLS §4.13.
+///
+/// Emitted as a read-only array of function pointer addresses in `.rodata`.
+/// Indexed by method position (0 = first method in trait declaration order).
+///
+/// Cache-line note: N × 8 bytes in `.rodata`, 8-byte aligned.
+pub struct VtableSpec {
+    /// Assembly label for this vtable (e.g., `vtable_MyTrait_MyStruct`).
+    pub label: String,
+    /// Shim labels in trait method declaration order.
+    ///
+    /// `method_shim_labels[i]` is the address emitted at offset `i * 8`
+    /// in the vtable. The vtable caller loads this address and calls via `blr`.
+    pub method_shim_labels: Vec<String>,
 }
 
 /// A trampoline for passing a capturing closure as an `impl Fn` argument.
@@ -781,6 +850,39 @@ pub enum Instr {
         ptr_slot: u8,
         /// Argument virtual registers, in left-to-right parameter order.
         args: Vec<u8>,
+    },
+
+    /// Call a method through a vtable (dynamic dispatch). FLS §4.13.
+    ///
+    /// `CallVtable { dst, data_slot, vtable_slot, method_idx }` emits:
+    ///   `ldr x9, [sp, #{vtable_slot*8}]`    // load vtable pointer
+    ///   `ldr x10, [x9, #{method_idx*8}]`    // load method fn-ptr from vtable
+    ///   `ldr x0, [sp, #{data_slot*8}]`      // load data pointer → shim arg
+    ///   `blr x10`                             // dispatch through vtable
+    ///   `mov x{dst}, x0`                     // capture return value
+    ///
+    /// The callee is a vtable shim that receives x0 = data pointer, expands
+    /// the struct fields into registers, and tail-calls the concrete method.
+    ///
+    /// ARM64 scratch registers x9/x10 are caller-saved and not argument
+    /// registers, so loading the vtable and method pointers there does not
+    /// disturb the data pointer in x0.
+    ///
+    /// FLS §4.13: "Each method in the trait definition has a pointer in the
+    /// vtable." Indexing: method_idx × 8 bytes gives the byte offset.
+    ///
+    /// Cache-line note: 4 fixed instructions (ldr, ldr, ldr, blr) + 1 result
+    /// move = 5 instructions (20 bytes). Fits in one 64-byte cache line
+    /// alongside 11 other instructions.
+    CallVtable {
+        /// Destination virtual register for the scalar return value.
+        dst: u8,
+        /// Stack slot holding the data pointer (first half of fat pointer).
+        data_slot: u8,
+        /// Stack slot holding the vtable pointer (second half of fat pointer).
+        vtable_slot: u8,
+        /// Index of the method within the vtable (0 = first method).
+        method_idx: usize,
     },
 
     /// Call a `&mut self` method and write modified fields back to the caller's struct.
