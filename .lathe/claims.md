@@ -2653,35 +2653,36 @@ must be emitted at runtime even though the values happen to be known at the call
 
 ---
 
-## Claim 66: u8/i8 compound assignment wraps correctly mid-body (not only at return boundaries)
+## Claim 66: narrow integer compound assignment wraps correctly mid-body (not only at return boundaries)
 
 **Stakeholder**: William (researcher), Compiler Researchers
 
-**Promise**: When a `u8` or `i8` local variable is updated via compound assignment
-(`+=`, `-=`, `*=`, etc.) and then read back within the same function body, the value
-must already be in the type's range — regardless of whether the function's return type
-is `u8`/`i8` or something else.
+**Promise**: When a `u8`, `i8`, `u16`, or `i16` local variable is updated via compound
+assignment (`+=`, `-=`, `*=`, etc.) and then read back within the same function body,
+the value must already be in the type's range — regardless of whether the function's
+return type is a narrow integer or not. This applies to ALL compound-assignment operators,
+not only `+=`.
 
-The existing TruncU8/SextI8 at function return boundaries is insufficient because a
-variable can be read in comparisons, casts (`x as i32`), or passed to other functions
-before the enclosing function returns. Without normalization at the compound-assignment
-store, the slot holds an unwrapped value (e.g., 300 for `200_u8 += 100`) and any
-mid-body read sees the wrong value.
+The existing TruncU8/SextI8/TruncU16/SextI16 at function return boundaries is
+insufficient because a variable can be read in comparisons, casts, or passed to other
+functions before the enclosing function returns. Without normalization at the
+compound-assignment store, the slot holds an unwrapped value and mid-body reads see
+wrong results.
 
-This was a real latent bug: `let mut x: u8 = 200; x += 100; if x < 50 { ... }` would
-branch incorrectly (comparing 300 < 50 instead of 44 < 50) on code paths that never
-return u8 directly.
+This was a real latent bug for `+=`; the same path applies to `*=`. The normalization
+at `lower.rs:14527–14539` applies after ANY BinOp in a compound-assignment, but was
+only tested for `+=` prior to milestone 186.
 
-**FLS §4.1**: u8 range is 0..=255; i8 range is -128..=127.
+**FLS §4.1**: narrow integer ranges (u8: 0..=255, i8: -128..=127, u16: 0..=65535, i16: -32768..=32767).
 **FLS §6.23**: At runtime, integer arithmetic wraps. The wrapping must be observable
 immediately after the operation, not only at function boundaries.
 **FLS §6.1.2 Constraint 1**: The operation is runtime; so is the wrapping normalization.
 
-**Violated if** for `fn test(a: u8, b: u8) -> i32 { let mut x: u8 = a; x += b; if x < 50 { 1 } else { 0 } }` called with `(200, 100)`:
+**Violated if** for `fn test(a: u8, b: u8) -> i32 { let mut x: u8 = a; x *= b; if x < 50 { 1 } else { 0 } }` called with `(15, 20)`:
 - returns 0 instead of 1 (comparison sees 300 instead of wrapped 44), OR
-- the compound_u8 function body lacks `and ... #255` before the store-back
+- the function body lacks `and ... #255` before the store-back for `*=`
 
-**Tests**: `cargo test --test e2e -- runtime_u8_compound_add_emits_trunc_u8 runtime_i8_compound_add_emits_sext_i8 milestone_178_u8_compound_add_wraps_mid_body milestone_178_i8_compound_add_wraps_mid_body`
+**Tests**: `cargo test --test e2e -- runtime_u8_compound_add_emits_trunc_u8 runtime_i8_compound_add_emits_sext_i8 milestone_178_u8_compound_add_wraps_mid_body milestone_178_i8_compound_add_wraps_mid_body runtime_u8_compound_mul_emits_trunc_u8 runtime_i8_compound_mul_emits_sext_i8 milestone_186_u8_compound_mul_wraps_mid_body milestone_186_i8_compound_mul_wraps_mid_body runtime_u16_compound_mul_emits_trunc_u16 runtime_i16_compound_mul_emits_sext_i16 milestone_186_u16_compound_mul_wraps_mid_body milestone_186_i16_compound_mul_wraps_mid_body`
 
 ---
 
