@@ -31934,3 +31934,132 @@ fn claim_75_u8_const_item_wraps_at_8_bits_not_i32() {
     };
     assert_eq!(exit_code, 1, "u8 const 200+100 must wrap to 44; bug gives 300 which fails == 44 check");
 }
+
+// ── Milestone 190: chained narrow integer const item references ───────────────
+//
+// FLS §7.1:10: Every use of a constant is replaced with its value (or a copy
+// of it). When a narrow-typed const references another narrow-typed const, the
+// stored value used as the operand must already be narrowed.
+//
+// Example: `const X: u8 = 200; const Y: u8 = X + 100`
+//   - X is stored as 200 (fits in u8 without wrapping)
+//   - Y's initializer fetches X=200 from const_vals, adds 100 → 300 in i32,
+//     then narrow_const_value wraps 300 to (300 as u8) = 44.
+//   - Y is stored as 44.
+//
+// The adversarial failure mode: if narrow_const_value were not called, Y would
+// store 300. Since `exit(300)` is `exit(44)` at the OS level, only assembly
+// inspection or comparison-based runtime tests can catch this.
+
+#[test]
+fn milestone_190_u8_const_ref_chain_wraps() {
+    let Some(exit_code) = compile_and_run(
+        "const X: u8 = 200;\nconst Y: u8 = X + 100;\nfn check(v: i32) -> i32 { if v == 44 { 1 } else { 0 } }\nfn main() -> i32 { check(Y as i32) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "const X:u8=200; const Y:u8=X+100 must yield Y=44 (300 wrapped)");
+}
+
+#[test]
+fn milestone_190_u8_const_ref_chain_no_wrap() {
+    let Some(exit_code) = compile_and_run(
+        "const X: u8 = 10;\nconst Y: u8 = X + 5;\nfn check(v: i32) -> i32 { if v == 15 { 1 } else { 0 } }\nfn main() -> i32 { check(Y as i32) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "const X:u8=10; const Y:u8=X+5 must yield Y=15 (no wrapping)");
+}
+
+#[test]
+fn milestone_190_u8_three_level_const_chain() {
+    // X=200, Y=X+100=44, Z=Y+50=94. No wrap at Z step (44+50=94 < 256).
+    let Some(exit_code) = compile_and_run(
+        "const X: u8 = 200;\nconst Y: u8 = X + 100;\nconst Z: u8 = Y + 50;\nfn check(v: i32) -> i32 { if v == 94 { 1 } else { 0 } }\nfn main() -> i32 { check(Z as i32) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "X=200,Y=44,Z=44+50=94 — three-level u8 const chain must give 94");
+}
+
+#[test]
+fn milestone_190_u16_const_ref_chain_wraps() {
+    // X: u16 = 60000, Y: u16 = X + 10000 → 70000 wrapped to u16 = 4464
+    let Some(exit_code) = compile_and_run(
+        "const X: u16 = 60000;\nconst Y: u16 = X + 10000;\nfn check(v: i32) -> i32 { if v == 4464 { 1 } else { 0 } }\nfn main() -> i32 { check(Y as i32) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "const X:u16=60000; const Y:u16=X+10000 must yield 4464 (70000 wrapped to u16)");
+}
+
+#[test]
+fn milestone_190_i32_const_used_in_u8_chain() {
+    // i32 const X = 100; u8 const Y = X + 200 → 300 wrapped to u8 = 44.
+    // Tests that a non-narrow const's value is correctly used as an operand
+    // in a narrow const's initializer, with wrapping applied to the narrow result.
+    let Some(exit_code) = compile_and_run(
+        "const X: i32 = 100;\nconst Y: u8 = X as u8 + 200;\nfn check(v: i32) -> i32 { if v == 44 { 1 } else { 0 } }\nfn main() -> i32 { check(Y as i32) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "i32 const feeding u8 const: (100 as u8) + 200 wrapped must give 44");
+}
+
+// Assembly inspection: chained narrow const reference emits the wrapped immediate.
+// `const X: u8 = 200; const Y: u8 = X + 100; fn main() -> i32 { Y as i32 }`
+// must emit #44 (0x2c) for Y, not #300 (0x12c).
+//
+// If narrow_const_value is not applied after fetching X's value and computing
+// X+100=300 in i32, the assembly would emit `mov  x0, #300` — caught here.
+#[test]
+fn runtime_u8_const_chain_ref_emits_correct_loadimm() {
+    let asm = compile_to_asm(
+        "const X: u8 = 200;\nconst Y: u8 = X + 100;\nfn main() -> i32 { Y as i32 }\n",
+    );
+    assert!(
+        asm.contains("#44") || asm.contains("#0x2c"),
+        "chained u8 const Y=X+100 (X=200) must emit #44 (#0x2c); got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("#300") && !asm.contains("#0x12c"),
+        "chained u8 const must NOT emit #300 (unwrapped i32): {asm}"
+    );
+}
+
+// Claim 76 falsification test: chained narrow const references preserve bit-width.
+//
+// This is the adversarial version of Claim 75 extended to const-chains.
+// The failure mode is subtle: `eval_const_expr` fetches X's stored value (already
+// narrowed to 200), adds 100 → 300 in i32. Without a second call to
+// `narrow_const_value` before inserting Y into const_vals, Y stores 300.
+//
+// The comparison-based runtime test makes this detectable: exit(300)==exit(44)
+// at the OS level, so we must use `check(Y) { if Y == 44 { 1 } else { 0 } }`.
+//
+// FLS §7.1:10: Every use of a constant is replaced with its value.
+// FLS §4.1: Narrow integer types have specific bit-widths.
+// FLS §6.23 AMBIGUOUS: Overflow in const contexts should error; galvanic wraps.
+#[test]
+fn claim_76_u8_chained_const_ref_wraps_at_8_bits() {
+    // Assembly check: Y must be emitted as #44, not #300.
+    let asm = compile_to_asm(
+        "const X: u8 = 200;\nconst Y: u8 = X + 100;\nfn main() -> i32 { Y as i32 }\n",
+    );
+    assert!(
+        asm.contains("#44") || asm.contains("#0x2c"),
+        "claim_76 ASM: chained u8 const Y=X+100 (X=200) must emit #44; got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("#300") && !asm.contains("#0x12c"),
+        "claim_76 ASM: must NOT emit #300 (unwrapped i32): {asm}"
+    );
+
+    // Runtime check: check(Y)==1 only if Y==44 (correctly wrapped).
+    let Some(exit_code) = compile_and_run(
+        "const X: u8 = 200;\nconst Y: u8 = X + 100;\nfn check(v: i32) -> i32 { if v == 44 { 1 } else { 0 } }\nfn main() -> i32 { check(Y as i32) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "claim_76: Y=X+100 (X=200,u8) must be 44 — got exit {exit_code} (0=Y was 300)");
+}
