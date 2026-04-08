@@ -1005,6 +1005,31 @@ else
     pass "Claim 48: Self::AssocType in method signatures emits runtime dispatch (not constant-folded)"
 fi
 
+# ── Claim 49: T::AssocType in generic function return position emits monomorphized dispatch (not folded) ─
+#
+# Promise: A generic free function `fn use_it<C: Container>(c: C) -> C::Item` must:
+# 1. Emit a monomorphized label per concrete type (e.g., use_it__Counter).
+# 2. Dispatch to the concrete method via bl at runtime.
+# 3. Not constant-fold the result.
+# Both single-type (Pattern 1) and two-type (Pattern 2) cases are guarded.
+#
+# Pattern 1: use_it__Counter label present, bl Counter__get present, mov x0,#0 absent
+# Pattern 2: both Meters and Feet labels present, mov x0,#5 absent
+#
+# FLS §10.2: Associated type projections resolve per-impl at monomorphization.
+# FLS §12.1 / §10.2 AMBIGUOUS: Spec does not specify how T::X resolves during monomorphization.
+# FLS §6.1.2 Constraint 1: fn main() is not a const context.
+#
+# Introduced in cycle 92 (M167 T::AssocType falsification).
+# References: claims.md Claim 49.
+
+echo "--- Claim 49: T::AssocType in generic function return position emits monomorphized dispatch (not folded) ---"
+if cargo test --test e2e --quiet -- runtime_proj_return_emits_bl_not_folded runtime_proj_two_types_both_monomorphized 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 49" "runtime_proj_return_emits_bl_not_folded or runtime_proj_two_types_both_monomorphized FAILED — T::AssocType generic return may be constant-folded or monomorphized label missing"
+else
+    pass "Claim 49: T::AssocType in generic fn return emits monomorphized dispatch (not constant-folded)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 

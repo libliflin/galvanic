@@ -1912,3 +1912,90 @@ Self::AssocType signatures must execute at runtime.
 - contains `mov     x0, #12` (result for n=3,f=4 was constant-folded)
 
 **Tests**: `cargo test --test e2e -- runtime_self_assoc_type_return_emits_bl_not_folded runtime_self_assoc_type_param_emits_mul_not_folded`
+
+---
+
+## Claim 49: T::AssocType in generic function return position emits monomorphized dispatch (not constant-folded)
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: When a generic free function uses `T::AssocType` as its return type
+(e.g., `fn use_it<C: Container>(c: C) -> C::Item`), the emitted assembly must:
+1. Emit a monomorphized label per concrete type (e.g., `use_it__Counter`).
+2. Dispatch to the concrete method via `bl` at runtime.
+3. Not constant-fold the result.
+
+Both the single-type and two-type (both concrete types) cases are guarded.
+
+```rust
+// Pattern 1: single generic fn with T::Item return
+trait Container {
+    type Item;
+    fn get(&self) -> Self::Item;
+}
+struct Counter { val: i32 }
+impl Container for Counter {
+    type Item = i32;
+    fn get(&self) -> Self::Item { self.val }
+}
+fn use_it<C: Container>(c: C) -> C::Item { c.get() }
+fn make_and_call(n: i32) -> i32 { let c = Counter { val: n }; use_it(c) }
+// main: make_and_call(5) → 5
+
+// Pattern 2: two concrete types, both monomorphized
+trait Measure {
+    type Unit;
+    fn measure(&self) -> Self::Unit;
+}
+struct Meters { val: i32 }
+struct Feet { val: i32 }
+impl Measure for Meters { type Unit = i32; fn measure(&self) -> Self::Unit { self.val } }
+impl Measure for Feet   { type Unit = i32; fn measure(&self) -> Self::Unit { self.val * 3 } }
+fn get_measure<M: Measure>(m: M) -> M::Unit { m.measure() }
+// main: get_measure(Meters{val:2}) + get_measure(Feet{val:1}) → 5
+```
+
+Must emit (Pattern 1):
+- `use_it__Counter` — monomorphized label for the concrete instantiation
+- `bl      Counter__get` — runtime dispatch to the trait method
+- NOT `mov x0, #0` — result must not be folded to a constant
+
+Must emit (Pattern 2):
+- Both `Meters` and `Feet` labels in the assembly
+- NOT `mov     x0, #5` — result must not be constant-folded to 5
+
+**Why this claim matters**: Milestone 167 added `T::AssocType` in generic free
+function return position. Without this claim, a regression that folds
+`use_it__Counter` to a constant return (e.g., evaluating `c.get()` at compile
+time) would pass all exit-code tests. The generic function must remain a real
+runtime dispatch site, not an inlined constant.
+
+**Attack vectors**:
+1. Constant-fold `use_it__Counter` to `mov x0, #5; ret` — exit code correct, folded.
+   Caught by `!asm.contains("mov     x0, #0")` and absence of `bl Counter__get`.
+2. Fail to emit `use_it__Counter` monomorphized label (generic fn not instantiated).
+   Caught by `asm.contains("use_it__Counter")`.
+3. Fold two-type case to `mov x0, #5` — both concrete results summed at compile time.
+   Caught by `!asm.contains("mov     x0, #5")`.
+4. Emit only one concrete type's label (second instantiation missing).
+   Caught by checking both `Meters` and `Feet` labels present.
+
+**FLS §10.2**: Associated type projections `T::X` resolve to the concrete type
+bound by `T`'s impl of the trait that declares `type X`.
+**FLS §12.1 / §10.2 AMBIGUOUS**: The FLS does not specify how `T::X` is resolved
+during generic instantiation (monomorphization). Galvanic extends the per-monomorphization
+alias map: when `C` → `Counter`, add `C::Item` → `Counter::Item`'s IrTy. The spec
+is silent on the mechanism.
+**FLS §6.1.2 Constraint 1**: `fn main()` is not a const context — generic calls
+with `T::AssocType` return types must execute at runtime.
+
+**Violated if**: `compile_to_asm(PROJ_RETURN)` returns assembly that:
+- lacks `use_it__Counter` (monomorphization missing), OR
+- lacks `bl      Counter__get` (runtime dispatch missing), OR
+- contains `mov     x0, #0` (result constant-folded)
+
+**Violated if**: `compile_to_asm(PROJ_TWO_TYPES)` returns assembly that:
+- lacks both `Meters` and `Feet` labels (one or both instantiations missing), OR
+- contains `mov     x0, #5` (two-type sum was constant-folded)
+
+**Tests**: `cargo test --test e2e -- runtime_proj_return_emits_bl_not_folded runtime_proj_two_types_both_monomorphized`
