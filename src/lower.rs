@@ -13481,7 +13481,48 @@ impl<'src> LowerCtx<'src> {
                         // Use IrTy::I32 as the type hint (not ret_ty) so that integer
                         // literal arguments (e.g., `add(3)` as a statement) are lowered
                         // correctly when ret_ty is IrTy::Unit.
+                        //
+                        // FLS §4.9 AMBIGUOUS: &[T] fat pointer arguments require two
+                        // registers (data ptr + length). Check for slice variables and
+                        // &arr borrows before falling through to scalar lowering.
                         for arg in args {
+                            // Case 1: argument is a &[T] slice variable (already a fat ptr).
+                            if let ExprKind::Path(segs) = &arg.kind
+                                && segs.len() == 1
+                            {
+                                let var_name = segs[0].text(self.source);
+                                if let Some(&s_slot) = self.locals.get(var_name)
+                                    && self.local_slice_slots.contains(&s_slot)
+                                {
+                                    // Pass data pointer then length (two consecutive slots).
+                                    let r_ptr = self.alloc_reg()?;
+                                    self.instrs.push(Instr::Load { dst: r_ptr, slot: s_slot });
+                                    all_regs.push(r_ptr);
+                                    let r_len = self.alloc_reg()?;
+                                    self.instrs.push(Instr::Load { dst: r_len, slot: s_slot + 1 });
+                                    all_regs.push(r_len);
+                                    continue;
+                                }
+                            }
+                            // Case 2: argument is &arr — borrow of an array variable.
+                            if let ExprKind::Unary { op: crate::ast::UnaryOp::Ref, operand: inner } = &arg.kind
+                                && let ExprKind::Path(segs) = &inner.kind
+                                && segs.len() == 1
+                            {
+                                let arr_name = segs[0].text(self.source);
+                                if let Some(&arr_base_slot) = self.locals.get(arr_name)
+                                    && let Some(&arr_len) = self.local_array_lens.get(&arr_base_slot)
+                                {
+                                    let r_addr = self.alloc_reg()?;
+                                    self.instrs.push(Instr::AddrOf { dst: r_addr, slot: arr_base_slot });
+                                    all_regs.push(r_addr);
+                                    let r_len = self.alloc_reg()?;
+                                    self.instrs.push(Instr::LoadImm(r_len, arr_len as i32));
+                                    all_regs.push(r_len);
+                                    continue;
+                                }
+                            }
+                            // Scalar or other argument: lower normally.
                             let v = self.lower_expr(arg, &IrTy::I32)?;
                             let r = self.val_to_reg(v)?;
                             all_regs.push(r);
