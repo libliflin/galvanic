@@ -2945,6 +2945,43 @@ fn runtime_match_guard_emits_cbz_for_guard_condition() {
         "expected comparison instruction for guard n > 5");
 }
 
+/// Claim 24: match guard with function parameter emits runtime comparison, not constant-folded.
+///
+/// The existing `runtime_match_guard_emits_cbz_for_guard_condition` test uses a literal
+/// (`let x = 7`) as the scrutinee. This test uses a function parameter — the FLS §6.1.2
+/// litmus test: if replacing a literal with a parameter breaks the implementation, it's
+/// an interpreter, not a compiler.
+///
+/// `guarded(n: i32) -> i32` with guard `x if x > 5 => x + 10`:
+/// - When called as `guarded(7)`, the folded result would be 17.
+/// - The assembly must contain `cmp` (guard check) and `cbz`/`cbnz` (conditional branch).
+/// - The assembly must NOT contain `mov x0, #17` (constant-folded result).
+///
+/// FLS §6.18: Guard condition is evaluated at runtime.
+/// FLS §6.1.2:37–45: Non-const code must emit runtime instructions.
+#[test]
+fn runtime_match_guard_with_param_emits_runtime_comparison() {
+    // Parameterized scrutinee — guard `x > 5` cannot be evaluated at compile time.
+    // guarded(7): 7 > 5 → arm 1 → 7 + 10 = 17. If folded: `mov x0, #17; ret`.
+    let src = "fn guarded(n: i32) -> i32 { match n { x if x > 5 => x + 10, _ => 0 } }\nfn main() -> i32 { guarded(7) }\n";
+    let asm = compile_to_asm(src);
+    // Guard comparison must be runtime.
+    assert!(
+        asm.contains("cmp") || asm.contains("cset"),
+        "expected runtime comparison for guard x > 5: {asm}"
+    );
+    // Conditional branch (cbz/cbnz) must be emitted for guard evaluation.
+    assert!(
+        asm.contains("cbz") || asm.contains("cbnz"),
+        "expected conditional branch for guard condition: {asm}"
+    );
+    // Must NOT constant-fold the guarded result: 7 + 10 = 17.
+    assert!(
+        !asm.contains("mov     x0, #17"),
+        "guard result was constant-folded to 17 — interpreter not compiler: {asm}"
+    );
+}
+
 // ── Milestone 36: if-let expressions (FLS §6.17) ─────────────────────────────
 
 /// Milestone 36: if-let with integer literal pattern — match taken.
