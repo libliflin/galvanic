@@ -630,6 +630,29 @@ else
     pass "Claim 31: dyn Trait method field arithmetic emits runtime add (not folded)"
 fi
 
+# ── Claim 32: FnMut closures pass mutable captures by address and write back ──
+#
+# The distinguishing invariant of FnMut: the captured variable is passed by
+# address (AddrOf: `add xN, sp, #offset`) so that writes inside the closure
+# body propagate back to the caller. Without write-back, every call sees the
+# initial value — `inc()` always returns 1 instead of accumulating.
+#
+# The test verifies three structural guarantees:
+#   1. `add x_, sp, #N` — address-of the captured stack slot is computed.
+#   2. `ldr xN, [xM]` (not [sp]) — value is read through an indirect pointer.
+#   3. `str xN, [xM]` (not [sp]) — updated value is written back through
+#      the pointer.
+# Plus a negative assertion that the second `inc()` result is not folded.
+#
+# References: claims.md Claim 32.
+
+echo "--- Claim 32: FnMut closures pass mutable captures by address (addr-of + write-back) ---"
+if cargo test --test e2e --quiet -- runtime_fn_mut_emits_addr_of_and_load_store_ptr 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 32" "runtime_fn_mut_emits_addr_of_and_load_store_ptr FAILED — FnMut may be passing captures by copy (snapshot) instead of address, breaking write-back across calls"
+else
+    pass "Claim 32: FnMut mutable capture passes address and writes back through pointer (not snapshot)"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

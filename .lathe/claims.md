@@ -964,3 +964,51 @@ pass all existing dyn Trait tests while violating the runtime-codegen invariant.
 - contains `mov x0, #7` (constant-folded result of `measure(3, 4)`).
 
 **Test**: `cargo test --test e2e -- runtime_dyn_trait_field_arithmetic_not_folded`
+
+---
+
+## Claim 32: FnMut closures pass mutable captures by address and write back through the pointer
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: A `FnMut` closure that mutates a captured variable must pass the capture
+by address (not by copy) and write the updated value back through the pointer after each
+call. Each successive call must observe the state changes made by all prior calls.
+
+```rust
+fn main() -> i32 {
+    let mut n = 0;
+    let mut inc = || { n += 1; n };
+    inc();
+    inc()
+}
+```
+
+Must emit `add x_, sp, #N` (address-of the captured slot), an indirect `ldr xN, [xM]`
+(LoadPtr through pointer), and an indirect `str xN, [xM]` (StorePtr write-back). Must NOT
+emit `mov x0, #2` (the constant-folded result of the second `inc()` call).
+
+**Why this claim matters**: The entire FnMut contract depends on capture-by-address with
+write-back. If galvanic snapshots the capture (copies the value instead of its address),
+each call sees the initial value — `inc()` always returns 1 regardless of how many times
+it's called. This would produce wrong runtime behavior while still passing any test that
+only checks the instruction sequence in isolation (e.g., "does `add` appear?"). The only
+thing that distinguishes a correct write-back from a snapshot is the presence of the
+address-of pattern (`add x, sp, #N`) combined with indirect-through-register load/store
+(`ldr xN, [xM]` / `str xN, [xM]`).
+
+**Attack vector**:
+1. Snapshot capture: galvanic passes `n` by value. First `inc()` returns 1 (0+1). Second
+   `inc()` also returns 1 (still reading original 0). Result: 1 instead of 2. Exit code wrong.
+2. Address-of without write-back: galvanic passes `&n` but the closure does not store back.
+   Same symptom as (1).
+3. Constant-fold: `inc(); inc()` compiled as `mov x0, #1; ret`. Passes compile-and-run for
+   the wrong reason. The `!mov x0, #2` assertion catches the constant-fold-of-final-result case.
+
+**Violated if**: `compile_to_asm(...)` for the program above returns assembly that:
+- lacks `add x_, sp, #N` (address-of not emitted — capture is by copy), OR
+- lacks `ldr xN, [xM]` not through sp (no indirect-through-register load), OR
+- lacks `str xN, [xM]` not through sp (no write-back through pointer), OR
+- contains `mov x0, #2` (constant-folded result of second `inc()`).
+
+**Test**: `cargo test --test e2e -- runtime_fn_mut_emits_addr_of_and_load_store_ptr`
