@@ -200,12 +200,27 @@ impl<'src> Parser<'src> {
 
         match self.peek_kind() {
             TokenKind::KwFn => {
-                let fn_def = self.parse_fn_def(vis, false)?;
+                let fn_def = self.parse_fn_def(vis, false, false)?;
                 let end = fn_def
                     .body
                     .as_ref()
                     .map(|b| b.span)
                     .unwrap_or(start);
+                let span = start.to(end);
+                Ok(Item { kind: ItemKind::Fn(Box::new(fn_def)), span })
+            }
+            // FLS §19: `unsafe fn` — a function that may only be called from an
+            // unsafe context. The `unsafe` keyword is consumed here; `parse_fn_def`
+            // is called with `is_unsafe = true`. Codegen is identical to a normal
+            // function — the qualifier is a static typing constraint only.
+            //
+            // FLS §19 AMBIGUOUS: The spec requires callers to use an unsafe context,
+            // but does not define the enforcement mechanism. Galvanic records the
+            // qualifier and defers enforcement.
+            TokenKind::KwUnsafe if self.peek_nth(1) == TokenKind::KwFn => {
+                self.advance(); // consume `unsafe`
+                let fn_def = self.parse_fn_def(vis, false, true)?;
+                let end = fn_def.body.as_ref().map(|b| b.span).unwrap_or(start);
                 let span = start.to(end);
                 Ok(Item { kind: ItemKind::Fn(Box::new(fn_def)), span })
             }
@@ -235,7 +250,7 @@ impl<'src> Parser<'src> {
                 // an `is_const` function rather than a const item.
                 if self.peek_nth(1) == TokenKind::KwFn {
                     self.advance(); // consume `const`
-                    let fn_def = self.parse_fn_def(vis, true)?;
+                    let fn_def = self.parse_fn_def(vis, true, false)?;
                     let end = fn_def.body.as_ref().map(|b| b.span).unwrap_or(start);
                     let span = start.to(end);
                     Ok(Item { kind: ItemKind::Fn(Box::new(fn_def)), span })
@@ -291,7 +306,9 @@ impl<'src> Parser<'src> {
     /// one produces a parse error directing the user to the limitation.
     /// `is_const` is `true` when the `const` keyword preceded `fn` at the call
     /// site (the caller has already consumed `const`). FLS §9:41–43.
-    fn parse_fn_def(&mut self, vis: Visibility, is_const: bool) -> Result<FnDef, ParseError> {
+    /// `is_unsafe` is `true` when the `unsafe` keyword preceded `fn` at the
+    /// call site (the caller has already consumed `unsafe`). FLS §19.
+    fn parse_fn_def(&mut self, vis: Visibility, is_const: bool, is_unsafe: bool) -> Result<FnDef, ParseError> {
         self.expect(TokenKind::KwFn)?;
 
         // Function name must be an identifier — keywords are not valid here.
@@ -420,7 +437,7 @@ impl<'src> Parser<'src> {
             Some(self.parse_block()?)
         };
 
-        Ok(FnDef { vis, is_const, name, generic_params, self_param, params, ret_ty, body })
+        Ok(FnDef { vis, is_const, is_unsafe, name, generic_params, self_param, params, ret_ty, body })
     }
 
     /// Parse an inherent impl block.
@@ -599,13 +616,22 @@ impl<'src> Parser<'src> {
             } else {
                 false
             };
+            // FLS §19: Allow `unsafe fn` inside impl blocks.
+            let is_unsafe = if self.peek_kind() == TokenKind::KwUnsafe
+                && self.peek_nth(1) == TokenKind::KwFn
+            {
+                self.advance(); // consume `unsafe`
+                true
+            } else {
+                false
+            };
             if self.peek_kind() != TokenKind::KwFn {
                 return Err(self.error(format!(
-                    "expected `fn`, `const`, or `type` inside impl block, found {:?}",
+                    "expected `fn`, `const`, `unsafe`, or `type` inside impl block, found {:?}",
                     self.peek_kind()
                 )));
             }
-            let method = self.parse_fn_def(vis, is_const)?;
+            let method = self.parse_fn_def(vis, is_const, is_unsafe)?;
             methods.push(Box::new(method));
         }
 
@@ -714,16 +740,25 @@ impl<'src> Parser<'src> {
             } else {
                 false
             };
+            // FLS §19: `unsafe fn` may appear in trait bodies.
+            let is_unsafe = if self.peek_kind() == TokenKind::KwUnsafe
+                && self.peek_nth(1) == TokenKind::KwFn
+            {
+                self.advance(); // consume `unsafe`
+                true
+            } else {
+                false
+            };
             if self.peek_kind() != TokenKind::KwFn {
                 return Err(self.error(format!(
-                    "expected `fn`, `const`, or `type` inside trait body, found {:?}",
+                    "expected `fn`, `const`, `unsafe`, or `type` inside trait body, found {:?}",
                     self.peek_kind()
                 )));
             }
             // Parse the function signature. If the next token after the
             // signature is `;`, consume it (body-less method signature).
             // If it is `{`, parse the full body (default method — future work).
-            let method = self.parse_fn_def(vis, is_const)?;
+            let method = self.parse_fn_def(vis, is_const, is_unsafe)?;
             methods.push(Box::new(method));
         }
 
