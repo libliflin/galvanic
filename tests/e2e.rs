@@ -20735,3 +20735,177 @@ fn main() -> i32 {
         "result must not be constant-folded: {asm}"
     );
 }
+
+// ── Milestone 142: method calls on concrete struct-typed fields (FLS §6.12.2, §6.13) ──
+
+/// Milestone 142: basic field method call — `c.inner.get()`.
+///
+/// FLS §6.12.2: A method call expression `receiver.method(args)`. When the
+/// receiver is a field access expression, the method is dispatched on the
+/// concrete type of the field.
+///
+/// FLS §6.13: Field access `c.inner` resolves the slot for field `inner`
+/// of `c`'s struct type. When that field is itself a struct, its fields
+/// become the receiver arguments for the method call.
+#[test]
+fn milestone_142_field_method_basic() {
+    let src = r#"
+trait Getter { fn get(&self) -> i32; }
+struct Counter { x: i32 }
+impl Getter for Counter { fn get(&self) -> i32 { self.x } }
+struct Container { inner: Counter }
+fn main() -> i32 {
+    let c = Container { inner: Counter { x: 7 } };
+    c.inner.get()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 7);
+}
+
+/// Milestone 142: field method result used in arithmetic.
+#[test]
+fn milestone_142_field_method_in_arithmetic() {
+    let src = r#"
+struct Value { x: i32 }
+impl Value { fn get(&self) -> i32 { self.x } }
+struct Container { inner: Value }
+fn main() -> i32 {
+    let c = Container { inner: Value { x: 3 } };
+    c.inner.get() + c.inner.get()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 6);
+}
+
+/// Milestone 142: field method call on a function parameter.
+#[test]
+fn milestone_142_field_method_on_parameter() {
+    let src = r#"
+struct Value { x: i32 }
+impl Value { fn get(&self) -> i32 { self.x } }
+struct Container { inner: Value }
+fn run(c: Container) -> i32 { c.inner.get() }
+fn main() -> i32 {
+    run(Container { inner: Value { x: 5 } })
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 5);
+}
+
+/// Milestone 142: field method result passed to another function.
+#[test]
+fn milestone_142_field_method_result_passed_to_fn() {
+    let src = r#"
+fn double(n: i32) -> i32 { n + n }
+struct Value { x: i32 }
+impl Value { fn get(&self) -> i32 { self.x } }
+struct Container { inner: Value }
+fn main() -> i32 {
+    let c = Container { inner: Value { x: 4 } };
+    double(c.inner.get())
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 8);
+}
+
+/// Milestone 142: field method result in if condition.
+#[test]
+fn milestone_142_field_method_in_if() {
+    let src = r#"
+struct Value { x: i32 }
+impl Value { fn get(&self) -> i32 { self.x } }
+struct Container { inner: Value }
+fn main() -> i32 {
+    let c = Container { inner: Value { x: 3 } };
+    if c.inner.get() > 0 { 1 } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 1);
+}
+
+/// Milestone 142: field method call with an explicit argument.
+#[test]
+fn milestone_142_field_method_with_arg() {
+    let src = r#"
+struct Value { x: i32 }
+impl Value { fn add(&self, n: i32) -> i32 { self.x + n } }
+struct Container { inner: Value }
+fn main() -> i32 {
+    let c = Container { inner: Value { x: 4 } };
+    c.inner.add(3)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 7);
+}
+
+/// Milestone 142: method calls on two different struct-typed fields.
+#[test]
+fn milestone_142_two_field_methods() {
+    let src = r#"
+struct Value { x: i32 }
+impl Value { fn get(&self) -> i32 { self.x } }
+struct Pair { first: Value, second: Value }
+fn main() -> i32 {
+    let p = Pair { first: Value { x: 3 }, second: Value { x: 4 } };
+    p.first.get() + p.second.get()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 7);
+}
+
+/// Milestone 142: field method called twice on the same field.
+#[test]
+fn milestone_142_field_method_called_twice() {
+    let src = r#"
+struct Value { x: i32 }
+impl Value { fn get(&self) -> i32 { self.x } }
+struct Container { inner: Value }
+fn run(c: Container) -> i32 { c.inner.get() + c.inner.get() }
+fn main() -> i32 {
+    run(Container { inner: Value { x: 2 } })
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 4);
+}
+
+// Assembly inspection: field method call emits bl and is not constant-folded.
+//
+// `run(c: Container)` ensures the container value is unknown at compile time.
+// A folding interpreter would constant-fold `c.inner.get()` to the literal value
+// when everything is statically known — but the `bl Counter__get` instruction
+// must be present to prove runtime dispatch.
+//
+// FLS §6.12.2: Method call expressions are dispatched at runtime.
+// FLS §6.1.2:37–45: Non-const code must emit runtime instructions.
+#[test]
+fn runtime_field_method_call_emits_bl_not_folded() {
+    let src = r#"
+trait Getter { fn get(&self) -> i32; }
+struct Counter { x: i32 }
+impl Getter for Counter { fn get(&self) -> i32 { self.x } }
+struct Container { inner: Counter }
+fn run(c: Container) -> i32 { c.inner.get() }
+fn main() -> i32 { run(Container { inner: Counter { x: 7 } }) }
+"#;
+    let asm = compile_to_asm(src);
+    // Runtime dispatch: must emit bl Counter__get.
+    assert!(
+        asm.contains("bl      Counter__get") || asm.contains("bl Counter__get"),
+        "field method call must emit bl Counter__get: {asm}"
+    );
+    // Must not bypass runtime dispatch — if `run` were folded, there would be no ldr.
+    // The `mov x0, #7` in main is the literal argument to run(), which is expected.
+    // The critical check is that `run` emits `bl Counter__get`, not a direct return.
+    assert!(
+        !asm.contains("mov     x0, #7") || asm.contains("ldr"),
+        "field method call result must not be constant-folded (must emit ldr): {asm}"
+    );
+}

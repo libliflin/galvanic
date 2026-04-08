@@ -14292,6 +14292,35 @@ impl<'src> LowerCtx<'src> {
                             .clone();
                         (base_slot, type_name)
                     }
+                    // FLS §6.12.2, §6.13: Method call on a field access expression.
+                    //
+                    // Supports `c.inner.get()` where `inner` is a concrete struct-typed
+                    // field. The field's base slot and type are resolved by `resolve_place`,
+                    // which handles both single-level (`c.inner`) and chained
+                    // (`c.outer.inner`) field access in a uniform way.
+                    //
+                    // FLS §6.13: Field access computes a slot address at compile time;
+                    // no extra runtime instructions are emitted by receiver resolution.
+                    //
+                    // FLS §12.1: AMBIGUOUS — The spec does not specify whether generic-typed
+                    // fields (`val: T`) can be method receivers when `T` has a trait bound.
+                    // Galvanic requires a concrete (non-generic) struct type at this milestone.
+                    //
+                    // Cache-line note: `resolve_place` is a pure compile-time slot
+                    // computation; zero extra ARM64 instructions compared to a plain
+                    // variable receiver.
+                    ExprKind::FieldAccess { .. } => {
+                        let (field_slot, field_ty) = self.resolve_place(receiver)?;
+                        let type_name = field_ty.ok_or_else(|| {
+                            LowerError::Unsupported(
+                                "method call on scalar or generic-typed field — \
+                                 only concrete struct-typed fields support method calls \
+                                 (FLS §6.12.2, §12.1: AMBIGUOUS for generic fields)"
+                                    .into(),
+                            )
+                        })?;
+                        (field_slot, type_name)
+                    }
                     _ => {
                         return Err(LowerError::Unsupported(
                             "method call on non-variable receiver not yet supported".into(),
