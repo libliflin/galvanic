@@ -1182,6 +1182,15 @@ else
     pass "Claim 61: shift operators emit runtime lsl/asr with function parameters (not constant-folded)"
 fi
 
+# References: claims.md Claim 62.
+
+echo "--- Claim 62: bitwise operators emit runtime and/orr/eor with function parameters (not constant-folded) ---"
+if cargo test --test e2e --quiet -- runtime_and_emits_and_not_folded runtime_or_emits_orr_not_folded runtime_xor_emits_eor_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 62" "runtime_and_emits_and_not_folded, runtime_or_emits_orr_not_folded, or runtime_xor_emits_eor_not_folded FAILED — bitwise ops may be constant-folded instead of emitting runtime and/orr/eor"
+else
+    pass "Claim 62: bitwise operators emit runtime and/orr/eor with function parameters (not constant-folded)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 
