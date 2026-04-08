@@ -12850,6 +12850,15 @@ impl<'src> LowerCtx<'src> {
                     self.generic_fn_param_counts.get(&fn_name)
                 {
                     // Pre-scan args to collect struct type names in order of appearance.
+                    //
+                    // FLS §12.1: Concrete type inference for generic call sites.
+                    // Two cases:
+                    //   (a) Arg is a path variable registered in local_struct_types.
+                    //   (b) Arg is an inline struct literal `Struct { field: val }` —
+                    //       the type name is the literal's `name` span.
+                    // Both cases yield the concrete struct type for the corresponding
+                    // generic type parameter. This enables `doubled(Src { x: 6 })` to
+                    // monomorphize as `doubled__Src` instead of `doubled__i32`.
                     let mut struct_arg_types: Vec<String> = Vec::new();
                     for arg in args {
                         if let ExprKind::Path(segs) = &arg.kind
@@ -12860,6 +12869,15 @@ impl<'src> LowerCtx<'src> {
                                 && let Some(st) = self.local_struct_types.get(&slot)
                             {
                                 struct_arg_types.push(st.clone());
+                                continue;
+                            }
+                        }
+                        // FLS §6.11: Struct literal in argument position — extract
+                        // the type name directly from the literal's name span.
+                        if let ExprKind::StructLit { name, .. } = &arg.kind {
+                            let type_name = name.text(self.source).to_owned();
+                            if self.struct_field_types.contains_key(type_name.as_str()) {
+                                struct_arg_types.push(type_name);
                                 continue;
                             }
                         }
