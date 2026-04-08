@@ -22575,6 +22575,66 @@ fn main() -> i32 {
     );
 }
 
+#[test]
+fn runtime_dyn_trait_field_arithmetic_not_folded() {
+    // FLS §4.13: when a dyn Trait method accesses struct fields and uses them in
+    // arithmetic, the computation must execute at runtime via vtable dispatch —
+    // not be constant-folded from the call site.
+    //
+    // The method `manhattan` sums two fields (`self.x + self.y`). The struct is
+    // constructed from function parameters `a` and `b`, making the field values
+    // unknown at compile time. A constant-folding interpreter would evaluate
+    // `measure(3, 4)` → `Point { x: 3, y: 4 }.manhattan()` → `3 + 4` → `7` and
+    // emit `mov x0, #7` directly — bypassing runtime vtable dispatch and `add`.
+    //
+    // This guards against a regression where dyn Trait method bodies fold away
+    // field arithmetic when the caller uses literal arguments.
+    //
+    // FLS §4.13: method calls via dyn Trait execute at runtime through vtable
+    // indirection (blr). FLS §6.1.2:37–45: function bodies are not const contexts;
+    // field arithmetic in `manhattan` must emit runtime `add`.
+    // The struct is constructed from function parameters `a` and `b` — not from
+    // literals — so the field values are unknown at compile time. A constant-folding
+    // interpreter would evaluate `make_and_measure(3, 4)` at compile time and emit
+    // `mov x0, #7`. Galvanic must instead emit vtable dispatch (blr) and runtime
+    // field addition (add).
+    let src = "
+trait Dist {
+    fn manhattan(&self) -> i32;
+}
+struct Point { x: i32, y: i32 }
+impl Dist for Point {
+    fn manhattan(&self) -> i32 { self.x + self.y }
+}
+fn measure(d: &dyn Dist) -> i32 {
+    d.manhattan()
+}
+fn make_and_measure(a: i32, b: i32) -> i32 {
+    let p = Point { x: a, y: b };
+    measure(&p)
+}
+fn main() -> i32 { make_and_measure(3, 4) }
+";
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("vtable_Dist_Point"),
+        "vtable label `vtable_Dist_Point` must be emitted: {asm}"
+    );
+    assert!(
+        asm.contains("blr"),
+        "vtable dispatch must emit `blr` (indirect call): {asm}"
+    );
+    assert!(
+        asm.contains("add"),
+        "field sum `self.x + self.y` must emit runtime `add`: {asm}"
+    );
+    // Must not constant-fold `measure(3, 4)` to the scalar result 7:
+    assert!(
+        !asm.contains("mov     x0, #7"),
+        "dyn Trait field arithmetic must NOT be constant-folded to 7: {asm}"
+    );
+}
+
 // ── Milestone 148: Associated type bindings in trait bounds (FLS §10.2, §12.1) ─
 
 /// Milestone 148: generic function with associated type binding in bound.
