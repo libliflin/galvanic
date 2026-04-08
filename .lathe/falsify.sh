@@ -174,6 +174,22 @@ else
     pass "Claim 7: generic function/method calls emit runtime bl (not folded)"
 fi
 
+# ── Claim 8: Named block `break` emits unconditional branch ─────────────────
+# Tests that `break 'label value` emits a real unconditional branch instruction
+# (`b .Lxxx`), not just the character 'b' somewhere in the output.
+# Red-team finding (2026-04-07): the original assertion was `asm.contains('b')`
+# which checked for the character 'b' — vacuously true in any ARM64 program.
+# Any instruction (bl, blr, cbz, sub) or label name contains 'b'. The assertion
+# was indistinguishable from a no-op. Fixed to check `b       .L` pattern.
+# References: claims.md Claim 8.
+
+echo "--- Claim 8: named block break emits unconditional branch (not vacuous 'b') ---"
+if cargo test --test e2e --quiet -- runtime_named_block_emits_branch_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 8" "runtime_named_block_emits_branch_not_folded FAILED — named block break may not emit an unconditional branch to the exit label"
+else
+    pass "Claim 8: named block break emits unconditional branch to exit label"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""
