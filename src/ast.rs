@@ -818,16 +818,34 @@ pub struct Stmt {
 pub enum StmtKind {
     /// A let binding. FLS §8.1.
     ///
-    /// Grammar: `"let" Pattern (":" Type)? ("=" Expression)? ";"`
+    /// Grammar: `"let" Pattern (":" Type)? ("=" Expression)? ("else" Block)? ";"`
     ///
-    /// FLS §8.1: The pattern may be any irrefutable pattern. Common forms:
+    /// FLS §8.1: The pattern may be any irrefutable pattern, or a refutable
+    /// pattern when `else_block` is present (`let-else`). Common forms:
     /// - `let x = expr;` — identifier pattern, binds `x`.
     /// - `let _ = expr;` — wildcard pattern, discards.
     /// - `let (a, b) = tuple;` — tuple pattern (FLS §5.10.3), destructures.
+    /// - `let Enum::V(v) = e else { return 0; };` — refutable pattern with
+    ///   diverging else block (FLS §8.1 let-else).
+    ///
+    /// FLS §8.1 AMBIGUOUS: The spec does not specify which patterns are
+    /// considered irrefutable vs refutable. Galvanic does not enforce
+    /// irrefutability; a non-matching irrefutable-seeming pattern silently
+    /// produces undefined behavior at runtime without `else`.
+    ///
+    /// Cache-line note: let-else adds a discriminant check (~5 instructions)
+    /// and a branch to the else block before the field bindings are installed.
     Let {
         pat: Pat,
         ty: Option<Ty>,
         init: Option<Box<Expr>>,
+        /// Optional diverging else block for `let-else`. FLS §8.1.
+        ///
+        /// When present, the pattern is matched at runtime. If it does not
+        /// match, the else block executes. The else block must diverge (contain
+        /// `return`, `break`, `continue`, or an infinite loop). Variables bound
+        /// by the pattern are in scope after the entire let-else statement.
+        else_block: Option<Box<Block>>,
     },
 
     /// An expression followed by `;`. FLS §8.3.

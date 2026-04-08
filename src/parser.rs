@@ -1904,22 +1904,41 @@ impl<'src> Parser<'src> {
             None
         };
 
+        // Optional else block for let-else: `else { Block }`. FLS §8.1.
+        //
+        // `let PAT = EXPR else { BLOCK };`
+        //
+        // The else block must be a diverging expression (contain return, break,
+        // continue, or an infinite loop). Variables bound by PAT are in scope
+        // after the entire let-else statement.
+        //
+        // FLS §8.1 AMBIGUOUS: The spec does not restrict which patterns are
+        // valid in let-else. Galvanic supports TupleStruct enum variant patterns
+        // and literal patterns at this milestone.
+        let else_block = if self.eat(TokenKind::KwElse) {
+            Some(Box::new(self.parse_block()?))
+        } else {
+            None
+        };
+
         let end = self.current_span();
         self.expect(TokenKind::Semi)?;
 
         Ok(Stmt {
-            kind: StmtKind::Let { pat, ty, init },
+            kind: StmtKind::Let { pat, ty, init, else_block },
             span: start.to(end),
         })
     }
 
     /// Parse a pattern in `let` position.
     ///
-    /// FLS §8.1: The pattern in a let statement is irrefutable. Currently
-    /// supports: identifier, `_` (wildcard), and tuple patterns `(p0, p1, ...)`.
+    /// FLS §8.1: The pattern in a let statement is irrefutable for plain let,
+    /// or refutable for let-else. Supports: identifier, `_` (wildcard), tuple
+    /// patterns, struct patterns, tuple struct patterns, and two-segment enum
+    /// variant paths (for let-else).
     ///
-    /// FLS §5.10.3: Tuple patterns — `(p0, p1, ...)` where each sub-pattern
-    /// is an identifier, `_`, or another irrefutable pattern.
+    /// FLS §5.10.3: Tuple patterns — `(p0, p1, ...)`.
+    /// FLS §5.4: Tuple struct / variant — `Enum::Variant(p0, p1, ...)`.
     fn parse_let_pattern(&mut self) -> Result<Pat, ParseError> {
         match self.peek_kind() {
             // Wildcard `_`. FLS §5.11.
@@ -1927,17 +1946,51 @@ impl<'src> Parser<'src> {
                 self.advance();
                 Ok(Pat::Wildcard)
             }
-            // Identifier, struct, or tuple struct pattern.
-            // FLS §5.2 (ident), FLS §5.10.2 (struct), FLS §5.10.4 (tuple struct).
+            // Identifier, struct, tuple struct, or path pattern.
+            // FLS §5.2 (ident), FLS §5.10.2 (struct), FLS §5.10.4 (tuple struct),
+            // FLS §5.5 (path/enum variant).
             //
-            // If the identifier is followed by `{`, it begins a struct pattern
-            // `StructName { field1, field2 }`.
-            // If the identifier is followed by `(`, it begins a tuple struct pattern
-            // `StructName(p0, p1, ...)`.
+            // If followed by `::`, parses a multi-segment path (e.g. `Enum::Variant`).
+            // If followed by `{`, begins a struct pattern.
+            // If followed by `(`, begins a tuple struct pattern.
             // Otherwise it is a plain binding.
             TokenKind::Ident => {
                 let span = self.current_span();
                 self.advance();
+                // Multi-segment path: `Enum::Variant`, `Enum::Variant(fields)`.
+                // FLS §5.4: Tuple struct/variant pattern.
+                // FLS §5.5: Path pattern (unit variant).
+                if self.peek_kind() == TokenKind::ColonColon {
+                    let mut segs = vec![span];
+                    while self.peek_kind() == TokenKind::ColonColon {
+                        self.advance(); // consume `::`
+                        if self.peek_kind() != TokenKind::Ident {
+                            return Err(self.error(
+                                "expected identifier after `::` in let pattern".to_owned(),
+                            ));
+                        }
+                        let seg = self.advance();
+                        segs.push(Self::span_of(&seg));
+                    }
+                    // Tuple struct/variant: `Enum::Variant(p0, p1, ...)`.
+                    if self.peek_kind() == TokenKind::OpenParen {
+                        self.advance(); // consume `(`
+                        let mut fields = Vec::new();
+                        while self.peek_kind() != TokenKind::CloseParen {
+                            fields.push(self.parse_let_pattern()?);
+                            if !self.eat(TokenKind::Comma) {
+                                break;
+                            }
+                            if self.peek_kind() == TokenKind::CloseParen {
+                                break; // trailing comma
+                            }
+                        }
+                        self.expect(TokenKind::CloseParen)?;
+                        return Ok(Pat::TupleStruct { path: segs, fields });
+                    }
+                    // Unit variant / path pattern: `Enum::Variant`.
+                    return Ok(Pat::Path(segs));
+                }
                 // Peek ahead: `{` means struct pattern (FLS §5.10.2).
                 if self.peek_kind() == TokenKind::OpenBrace {
                     self.advance(); // consume `{`
@@ -4012,6 +4065,33 @@ mod tests {
             panic!("expected let");
         };
         assert!(init.is_none());
+    }
+
+    #[test]
+    fn let_else_tuple_struct_pattern() {
+        // FLS §8.1: let-else with two-segment TupleStruct pattern.
+        // `let Opt::Some(v) = o else { return 0 };` — refutable pattern with
+        // a diverging else block.
+        use crate::ast::{Pat, StmtKind};
+        let src = "fn f(o: Opt) -> i32 { let Opt::Some(v) = o else { return 0 }; v }";
+        let sf = parse_ok(src);
+        let ItemKind::Fn(ref f) = sf.items[0].kind else { panic!("expected Fn item") };
+        let body = f.body.as_ref().unwrap();
+        // let-else is a stmt; `v` is the tail expression (not a stmt).
+        assert_eq!(body.stmts.len(), 1, "expected 1 stmt (the let-else)");
+        assert!(body.tail.is_some(), "expected tail expression `v`");
+        let StmtKind::Let { pat, else_block, .. } = &body.stmts[0].kind else {
+            panic!("expected let");
+        };
+        // Pattern: TupleStruct with two-segment path Opt::Some.
+        let Pat::TupleStruct { path, fields } = pat else {
+            panic!("expected TupleStruct pattern, got {:?}", pat);
+        };
+        assert_eq!(path.len(), 2, "path must have two segments");
+        assert_eq!(fields.len(), 1, "one positional field");
+        assert!(matches!(fields[0], Pat::Ident(_)), "field is Ident binding");
+        // else_block must be present.
+        assert!(else_block.is_some(), "let-else must have an else block");
     }
 
     #[test]
