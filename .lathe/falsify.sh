@@ -781,6 +781,27 @@ else
     pass "Claim 38: unsafe block body emits runtime mul (not constant-folded)"
 fi
 
+# `const fn` called from a non-const context must emit a runtime bl, not be folded.
+# A `const fn` is only eligible for compile-time evaluation when called from a const
+# context (const item, const block, array length, etc.). When called from `fn main()`
+# the arguments may be dynamic at runtime; the compiler must emit a real function call.
+# FLS §9:41–43 (Constraint 2): `const fn` called outside a const context runs as
+# normal code and must emit a runtime bl instruction.
+#
+# Attack: constant-fold `add(20, 22)` to `mov x0, #42` because both arguments are
+# known constants. The exit code would still be 42 (correct), but the program is
+# semantically wrong — the function must execute at runtime.
+#
+# Introduced in cycle 75 (red-team, const fn context-sensitivity, FLS §9:41–43).
+# References: claims.md Claim 39.
+
+echo "--- Claim 39: const fn called from non-const context emits runtime bl (not folded) ---"
+if cargo test --test e2e --quiet -- runtime_const_fn_runtime_call_emits_bl_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 39" "runtime_const_fn_runtime_call_emits_bl_not_folded FAILED — const fn may be constant-folded when called from non-const context (violates FLS §9:41–43)"
+else
+    pass "Claim 39: const fn called from non-const context emits runtime bl (not folded)"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""
