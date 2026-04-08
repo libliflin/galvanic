@@ -2012,6 +2012,14 @@ fn runtime_for_loop_emits_cmp_cbz_add_and_back_branch() {
     assert!(asm.contains("add"), "expected add (increment) in for loop assembly");
     // Back-edge: unconditional branch to the condition label.
     assert!(asm.contains("b "), "expected back-edge branch in for loop assembly");
+    // Negative assertion: 0+1+2+3+4=10 must NOT be folded to a constant.
+    // A constant-folding interpreter could evaluate the loop at compile time and emit
+    // `mov x0, #10`. The loop must execute at runtime via the back-edge branch above.
+    // FLS §6.1.2:37–45: non-const code is not eligible for compile-time evaluation.
+    assert!(
+        !asm.contains("mov     x0, #10"),
+        "for loop result must not be constant-folded to mov x0, #10 — must execute at runtime"
+    );
 }
 
 // ── Milestone 20: loop-as-expression with break value ─────────────────────────
