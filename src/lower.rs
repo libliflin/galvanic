@@ -3362,6 +3362,14 @@ fn lower_fn(
         if param_ty == IrTy::FnPtr {
             ctx.local_fn_ptr_slots.insert(slot);
         }
+        // FLS §4.1, §6.23: track narrow-type parameters so compound assignment
+        // can apply the correct wrapping instruction (TruncU8 / SextI8).
+        if param_ty == IrTy::U8 {
+            ctx.u8_locals.insert(param_name);
+        }
+        if param_ty == IrTy::I8 {
+            ctx.i8_locals.insert(param_name);
+        }
         reg_idx += 1;
     }
 
@@ -4357,6 +4365,25 @@ struct LowerCtx<'src> {
     /// Cache-line note: pointer occupies one stack slot (8 bytes) — same as scalar.
     ptr_capture_slots: std::collections::HashSet<u8>,
 
+    /// Names of local variables explicitly declared with type `u8`.
+    ///
+    /// FLS §4.1, §6.23: u8 arithmetic wraps at 256. Compound assignment (`+=`,
+    /// `*=`, etc.) must apply `TruncU8` (`and #255`) after the binary operation
+    /// before storing the result back to the slot. Without this, mid-body reads
+    /// of u8 variables after compound assignment see unwrapped (>255) values.
+    ///
+    /// Populated from `let x: u8 = …` annotations and u8 function parameters.
+    u8_locals: std::collections::HashSet<&'src str>,
+
+    /// Names of local variables explicitly declared with type `i8`.
+    ///
+    /// FLS §4.1, §6.23: i8 arithmetic wraps at ±128. Compound assignment must
+    /// apply `SextI8` (`sxtb x{r}, w{r}`) after the binary operation to sign-extend
+    /// the lower 8 bits into the full 64-bit register before storing back.
+    ///
+    /// Populated from `let x: i8 = …` annotations and i8 function parameters.
+    i8_locals: std::collections::HashSet<&'src str>,
+
     /// Captured outer-scope slots for each closure fn-pointer slot.
     ///
     /// FLS §6.22: Capturing closures capture free variables from the enclosing
@@ -5043,6 +5070,8 @@ impl<'src> LowerCtx<'src> {
             local_fn_ptr_slots: std::collections::HashSet::new(),
             local_str_slots: std::collections::HashSet::new(),
             ptr_capture_slots: std::collections::HashSet::new(),
+            u8_locals: std::collections::HashSet::new(),
+            i8_locals: std::collections::HashSet::new(),
             local_capture_args: HashMap::new(),
             last_closure_captures: None,
             last_closure_name: None,
@@ -9361,6 +9390,27 @@ impl<'src> LowerCtx<'src> {
                     // `LoadF32Slot` rather than `Load` or `LoadF64Slot`.
                     self.float32_locals.insert(var_name, slot);
                     return Ok(());
+                }
+
+                // FLS §4.1, §6.23: Track u8 / i8 let bindings by variable name.
+                // Unlike f64/f32, u8/i8 use the same integer load/store instructions —
+                // no separate slot map needed. We just record the name so compound
+                // assignment can emit the correct wrapping instruction (TruncU8 / SextI8)
+                // when it stores back to this slot, preventing mid-body reads of the
+                // variable from seeing unwrapped (> 255 / not sign-extended) values.
+                let declared_u8 = ty.as_ref().is_some_and(|t| {
+                    matches!(&t.kind, crate::ast::TyKind::Path(segs)
+                        if segs.len() == 1 && segs[0].text(self.source) == "u8")
+                });
+                if declared_u8 {
+                    self.u8_locals.insert(var_name);
+                }
+                let declared_i8 = ty.as_ref().is_some_and(|t| {
+                    matches!(&t.kind, crate::ast::TyKind::Path(segs)
+                        if segs.len() == 1 && segs[0].text(self.source) == "i8")
+                });
+                if declared_i8 {
+                    self.i8_locals.insert(var_name);
                 }
 
                 if let Some(init_expr) = init.as_ref() {
@@ -14039,6 +14089,33 @@ impl<'src> LowerCtx<'src> {
                 };
                 let dst = self.alloc_reg()?;
                 self.instrs.push(Instr::BinOp { op: ir_op, dst, lhs: lhs_reg, rhs: rhs_reg });
+
+                // FLS §4.1, §6.23: narrow integer wrapping at compound-assignment stores.
+                //
+                // For u8 and i8 locals, the binary operation may produce a value outside
+                // the type's range (e.g., 200_u8 + 100_u8 = 300, which overflows u8).
+                // Without normalisation here, the slot holds 300 and any mid-body read
+                // (comparison, cast, etc.) sees the unwrapped value — incorrect per FLS §6.23.
+                //
+                // u8: `and {dst}, {dst}, #255`  — mask to 8 bits (TruncU8).
+                // i8: `sxtb x{dst}, w{dst}`     — sign-extend from 8 bits (SextI8).
+                //
+                // This mirrors the normalisation applied at function return boundaries
+                // (see the `fn_ret_ty` match at the end of `lower_fn`) but is necessary
+                // here too so that subsequent in-body reads of the variable are correct.
+                //
+                // Note: field-access and deref compound-assignment paths are separate
+                // code blocks above and do not go through this narrow-type check.
+                if let ExprKind::Path(segs) = &target.kind
+                    && segs.len() == 1
+                {
+                    let target_name = segs[0].text(self.source);
+                    if self.u8_locals.contains(target_name) {
+                        self.instrs.push(Instr::TruncU8 { dst, src: dst });
+                    } else if self.i8_locals.contains(target_name) {
+                        self.instrs.push(Instr::SextI8 { dst, src: dst });
+                    }
+                }
 
                 // Store the result back to the same stack slot.
                 // FLS §6.5.11: "Compound assignment is equivalent to the binary expression

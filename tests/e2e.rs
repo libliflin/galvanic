@@ -30090,3 +30090,92 @@ fn runtime_i8_sext_not_emitted_for_i32_return() {
         "i32-returning function must NOT emit i8 sign-extension; got:\n{asm}"
     );
 }
+
+// ── Claim 66: u8/i8 compound assignment wraps correctly mid-body ─────────────
+//
+// FLS §4.1, §6.23: u8 and i8 arithmetic wraps at 256 / ±128. When a u8 or i8
+// variable is updated via compound assignment (`+=`, `*=`, etc.) and then read
+// back within the same function body (not at a return boundary), the value must
+// already be in the type's range. Without TruncU8/SextI8 applied AFTER the
+// BinOp in the compound-assignment lowering path, the slot holds an unwrapped
+// value and comparisons / casts using that variable see wrong results.
+//
+// This was a real bug: the existing TruncU8/SextI8 was only applied at function
+// return boundaries, leaving mid-body reads of u8/i8 variables after compound
+// assignment silently wrong.
+
+/// Assembly inspection: u8 compound `+=` emits TruncU8 (`and #255`) before the store.
+///
+/// Claim 66: compound assignment on a u8 local must normalize the result to the
+/// 8-bit range before writing back, so that subsequent reads within the function
+/// body see the wrapped value.
+#[test]
+fn runtime_u8_compound_add_emits_trunc_u8() {
+    let asm = compile_to_asm(
+        "fn compound_u8(a: u8, b: u8) -> i32 { let mut x: u8 = a; x += b; x as i32 }\nfn main() -> i32 { 0 }\n",
+    );
+    assert!(
+        asm.contains("and") && asm.contains("#255"),
+        "u8 compound `+=` must emit `and #255` (TruncU8); got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #44"),
+        "result must NOT be constant-folded to mov x0, #44; got:\n{asm}"
+    );
+}
+
+/// Assembly inspection: i8 compound `+=` emits SextI8 (`sxtb`) before the store.
+///
+/// Claim 66: compound assignment on an i8 local must sign-extend the result
+/// from 8 bits after the binary operation so mid-body reads see the wrapped value.
+/// The sxtb must appear BEFORE the store of the compound-assignment result (i.e.,
+/// in the function body, not just at the function-return boundary).
+#[test]
+fn runtime_i8_compound_add_emits_sext_i8() {
+    let asm = compile_to_asm(
+        "fn compound_i8(a: i8, b: i8) -> i32 { let mut x: i8 = a; x += b; x as i32 }\nfn main() -> i32 { 0 }\n",
+    );
+    // The sxtb must be present inside the compound_i8 function body (before the store).
+    assert!(
+        asm.contains("sxtb"),
+        "i8 compound `+=` must emit `sxtb` (SextI8) before the store-back; got:\n{asm}"
+    );
+    // The result must not be folded — compound_i8 takes parameters so it cannot be
+    // constant-folded, but we verify by checking that an add instruction is emitted.
+    assert!(
+        asm.contains("add"),
+        "i8 compound `+=` must emit runtime `add` instruction; got:\n{asm}"
+    );
+}
+
+/// Compile-and-run: u8 compound addition wraps at 256 mid-body.
+///
+/// Adversarial: reads the u8 variable AFTER compound `+=` in a comparison,
+/// not just at the return boundary. Without the mid-body TruncU8 fix, `x` holds
+/// 300 and `x < 50` is false → returns 0. With the fix, `x` is 44 and
+/// `x < 50` is true → returns 1.
+#[test]
+fn milestone_178_u8_compound_add_wraps_mid_body() {
+    let Some(exit) = compile_and_run(
+        "fn test(a: u8, b: u8) -> i32 { let mut x: u8 = a; x += b; if x < 50 { 1 } else { 0 } }\nfn main() -> i32 { test(200, 100) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "200_u8 + 100_u8 wraps to 44; 44 < 50 should be true");
+}
+
+/// Compile-and-run: i8 compound addition wraps at ±128 mid-body.
+///
+/// Adversarial: 100_i8 += 50_i8 = 150, which overflows i8 to -106. The
+/// comparison `x < 0` must use the wrapped value. Without mid-body SextI8,
+/// `x` holds +150 and `x < 0` is false → returns 0. With the fix, x = -106
+/// and `x < 0` is true → returns 1.
+#[test]
+fn milestone_178_i8_compound_add_wraps_mid_body() {
+    let Some(exit) = compile_and_run(
+        "fn test(a: i8, b: i8) -> i32 { let mut x: i8 = a; x += b; if x < 0 { 1 } else { 0 } }\nfn main() -> i32 { test(100, 50) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "100_i8 + 50_i8 wraps to -106; -106 < 0 should be true");
+}

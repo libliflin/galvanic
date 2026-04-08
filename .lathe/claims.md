@@ -2650,3 +2650,35 @@ must be emitted at runtime even though the values happen to be known at the call
 - contains `mov x0, #150` or `mov x0, #-106` (constant-folded without runtime code)
 
 **Tests**: `cargo test --test e2e -- runtime_i8_add_emits_sxtb_sign_extension milestone_177_i8_add_wraps milestone_177_i8_sub_wraps`
+
+---
+
+## Claim 66: u8/i8 compound assignment wraps correctly mid-body (not only at return boundaries)
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: When a `u8` or `i8` local variable is updated via compound assignment
+(`+=`, `-=`, `*=`, etc.) and then read back within the same function body, the value
+must already be in the type's range — regardless of whether the function's return type
+is `u8`/`i8` or something else.
+
+The existing TruncU8/SextI8 at function return boundaries is insufficient because a
+variable can be read in comparisons, casts (`x as i32`), or passed to other functions
+before the enclosing function returns. Without normalization at the compound-assignment
+store, the slot holds an unwrapped value (e.g., 300 for `200_u8 += 100`) and any
+mid-body read sees the wrong value.
+
+This was a real latent bug: `let mut x: u8 = 200; x += 100; if x < 50 { ... }` would
+branch incorrectly (comparing 300 < 50 instead of 44 < 50) on code paths that never
+return u8 directly.
+
+**FLS §4.1**: u8 range is 0..=255; i8 range is -128..=127.
+**FLS §6.23**: At runtime, integer arithmetic wraps. The wrapping must be observable
+immediately after the operation, not only at function boundaries.
+**FLS §6.1.2 Constraint 1**: The operation is runtime; so is the wrapping normalization.
+
+**Violated if** for `fn test(a: u8, b: u8) -> i32 { let mut x: u8 = a; x += b; if x < 50 { 1 } else { 0 } }` called with `(200, 100)`:
+- returns 0 instead of 1 (comparison sees 300 instead of wrapped 44), OR
+- the compound_u8 function body lacks `and ... #255` before the store-back
+
+**Tests**: `cargo test --test e2e -- runtime_u8_compound_add_emits_trunc_u8 runtime_i8_compound_add_emits_sext_i8 milestone_178_u8_compound_add_wraps_mid_body milestone_178_i8_compound_add_wraps_mid_body`

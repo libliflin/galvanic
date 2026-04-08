@@ -1218,6 +1218,20 @@ else
     pass "Claim 65: i8 arithmetic emits runtime add and sxtb sign-extension (not constant-folded)"
 fi
 
+# References: claims.md Claim 66.
+
+echo "--- Claim 66: u8/i8 compound assignment wraps correctly mid-body (not only at return boundaries) ---"
+if cargo test --test e2e --quiet -- \
+    runtime_u8_compound_add_emits_trunc_u8 \
+    runtime_i8_compound_add_emits_sext_i8 \
+    milestone_178_u8_compound_add_wraps_mid_body \
+    milestone_178_i8_compound_add_wraps_mid_body \
+    2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 66" "u8/i8 compound assignment wrapping test FAILED — mid-body reads of u8/i8 vars after compound-assign may see unwrapped values"
+else
+    pass "Claim 66: u8/i8 compound assignment wraps correctly mid-body (not only at return boundaries)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 
