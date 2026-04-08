@@ -291,6 +291,22 @@ else
     pass "Claim 14: field method calls dispatch at runtime via bl (not folded)"
 fi
 
+# ── Claim 15: Multiple bounds monomorphize ALL methods for ALL concrete types ─
+# Tests that when two concrete types are both used with a multi-bound generic,
+# all bound methods are emitted as labels for EACH type (not just the first).
+# Attack: pending_monos may register methods for the first concrete type but
+# silently drop method labels for the second type.
+# Distinct from Claim 12 (single-type, single-bound) and from the existing
+# runtime_multiple_bounds_emits_both_trait_calls (single-type, multi-bound).
+# References: claims.md Claim 15.
+
+echo "--- Claim 15: multiple bounds monomorphize all methods for all concrete types ---"
+if cargo test --test e2e --quiet -- runtime_multiple_bounds_two_types_both_monomorphized 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 15" "runtime_multiple_bounds_two_types_both_monomorphized FAILED — multi-bound generic may not emit all method labels for all concrete type monomorphizations"
+else
+    pass "Claim 15: multiple bounds monomorphize all methods for all concrete types"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""
