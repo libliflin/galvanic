@@ -1200,6 +1200,15 @@ else
     pass "Claim 63: unary operators emit runtime neg/mvn/eor with function parameters (not constant-folded)"
 fi
 
+# References: claims.md Claim 64.
+
+echo "--- Claim 64: u8 arithmetic emits runtime add and and-truncation (not constant-folded) ---"
+if cargo test --test e2e --quiet -- runtime_u8_add_emits_and_truncation milestone_176_u8_add_wraps 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 64" "runtime_u8_add_emits_and_truncation or milestone_176_u8_add_wraps FAILED — u8 arithmetic may be constant-folded or missing TruncU8 truncation"
+else
+    pass "Claim 64: u8 arithmetic emits runtime add and and-truncation (not constant-folded)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 

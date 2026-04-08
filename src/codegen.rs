@@ -695,6 +695,19 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
             )?;
         }
 
+        // FLS §4.1, §6.23: Truncate to 8 unsigned bits for u8 return values.
+        // ARM64: `and w{dst}, w{src}, #255` masks the low 8 bits.
+        // The `w` register prefix operates on the 32-bit view of the register,
+        // which is zero-extended into the full 64-bit x-register — identical
+        // to masking the full 64-bit value with 0xFF.
+        // Cache-line note: one 4-byte instruction.
+        Instr::TruncU8 { dst, src } => {
+            writeln!(
+                out,
+                "    and     w{dst}, w{src}, #255            // FLS §6.23: truncate u8 (wrap at 256)"
+            )?;
+        }
+
         // FLS §8.1: Store a virtual register to a stack slot.
         // ARM64: `str x{src}, [sp, #{offset}]` — offset = slot * 8.
         // Cache-line note: 8-byte slots keep stores naturally aligned;
