@@ -647,6 +647,35 @@ impl<'src> Parser<'src> {
         let name = self.current_span();
         self.advance();
 
+        // FLS §4.14: Optional supertrait bounds: `trait Derived: Base + Other { ... }`
+        //
+        // When a `:` follows the trait name, parse one or more `+`-separated
+        // trait names as supertrait bounds. Galvanic does not enforce that
+        // implementors of `Derived` also implement `Base` — no type-system checking
+        // is performed. The spans are stored in `TraitDef.supertraits` for FLS
+        // traceability and to enable future enforcement.
+        //
+        // FLS §4.14 AMBIGUOUS: The spec does not define how supertrait method
+        // availability is resolved for concrete types at call sites. Galvanic's
+        // monomorphization naturally handles this: `t.base_method()` on a generic
+        // `T: Derived` resolves to `T__base_method` at call sites, which exists
+        // because the concrete type implements the supertrait.
+        let mut supertraits = Vec::new();
+        if self.peek_kind() == TokenKind::Colon {
+            self.advance(); // consume `:`
+            loop {
+                if self.peek_kind() == TokenKind::Ident {
+                    supertraits.push(self.current_span());
+                    self.advance();
+                }
+                if self.peek_kind() == TokenKind::Plus {
+                    self.advance(); // consume `+`
+                } else {
+                    break;
+                }
+            }
+        }
+
         // FLS §4.14: Optional where clause on trait definition.
         // `trait Transform where Self: Sized { ... }`
         // The where clause is parsed and discarded — galvanic does not enforce
@@ -702,7 +731,7 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::CloseBrace)?;
         let span = start.to(end);
 
-        Ok(TraitDef { name, methods, assoc_consts, assoc_types, span })
+        Ok(TraitDef { name, supertraits, methods, assoc_consts, assoc_types, span })
     }
 
     /// Consume a `self`, `&self`, or `&mut self` parameter if present.
