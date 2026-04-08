@@ -2151,3 +2151,38 @@ with `where C::Item: Trait` where clauses must execute at runtime.
 - contains `mov     x0, #9` (two-type sum constant-folded)
 
 **Tests**: `cargo test --test e2e -- runtime_where_proj_emits_bl_not_folded runtime_where_proj_two_types_both_monomorphized`
+
+---
+
+## Claim 52: unsafe fn body emits runtime instructions (not constant-folded)
+
+**FLS §19, §9.1**: The `unsafe fn` qualifier does not change codegen. The body of
+an `unsafe fn` must emit runtime ARM64 instructions, not compile-time constants.
+Calling an `unsafe fn` from an `unsafe { }` block emits a normal `bl` instruction.
+
+**Falsification strategy**: Write two programs:
+1. `unsafe fn double(x: i32) -> i32 { x * 2 }` — body must emit `mul`, not fold to `#10`.
+2. `unsafe fn add(a: i32, b: i32) -> i32 { a + b }` — call must emit `bl`, not fold to `#7`.
+
+**What would break this**:
+1. Folding `unsafe fn` body to a constant (treating it like a const fn).
+2. Inlining the call and constant-folding to `mov x0, #10` or `mov x0, #7`.
+3. Failing to emit `bl` at the call site.
+
+**FLS §19 AMBIGUOUS**: The spec does not define the enforcement mechanism for
+ensuring callers use an unsafe context. Galvanic records `is_unsafe` on `FnDef`
+but does not yet enforce the calling context constraint — this would require a
+borrow-checker-level pass.
+
+**FLS §6.1.2 Constraint 1**: `fn main()` and `unsafe fn` bodies are not const
+contexts — they must execute at runtime.
+
+**Violated if**: `compile_to_asm(UNSAFE_FN)` returns assembly that:
+- lacks `mul` in the body of `double`, OR
+- contains `mov     x0, #10` (result constant-folded)
+
+**Violated if**: `compile_to_asm(UNSAFE_FN_ADD)` returns assembly that:
+- lacks `bl` at the call site, OR
+- contains `mov     x0, #7` (result constant-folded)
+
+**Tests**: `cargo test --test e2e -- runtime_unsafe_fn_body_emits_mul_not_folded runtime_unsafe_fn_call_emits_bl_not_folded`

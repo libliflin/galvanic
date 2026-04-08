@@ -161,3 +161,8 @@ fn fls_4_14_supertrait_bounds() {
 fn fls_10_2_where_clause_proj() {
     assert_galvanic_accepts("fls_10_2_where_clause_proj.rs");
 }
+
+#[test]
+fn fls_19_unsafe_fn() {
+    assert_galvanic_accepts("fls_19_unsafe_fn.rs");
+}

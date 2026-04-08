@@ -257,6 +257,20 @@ pub struct FnDef {
     /// called from a non-const context it runs as a normal runtime function —
     /// identical codegen to a non-const fn.
     pub is_const: bool,
+    /// Whether this function is declared `unsafe`.
+    ///
+    /// FLS §19: An `unsafe fn` may only be called from within an unsafe context
+    /// (an `unsafe { }` block or another `unsafe fn`). The body may contain
+    /// unsafe operations without an inner `unsafe { }` block.
+    ///
+    /// FLS §19 AMBIGUOUS: The FLS requires that callers of `unsafe fn` use an
+    /// unsafe context, but does not specify the mechanism by which the compiler
+    /// enforces this. Galvanic records the qualifier for documentation purposes;
+    /// enforcement is deferred (it requires a borrow-checker-level pass).
+    ///
+    /// Codegen note: `unsafe fn` emits identical ARM64 instructions to `fn` —
+    /// the `unsafe` qualifier is a static typing constraint, not a runtime marker.
+    pub is_unsafe: bool,
     /// The function's name (span of the identifier token).
     pub name: Span,
     /// Generic type parameter names (e.g. `T`, `U` in `fn foo<T, U>(...)`).

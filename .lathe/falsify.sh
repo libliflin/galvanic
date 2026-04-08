@@ -1065,6 +1065,15 @@ else
     pass "Claim 51: where C::Item: Trait where-proj fn emits monomorphized bl (not constant-folded)"
 fi
 
+# References: claims.md Claim 52.
+
+echo "--- Claim 52: unsafe fn body emits runtime mul and call emits runtime bl (not constant-folded) ---"
+if cargo test --test e2e --quiet -- runtime_unsafe_fn_body_emits_mul_not_folded runtime_unsafe_fn_call_emits_bl_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 52" "runtime_unsafe_fn_body_emits_mul_not_folded or runtime_unsafe_fn_call_emits_bl_not_folded FAILED — unsafe fn body may be constant-folded or bl missing"
+else
+    pass "Claim 52: unsafe fn body emits runtime mul and call emits runtime bl (not constant-folded)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 

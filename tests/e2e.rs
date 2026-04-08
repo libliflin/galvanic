@@ -28416,3 +28416,157 @@ fn main() -> i32 {
         "result must NOT be constant-folded to #9; got:\n{asm}"
     );
 }
+
+// ── Milestone 170: unsafe fn — FLS §9.1, §19 ────────────────────────────────
+//
+// FLS §9.1: Functions may carry the `unsafe` qualifier. An `unsafe fn` may
+// only be called from within an unsafe context (an `unsafe { }` block or
+// another `unsafe fn`). The body may contain unsafe operations without an
+// inner `unsafe { }` block.
+//
+// FLS §19 AMBIGUOUS: The spec requires callers to use an unsafe context, but
+// does not define the enforcement mechanism. Galvanic records the qualifier for
+// documentation purposes; enforcement is deferred (it requires a borrow-checker-
+// level pass that galvanic does not yet implement).
+//
+// Codegen note: `unsafe fn` emits identical ARM64 instructions to `fn` — the
+// qualifier is a static typing constraint, not a runtime marker. No runtime
+// overhead. 16 ARM64 instructions per 64-byte cache line — same as a regular
+// function.
+
+/// Milestone 170: basic — unsafe fn doubling a parameter.
+#[test]
+fn milestone_170_unsafe_fn_basic() {
+    let Some(exit_code) = compile_and_run(r#"
+unsafe fn double(x: i32) -> i32 { x * 2 }
+fn main() -> i32 { unsafe { double(5) } }
+"#) else { return; };
+    assert_eq!(exit_code, 10); // 5 * 2
+}
+
+/// Milestone 170: arithmetic in unsafe fn body.
+#[test]
+fn milestone_170_unsafe_fn_arithmetic() {
+    let Some(exit_code) = compile_and_run(r#"
+unsafe fn add(a: i32, b: i32) -> i32 { a + b }
+fn main() -> i32 { unsafe { add(3, 7) } }
+"#) else { return; };
+    assert_eq!(exit_code, 10); // 3 + 7
+}
+
+/// Milestone 170: unsafe fn called from a non-unsafe wrapper.
+///
+/// Galvanic does not enforce the unsafety contract at call sites — a future
+/// enforcement pass would reject calling `square` outside an unsafe block.
+#[test]
+fn milestone_170_unsafe_fn_from_wrapper() {
+    let Some(exit_code) = compile_and_run(r#"
+unsafe fn square(x: i32) -> i32 { x * x }
+fn compute(n: i32) -> i32 { unsafe { square(n) } }
+fn main() -> i32 { compute(6) }
+"#) else { return; };
+    assert_eq!(exit_code, 36); // 6 * 6
+}
+
+/// Milestone 170: result used in arithmetic.
+#[test]
+fn milestone_170_unsafe_fn_result_in_arithmetic() {
+    let Some(exit_code) = compile_and_run(r#"
+unsafe fn half(x: i32) -> i32 { x / 2 }
+fn main() -> i32 { unsafe { half(10) } * 3 }
+"#) else { return; };
+    assert_eq!(exit_code, 15); // (10/2) * 3
+}
+
+/// Milestone 170: result passed to another function.
+#[test]
+fn milestone_170_unsafe_fn_result_passed_to_fn() {
+    let Some(exit_code) = compile_and_run(r#"
+unsafe fn triple(x: i32) -> i32 { x * 3 }
+fn add_one(x: i32) -> i32 { x + 1 }
+fn main() -> i32 { add_one(unsafe { triple(4) }) }
+"#) else { return; };
+    assert_eq!(exit_code, 13); // 4*3 + 1
+}
+
+/// Milestone 170: result used in an if expression.
+#[test]
+fn milestone_170_unsafe_fn_result_in_if() {
+    let Some(exit_code) = compile_and_run(r#"
+unsafe fn check(x: i32) -> i32 { if x > 5 { 1 } else { 0 } }
+fn main() -> i32 { unsafe { check(7) } }
+"#) else { return; };
+    assert_eq!(exit_code, 1);
+}
+
+/// Milestone 170: unsafe fn called twice with different arguments.
+#[test]
+fn milestone_170_unsafe_fn_called_twice() {
+    let Some(exit_code) = compile_and_run(r#"
+unsafe fn inc(x: i32) -> i32 { x + 1 }
+fn main() -> i32 { unsafe { inc(2) + inc(5) } }
+"#) else { return; };
+    assert_eq!(exit_code, 9); // (2+1) + (5+1)
+}
+
+/// Milestone 170: unsafe fn on a function parameter value.
+#[test]
+fn milestone_170_unsafe_fn_on_parameter() {
+    let Some(exit_code) = compile_and_run(r#"
+unsafe fn negate(x: i32) -> i32 { 0 - x }
+fn apply(n: i32) -> i32 { unsafe { negate(n) } }
+fn main() -> i32 {
+    let r = apply(3);
+    if r < 0 { 1 } else { 0 }
+}
+"#) else { return; };
+    assert_eq!(exit_code, 1); // -3 < 0 → 1
+}
+
+// Assembly inspection: unsafe fn body emits runtime mul (not constant-folded).
+//
+// FLS §19: `unsafe fn` qualifier does not change codegen. The body must emit
+// runtime instructions, not compile-time constants.
+// FLS §6.1.2:37–45: Non-const functions emit runtime instructions.
+//
+// Positive: `mul` instruction emitted in the body of `double`.
+// Negative: result of `double(5)` (= 10) NOT folded to `mov x0, #10`.
+#[test]
+fn runtime_unsafe_fn_body_emits_mul_not_folded() {
+    let asm = compile_to_asm(r#"
+unsafe fn double(x: i32) -> i32 { x * 2 }
+fn main() -> i32 { unsafe { double(5) } }
+"#);
+    assert!(
+        asm.contains("mul"),
+        "unsafe fn body must emit runtime mul instruction; got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #10") && !asm.contains("mov x0, #10"),
+        "result must NOT be constant-folded to #10; got:\n{asm}"
+    );
+}
+
+// Assembly inspection: unsafe fn call site emits bl (not constant-folded).
+//
+// FLS §19: Calling an `unsafe fn` from an `unsafe { }` block emits a normal
+// `bl` instruction — identical to calling a non-unsafe function.
+// FLS §6.1.2:37–45: The call is a runtime instruction.
+//
+// Positive: `bl` emitted at the call site.
+// Negative: result of `add(3, 4)` (= 7) NOT folded to `mov x0, #7`.
+#[test]
+fn runtime_unsafe_fn_call_emits_bl_not_folded() {
+    let asm = compile_to_asm(r#"
+unsafe fn add(a: i32, b: i32) -> i32 { a + b }
+fn main() -> i32 { unsafe { add(3, 4) } }
+"#);
+    assert!(
+        asm.contains("bl"),
+        "unsafe fn call must emit runtime bl instruction; got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #7") && !asm.contains("mov x0, #7"),
+        "result must NOT be constant-folded to #7; got:\n{asm}"
+    );
+}
