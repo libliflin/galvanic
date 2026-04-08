@@ -235,6 +235,24 @@ else
     pass "Claim 11: closures emit hidden function labels with runtime body instructions"
 fi
 
+# ── Claim 12: Trait-bound generic function dispatch emits monomorphized runtime code ─
+# Tests that a generic function with `<T: Trait>` bound:
+#   (a) emits a monomorphized label (apply_scale__Foo) in the assembly
+#   (b) dispatches to the concrete type's method via runtime `bl Foo__scale`
+#   (c) does NOT constant-fold the result when called with a runtime parameter
+# This is distinct from Claim 7 (data-only generics) and Claim 9 (generic trait impls).
+# The code path: call-site type inference → `pending_monos` → `generic_type_subst` →
+# param spilling with concrete struct name → `local_struct_types` → method dispatch.
+# Introduced in cycle 17 (milestone 139, FLS §12.1 + §4.14). No prior falsification.
+# References: claims.md Claim 12.
+
+echo "--- Claim 12: trait-bound generic dispatch emits monomorphized label and runtime bl ---"
+if cargo test --test e2e --quiet -- runtime_trait_bound_result_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 12" "runtime_trait_bound_result_not_folded FAILED — trait-bound generic dispatch may not be monomorphizing or may be constant-folding the result"
+else
+    pass "Claim 12: trait-bound generic dispatch emits monomorphized label and runtime bl (not folded)"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

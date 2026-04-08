@@ -232,6 +232,35 @@ OR for a capturing closure, the assembly fails to contain `__closure_main_0` or 
 
 ---
 
+## Claim 12: Trait-bound generic function dispatch emits monomorphized runtime code
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: When a generic function with a trait bound is called — whether using
+inline bounds (`fn f<T: Trait>(t: T)`) or where-clause bounds (`fn f<T>(t: T) where T: Trait`)
+— galvanic must:
+1. Emit a monomorphized function label: `apply_scale__Foo:` for concrete type `Foo`.
+2. Inside that label, dispatch to the concrete type's method via a runtime `bl Foo__scale`.
+3. Not constant-fold the result: calling with a runtime parameter must not produce a `mov`.
+
+This guards the dispatch path introduced in milestones 139 and 140 (FLS §12.1, §4.14).
+It is distinct from Claims 7 and 9:
+- Claim 7: generic function without trait dispatch (data-only type param, e.g., `identity__i32`)
+- Claim 9: generic *trait impl* for a generic type (e.g., `impl<T> Trait for Type<T>`)
+- Claim 12: generic function with a *trait bound* that dispatches to the concrete type's method body
+
+The code path in `lower.rs` that resolves `T = Foo` at call sites and routes `t.method()` to
+`Foo__method` was added in cycle 17. A regression here would silence the method dispatch
+entirely (calling an unmangeld label or no label) without being caught by Claims 7 or 9.
+
+**Violated if**: `compile_to_asm(...)` for `fn apply_scale<T: Scalable>(t: T, n: i32)` fails to
+contain `apply_scale__Foo:` (monomorphization absent), or fails to contain `bl Foo__scale`
+(method dispatch absent), or contains `mov x0, #12` (constant-folded instead of runtime).
+
+**Test**: `cargo test --test e2e -- runtime_trait_bound_result_not_folded`
+
+---
+
 ## Not Yet Claims (honest gaps)
 
 These are promises the project will eventually make but cannot yet be falsified:
