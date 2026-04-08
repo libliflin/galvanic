@@ -1392,6 +1392,20 @@ else
     pass "Claim 76: chained narrow integer const item references preserve bit-width (X+ref wraps at declared width)"
 fi
 
+echo "--- Claim 77: narrow integer const items wrap for subtraction (underflow) and multiplication, not just addition ---"
+if cargo test --test e2e -- \
+    claim_77_u8_const_sub_and_mul_wrap_not_saturate \
+    runtime_u8_const_sub_underflow_emits_loadimm_251 \
+    runtime_u8_const_mul_wrap_emits_loadimm_44 \
+    milestone_191_u8_const_sub_underflow \
+    milestone_191_u8_const_mul_wraps \
+    milestone_191_u8_const_chained_sub_underflow \
+    2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 77" "narrow const sub/mul wrapping FAILED — narrow_const_value may clamp negatives to 0 (saturation) or not narrow mul results (5-10 should be 251, not 0 or -5; 100*3 should be 44, not 300)"
+else
+    pass "Claim 77: narrow integer const items wrap for subtraction (underflow) and multiplication (not just addition)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 

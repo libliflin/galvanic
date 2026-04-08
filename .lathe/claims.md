@@ -2918,3 +2918,28 @@ declared field type — not as a wider i32.
 - The assembly for that program contains `#300` or `#0x12c` instead of `#44` or `#0x2c`
 
 **Tests**: `cargo test --test e2e -- claim_76_u8_chained_const_ref_wraps_at_8_bits runtime_u8_const_chain_ref_emits_correct_loadimm milestone_190_u8_const_ref_chain_wraps milestone_190_u16_const_ref_chain_wraps`
+
+---
+
+## Claim 77: Narrow integer const items wrap correctly for subtraction and multiplication, not just addition
+
+**Stakeholder**: William (researcher), CI / Validation Infrastructure
+
+**Promise**: `narrow_const_value` applies two's-complement bit-width truncation to ALL arithmetic results in const item initializers — addition, subtraction, AND multiplication. `const X: u8 = 5 - 10` must yield 251 (not 0 from saturation or -5 from no narrowing). `const X: u8 = 100 * 3` must yield 44 (not 300 from no narrowing).
+
+**Why this is load-bearing**: Claim 75 tested addition wrapping (200+100=300→44). A regression that broke only subtraction or multiplication narrowing would pass Claim 75. The adversarial failure modes are:
+1. `narrow_const_value` clamps negative raw values to 0 instead of wrapping: `-5 as u8 = 251` becomes `0`. Would affect all subtraction that produces a negative i32 intermediate.
+2. `narrow_const_value` not called uniformly (e.g., special-cased only for addition): multiplication raw result 300 stored un-narrowed.
+3. `eval_const_expr` returns `None` for subtraction that underflows i32 (wrong — `-5` fits in i32 fine; `checked_sub` correctly returns `Some(-5)`).
+
+**ARM64 implementation**: `narrow_const_value(raw, &c.ty, source)` uses `raw as u8 as i32` (Rust's two's-complement modular cast) which handles both positive overflow AND negative underflow correctly. The call is unconditional after any `eval_const_expr` result.
+
+**FLS §6.23, §4.1**: Narrow integer types have specific bit-widths; all arithmetic must respect declared width.
+**FLS §6.23 AMBIGUOUS**: Underflow/overflow in const contexts should be compile-time errors; galvanic wraps pragmatically.
+
+**Violated if**:
+- `const X: u8 = 5 - 10; fn check(v: i32) -> i32 { if v == 251 { 1 } else { 0 } } fn main() -> i32 { check(X as i32) }` returns 0 (X was 0 from saturation or -5 from no narrowing), OR
+- Assembly for `const X: u8 = 5 - 10; fn main() -> i32 { X as i32 }` does NOT contain `#251`, OR
+- `const X: u8 = 100 * 3; fn check(v: i32) -> i32 { if v == 44 { 1 } else { 0 } } fn main() -> i32 { check(X as i32) }` returns 0 (X was 300 un-narrowed)
+
+**Tests**: `cargo test --test e2e -- claim_77_u8_const_sub_and_mul_wrap_not_saturate runtime_u8_const_sub_underflow_emits_loadimm_251 runtime_u8_const_mul_wrap_emits_loadimm_44 milestone_191_u8_const_sub_underflow milestone_191_u8_const_mul_wraps milestone_191_u8_const_chained_sub_underflow`
