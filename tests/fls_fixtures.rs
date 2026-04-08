@@ -132,3 +132,8 @@ fn fls_4_14_where_clauses() {
 fn fls_4_14_where_clauses_on_types() {
     assert_galvanic_accepts("fls_4_14_where_clauses_on_types.rs");
 }
+
+#[test]
+fn fls_11_impl_trait() {
+    assert_galvanic_accepts("fls_11_impl_trait.rs");
+}

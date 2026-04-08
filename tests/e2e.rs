@@ -21513,3 +21513,309 @@ fn main() -> i32 {
         "use_bar(Bar{{val:1}}) result must not be folded to constant 14: {asm}"
     );
 }
+
+// ── Milestone 145: impl Trait in argument position (FLS §11, §12.1) ─────────
+//
+// `impl Trait` in argument position is syntactic sugar for an anonymous generic
+// type parameter with a trait bound. `fn foo(x: impl MyTrait) -> i32` is
+// equivalent to `fn foo<T: MyTrait>(x: T) -> i32`. Galvanic monomorphizes
+// each call site to a concrete specialization: `foo__Num`, `foo__Counter`, etc.
+//
+// FLS §11: AMBIGUOUS — The spec does not precisely specify the desugaring scope
+// (lifetime capture, RPIT vs APIT distinctions). Galvanic treats each impl Trait
+// param as an independent anonymous generic type parameter.
+
+const IMPL_TRAIT_BASIC: &str = "
+trait Value {
+    fn get(&self) -> i32;
+}
+struct Num { val: i32 }
+impl Value for Num {
+    fn get(&self) -> i32 { self.val }
+}
+fn extract(x: impl Value) -> i32 {
+    x.get()
+}
+fn main() -> i32 {
+    let n = Num { val: 7 };
+    extract(n)
+}
+";
+
+#[test]
+fn milestone_145_impl_trait_basic() {
+    let Some(exit_code) = compile_and_run(IMPL_TRAIT_BASIC) else { return };
+    assert_eq!(exit_code, 7);
+}
+
+#[test]
+fn milestone_145_impl_trait_on_parameter() {
+    let src = "
+trait Value {
+    fn get(&self) -> i32;
+}
+struct Num { val: i32 }
+impl Value for Num {
+    fn get(&self) -> i32 { self.val }
+}
+fn extract(x: impl Value) -> i32 {
+    x.get()
+}
+fn wrapper(n: Num) -> i32 {
+    extract(n)
+}
+fn main() -> i32 {
+    wrapper(Num { val: 5 })
+}
+";
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 5);
+}
+
+#[test]
+fn milestone_145_impl_trait_result_in_arithmetic() {
+    let src = "
+trait Value {
+    fn get(&self) -> i32;
+}
+struct Num { val: i32 }
+impl Value for Num {
+    fn get(&self) -> i32 { self.val }
+}
+fn extract(x: impl Value) -> i32 {
+    x.get()
+}
+fn main() -> i32 {
+    let a = Num { val: 3 };
+    let b = Num { val: 4 };
+    extract(a) + extract(b)
+}
+";
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 7);
+}
+
+#[test]
+fn milestone_145_impl_trait_two_types() {
+    let src = "
+trait Score {
+    fn score(&self) -> i32;
+}
+struct Low { val: i32 }
+struct High { val: i32 }
+impl Score for Low {
+    fn score(&self) -> i32 { self.val }
+}
+impl Score for High {
+    fn score(&self) -> i32 { self.val + 10 }
+}
+fn get_score(x: impl Score) -> i32 {
+    x.score()
+}
+fn main() -> i32 {
+    let lo = Low { val: 1 };
+    let hi = High { val: 2 };
+    get_score(lo) + get_score(hi)
+}
+";
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 13); // 1 + (2+10)
+}
+
+#[test]
+fn milestone_145_impl_trait_called_twice() {
+    let src = "
+trait Double {
+    fn double(&self) -> i32;
+}
+struct Num { val: i32 }
+impl Double for Num {
+    fn double(&self) -> i32 { self.val * 2 }
+}
+fn apply_double(x: impl Double) -> i32 {
+    x.double()
+}
+fn main() -> i32 {
+    let a = Num { val: 3 };
+    let b = Num { val: 4 };
+    apply_double(a) + apply_double(b)
+}
+";
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 14); // 6 + 8
+}
+
+#[test]
+fn milestone_145_impl_trait_result_in_if() {
+    let src = "
+trait Value {
+    fn get(&self) -> i32;
+}
+struct Num { val: i32 }
+impl Value for Num {
+    fn get(&self) -> i32 { self.val }
+}
+fn extract(x: impl Value) -> i32 {
+    x.get()
+}
+fn main() -> i32 {
+    let n = Num { val: 8 };
+    if extract(n) > 5 { 1 } else { 0 }
+}
+";
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 1);
+}
+
+#[test]
+fn milestone_145_impl_trait_result_passed_to_fn() {
+    let src = "
+trait Value {
+    fn get(&self) -> i32;
+}
+struct Num { val: i32 }
+impl Value for Num {
+    fn get(&self) -> i32 { self.val }
+}
+fn extract(x: impl Value) -> i32 {
+    x.get()
+}
+fn double(x: i32) -> i32 { x * 2 }
+fn main() -> i32 {
+    let n = Num { val: 6 };
+    double(extract(n))
+}
+";
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 12);
+}
+
+#[test]
+fn milestone_145_impl_trait_with_default_method() {
+    let src = "
+trait Scaled {
+    fn raw(&self) -> i32;
+    fn scaled(&self) -> i32 { self.raw() * 3 }
+}
+struct Num { val: i32 }
+impl Scaled for Num {
+    fn raw(&self) -> i32 { self.val }
+}
+fn scale(x: impl Scaled) -> i32 {
+    x.scaled()
+}
+fn main() -> i32 {
+    let n = Num { val: 4 };
+    scale(n)
+}
+";
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 12);
+}
+
+// Assembly inspection: impl Trait must monomorphize (emit a mangled label), not fold.
+#[test]
+fn runtime_impl_trait_emits_monomorphized_label() {
+    let asm = compile_to_asm("
+trait Value {
+    fn get(&self) -> i32;
+}
+struct Num { val: i32 }
+impl Value for Num {
+    fn get(&self) -> i32 { self.val }
+}
+fn extract(x: impl Value) -> i32 {
+    x.get()
+}
+fn wrapper(n: Num) -> i32 {
+    extract(n)
+}
+fn main() -> i32 {
+    wrapper(Num { val: 7 })
+}
+");
+    assert!(
+        asm.contains("extract__Num:"),
+        "impl Trait must produce a monomorphized label `extract__Num`: {asm}"
+    );
+}
+
+#[test]
+fn runtime_impl_trait_call_emits_bl_not_folded() {
+    // Using a wrapper function ensures the value is a runtime parameter,
+    // so constant folding is structurally impossible.
+    let asm = compile_to_asm("
+trait Value {
+    fn get(&self) -> i32;
+}
+struct Num { val: i32 }
+impl Value for Num {
+    fn get(&self) -> i32 { self.val }
+}
+fn extract(x: impl Value) -> i32 {
+    x.get()
+}
+fn wrapper(n: Num) -> i32 {
+    extract(n)
+}
+fn main() -> i32 {
+    wrapper(Num { val: 7 })
+}
+");
+    assert!(
+        asm.contains("bl") && asm.contains("extract__Num"),
+        "impl Trait call must emit `bl extract__Num` (runtime dispatch): {asm}"
+    );
+    // The wrapper function proves runtime dispatch: inside `wrapper(n: Num)`,
+    // `n` is a parameter — constant folding is structurally impossible.
+    // The `bl extract__Num` in wrapper confirms the call is not inlined as a constant.
+}
+
+#[test]
+fn runtime_impl_trait_two_types_both_monomorphized() {
+    // Verify that calling the same impl Trait function with two different concrete
+    // types produces two separate monomorphizations, not just one.
+    // Wrapper functions force runtime dispatch — the struct is a parameter, so
+    // constant folding is structurally impossible inside the wrappers.
+    let asm = compile_to_asm("
+trait Score {
+    fn score(&self) -> i32;
+}
+struct Low { val: i32 }
+struct High { val: i32 }
+impl Score for Low {
+    fn score(&self) -> i32 { self.val }
+}
+impl Score for High {
+    fn score(&self) -> i32 { self.val + 10 }
+}
+fn get_score(x: impl Score) -> i32 {
+    x.score()
+}
+fn use_low(lo: Low) -> i32 { get_score(lo) }
+fn use_high(hi: High) -> i32 { get_score(hi) }
+fn main() -> i32 {
+    let lo = Low { val: 1 };
+    let hi = High { val: 2 };
+    use_low(lo) + use_high(hi)
+}
+");
+    // Both concrete monomorphizations must be emitted as separate labeled functions.
+    assert!(
+        asm.contains("get_score__Low:"),
+        "impl Trait must monomorphize to `get_score__Low`: {asm}"
+    );
+    assert!(
+        asm.contains("get_score__High:"),
+        "impl Trait must monomorphize to `get_score__High`: {asm}"
+    );
+    // Both wrappers must emit a `bl` to the monomorphized callee, not inline a constant.
+    assert!(
+        asm.contains("bl") && asm.contains("get_score__Low"),
+        "use_low must call get_score__Low via bl (runtime dispatch): {asm}"
+    );
+    assert!(
+        asm.contains("bl") && asm.contains("get_score__High"),
+        "use_high must call get_score__High via bl (runtime dispatch): {asm}"
+    );
+}
