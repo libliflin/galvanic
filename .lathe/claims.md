@@ -374,3 +374,36 @@ These are promises the project will eventually make but cannot yet be falsified:
 - **Arithmetic overflow behavior**: In non-const code at runtime, integer overflow must panic in debug mode and wrap in release mode (FLS §6.1.2:49–50). Galvanic does not yet enforce this — no bounds checking is emitted. When it does, add a claim here.
 
 - **Unicode identifier handling**: FLS §2.3 requires NFC normalization for Unicode identifiers. Galvanic accepts non-ASCII identifiers but does not normalize them. This is a known gap, documented in `lexer.rs`.
+
+---
+
+## Claim 16: dyn Trait dispatch uses vtable indirection, not constant folding
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: When a `&dyn Trait` value is passed to a function and a method is called
+on it, galvanic must emit a vtable indirect call (`blr`) rather than resolving the
+method statically or constant-folding the result.
+
+Specifically: for `fn print_area(s: &dyn Shape) -> i32 { s.area() }` called with
+`Circle { r: 5 }`, the emitted assembly must:
+1. Contain the vtable label `vtable_Shape_Circle` in `.rodata`.
+2. Contain `blr` for the indirect method dispatch.
+3. NOT contain `mov x0, #25` (constant-folded result of 5*5=25).
+
+**Attack vector**: A naive optimizer could detect that the only concrete type passed
+to `print_area` is `Circle` and devirtualize the call, substituting the direct call
+`Circle__area` or even folding `5*5` to `25`. This would defeat the purpose of
+`dyn Trait` — runtime polymorphism — and would break programs where multiple concrete
+types are passed to the same dyn Trait parameter.
+
+This is distinct from Claim 12 (impl Trait static dispatch) which SHOULD monomorphize.
+`dyn Trait` must preserve vtable dispatch even when the concrete type is known at
+the call site.
+
+**Violated if**: `compile_to_asm(DYN_TRAIT_BASIC)` returns assembly that:
+- lacks `vtable_Shape_Circle` (vtable not emitted), OR
+- lacks `blr` (no indirect dispatch), OR
+- contains `mov x0, #25` (result constant-folded).
+
+**Test**: `cargo test --test e2e -- milestone_147_dyn_trait_asm_inspection`

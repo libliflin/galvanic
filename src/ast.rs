@@ -759,6 +759,25 @@ pub enum TyKind {
     ///
     /// Cache-line note: same register footprint as explicit generic params.
     ImplTrait(Span),
+
+    /// `dyn Trait` — a trait object type. FLS §4.13.
+    ///
+    /// A value of type `&dyn Trait` is a fat pointer: a pair of (data pointer,
+    /// vtable pointer). The data pointer points to the concrete value; the
+    /// vtable pointer points to a table of function pointers for the trait's
+    /// methods, one per method in declaration order.
+    ///
+    /// FLS §4.13: "A trait object is an opaque value of another type that
+    /// implements a set of traits." Dynamic dispatch is used when the concrete
+    /// type is not known at compile time.
+    ///
+    /// FLS §4.13: AMBIGUOUS — The FLS does not specify the vtable layout or
+    /// the fat pointer representation. Galvanic uses (data_ptr, vtable_ptr)
+    /// as two consecutive stack slots, consistent with the Rust ABI convention.
+    ///
+    /// Cache-line note: a fat pointer occupies 16 bytes (2 × 8-byte slots),
+    /// double the cost of a thin pointer or any scalar value.
+    DynTrait(Span),
 }
 
 // ── Blocks ────────────────────────────────────────────────────────────────────

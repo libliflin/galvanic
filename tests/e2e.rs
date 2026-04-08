@@ -22124,3 +22124,211 @@ fn runtime_multi_impl_trait_both_methods_emitted() {
         "combine must call Bar__double via bl: {asm}"
     );
 }
+
+// ── Milestone 147: dyn Trait — vtable dispatch (FLS §4.13) ───────────────────
+//
+// A value of type `&dyn Trait` is a fat pointer: (data_ptr, vtable_ptr).
+// Method calls dispatch through the vtable at runtime.
+//
+// FLS §4.13 AMBIGUOUS: The FLS does not specify vtable layout or fat pointer
+// representation. Galvanic uses (data_ptr, vtable_ptr) as two consecutive
+// registers/slots, with a dense vtable array in .rodata.
+//
+// Tests cover:
+//   1. Basic single-method trait dispatch
+//   2. Two different concrete types via the same dyn Trait parameter
+//   3. Result of dispatch used in arithmetic
+//   4. Multiple method calls on the same dyn object
+//   5. Two-method trait (vtable has 2 entries)
+//   6. Struct with two fields behind dyn Trait
+//   7. Nested dyn Trait call (dispatch result passed to another fn)
+//   8. Assembly inspection: vtable label and blr present; no constant folding
+
+const DYN_TRAIT_BASIC: &str = "
+trait Shape {
+    fn area(&self) -> i32;
+}
+struct Circle { r: i32 }
+impl Shape for Circle {
+    fn area(&self) -> i32 { self.r * self.r }
+}
+fn print_area(s: &dyn Shape) -> i32 {
+    s.area()
+}
+fn main() -> i32 {
+    let c = Circle { r: 5 };
+    print_area(&c)
+}
+";
+
+#[test]
+fn milestone_147_dyn_trait_basic() {
+    // Circle { r: 5 }.area() = 25
+    let Some(exit_code) = compile_and_run(DYN_TRAIT_BASIC) else { return };
+    assert_eq!(exit_code, 25);
+}
+
+#[test]
+fn milestone_147_dyn_trait_two_concrete_types() {
+    let src = "
+trait Shape {
+    fn area(&self) -> i32;
+}
+struct Circle { r: i32 }
+struct Square { side: i32 }
+impl Shape for Circle {
+    fn area(&self) -> i32 { self.r * self.r }
+}
+impl Shape for Square {
+    fn area(&self) -> i32 { self.side * self.side }
+}
+fn print_area(s: &dyn Shape) -> i32 {
+    s.area()
+}
+fn main() -> i32 {
+    let c = Circle { r: 3 };
+    let sq = Square { side: 4 };
+    print_area(&c) + print_area(&sq)
+}
+";
+    // 9 + 16 = 25
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 25);
+}
+
+#[test]
+fn milestone_147_dyn_trait_result_in_arithmetic() {
+    let src = "
+trait Compute {
+    fn value(&self) -> i32;
+}
+struct Num { n: i32 }
+impl Compute for Num {
+    fn value(&self) -> i32 { self.n * 3 }
+}
+fn run(c: &dyn Compute) -> i32 {
+    c.value()
+}
+fn main() -> i32 {
+    let x = Num { n: 4 };
+    run(&x) + 1
+}
+";
+    // 4*3 + 1 = 13
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 13);
+}
+
+#[test]
+fn milestone_147_dyn_trait_multiple_calls() {
+    let src = "
+trait Compute {
+    fn value(&self) -> i32;
+}
+struct Num { n: i32 }
+impl Compute for Num {
+    fn value(&self) -> i32 { self.n + 1 }
+}
+fn double_run(c: &dyn Compute) -> i32 {
+    c.value() + c.value()
+}
+fn main() -> i32 {
+    let x = Num { n: 7 };
+    double_run(&x)
+}
+";
+    // (7+1) + (7+1) = 16
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 16);
+}
+
+#[test]
+fn milestone_147_dyn_trait_two_method_vtable() {
+    let src = "
+trait Widget {
+    fn width(&self) -> i32;
+    fn height(&self) -> i32;
+}
+struct Box2 { w: i32, h: i32 }
+impl Widget for Box2 {
+    fn width(&self) -> i32 { self.w }
+    fn height(&self) -> i32 { self.h }
+}
+fn area(w: &dyn Widget) -> i32 {
+    w.width() * w.height()
+}
+fn main() -> i32 {
+    let b = Box2 { w: 6, h: 7 };
+    area(&b)
+}
+";
+    // 6 * 7 = 42
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 42);
+}
+
+#[test]
+fn milestone_147_dyn_trait_two_field_struct() {
+    let src = "
+trait Dist {
+    fn manhattan(&self) -> i32;
+}
+struct Point { x: i32, y: i32 }
+impl Dist for Point {
+    fn manhattan(&self) -> i32 { self.x + self.y }
+}
+fn measure(d: &dyn Dist) -> i32 {
+    d.manhattan()
+}
+fn main() -> i32 {
+    let p = Point { x: 3, y: 8 };
+    measure(&p)
+}
+";
+    // 3 + 8 = 11
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 11);
+}
+
+#[test]
+fn milestone_147_dyn_trait_nested_call() {
+    let src = "
+trait Val {
+    fn get(&self) -> i32;
+}
+struct Wrap { v: i32 }
+impl Val for Wrap {
+    fn get(&self) -> i32 { self.v * 2 }
+}
+fn fetch(v: &dyn Val) -> i32 {
+    v.get()
+}
+fn identity(x: i32) -> i32 { x }
+fn main() -> i32 {
+    let w = Wrap { v: 6 };
+    identity(fetch(&w))
+}
+";
+    // 6*2 = 12
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 12);
+}
+
+#[test]
+fn milestone_147_dyn_trait_asm_inspection() {
+    // Positive: vtable label and blr instruction are present.
+    // Negative: the method result must NOT be constant-folded.
+    let asm = compile_to_asm(DYN_TRAIT_BASIC);
+    assert!(
+        asm.contains("vtable_Shape_Circle"),
+        "vtable label `vtable_Shape_Circle` must be emitted in .rodata: {asm}"
+    );
+    assert!(
+        asm.contains("blr"),
+        "vtable dispatch must emit `blr` (indirect call): {asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #25"),
+        "dyn Trait dispatch must NOT be constant-folded to 25: {asm}"
+    );
+}

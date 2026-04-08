@@ -307,6 +307,13 @@ else
     pass "Claim 15: multiple bounds monomorphize all methods for all concrete types"
 fi
 
+echo "--- Claim 16: dyn Trait dispatch uses vtable indirection, not constant folding ---"
+if cargo test --test e2e --quiet -- milestone_147_dyn_trait_asm_inspection 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 16" "milestone_147_dyn_trait_asm_inspection FAILED — dyn Trait dispatch may be constant-folded or vtable not emitted"
+else
+    pass "Claim 16: dyn Trait dispatch uses vtable indirection, not constant folding"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

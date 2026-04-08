@@ -1573,6 +1573,33 @@ impl<'src> Parser<'src> {
             //
             // FLS §12 NOTE: The full semantics of `impl Trait` (monomorphisation, capturing
             // closures) are not yet implemented. Only non-capturing closures are supported.
+            // `dyn Trait` — a trait object type. FLS §4.13.
+            //
+            // `&dyn Trait` is a fat pointer: (data ptr, vtable ptr). The `dyn`
+            // keyword indicates dynamic dispatch through the vtable at runtime.
+            // Parsed as `TyKind::DynTrait(trait_name_span)`. The surrounding
+            // `&` (or `&mut`) is parsed by the `TokenKind::And` arm above and
+            // wraps the DynTrait in a `TyKind::Ref`.
+            //
+            // FLS §4.13: "A trait object is an opaque value of another type
+            // that implements a set of traits." The `dyn` keyword makes dynamic
+            // dispatch explicit.
+            //
+            // FLS §4.13: AMBIGUOUS — The FLS does not specify vtable layout.
+            // Cache-line note: fat pointer = 2 × 8-byte slots (16 bytes).
+            TokenKind::KwDyn => {
+                self.advance(); // consume `dyn`
+                if self.peek_kind() != TokenKind::Ident {
+                    return Err(self.error(format!(
+                        "expected trait name after `dyn`, found {:?}",
+                        self.peek_kind()
+                    )));
+                }
+                let trait_span = self.current_span();
+                self.advance(); // consume trait name
+                Ok(Ty { kind: TyKind::DynTrait(trait_span), span: start.to(trait_span) })
+            }
+
             TokenKind::KwImpl => {
                 self.advance(); // consume `impl`
                 // Expect a trait name identifier.
