@@ -3348,7 +3348,7 @@ fn lower_fn(
         // FLS §4.1: i32 parameters occupy one 64-bit register (x0–x7).
         // FLS §4.1: All primitive integer types and bool are supported as
         // parameters. Each uses one 64-bit ARM64 register (x0–x7).
-        if !matches!(param_ty, IrTy::I32 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::FnPtr) {
+        if !matches!(param_ty, IrTy::I32 | IrTy::I8 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::FnPtr) {
             return Err(LowerError::Unsupported(
                 "parameter type other than i32/bool/u32/i64/u64/usize/isize/i8/i16/u8/u16/fn ptr/f64/f32".into(),
             ));
@@ -3361,6 +3361,14 @@ fn lower_fn(
         // emit CallIndirect rather than a direct `bl {name}`.
         if param_ty == IrTy::FnPtr {
             ctx.local_fn_ptr_slots.insert(slot);
+        }
+        // FLS §4.1, §6.23: track narrow-type parameters so compound assignment
+        // can apply the correct wrapping instruction (TruncU8 / SextI8).
+        if param_ty == IrTy::U8 {
+            ctx.u8_locals.insert(param_name);
+        }
+        if param_ty == IrTy::I8 {
+            ctx.i8_locals.insert(param_name);
         }
         reg_idx += 1;
     }
@@ -3890,10 +3898,13 @@ fn lower_ty(
         }
         TyKind::Path(segments) if segments.len() == 1 => {
             match segments[0].text(source) {
-                // FLS §4.1: Signed integer types. i8/i16/i64/isize all use
-                // signed 64-bit registers on ARM64. Width truncation for
-                // narrower types is deferred (FLS §4.1 AMBIGUOUS on ABI layout).
-                "i32" | "i8" | "i16" | "i64" | "isize" => Ok(IrTy::I32),
+                // FLS §4.1: Signed integer types. i16/i64/isize use signed 64-bit
+                // registers on ARM64 (width narrowing is deferred for i16/i64/isize).
+                "i32" | "i16" | "i64" | "isize" => Ok(IrTy::I32),
+                // FLS §4.1: The i8 type. Arithmetic uses the same signed ops as
+                // I32 (sdiv, asr). At return boundaries, SextI8 sign-extends
+                // the result to 8 bits for correct FLS §6.23 wrapping semantics.
+                "i8" => Ok(IrTy::I8),
                 // FLS §4.3: bool is a distinct type in the IR so that `!` can
                 // emit logical NOT (eor, XOR with 1) rather than bitwise NOT (mvn).
                 // On ARM64, bool and i32 share the same register layout (0/1 as i64),
@@ -4353,6 +4364,25 @@ struct LowerCtx<'src> {
     ///
     /// Cache-line note: pointer occupies one stack slot (8 bytes) — same as scalar.
     ptr_capture_slots: std::collections::HashSet<u8>,
+
+    /// Names of local variables explicitly declared with type `u8`.
+    ///
+    /// FLS §4.1, §6.23: u8 arithmetic wraps at 256. Compound assignment (`+=`,
+    /// `*=`, etc.) must apply `TruncU8` (`and #255`) after the binary operation
+    /// before storing the result back to the slot. Without this, mid-body reads
+    /// of u8 variables after compound assignment see unwrapped (>255) values.
+    ///
+    /// Populated from `let x: u8 = …` annotations and u8 function parameters.
+    u8_locals: std::collections::HashSet<&'src str>,
+
+    /// Names of local variables explicitly declared with type `i8`.
+    ///
+    /// FLS §4.1, §6.23: i8 arithmetic wraps at ±128. Compound assignment must
+    /// apply `SextI8` (`sxtb x{r}, w{r}`) after the binary operation to sign-extend
+    /// the lower 8 bits into the full 64-bit register before storing back.
+    ///
+    /// Populated from `let x: i8 = …` annotations and i8 function parameters.
+    i8_locals: std::collections::HashSet<&'src str>,
 
     /// Captured outer-scope slots for each closure fn-pointer slot.
     ///
@@ -5040,6 +5070,8 @@ impl<'src> LowerCtx<'src> {
             local_fn_ptr_slots: std::collections::HashSet::new(),
             local_str_slots: std::collections::HashSet::new(),
             ptr_capture_slots: std::collections::HashSet::new(),
+            u8_locals: std::collections::HashSet::new(),
+            i8_locals: std::collections::HashSet::new(),
             local_capture_args: HashMap::new(),
             last_closure_captures: None,
             last_closure_name: None,
@@ -6075,12 +6107,15 @@ impl<'src> LowerCtx<'src> {
     /// FLS §6.1.2:37–45: Non-const function bodies must emit runtime code.
     fn lower_block(&mut self, block: &Block, ret_ty: &IrTy) -> Result<(), LowerError> {
         let ret_val = self.lower_block_to_value(block, ret_ty)?;
-        // FLS §4.1, §6.23: u8 arithmetic wraps at 256. Mask the tail return
-        // value to 8 bits so that e.g. 200_u8 + 100_u8 yields 44, not 300.
+        // FLS §4.1, §6.23: narrow integer types need boundary normalization.
+        // u8: mask to 8 bits (and #255). i8: sign-extend from 8 bits (sxtb).
         // Early `return` expressions are handled in ExprKind::Return.
-        if *ret_ty == IrTy::U8
-            && let IrValue::Reg(r) = ret_val {
-                self.instrs.push(Instr::TruncU8 { dst: r, src: r });
+        if let IrValue::Reg(r) = ret_val {
+            match ret_ty {
+                IrTy::U8 => self.instrs.push(Instr::TruncU8 { dst: r, src: r }),
+                IrTy::I8 => self.instrs.push(Instr::SextI8 { dst: r, src: r }),
+                _ => {}
+            }
         }
         self.instrs.push(Instr::Ret(ret_val));
         Ok(())
@@ -9357,6 +9392,27 @@ impl<'src> LowerCtx<'src> {
                     return Ok(());
                 }
 
+                // FLS §4.1, §6.23: Track u8 / i8 let bindings by variable name.
+                // Unlike f64/f32, u8/i8 use the same integer load/store instructions —
+                // no separate slot map needed. We just record the name so compound
+                // assignment can emit the correct wrapping instruction (TruncU8 / SextI8)
+                // when it stores back to this slot, preventing mid-body reads of the
+                // variable from seeing unwrapped (> 255 / not sign-extended) values.
+                let declared_u8 = ty.as_ref().is_some_and(|t| {
+                    matches!(&t.kind, crate::ast::TyKind::Path(segs)
+                        if segs.len() == 1 && segs[0].text(self.source) == "u8")
+                });
+                if declared_u8 {
+                    self.u8_locals.insert(var_name);
+                }
+                let declared_i8 = ty.as_ref().is_some_and(|t| {
+                    matches!(&t.kind, crate::ast::TyKind::Path(segs)
+                        if segs.len() == 1 && segs[0].text(self.source) == "i8")
+                });
+                if declared_i8 {
+                    self.i8_locals.insert(var_name);
+                }
+
                 if let Some(init_expr) = init.as_ref() {
                     // FLS §8.1 AMBIGUOUS: the spec does not describe how type
                     // inference resolves the type of the initializer in the
@@ -9642,6 +9698,20 @@ impl<'src> LowerCtx<'src> {
                         if *n > 255 {
                             return Err(LowerError::Unsupported(format!(
                                 "u8 literal {n} out of range 0..=255"
+                            )));
+                        }
+                        let r = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(r, *n as i32));
+                        Ok(IrValue::Reg(r))
+                    }
+                    // FLS §4.1: i8 literal. Positive values 0..=127 fit in a LoadImm.
+                    // Values > 127 are a compile-time error (FLS §6.23: overflow
+                    // in const context is an error). Negative i8 values arrive as
+                    // Unary(Neg, LitInt(n)) — the literal node itself is always >= 0.
+                    IrTy::I8 => {
+                        if *n > 127 {
+                            return Err(LowerError::Unsupported(format!(
+                                "i8 literal {n} out of range 0..=127 (negative values via unary negation)"
                             )));
                         }
                         let r = self.alloc_reg()?;
@@ -10005,7 +10075,9 @@ impl<'src> LowerCtx<'src> {
                 spine.reverse(); // now in left-to-right evaluation order
 
                 match ret_ty {
-                    IrTy::I32 => {
+                    // FLS §4.1: i8 uses the same signed arithmetic as i32.
+                    // SextI8 is emitted at return boundaries, not per-operation.
+                    IrTy::I32 | IrTy::I8 => {
                         // Lower the leftmost leaf (not a binary arithmetic node).
                         let mut acc_val = self.lower_expr(leftmost, ret_ty)?;
 
@@ -10249,7 +10321,7 @@ impl<'src> LowerCtx<'src> {
                     //
                     // Cache-line note: the phi slot is one 8-byte stack entry;
                     // read exactly once after the if expression completes.
-                    IrTy::I32 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::FnPtr => {
+                    IrTy::I32 | IrTy::I8 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::FnPtr => {
                         let else_label = self.alloc_label();
                         let end_label = self.alloc_label();
 
@@ -11034,7 +11106,7 @@ impl<'src> LowerCtx<'src> {
                 }
 
                 match ret_ty {
-                    IrTy::I32 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::FnPtr => {
+                    IrTy::I32 | IrTy::I8 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::FnPtr => {
                         let phi_slot = self.alloc_slot()?;
 
                         // Then branch.
@@ -11283,7 +11355,7 @@ impl<'src> LowerCtx<'src> {
                 let exit_label = self.alloc_label();
 
                 match ret_ty {
-                    IrTy::I32 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::FnPtr => {
+                    IrTy::I32 | IrTy::I8 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::FnPtr => {
                         let phi_slot = self.alloc_slot()?;
 
                         for arm in checked_arms {
@@ -14018,6 +14090,33 @@ impl<'src> LowerCtx<'src> {
                 let dst = self.alloc_reg()?;
                 self.instrs.push(Instr::BinOp { op: ir_op, dst, lhs: lhs_reg, rhs: rhs_reg });
 
+                // FLS §4.1, §6.23: narrow integer wrapping at compound-assignment stores.
+                //
+                // For u8 and i8 locals, the binary operation may produce a value outside
+                // the type's range (e.g., 200_u8 + 100_u8 = 300, which overflows u8).
+                // Without normalisation here, the slot holds 300 and any mid-body read
+                // (comparison, cast, etc.) sees the unwrapped value — incorrect per FLS §6.23.
+                //
+                // u8: `and {dst}, {dst}, #255`  — mask to 8 bits (TruncU8).
+                // i8: `sxtb x{dst}, w{dst}`     — sign-extend from 8 bits (SextI8).
+                //
+                // This mirrors the normalisation applied at function return boundaries
+                // (see the `fn_ret_ty` match at the end of `lower_fn`) but is necessary
+                // here too so that subsequent in-body reads of the variable are correct.
+                //
+                // Note: field-access and deref compound-assignment paths are separate
+                // code blocks above and do not go through this narrow-type check.
+                if let ExprKind::Path(segs) = &target.kind
+                    && segs.len() == 1
+                {
+                    let target_name = segs[0].text(self.source);
+                    if self.u8_locals.contains(target_name) {
+                        self.instrs.push(Instr::TruncU8 { dst, src: dst });
+                    } else if self.i8_locals.contains(target_name) {
+                        self.instrs.push(Instr::SextI8 { dst, src: dst });
+                    }
+                }
+
                 // Store the result back to the same stack slot.
                 // FLS §6.5.11: "Compound assignment is equivalent to the binary expression
                 // followed by assignment." The store makes this observable to subsequent reads.
@@ -15518,10 +15617,11 @@ impl<'src> LowerCtx<'src> {
                     Some(val) => {
                         let v = self.lower_expr(val, &fn_ret_ty)?;
                         let r = self.val_to_reg(v)?;
-                        // FLS §4.1, §6.23: u8 return values must be masked to
-                        // 8 bits for correct overflow wrapping semantics.
-                        if fn_ret_ty == IrTy::U8 {
-                            self.instrs.push(Instr::TruncU8 { dst: r, src: r });
+                        // FLS §4.1, §6.23: narrow integer returns need boundary normalization.
+                        match fn_ret_ty {
+                            IrTy::U8 => self.instrs.push(Instr::TruncU8 { dst: r, src: r }),
+                            IrTy::I8 => self.instrs.push(Instr::SextI8 { dst: r, src: r }),
+                            _ => {}
                         }
                         IrValue::Reg(r)
                     }
@@ -15837,11 +15937,113 @@ impl<'src> LowerCtx<'src> {
                 };
 
                 match target_name {
+                    // FLS §6.5.9: Narrowing cast to u8.
+                    // `x as u8` retains only the low 8 bits of x. ARM64: `and w{dst}, w{dst}, #255`.
+                    // This must be emitted at cast time so that subsequent operations
+                    // (comparisons, further casts, stores) see the correctly truncated value.
+                    // Without this, `300_i32 as u8` would produce 300 instead of 44.
+                    "u8" => {
+                        let val = self.lower_expr(inner, &IrTy::I32)?;
+                        let r = match val {
+                            IrValue::Reg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "expected integer register for u8 cast source".into(),
+                            )),
+                        };
+                        self.instrs.push(Instr::TruncU8 { dst: r, src: r });
+                        Ok(IrValue::Reg(r))
+                    }
+
+                    // FLS §6.5.9: Narrowing cast to i8.
+                    // `x as i8` retains the low 8 bits and sign-extends to 64 bits.
+                    // ARM64: `sxtb x{dst}, w{src}`.
+                    // Without this, `200_i32 as i8` would produce 200 instead of -56.
+                    "i8" => {
+                        if self.is_f64_expr(inner) {
+                            let val = self.lower_expr(inner, &IrTy::F64)?;
+                            let src = match val {
+                                IrValue::FReg(r) => r,
+                                _ => return Err(LowerError::Unsupported(
+                                    "expected float register for f64-to-i8 cast source".into(),
+                                )),
+                            };
+                            let dst = self.alloc_reg()?;
+                            self.instrs.push(Instr::F64ToI32 { dst, src });
+                            self.instrs.push(Instr::SextI8 { dst, src: dst });
+                            Ok(IrValue::Reg(dst))
+                        } else if self.is_f32_expr(inner) {
+                            let val = self.lower_expr(inner, &IrTy::F32)?;
+                            let src = match val {
+                                IrValue::F32Reg(r) => r,
+                                _ => return Err(LowerError::Unsupported(
+                                    "expected f32 register for f32-to-i8 cast source".into(),
+                                )),
+                            };
+                            let dst = self.alloc_reg()?;
+                            self.instrs.push(Instr::F32ToI32 { dst, src });
+                            self.instrs.push(Instr::SextI8 { dst, src: dst });
+                            Ok(IrValue::Reg(dst))
+                        } else {
+                            let val = self.lower_expr(inner, &IrTy::I32)?;
+                            let r = match val {
+                                IrValue::Reg(r) => r,
+                                _ => return Err(LowerError::Unsupported(
+                                    "expected integer register for i8 cast source".into(),
+                                )),
+                            };
+                            self.instrs.push(Instr::SextI8 { dst: r, src: r });
+                            Ok(IrValue::Reg(r))
+                        }
+                    }
+
+                    // FLS §6.5.9: Narrowing cast to i16.
+                    // `x as i16` retains the low 16 bits and sign-extends to 64 bits.
+                    // ARM64: `sxth x{dst}, w{src}`.
+                    // Without this, `40000_i32 as i16` would produce 40000 instead of -25536.
+                    "i16" => {
+                        if self.is_f64_expr(inner) {
+                            let val = self.lower_expr(inner, &IrTy::F64)?;
+                            let src = match val {
+                                IrValue::FReg(r) => r,
+                                _ => return Err(LowerError::Unsupported(
+                                    "expected float register for f64-to-i16 cast source".into(),
+                                )),
+                            };
+                            let dst = self.alloc_reg()?;
+                            self.instrs.push(Instr::F64ToI32 { dst, src });
+                            self.instrs.push(Instr::SextI16 { dst, src: dst });
+                            Ok(IrValue::Reg(dst))
+                        } else if self.is_f32_expr(inner) {
+                            let val = self.lower_expr(inner, &IrTy::F32)?;
+                            let src = match val {
+                                IrValue::F32Reg(r) => r,
+                                _ => return Err(LowerError::Unsupported(
+                                    "expected f32 register for f32-to-i16 cast source".into(),
+                                )),
+                            };
+                            let dst = self.alloc_reg()?;
+                            self.instrs.push(Instr::F32ToI32 { dst, src });
+                            self.instrs.push(Instr::SextI16 { dst, src: dst });
+                            Ok(IrValue::Reg(dst))
+                        } else {
+                            let val = self.lower_expr(inner, &IrTy::I32)?;
+                            let r = match val {
+                                IrValue::Reg(r) => r,
+                                _ => return Err(LowerError::Unsupported(
+                                    "expected integer register for i16 cast source".into(),
+                                )),
+                            };
+                            self.instrs.push(Instr::SextI16 { dst: r, src: r });
+                            Ok(IrValue::Reg(r))
+                        }
+                    }
+
                     // FLS §6.5.9: Signed integer targets.
                     // Includes bool → i32 (0/1 → 0/1 identity), all signed
-                    // integer types. Narrowing (i64→i8, i64→i16) is identity
-                    // at the register level for values within the target range.
-                    "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => {
+                    // integer types wider than i16.
+                    // Note: i8 is handled above with explicit SextI8.
+                    // Note: i16 is handled above with explicit SextI16.
+                    "i32" | "i64" | "i128" | "isize" => {
                         // FLS §6.5.9: If the inner expression is f64-typed,
                         // emit FCVTZS (float-to-signed-integer, truncating toward zero).
                         // FLS §6.5.9: If the inner expression is f32-typed,
@@ -15876,12 +16078,27 @@ impl<'src> LowerCtx<'src> {
                         }
                     }
 
-                    // FLS §6.5.9: Unsigned integer targets.
+                    // FLS §6.5.9: Narrowing cast to u16.
+                    // `x as u16` retains only the low 16 bits of x. ARM64: `and w{dst}, w{dst}, #65535`.
+                    // Without this, `70000_i32 as u16` would produce 70000 instead of 4464.
+                    "u16" => {
+                        let val = self.lower_expr(inner, &IrTy::I32)?;
+                        let r = match val {
+                            IrValue::Reg(r) => r,
+                            _ => return Err(LowerError::Unsupported(
+                                "expected integer register for u16 cast source".into(),
+                            )),
+                        };
+                        self.instrs.push(Instr::TruncU16 { dst: r, src: r });
+                        Ok(IrValue::Reg(r))
+                    }
+
+                    // FLS §6.5.9: Unsigned integer targets wider than u16.
                     // Division uses `udiv` and right shift uses `lsr` when the
                     // result is subsequently used in arithmetic with U32 context.
-                    // Narrowing casts (u64→u8, u64→u16) are identity for small
-                    // values; truncation deferred (see FLS §6.5.9 AMBIGUOUS above).
-                    "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => {
+                    // Note: u8 is handled above with explicit TruncU8.
+                    // Note: u16 is handled above with explicit TruncU16.
+                    "u32" | "u64" | "u128" | "usize" => {
                         self.lower_expr(inner, &IrTy::U32)
                     }
 

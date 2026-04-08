@@ -29897,6 +29897,47 @@ fn runtime_u8_add_emits_and_truncation() {
     );
 }
 
+/// Compile-and-run: u8 multiplication wraps at 256.
+///
+/// Adversarial: 15 * 20 = 300, which overflows u8. The result must be 44 (= 300 mod 256).
+/// Without TruncU8, the function would return 300 (wrong). This test catches
+/// a regression where TruncU8 is emitted for add/sub but not mul.
+#[test]
+fn milestone_176_u8_mul_wraps() {
+    let Some(exit) = compile_and_run(
+        "fn mul_u8(a: u8, b: u8) -> u8 { a * b }\nfn main() -> i32 { if mul_u8(15, 20) == 44 { 1 } else { 0 } }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1);
+}
+
+/// Assembly inspection: u8 mul emits `mul` instruction and `and` truncation —
+/// not a constant-folded result and not without truncation.
+///
+/// Adversarial: tests that a regression disabling TruncU8 for mul (while leaving
+/// it for add) would be caught. The two checks together confirm:
+/// 1. Runtime codegen (mul instruction present — not an interpreter)
+/// 2. Wrapping semantics (and #255 present — not missing truncation)
+#[test]
+fn runtime_u8_mul_emits_and_truncation() {
+    let asm = compile_to_asm(
+        "fn mul_u8(a: u8, b: u8) -> u8 { a * b }\nfn main() -> i32 { mul_u8(15, 20) as i32 }\n",
+    );
+    assert!(
+        asm.contains("mul"),
+        "u8 mul must emit a mul instruction; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("and") && asm.contains("#255"),
+        "u8 return must emit `and ... #255` for truncation; got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #44"),
+        "result must NOT be constant-folded to mov x0, #44; got:\n{asm}"
+    );
+}
+
 /// Assembly inspection: u8 truncation is not emitted for non-u8 functions.
 ///
 /// This ensures the `and #255` is only emitted when needed (u8 return type),
@@ -29910,4 +29951,497 @@ fn runtime_u8_trunc_not_emitted_for_i32_return() {
         !asm.contains("and     w0, w0, #255"),
         "i32-returning function must NOT emit u8 truncation; got:\n{asm}"
     );
+}
+
+// ── Milestone 177: i8 arithmetic with sign-extending wrapping ─────────────────
+// FLS §4.1, §6.23: The i8 type wraps at 128/-128. Galvanic emits `sxtb w{r},
+// w{r}` (SextI8) at function return boundaries so that 100_i8 + 50_i8 = -106.
+
+#[test]
+fn milestone_177_i8_identity() {
+    let Some(exit) = compile_and_run(
+        "fn id_i8(a: i8) -> i8 { a }\nfn main() -> i32 { if id_i8(42) as i32 == 42 { 1 } else { 0 } }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "i8 identity should return 42");
+}
+
+#[test]
+fn milestone_177_i8_add_no_wrap() {
+    let Some(exit) = compile_and_run(
+        "fn add_i8(a: i8, b: i8) -> i8 { a + b }\nfn main() -> i32 { add_i8(10, 20) as i32 }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 30, "10_i8 + 20_i8 should be 30 (no wrap)");
+}
+
+/// Adversarial: 100_i8 + 50_i8 = 150, which overflows i8. The result must be
+/// -106 (= 150 - 256). Without SextI8, the function would return 150 (wrong).
+#[test]
+fn milestone_177_i8_add_wraps() {
+    let Some(exit) = compile_and_run(
+        "fn add_i8(a: i8, b: i8) -> i8 { a + b }\nfn main() -> i32 { if add_i8(100, 50) as i32 == -106 { 1 } else { 0 } }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "100_i8 + 50_i8 should wrap to -106 (150 - 256)");
+}
+
+/// Adversarial: i8 subtraction wrapping. 0_i8 - 1_i8 = -1 (sign-extended correctly).
+#[test]
+fn milestone_177_i8_sub_wraps() {
+    let Some(exit) = compile_and_run(
+        "fn sub_i8(a: i8, b: i8) -> i8 { a - b }\nfn main() -> i32 { if sub_i8(0, 1) as i32 == -1 { 1 } else { 0 } }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "0_i8 - 1_i8 should be -1");
+}
+
+#[test]
+fn milestone_177_i8_passed_to_fn() {
+    let Some(exit) = compile_and_run(
+        "fn add_i8(a: i8, b: i8) -> i8 { a + b }\nfn use_it(x: i8) -> i32 { x as i32 }\nfn main() -> i32 { use_it(add_i8(10, 5)) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 15, "i8 result passed to another function");
+}
+
+#[test]
+fn milestone_177_i8_in_arithmetic() {
+    let Some(exit) = compile_and_run(
+        "fn add_i8(a: i8, b: i8) -> i8 { a + b }\nfn main() -> i32 { add_i8(10, 5) as i32 + 1 }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 16, "i8 result used in i32 arithmetic");
+}
+
+#[test]
+fn milestone_177_i8_result_in_if() {
+    let Some(exit) = compile_and_run(
+        "fn add_i8(a: i8, b: i8) -> i8 { a + b }\nfn main() -> i32 { if add_i8(10, 5) as i32 > 10 { 1 } else { 0 } }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "i8 result should compare correctly in if");
+}
+
+#[test]
+fn milestone_177_i8_called_twice() {
+    let Some(exit) = compile_and_run(
+        "fn add_i8(a: i8, b: i8) -> i8 { a + b }\nfn main() -> i32 { add_i8(10, 5) as i32 + add_i8(3, 2) as i32 }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 20, "two i8 calls: 15 + 5 = 20");
+}
+
+#[test]
+fn milestone_177_i8_captures_parameter() {
+    let Some(exit) = compile_and_run(
+        "fn double_i8(a: i8) -> i8 { a + a }\nfn main() -> i32 { double_i8(20) as i32 }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 40, "double_i8(20) = 40");
+}
+
+/// Assembly inspection: i8 add emits `add` + `sxtb` at return (not constant-folded).
+///
+/// Claim 65: i8 arithmetic emits runtime add and sxtb sign-extension —
+/// not a constant-folded result and not without sign-extension.
+#[test]
+fn runtime_i8_add_emits_sxtb_sign_extension() {
+    let asm = compile_to_asm(
+        "fn add_i8(a: i8, b: i8) -> i8 { a + b }\nfn main() -> i32 { add_i8(100, 50) as i32 }\n",
+    );
+    assert!(
+        asm.contains("add"),
+        "i8 add must emit an add instruction; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("sxtb"),
+        "i8 return must emit `sxtb` for sign-extension (SextI8); got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #150"),
+        "result must NOT be constant-folded to mov x0, #150; got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #-106"),
+        "result must NOT be constant-folded to -106; got:\n{asm}"
+    );
+}
+
+/// Assembly inspection: i8 sign-extension is not emitted for i32-returning functions.
+///
+/// Ensures `sxtb` is only emitted when needed (i8 return type), not for every function.
+#[test]
+fn runtime_i8_sext_not_emitted_for_i32_return() {
+    let asm = compile_to_asm(
+        "fn add_i32(a: i32, b: i32) -> i32 { a + b }\nfn main() -> i32 { add_i32(1, 2) }\n",
+    );
+    assert!(
+        !asm.contains("sxtb"),
+        "i32-returning function must NOT emit i8 sign-extension; got:\n{asm}"
+    );
+}
+
+// ── Claim 66: u8/i8 compound assignment wraps correctly mid-body ─────────────
+//
+// FLS §4.1, §6.23: u8 and i8 arithmetic wraps at 256 / ±128. When a u8 or i8
+// variable is updated via compound assignment (`+=`, `*=`, etc.) and then read
+// back within the same function body (not at a return boundary), the value must
+// already be in the type's range. Without TruncU8/SextI8 applied AFTER the
+// BinOp in the compound-assignment lowering path, the slot holds an unwrapped
+// value and comparisons / casts using that variable see wrong results.
+//
+// This was a real bug: the existing TruncU8/SextI8 was only applied at function
+// return boundaries, leaving mid-body reads of u8/i8 variables after compound
+// assignment silently wrong.
+
+/// Assembly inspection: u8 compound `+=` emits TruncU8 (`and #255`) before the store.
+///
+/// Claim 66: compound assignment on a u8 local must normalize the result to the
+/// 8-bit range before writing back, so that subsequent reads within the function
+/// body see the wrapped value.
+#[test]
+fn runtime_u8_compound_add_emits_trunc_u8() {
+    let asm = compile_to_asm(
+        "fn compound_u8(a: u8, b: u8) -> i32 { let mut x: u8 = a; x += b; x as i32 }\nfn main() -> i32 { 0 }\n",
+    );
+    assert!(
+        asm.contains("and") && asm.contains("#255"),
+        "u8 compound `+=` must emit `and #255` (TruncU8); got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #44"),
+        "result must NOT be constant-folded to mov x0, #44; got:\n{asm}"
+    );
+}
+
+/// Assembly inspection: i8 compound `+=` emits SextI8 (`sxtb`) before the store.
+///
+/// Claim 66: compound assignment on an i8 local must sign-extend the result
+/// from 8 bits after the binary operation so mid-body reads see the wrapped value.
+/// The sxtb must appear BEFORE the store of the compound-assignment result (i.e.,
+/// in the function body, not just at the function-return boundary).
+#[test]
+fn runtime_i8_compound_add_emits_sext_i8() {
+    let asm = compile_to_asm(
+        "fn compound_i8(a: i8, b: i8) -> i32 { let mut x: i8 = a; x += b; x as i32 }\nfn main() -> i32 { 0 }\n",
+    );
+    // The sxtb must be present inside the compound_i8 function body (before the store).
+    assert!(
+        asm.contains("sxtb"),
+        "i8 compound `+=` must emit `sxtb` (SextI8) before the store-back; got:\n{asm}"
+    );
+    // The result must not be folded — compound_i8 takes parameters so it cannot be
+    // constant-folded, but we verify by checking that an add instruction is emitted.
+    assert!(
+        asm.contains("add"),
+        "i8 compound `+=` must emit runtime `add` instruction; got:\n{asm}"
+    );
+}
+
+/// Compile-and-run: u8 compound addition wraps at 256 mid-body.
+///
+/// Adversarial: reads the u8 variable AFTER compound `+=` in a comparison,
+/// not just at the return boundary. Without the mid-body TruncU8 fix, `x` holds
+/// 300 and `x < 50` is false → returns 0. With the fix, `x` is 44 and
+/// `x < 50` is true → returns 1.
+#[test]
+fn milestone_178_u8_compound_add_wraps_mid_body() {
+    let Some(exit) = compile_and_run(
+        "fn test(a: u8, b: u8) -> i32 { let mut x: u8 = a; x += b; if x < 50 { 1 } else { 0 } }\nfn main() -> i32 { test(200, 100) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "200_u8 + 100_u8 wraps to 44; 44 < 50 should be true");
+}
+
+/// Compile-and-run: i8 compound addition wraps at ±128 mid-body.
+///
+/// Adversarial: 100_i8 += 50_i8 = 150, which overflows i8 to -106. The
+/// comparison `x < 0` must use the wrapped value. Without mid-body SextI8,
+/// `x` holds +150 and `x < 0` is false → returns 0. With the fix, x = -106
+/// and `x < 0` is true → returns 1.
+#[test]
+fn milestone_178_i8_compound_add_wraps_mid_body() {
+    let Some(exit) = compile_and_run(
+        "fn test(a: i8, b: i8) -> i32 { let mut x: i8 = a; x += b; if x < 0 { 1 } else { 0 } }\nfn main() -> i32 { test(100, 50) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "100_i8 + 50_i8 wraps to -106; -106 < 0 should be true");
+}
+
+// ── Milestone 179: narrowing casts `as u8` and `as i8` truncate correctly ────
+//
+// FLS §6.5.9: An integer-to-integer cast to a narrower type retains only the
+// low bits of the source value. `300_i32 as u8` → 44 (300 & 255). `200_i32 as
+// i8` → -56 (0xC8 sign-extended from 8 bits). Previously galvanic treated these
+// as identity casts, so `300_i32 as u8` would return 300 rather than 44.
+//
+// ARM64 implementation:
+//   `as u8` → `and w{dst}, w{dst}, #255`  (TruncU8)
+//   `as i8` → `sxtb x{dst}, w{dst}`       (SextI8)
+
+/// Assembly inspection: `x as u8` emits `and`-truncation (not identity).
+///
+/// FLS §6.5.9: Narrowing cast to u8 must truncate to 8 bits at runtime.
+#[test]
+fn runtime_cast_to_u8_emits_and_truncation() {
+    let asm = compile_to_asm(
+        "fn f(x: i32) -> i32 { (x as u8) as i32 }\nfn main() -> i32 { f(300) }\n",
+    );
+    assert!(
+        asm.contains("and"),
+        "cast to u8 must emit and-mask (TruncU8); got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #44"),
+        "cast to u8 must not constant-fold 300 to 44; got:\n{asm}"
+    );
+}
+
+/// Assembly inspection: `x as i8` emits `sxtb` sign-extension (not identity).
+///
+/// FLS §6.5.9: Narrowing cast to i8 must truncate to 8 bits and sign-extend.
+#[test]
+fn runtime_cast_to_i8_emits_sxtb() {
+    let asm = compile_to_asm(
+        "fn f(x: i32) -> i32 { if (x as i8) < 0 { 1 } else { 0 } }\nfn main() -> i32 { f(200) }\n",
+    );
+    assert!(
+        asm.contains("sxtb"),
+        "cast to i8 must emit sxtb sign-extension; got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #1"),
+        "cast to i8 must not constant-fold; got:\n{asm}"
+    );
+}
+
+/// Runtime: `300_i32 as u8` truncates to 44 (300 & 255 = 44).
+#[test]
+fn milestone_179_cast_u8_truncates_300_to_44() {
+    let Some(exit) = compile_and_run(
+        "fn f(x: i32) -> i32 { (x as u8) as i32 }\nfn main() -> i32 { f(300) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 44, "300 as u8 should give 44 (300 & 255)");
+}
+
+/// Runtime: `256_i32 as u8` wraps to 0.
+#[test]
+fn milestone_179_cast_u8_truncates_256_to_0() {
+    let Some(exit) = compile_and_run(
+        "fn f(x: i32) -> i32 { (x as u8) as i32 }\nfn main() -> i32 { f(256) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 0, "256 as u8 should give 0 (256 & 255)");
+}
+
+/// Runtime: `200_i32 as i8` is negative (200 = 0xC8 → sign-extended = -56).
+///
+/// Verifies that the i8 sign-extension makes the comparison `x < 0` true.
+#[test]
+fn milestone_179_cast_i8_sign_extends_200_to_negative() {
+    let Some(exit) = compile_and_run(
+        "fn f(x: i32) -> i32 { if (x as i8) < 0 { 1 } else { 0 } }\nfn main() -> i32 { f(200) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "200 as i8 = -56, which is < 0");
+}
+
+/// Runtime: `127_i32 as i8` is within range and positive.
+#[test]
+fn milestone_179_cast_i8_127_stays_positive() {
+    let Some(exit) = compile_and_run(
+        "fn f(x: i32) -> i32 { if (x as i8) >= 0 { 1 } else { 0 } }\nfn main() -> i32 { f(127) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "127 as i8 = 127, which is >= 0");
+}
+
+/// Runtime: `x as u8` used in arithmetic computes correctly with truncated value.
+#[test]
+fn milestone_179_cast_u8_result_in_arithmetic() {
+    // f(x) = (x as u8) as i32 + 1; f(511) = (511 & 255) + 1 = 255 + 1 = 256 → 0 mod 256
+    // But exit codes are 0-255 mod-style anyway; let's use f(510) = 254 + 1 = 255.
+    let Some(exit) = compile_and_run(
+        "fn f(x: i32) -> i32 { (x as u8) as i32 + 1 }\nfn main() -> i32 { f(510) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 255, "510 as u8 = 254, 254 + 1 = 255");
+}
+
+/// Runtime: `x as u8` passed to a function computes correctly.
+#[test]
+fn milestone_179_cast_u8_passed_to_fn() {
+    let Some(exit) = compile_and_run(
+        "fn id(x: i32) -> i32 { x }\nfn f(x: i32) -> i32 { id((x as u8) as i32) }\nfn main() -> i32 { f(300) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 44, "300 as u8 = 44, passed through id()");
+}
+
+/// Runtime: `x as i8` used in arithmetic with the truncated signed value.
+#[test]
+fn milestone_179_cast_i8_in_arithmetic() {
+    // f(x) = (x as i8) as i32 + 100; f(200) = (-56) + 100 = 44
+    let Some(exit) = compile_and_run(
+        "fn f(x: i32) -> i32 { (x as i8) as i32 + 100 }\nfn main() -> i32 { f(200) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 44, "200 as i8 = -56; -56 + 100 = 44");
+}
+
+// ── Milestone 180: narrowing casts `as u16` / `as i16` (FLS §6.5.9) ─────────
+//
+// FLS §6.5.9: Integer-to-integer casts to a narrower type truncate to the
+// low N bits. Previously `as u16` and `as i16` were identity casts (no
+// truncation emitted). Fix: emit TruncU16 (and #65535) / SextI16 (sxth).
+
+/// Assembly inspection: `x as u16` emits `and #65535` truncation.
+/// Negative assertion: the untruncated source value must not appear as-is.
+#[test]
+fn runtime_cast_to_u16_emits_and_truncation() {
+    let asm = compile_to_asm("fn f(x: i32) -> i32 { (x as u16) as i32 }\nfn main() -> i32 { f(70000) }\n");
+    assert!(
+        asm.contains("and") && asm.contains("65535"),
+        "expected `and #65535` for u16 truncation, got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #70000") && !asm.contains("mov     x0, #4464"),
+        "must not constant-fold 70000 as u16 = 4464, got:\n{asm}"
+    );
+}
+
+/// Assembly inspection: `x as i16` emits `sxth` sign-extension.
+/// Uses a function parameter so the cast cannot be constant-folded away.
+#[test]
+fn runtime_cast_to_i16_emits_sxth() {
+    // f takes a parameter — constant folding is impossible since input is unknown.
+    // The cast `x as i16` must emit sxth even though 40000 is statically known at call site.
+    let asm = compile_to_asm("fn f(x: i32) -> i32 { (x as i16) as i32 }\nfn main() -> i32 { f(40000) }\n");
+    assert!(
+        asm.contains("sxth"),
+        "expected `sxth` for i16 sign-extension, got:\n{asm}"
+    );
+    // The function body must have the sxth before ret, not a pre-computed constant result.
+    // If constant-folded, f would be `mov x0, #-25536` or equivalent — but ARM64 can't
+    // encode -25536 as a single MOV immediate in all cases, so check sxth is present instead.
+    assert!(
+        !asm.contains("sxtb"),
+        "must emit sxth (16-bit), not sxtb (8-bit), got:\n{asm}"
+    );
+}
+
+/// Runtime: `x as u16` truncates to low 16 bits. 70000 mod 65536 = 4464.
+/// Comparison returns 44 to keep exit code ≤ 255 (Linux exit codes are 8-bit).
+#[test]
+fn milestone_180_cast_u16_truncates_70000_to_4464() {
+    // 70000 = 65536 + 4464, so 70000 as u16 = 4464.
+    // Return 44 if correct (exit code fits in 8 bits), 0 if truncation failed.
+    let Some(exit) = compile_and_run(
+        "fn f(x: i32) -> i32 { if (x as u16) as i32 == 4464 { 44 } else { 0 } }\nfn main() -> i32 { f(70000) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 44, "70000 as u16 = 4464; indirect check returns 44");
+}
+
+/// Runtime: `x as u16` truncates 65536 to 0.
+#[test]
+fn milestone_180_cast_u16_truncates_65536_to_0() {
+    let Some(exit) = compile_and_run(
+        "fn f(x: i32) -> i32 { (x as u16) as i32 }\nfn main() -> i32 { f(65536) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 0, "65536 as u16 = 0");
+}
+
+/// Runtime: `x as i16` sign-extends. 40000 = 0x9C40; bit 15 set → -25536.
+#[test]
+fn milestone_180_cast_i16_sign_extends_40000_to_negative() {
+    // 40000 = 0x9C40, bit 15 = 1, so sign-extended to 64 bits gives -25536
+    let Some(exit) = compile_and_run(
+        "fn f(x: i32) -> i32 { if (x as i16) < 0 { 1 } else { 0 } }\nfn main() -> i32 { f(40000) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "40000 as i16 is negative (sign bit set)");
+}
+
+/// Runtime: `x as i16` preserves values in range. 1000 as i16 = 1000.
+/// Uses subtraction to keep exit code ≤ 255 (Linux exit codes are 8-bit).
+#[test]
+fn milestone_180_cast_i16_1000_stays_positive() {
+    // 1000 is within i16 range (-32768..=32767), so (1000 as i16) as i32 == 1000.
+    // Subtract 900 to produce an exit-code-safe result (100 ≤ 255).
+    let Some(exit) = compile_and_run(
+        "fn f(x: i32) -> i32 { (x as i16) as i32 - 900 }\nfn main() -> i32 { f(1000) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 100, "1000 as i16 = 1000; 1000 - 900 = 100");
+}
+
+/// Runtime: `x as u16` result used in arithmetic.
+/// Uses input 65636 (= 65536+100) so that as u16 = 100; 100 + 100 = 200 (≤ 255).
+#[test]
+fn milestone_180_cast_u16_result_in_arithmetic() {
+    // 65636 = 65536 + 100, so 65636 as u16 = 100; 100 + 100 = 200 (fits in 8-bit exit code).
+    let Some(exit) = compile_and_run(
+        "fn f(x: i32) -> i32 { (x as u16) as i32 + 100 }\nfn main() -> i32 { f(65636) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 200, "65636 as u16 = 100; 100 + 100 = 200");
+}
+
+/// Runtime: `x as u16` passed to function.
+/// Uses input 65580 (= 65536+44) so that as u16 = 44 (≤ 255, fits in 8-bit exit code).
+#[test]
+fn milestone_180_cast_u16_passed_to_fn() {
+    // 65580 = 65536 + 44, so 65580 as u16 = 44.
+    let Some(exit) = compile_and_run(
+        "fn id(x: i32) -> i32 { x }\nfn f(x: i32) -> i32 { id((x as u16) as i32) }\nfn main() -> i32 { f(65580) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 44, "65580 as u16 = 44, passed through id()");
+}
+
+/// Runtime: `x as i16` used in arithmetic with the sign-extended value.
+#[test]
+fn milestone_180_cast_i16_in_arithmetic() {
+    // f(x) = (x as i16) as i32 + 100; for x = 40000 (→ -25536): -25536 + 100 = -25436
+    // Return value is truncated to u8 by the process; test as exit code mod 256.
+    // Use a smaller value instead: f(32868) = (32868 as i16) as i32 + 100
+    // 32868 = 0x8064, bit 15=1, two's complement i16 = 32868 - 65536 = -32668
+    // -32668 + 100 = -32568. That's hard to test via exit code.
+    // Use: f(x) = if (x as i16) < 0 { (x as i16) as i32 + 200 } else { 0 }
+    // f(40000): 40000 as i16 = -25536; -25536 + 200 = -25336 (still negative, hard exit code)
+    // Let's use a simpler check: f(65535) → 65535 as i16 = -1; -1 + 100 = 99
+    let Some(exit) = compile_and_run(
+        "fn f(x: i32) -> i32 { (x as i16) as i32 + 100 }\nfn main() -> i32 { f(65535) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 99, "65535 as i16 = -1; -1 + 100 = 99");
 }

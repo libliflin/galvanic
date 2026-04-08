@@ -193,7 +193,7 @@ jobs:
   # Verifies the full pipeline: lex → parse → IR → codegen → assemble → link → run.
   e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     needs: build
     steps:
       - uses: actions/checkout@v4

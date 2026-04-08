@@ -2587,25 +2587,26 @@ function parameters are not statically known at compile time.
 
 ---
 
-## Claim 64: u8 arithmetic emits runtime `add` and `and` truncation (not constant-folded)
+## Claim 64: u8 arithmetic emits runtime instructions and `and` truncation (not constant-folded)
 
 **Stakeholder**: William (researcher), Compiler Researchers
 
 **Promise**: The `u8` type wraps at 256 per FLS §6.23. When a function returns
 `u8`, galvanic must emit both:
-1. The arithmetic instruction (`add`, `sub`, etc.) at runtime — proving this is
+1. The arithmetic instruction (`add`, `sub`, `mul`, etc.) at runtime — proving this is
    a compiler, not an interpreter, and
 2. An `and w{r}, w{r}, #255` instruction (TruncU8) at the return boundary —
-   proving the overflow wrapping semantics are correctly implemented.
+   proving the overflow wrapping semantics are correctly implemented for ALL operators,
+   not just `add`.
 
-Without TruncU8, `200_u8 + 100_u8` would return 300 instead of 44. A comparison
-`add_u8(200, 100) == 44` would fail (return 0) without truncation. The compile-and-run
-test catches this.
+Without TruncU8, `200_u8 + 100_u8` would return 300 instead of 44. Similarly,
+`15_u8 * 20_u8 = 300` must wrap to 44. The falsification suite tests both add and mul
+to prevent operator-specific regressions (e.g., TruncU8 disabled for mul only).
 
 **FLS §4.1**: "The unsigned integer types have a range of [0, 2^N - 1]."
 **FLS §6.23**: At runtime, integer arithmetic wraps in two's complement. For u8, the
 modulus is 256.
-**FLS §6.1.2 Constraint 1**: Function parameters are not const contexts; the `add`
+**FLS §6.1.2 Constraint 1**: Function parameters are not const contexts; the arithmetic
 must be emitted at runtime even though the values happen to be known at the call site.
 
 **Violated if** `compile_to_asm("fn add_u8(a: u8, b: u8) -> u8 { a + b } ...")`:
@@ -2613,4 +2614,118 @@ must be emitted at runtime even though the values happen to be known at the call
 - lacks `and ... #255` (no truncation, wrapping semantics broken), OR
 - contains `mov x0, #44` (constant-folded to the wrapped result without runtime code)
 
-**Tests**: `cargo test --test e2e -- runtime_u8_add_emits_and_truncation milestone_176_u8_add_wraps`
+**Violated if** `compile_to_asm("fn mul_u8(a: u8, b: u8) -> u8 { a * b } ...")`:
+- lacks `mul` in the function body (no arithmetic emitted), OR
+- lacks `and ... #255` (TruncU8 missing for mul — operator-specific regression), OR
+- contains `mov x0, #44` (constant-folded — `15 * 20 = 300 mod 256 = 44`)
+
+**Tests**: `cargo test --test e2e -- runtime_u8_add_emits_and_truncation runtime_u8_mul_emits_and_truncation milestone_176_u8_add_wraps milestone_176_u8_mul_wraps`
+
+---
+
+## Claim 65: i8 arithmetic emits runtime instructions and `sxtb` sign-extension (not constant-folded)
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: The `i8` type wraps at -128/127 per FLS §6.23. When a function returns
+`i8`, galvanic must emit both:
+1. The arithmetic instruction (`add`, `sub`, `mul`, etc.) at runtime — proving this is
+   a compiler, not an interpreter, and
+2. A `sxtb w{r}, w{r}` instruction (SextI8) at the return boundary — proving the
+   overflow wrapping semantics are correctly implemented for signed 8-bit arithmetic.
+
+Without SextI8, `100_i8 + 50_i8` would return 150 instead of -106. The falsification
+suite tests both the assembly inspection (SextI8 present) and the runtime correctness
+(wrapping result matches the expected value).
+
+**FLS §4.1**: "The signed integer types have a range of [-2^(N-1), 2^(N-1)-1]."
+**FLS §6.23**: At runtime, integer arithmetic wraps in two's complement. For i8, the
+range is -128..=127.
+**FLS §6.1.2 Constraint 1**: Function parameters are not const contexts; the arithmetic
+must be emitted at runtime even though the values happen to be known at the call site.
+
+**Violated if** `compile_to_asm("fn add_i8(a: i8, b: i8) -> i8 { a + b } ...")`:
+- lacks `add` in the function body (no arithmetic emitted), OR
+- lacks `sxtb` (no sign-extension, wrapping semantics broken), OR
+- contains `mov x0, #150` or `mov x0, #-106` (constant-folded without runtime code)
+
+**Tests**: `cargo test --test e2e -- runtime_i8_add_emits_sxtb_sign_extension milestone_177_i8_add_wraps milestone_177_i8_sub_wraps`
+
+---
+
+## Claim 66: u8/i8 compound assignment wraps correctly mid-body (not only at return boundaries)
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: When a `u8` or `i8` local variable is updated via compound assignment
+(`+=`, `-=`, `*=`, etc.) and then read back within the same function body, the value
+must already be in the type's range — regardless of whether the function's return type
+is `u8`/`i8` or something else.
+
+The existing TruncU8/SextI8 at function return boundaries is insufficient because a
+variable can be read in comparisons, casts (`x as i32`), or passed to other functions
+before the enclosing function returns. Without normalization at the compound-assignment
+store, the slot holds an unwrapped value (e.g., 300 for `200_u8 += 100`) and any
+mid-body read sees the wrong value.
+
+This was a real latent bug: `let mut x: u8 = 200; x += 100; if x < 50 { ... }` would
+branch incorrectly (comparing 300 < 50 instead of 44 < 50) on code paths that never
+return u8 directly.
+
+**FLS §4.1**: u8 range is 0..=255; i8 range is -128..=127.
+**FLS §6.23**: At runtime, integer arithmetic wraps. The wrapping must be observable
+immediately after the operation, not only at function boundaries.
+**FLS §6.1.2 Constraint 1**: The operation is runtime; so is the wrapping normalization.
+
+**Violated if** for `fn test(a: u8, b: u8) -> i32 { let mut x: u8 = a; x += b; if x < 50 { 1 } else { 0 } }` called with `(200, 100)`:
+- returns 0 instead of 1 (comparison sees 300 instead of wrapped 44), OR
+- the compound_u8 function body lacks `and ... #255` before the store-back
+
+**Tests**: `cargo test --test e2e -- runtime_u8_compound_add_emits_trunc_u8 runtime_i8_compound_add_emits_sext_i8 milestone_178_u8_compound_add_wraps_mid_body milestone_178_i8_compound_add_wraps_mid_body`
+
+---
+
+## Claim 67: `x as u8` and `x as i8` narrowing casts truncate correctly (not identity)
+
+**FLS §6.5.9**: An integer-to-integer cast to a narrower type retains only the low N bits
+of the source value. `300_i32 as u8` → 44 (300 & 255). `200_i32 as i8` → -56 (0xC8
+sign-extended). Previously galvanic treated these as identity casts.
+
+**ARM64 implementation**:
+- `as u8` → `and w{dst}, w{dst}, #255` (TruncU8)
+- `as i8` → `sxtb x{dst}, w{dst}` (SextI8)
+
+Without explicit truncation, `300_i32 as u8` would produce 300 in the destination
+register. Any subsequent comparison, store, or arithmetic would use the unwrapped value,
+producing incorrect results.
+
+**FLS §6.5.9**: "An integer-to-integer cast to a narrower integer type truncates to the
+least-significant bits." This is not ambiguous — truncation is required.
+
+**Violated if** for `fn f(x: i32) -> i32 { (x as u8) as i32 }` called with 300:
+- returns 300 instead of 44, OR
+- the function body lacks `and ... #255` in the assembly output
+
+**Tests**: `cargo test --test e2e -- runtime_cast_to_u8_emits_and_truncation runtime_cast_to_i8_emits_sxtb milestone_179_cast_u8_truncates_300_to_44 milestone_179_cast_i8_sign_extends_200_to_negative`
+
+---
+
+## Claim 68: `x as u16` and `x as i16` narrowing casts truncate correctly (not identity)
+
+**FLS §6.5.9**: An integer-to-integer cast to a narrower type retains only the low N bits.
+`70000_i32 as u16` → 4464 (70000 mod 65536). `40000_i32 as i16` → negative (bit 15 set).
+Previously galvanic treated these as identity casts — no truncation emitted.
+
+**ARM64 implementation**:
+- `as u16` → `and w{dst}, w{dst}, #65535` (TruncU16)
+- `as i16` → `sxth x{dst}, w{dst}` (SextI16)
+
+Without explicit truncation, `70000_i32 as u16` would produce 70000 in the destination
+register. Any subsequent comparison, store, or arithmetic would use the unwrapped value,
+producing incorrect results.
+
+**Violated if** for `fn f(x: i32) -> i32 { (x as u16) as i32 }` called with 70000:
+- returns 70000 instead of 4464, OR
+- the function body lacks `and ... #65535` in the assembly output
+
+**Tests**: `cargo test --test e2e -- runtime_cast_to_u16_emits_and_truncation runtime_cast_to_i16_emits_sxth milestone_180_cast_u16_truncates_70000_to_4464 milestone_180_cast_i16_sign_extends_40000_to_negative`
