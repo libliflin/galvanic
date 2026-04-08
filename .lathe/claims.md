@@ -2943,3 +2943,28 @@ declared field type — not as a wider i32.
 - `const X: u8 = 100 * 3; fn check(v: i32) -> i32 { if v == 44 { 1 } else { 0 } } fn main() -> i32 { check(X as i32) }` returns 0 (X was 300 un-narrowed)
 
 **Tests**: `cargo test --test e2e -- claim_77_u8_const_sub_and_mul_wrap_not_saturate runtime_u8_const_sub_underflow_emits_loadimm_251 runtime_u8_const_mul_wrap_emits_loadimm_44 milestone_191_u8_const_sub_underflow milestone_191_u8_const_mul_wraps milestone_191_u8_const_chained_sub_underflow`
+
+---
+
+## Claim 78: `&[T]` slice parameter fat-pointer length is a runtime load, not a compile-time constant
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: When a `&[T]` slice parameter's `.len()` is called, the callee must emit a runtime `ldr` instruction to load the length from its fat-pointer stack slot. The callee must NOT constant-fold the length from information visible at the call site (e.g., because the caller always passes a 3-element array). Similarly, slice indexing `s[i]` must emit pointer arithmetic (`mul` + `add` + `ldr`) — not a direct array-slot load from the callee's own stack.
+
+**Why this is load-bearing**: Galvanic's slice parameter implementation spills the fat pointer (addr + len) as two consecutive stack slots. The callee loads the length slot at runtime. An interpreter that instead inlined the length from static call-site analysis would produce wrong code for any function called with slices of varying lengths — the canonical use case for `&[T]`. The adversarial test uses two calls with slices of different lengths (3 and 2) to the same function; a folded callee would return the same value for both.
+
+**ARM64 implementation**: Slice parameters occupy two consecutive slots in `local_slice_slots`. `.len()` emits `Load { slot: ptr_slot + 1 }` (an `ldr` from the length slot). Indexing emits `Load(ptr_slot)` → `mul(idx, ELEM_SIZE)` → `add` → `LoadPtr`. Both are pure runtime code paths — no static size information is used in the callee.
+
+**FLS §4.9**: `&[T]` is a fat pointer (data pointer + element count). The spec defines `.len()` as reading the runtime length field.
+**FLS §6.9**: Index expressions on slices load through the fat pointer.
+**FLS §6.1.2:37–45**: Non-const function bodies must emit runtime instructions.
+**FLS §4.9 AMBIGUOUS**: Fat-pointer ABI not specified; galvanic uses two consecutive ARM64 registers (addr + count).
+
+**Violated if**:
+- Assembly for `fn slice_len(s: &[i32]) -> usize { s.len() }` called with slices of different lengths contains `mov x0, #3` or `mov x0, #2` (length constant-folded to match a specific call site), OR
+- The combined result of two `slice_len` calls (lengths 3 + 2 = 5) appears as `mov x0, #5` (fully constant-folded), OR
+- Assembly for `fn get(s: &[i32], i: usize) -> i32 { s[i] }` does not contain `mul` and `ldr` (pointer arithmetic skipped), OR
+- Assembly for `s[1]` in a callee contains `mov x0, #20` (value constant-folded from known array contents)
+
+**Tests**: `cargo test --test e2e -- claim_78_slice_param_len_is_runtime_load_not_folded runtime_slice_param_len_emits_ldr_not_constant runtime_slice_index_emits_ptr_arithmetic_and_load runtime_slice_arg_emits_adrof_and_len`
