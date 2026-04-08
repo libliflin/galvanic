@@ -2429,6 +2429,30 @@ fn lower_fn(
     for (name, irt) in generic_subst {
         effective_aliases.insert(name.clone(), *irt);
     }
+    // FLS §10.2 / §12.1: For each generic type param T substituted with a concrete
+    // type CT (via generic_type_subst), also add "T::X" → irt for every "CT::X"
+    // entry in the alias map. This lets `C::Item` in a generic function's return
+    // or parameter type resolve when C is monomorphized to Counter (and
+    // Counter::Item is already in the global alias map from the impl block scan).
+    //
+    // Example: fn use_it<C: Container>(c: C) -> C::Item
+    //   generic_type_subst["C"] = "Counter"
+    //   type_aliases["Counter::Item"] = IrTy::I32
+    //   → adds effective_aliases["C::Item"] = IrTy::I32
+    for (param_name, concrete_name) in generic_type_subst {
+        let prefix = format!("{concrete_name}::");
+        let entries: Vec<(String, IrTy)> = effective_aliases
+            .iter()
+            .filter(|(k, _)| k.starts_with(prefix.as_str()))
+            .map(|(k, &v)| {
+                let assoc_name = &k[prefix.len()..];
+                (format!("{param_name}::{assoc_name}"), v)
+            })
+            .collect();
+        for (key, irt) in entries {
+            effective_aliases.entry(key).or_insert(irt);
+        }
+    }
     let type_aliases = &effective_aliases;
 
     // For associated functions, impl_type = None and self_kind = None.
@@ -9839,18 +9863,22 @@ impl<'src> LowerCtx<'src> {
             // FLS §10.3: Associated constant `TypeName::CONST_NAME`.
             // Check associated consts before enum variant discriminants —
             // both use two-segment paths, but consts take priority.
+            // FLS §12.1: When `TypeName` is a generic type parameter, resolve
+            // it through `generic_type_subst` to the concrete type.
             ExprKind::Path(segments)
                 if segments.len() == 2
                     && {
                         let type_name = segments[0].text(self.source);
                         let const_name = segments[1].text(self.source);
+                        let concrete = self.generic_type_subst.get(type_name).map(String::as_str).unwrap_or(type_name);
                         self.assoc_const_vals
-                            .contains_key(&format!("{type_name}::{const_name}"))
+                            .contains_key(&format!("{concrete}::{const_name}"))
                     } =>
             {
                 let type_name = segments[0].text(self.source);
                 let const_name = segments[1].text(self.source);
-                let key = format!("{type_name}::{const_name}");
+                let concrete = self.generic_type_subst.get(type_name).map(String::as_str).unwrap_or(type_name);
+                let key = format!("{concrete}::{const_name}");
                 let val = *self.assoc_const_vals.get(&key).unwrap();
                 let r = self.alloc_reg()?;
                 self.instrs.push(Instr::LoadImm(r, val));
@@ -12826,6 +12854,15 @@ impl<'src> LowerCtx<'src> {
                     self.generic_fn_param_counts.get(&fn_name)
                 {
                     // Pre-scan args to collect struct type names in order of appearance.
+                    //
+                    // FLS §12.1: Concrete type inference for generic call sites.
+                    // Two cases:
+                    //   (a) Arg is a path variable registered in local_struct_types.
+                    //   (b) Arg is an inline struct literal `Struct { field: val }` —
+                    //       the type name is the literal's `name` span.
+                    // Both cases yield the concrete struct type for the corresponding
+                    // generic type parameter. This enables `doubled(Src { x: 6 })` to
+                    // monomorphize as `doubled__Src` instead of `doubled__i32`.
                     let mut struct_arg_types: Vec<String> = Vec::new();
                     for arg in args {
                         if let ExprKind::Path(segs) = &arg.kind
@@ -12836,6 +12873,15 @@ impl<'src> LowerCtx<'src> {
                                 && let Some(st) = self.local_struct_types.get(&slot)
                             {
                                 struct_arg_types.push(st.clone());
+                                continue;
+                            }
+                        }
+                        // FLS §6.11: Struct literal in argument position — extract
+                        // the type name directly from the literal's name span.
+                        if let ExprKind::StructLit { name, .. } = &arg.kind {
+                            let type_name = name.text(self.source).to_owned();
+                            if self.struct_field_types.contains_key(type_name.as_str()) {
+                                struct_arg_types.push(type_name);
                                 continue;
                             }
                         }
