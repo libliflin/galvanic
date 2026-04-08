@@ -14054,6 +14054,28 @@ impl<'src> LowerCtx<'src> {
                         }
                     } else if let ExprKind::Path(segs) = &arg.kind
                         && segs.len() == 1
+                        && let Some(&s_slot) = self.locals.get(segs[0].text(self.source))
+                        && self.local_slice_slots.contains(&s_slot)
+                    {
+                        // FLS §4.9: `&[T]` slice variable as a direct call argument.
+                        // Pass (data_ptr, length) as two consecutive registers, matching
+                        // the fat-pointer ABI for `&[T]` parameters.
+                        //
+                        // This case handles slice variables that arrived as function
+                        // parameters (registered by `lower_fn`) or as closure explicit
+                        // params (registered in the closure spill loop). In both cases
+                        // `s_slot` is the ptr slot and `s_slot + 1` is the len slot.
+                        //
+                        // FLS §4.9 AMBIGUOUS: two-register fat-pointer ABI not mandated by spec.
+                        // FLS §6.1.2:37–45: Both loads are runtime instructions.
+                        let r_ptr = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: r_ptr, slot: s_slot });
+                        arg_regs.push(r_ptr);
+                        let r_len = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: r_len, slot: s_slot + 1 });
+                        arg_regs.push(r_len);
+                    } else if let ExprKind::Path(segs) = &arg.kind
+                        && segs.len() == 1
                         && let Some(&base_slot) = self.locals.get(segs[0].text(self.source))
                         && let Some(&n_elems) = self.local_array_lens.get(&base_slot)
                     {
@@ -18006,36 +18028,77 @@ impl<'src> LowerCtx<'src> {
 
                 // ── Spill explicit parameters (FLS §6.14, §9) ────────────────
                 // Explicit parameters arrive after the captured variables, so
-                // parameter i occupies register x{n_captures + i}.
+                // parameter i occupies register x{n_captures + reg_offset}.
                 //
                 // FLS §6.14: Closure parameters follow the ARM64 calling convention;
                 // the first N params arrive in x0..x{N-1} after captures.
                 // FLS §9: Same spill strategy as free functions.
                 // FLS §6.1.2:37–45: All spills are runtime store instructions.
-                for (i, param) in params.iter().enumerate() {
-                    let reg = (n_captures + i) as u8;
-                    let slot = closure_ctx.alloc_slot()?;
-                    closure_ctx.instrs.push(Instr::Store { src: reg, slot });
-                    match &param.pat {
-                        crate::ast::Pat::Ident(name_span) => {
-                            let name = name_span.text(self.source);
-                            if name != "_" {
-                                closure_ctx.locals.insert(name, slot);
+                //
+                // FLS §4.9 AMBIGUOUS: `&[T]` fat-pointer params occupy TWO consecutive
+                // registers (data ptr + length). Each such param increments reg_offset
+                // by 2 and allocates two consecutive stack slots. The ptr slot is
+                // registered in `local_slice_slots` so `.len()` and indexing work.
+                let mut reg_offset: usize = 0;
+                for param in params.iter() {
+                    let reg = (n_captures + reg_offset) as u8;
+
+                    // Detect &[T] fat-pointer parameters.
+                    let is_fat_slice = param.ty.as_ref().map(|ty| {
+                        matches!(&ty.kind,
+                            crate::ast::TyKind::Ref { inner, .. }
+                            if matches!(inner.kind, crate::ast::TyKind::Slice { .. }))
+                    }).unwrap_or(false);
+
+                    if is_fat_slice {
+                        // Allocate two consecutive slots: ptr then length.
+                        let ptr_slot = closure_ctx.alloc_slot()?;
+                        closure_ctx.instrs.push(Instr::Store { src: reg, slot: ptr_slot });
+                        let len_slot = closure_ctx.alloc_slot()?;
+                        closure_ctx.instrs.push(Instr::Store { src: reg + 1, slot: len_slot });
+                        match &param.pat {
+                            crate::ast::Pat::Ident(name_span) => {
+                                let name = name_span.text(self.source);
+                                if name != "_" {
+                                    closure_ctx.locals.insert(name, ptr_slot);
+                                }
+                            }
+                            crate::ast::Pat::Wildcard => {}
+                            other => {
+                                return Err(LowerError::Unsupported(format!(
+                                    "only identifier and wildcard patterns are supported \
+                                     in closure parameters at this milestone, found {other:?}"
+                                )));
                             }
                         }
-                        crate::ast::Pat::Wildcard => {}
-                        other => {
-                            return Err(LowerError::Unsupported(format!(
-                                "only identifier and wildcard patterns are supported \
-                                 in closure parameters at this milestone, found {other:?}"
-                            )));
+                        // Mark as slice so .len() and indexing emit fat-ptr loads.
+                        closure_ctx.local_slice_slots.insert(ptr_slot);
+                        reg_offset += 2;
+                    } else {
+                        let slot = closure_ctx.alloc_slot()?;
+                        closure_ctx.instrs.push(Instr::Store { src: reg, slot });
+                        match &param.pat {
+                            crate::ast::Pat::Ident(name_span) => {
+                                let name = name_span.text(self.source);
+                                if name != "_" {
+                                    closure_ctx.locals.insert(name, slot);
+                                }
+                            }
+                            crate::ast::Pat::Wildcard => {}
+                            other => {
+                                return Err(LowerError::Unsupported(format!(
+                                    "only identifier and wildcard patterns are supported \
+                                     in closure parameters at this milestone, found {other:?}"
+                                )));
+                            }
                         }
-                    }
-                    // Register fn-ptr params so indirect call emits `blr`.
-                    if let Some(ty) = &param.ty
-                        && matches!(lower_ty(ty, self.source, self.type_aliases), Ok(IrTy::FnPtr))
-                    {
-                        closure_ctx.local_fn_ptr_slots.insert(slot);
+                        // Register fn-ptr params so indirect call emits `blr`.
+                        if let Some(ty) = &param.ty
+                            && matches!(lower_ty(ty, self.source, self.type_aliases), Ok(IrTy::FnPtr))
+                        {
+                            closure_ctx.local_fn_ptr_slots.insert(slot);
+                        }
+                        reg_offset += 1;
                     }
                 }
 
@@ -18081,7 +18144,19 @@ impl<'src> LowerCtx<'src> {
                         .collect();
                     self.last_closure_captures = Some(outer_slots);
                     self.last_closure_name = Some(closure_name.clone());
-                    self.last_closure_n_explicit = Some(params.len());
+                    // Count register slots, not param count: &[T] params occupy 2 regs.
+                    // FLS §4.9: fat pointers pass data-ptr + length in consecutive registers.
+                    let n_explicit_regs: usize = params.iter().map(|p| {
+                        if let Some(ty) = &p.ty
+                            && let crate::ast::TyKind::Ref { inner, .. } = &ty.kind
+                            && matches!(inner.kind, crate::ast::TyKind::Slice { .. })
+                        {
+                            2
+                        } else {
+                            1
+                        }
+                    }).sum();
+                    self.last_closure_n_explicit = Some(n_explicit_regs);
                 }
 
                 // Materialise the closure's address as a function pointer value.

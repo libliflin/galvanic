@@ -2992,3 +2992,27 @@ declared field type — not as a wider i32.
 - The combined result of two `apply_len` calls (lengths 3 + 2 = 5) appears as `mov x0, #5` (fully constant-folded)
 
 **Tests**: `cargo test --test e2e -- claim_79_fn_ptr_slice_arg_passes_len_not_just_ptr runtime_fn_ptr_slice_arg_emits_two_loads`
+
+---
+
+## Claim 80: capturing closure with `&[T]` explicit parameter generates correct trampoline
+
+**Stakeholder**: William (researcher), CI / Validation Infrastructure
+
+**Promise**: When a capturing `move` closure has a `&[T]` explicit parameter and is passed to an `impl Fn(&[T])` callee, the generated trampoline MUST shift TWO registers (the data pointer AND the length) to make room for the captured value. The closure body must also correctly pass both fat-pointer components to any function called with the slice.
+
+**Why this is load-bearing**: The trampoline's `n_explicit` count tracks how many register positions to shift. Before the fix, `n_explicit` equalled the AST param count (1 for a single `&[T]` param). This caused the trampoline to shift only 1 register — moving the data pointer to position 1 while OVERWRITING the length that was already in position 1. The closure body received garbage as the length, so any slice operation (`s.len()`, `s[i]`) produced wrong results. The adversarial test passes two slices of different lengths through the same capturing closure; a broken trampoline would return the same (wrong) result for both.
+
+**ARM64 implementation**: In `lower.rs`, `last_closure_n_explicit` is set to the register-slot count of explicit params (not the AST param count). `&[T]` params count as 2 slots. The closure spill loop allocates two consecutive stack slots for `&[T]` params and registers the ptr slot in `local_slice_slots`. The trampoline codegen in `codegen.rs` iterates over `n_explicit` register slots in reverse order, shifting each from `x{i}` to `x{n_caps+i}` — correctly handling fat pointers because both register slots are shifted.
+
+**FLS §4.9**: `&[T]` is a fat pointer (data pointer + element count) occupying two consecutive registers.
+**FLS §6.22, §4.13**: The trampoline shifts explicit arguments by `n_caps` positions. Each fat-pointer arg occupies 2 register slots.
+**FLS §6.1.2:37–45**: Non-const function bodies emit runtime instructions.
+**FLS §4.9 AMBIGUOUS**: Fat-pointer ABI (two consecutive ARM64 registers: data ptr + length) is not mandated by the spec. The trampoline must be audited for every new param type that occupies more than one register.
+
+**Violated if**:
+- The trampoline for a closure with one `&[T]` explicit param and 1 capture does NOT contain `mov x2, x1` (shift len from position 1 to position 2), OR
+- The combined result of two calls with slices of different lengths (3 and 2) through a capturing closure appears as `mov x0, #5` (fully constant-folded), OR
+- The closure body does NOT emit two `ldr` instructions before calling a function that takes `&[T]` (only one register passed to callee)
+
+**Tests**: `cargo test --test e2e -- claim_80_closure_trampoline_slice_param_passes_len_not_just_ptr runtime_closure_trampoline_shifts_fat_ptr_slice_param`
