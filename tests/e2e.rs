@@ -23917,3 +23917,45 @@ fn main() -> i32 { extract(Opt::Some(5)) }
         "let-else must not constant-fold extracted value to #5: {asm}"
     );
 }
+
+/// Adversarial assembly check: let-else binding combined with a runtime parameter
+/// cannot be constant-folded.
+///
+/// This is stronger than `runtime_let_else_binding_not_folded`: even if galvanic
+/// "knew" the extracted value at compile time (it cannot — `o` is a parameter),
+/// it still cannot fold `v + n` because `n` is also a runtime parameter.
+///
+/// Attack vector: galvanic might constant-fold through the let-else binding when
+/// all values appear statically knowable at the call site (`compute(Opt::Some(3), 4)`).
+/// The use of TWO parameters — one for the enum payload and one for the addend —
+/// makes folding to `mov x0, #7` impossible for a correct compiler.
+///
+/// FLS §8.1: let-else patterns must check the discriminant at runtime.
+/// FLS §6.1.2 (Constraint 1): non-const code must emit runtime instructions.
+#[test]
+fn runtime_let_else_binding_combined_with_param_not_folded() {
+    let src = r#"
+enum Opt { Some(i32), None }
+fn compute(o: Opt, n: i32) -> i32 {
+    let Opt::Some(v) = o else { return 0 };
+    v + n
+}
+fn main() -> i32 { compute(Opt::Some(3), 4) }
+"#;
+    let asm = compile_to_asm(src);
+    // Must emit an add instruction — the sum v + n is computed at runtime.
+    assert!(
+        asm.contains("add"),
+        "let-else binding combined with param must emit runtime add: {asm}"
+    );
+    // Must NOT constant-fold 3 + 4 = 7.
+    assert!(
+        !asm.contains("mov     x0, #7"),
+        "let-else must not constant-fold v+n to #7 — both are runtime values: {asm}"
+    );
+    // Must emit a discriminant check (cbz) — the else branch is still possible at runtime.
+    assert!(
+        asm.contains("cbz"),
+        "let-else must emit cbz for discriminant check even when binding is used in arithmetic: {asm}"
+    );
+}

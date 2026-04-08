@@ -407,6 +407,28 @@ else
     pass "Claim 20: @ binding patterns emit runtime sub-pattern checks (not folded)"
 fi
 
+# ── Claim 21: let-else emits runtime discriminant check, binding not folded ───
+# Tests three things for `let Enum::Variant(v) = o else { return 0 }`:
+#   (a) A runtime discriminant check (cbz) is emitted — the else branch is reachable.
+#   (b) The extracted binding is loaded at runtime (ldr present, mov x0, #5 absent).
+#   (c) When the binding is used with a second runtime parameter (v + n), the result
+#       is NOT constant-folded: assembly must contain `add`, not `mov x0, #7`.
+#
+# Attack vector: galvanic could constant-fold through the enum field load when the
+# call site passes a literal (`Opt::Some(3)`). The adversarial test uses TWO function
+# parameters — one for the enum and one for the addend — making folding to a constant
+# impossible for any correct compiler.
+#
+# Introduced in cycle 44 (red-team, milestone 153 follow-up, FLS §8.1).
+# References: claims.md Claim 21.
+
+echo "--- Claim 21: let-else emits runtime discriminant check and binding not folded ---"
+if cargo test --test e2e --quiet -- runtime_let_else_emits_discriminant_check runtime_let_else_binding_not_folded runtime_let_else_binding_combined_with_param_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 21" "let-else falsification FAILED — discriminant check may be missing, binding may be constant-folded, or combined computation was folded to a constant"
+else
+    pass "Claim 21: let-else emits runtime discriminant check and binding is not folded"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

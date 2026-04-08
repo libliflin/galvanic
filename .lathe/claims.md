@@ -529,3 +529,37 @@ returns assembly that:
 - contains `mov x0, #12` (result of 3*4 constant-folded).
 
 **Test**: `cargo test --test e2e -- runtime_dyn_trait_second_method_emits_vtable_offset_8`
+
+---
+
+## Claim 21: let-else patterns emit runtime discriminant checks and do not constant-fold the extracted binding
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: When a `let Enum::Variant(v) = expr else { diverge }` statement is compiled,
+galvanic must:
+1. Emit a runtime discriminant comparison and conditional branch (`cbz`) to the else block —
+   not assume the pattern always matches.
+2. Load the bound value `v` from the enum's field slot at runtime — not substitute a compile-time
+   constant even when the call site passes a literal (`Opt::Some(5)`).
+3. When the extracted binding is used in computation with a second runtime parameter (`v + n`),
+   emit a runtime `add` instruction and NOT fold the result to a constant.
+
+This claim guards the let-else lowering path added in milestone 153 (cycle 43, FLS §8.1). The
+attack vectors are:
+- Removing the discriminant check → else block never reached (wrong runtime behavior when pattern fails).
+- Constant-folding through the enum field load → `v` always has the compile-time value from the
+  call site literal, not the runtime value of `o`'s payload.
+- Constant-folding `v + n` when `n` is also known at the call site → result is `mov x0, #N` instead
+  of a runtime `add`.
+
+The adversarial test (`runtime_let_else_binding_combined_with_param_not_folded`) uses TWO function
+parameters — one for the enum and one for the addend — making the result impossible to fold for any
+correct compiler. A folded result (`mov x0, #7`) is conclusive evidence of an interpreter.
+
+**Violated if**: `compile_to_asm(...)` for `fn compute(o: Opt, n: i32) -> i32 { let Opt::Some(v) = o else { return 0 }; v + n }` returns assembly that:
+- lacks `cbz` (discriminant check absent), OR
+- lacks `add` (field load + addition was constant-folded), OR
+- contains `mov x0, #7` (3+4 was folded at the call site).
+
+**Test**: `cargo test --test e2e -- runtime_let_else_emits_discriminant_check runtime_let_else_binding_not_folded runtime_let_else_binding_combined_with_param_not_folded`
