@@ -6837,10 +6837,73 @@ impl<'src> LowerCtx<'src> {
                                 }
                             }
                         }
+                        // FLS §5.1.11 + §8.1: OR pattern in let-else.
+                        // `let A | B | C = x else { <diverge> };`
+                        //
+                        // Strategy: same orr-accumulation as if-let OR pattern.
+                        //   1. matched_reg = 0
+                        //   2. For each alternative: load scrutinee, compare against
+                        //      alternative's immediate, OR result into matched_reg.
+                        //   3. CondBranch(matched_reg, else_label) — branches when
+                        //      matched_reg == 0 (no alternative matched) → else runs.
+                        //   4. Fall through to end_label (match succeeded, no bindings
+                        //      because OR pattern alternatives produce no variable bindings).
+                        //
+                        // FLS §6.1.2:37–45: All instructions are runtime.
+                        // Cache-line note: 1 (init) + 4×N (load+loadimm+eq+orr per alt)
+                        // + 1 (cbz) = 4N+2 instructions total.
+                        Pat::Or(alts) => {
+                            let matched_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::LoadImm(matched_reg, 0));
+                            for alt in alts {
+                                match alt {
+                                    Pat::Wildcard => {
+                                        // Wildcard alternative always matches.
+                                        self.instrs.push(Instr::LoadImm(matched_reg, 1));
+                                        break;
+                                    }
+                                    Pat::Or(_) | Pat::Ident(_) => {
+                                        return Err(LowerError::Unsupported(
+                                            "nested OR or identifier inside let-else OR pattern"
+                                                .into(),
+                                        ));
+                                    }
+                                    _ => {
+                                        let alt_imm = self.pat_scalar_imm(alt)?;
+                                        let si_reg = self.alloc_reg()?;
+                                        self.instrs.push(Instr::Load {
+                                            dst: si_reg,
+                                            slot: scrut_slot,
+                                        });
+                                        let alt_reg = self.alloc_reg()?;
+                                        self.instrs.push(Instr::LoadImm(alt_reg, alt_imm));
+                                        let eq_reg = self.alloc_reg()?;
+                                        self.instrs.push(Instr::BinOp {
+                                            op: IrBinOp::Eq,
+                                            dst: eq_reg,
+                                            lhs: si_reg,
+                                            rhs: alt_reg,
+                                        });
+                                        self.instrs.push(Instr::BinOp {
+                                            op: IrBinOp::BitOr,
+                                            dst: matched_reg,
+                                            lhs: matched_reg,
+                                            rhs: eq_reg,
+                                        });
+                                    }
+                                }
+                            }
+                            // CondBranch: cbz branches when matched_reg == 0 (no match).
+                            self.instrs.push(Instr::CondBranch {
+                                reg: matched_reg,
+                                label: else_label,
+                            });
+                            // No bindings: OR scalar/enum-unit patterns bind nothing.
+                        }
                         _ => {
                             return Err(LowerError::Unsupported(
                                 "let-else only supports TupleStruct (Enum::Variant(..)) \
-                                 patterns at this milestone"
+                                 or OR patterns at this milestone"
                                     .into(),
                             ));
                         }

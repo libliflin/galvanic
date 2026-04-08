@@ -1888,7 +1888,21 @@ impl<'src> Parser<'src> {
 
         // Pattern — FLS §8.1: any irrefutable pattern is permitted.
         // Common forms: identifier, `_`, or tuple `(a, b)` (FLS §5.10.3).
-        let pat = self.parse_let_pattern()?;
+        // FLS §5.1.11: OR patterns are also allowed in let-else position.
+        let first_pat = self.parse_let_pattern()?;
+        let pat = if self.peek_kind() == TokenKind::Or {
+            // OR pattern: `let A | B | C = x else { ... };`
+            // FLS §5.1.11: Each alternative must match the same set of bindings.
+            // Galvanic supports scalar/enum-unit alternatives (no bindings).
+            let mut alts = vec![first_pat];
+            while self.peek_kind() == TokenKind::Or {
+                self.advance(); // consume `|`
+                alts.push(self.parse_let_pattern()?);
+            }
+            Pat::Or(alts)
+        } else {
+            first_pat
+        };
 
         // Optional type annotation `: Type`.
         let ty = if self.eat(TokenKind::Colon) {
@@ -2090,6 +2104,35 @@ impl<'src> Parser<'src> {
                 }
                 self.expect(TokenKind::CloseBracket)?;
                 Ok(Pat::Slice(pats))
+            }
+            // Integer literal pattern. FLS §5.2.
+            // Used in let-else OR patterns: `let 1 | 2 | 3 = x else { ... };`
+            // FLS §8.1: let-else accepts refutable patterns.
+            TokenKind::LitInteger => {
+                let tok = self.advance();
+                let val = parse_int_literal(tok.text(self.src));
+                Ok(Pat::LitInt(val))
+            }
+            // Negative integer literal pattern `-n`. FLS §5.2.
+            TokenKind::Minus => {
+                self.advance(); // consume `-`
+                if self.peek_kind() != TokenKind::LitInteger {
+                    return Err(self.error(
+                        "expected integer literal after `-` in pattern".to_owned(),
+                    ));
+                }
+                let tok = self.advance();
+                let val = parse_int_literal(tok.text(self.src));
+                Ok(Pat::NegLitInt(val))
+            }
+            // Boolean literal patterns. FLS §5.2.
+            TokenKind::KwTrue => {
+                self.advance();
+                Ok(Pat::LitBool(true))
+            }
+            TokenKind::KwFalse => {
+                self.advance();
+                Ok(Pat::LitBool(false))
             }
             kind => Err(self.error(format!(
                 "expected identifier, `_`, `(`, or `[` in let pattern, found {kind:?}"
