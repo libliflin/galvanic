@@ -1480,3 +1480,50 @@ registration to `y` using the same two-slot layout as the source binding.
 - contains `mov     x0, #12` (result constant-folded)
 
 **Tests**: `cargo test --test e2e -- runtime_dyn_trait_rebind_emits_load_for_fat_pointer runtime_dyn_trait_rebind_not_folded`
+
+---
+
+## Claim 42: while loop emits runtime control flow (not constant-folded)
+
+**Stakeholder**: William (researcher), Compiler Researchers, FLS / Ferrocene Ecosystem
+
+**Promise**: A `while` loop whose body modifies the loop variable must emit runtime
+control flow — `cmp`, `cset`, `cbz`, and a back-edge `b` — at every iteration. The
+loop result must NOT be constant-folded to an immediate. A while loop is not a const
+context (FLS §6.15.3, §6.1.2 Constraint 1).
+
+```rust
+fn main() -> i32 { let mut x = 0; while x < 5 { x = x + 1; } x }
+```
+
+Must emit:
+- `cmp` — runtime comparison for the loop condition `x < 5`
+- `cset` — materialise comparison result into a register
+- `cbz` — conditional exit branch when condition is false
+- `b .L{n}` — back-edge returning to the top of the loop
+- NOT `mov     x0, #5` — must not fold the 5-iteration result to a compile-time constant
+
+**Why this claim matters**: The loop runs x from 0 to 5 — a statically-determined result.
+An interpreter could evaluate the loop at compile time and emit `mov x0, #5`. The positive
+assertions (cmp/cset/cbz/b) verify loop structure is present, but they would pass even if
+dead loop code co-existed with a constant-folded result. The negative assertion closes this
+gap: the result value 5 must not appear as a literal move instruction.
+
+**Attack vectors**:
+1. Fold `while x < 5 { x += 1; }` starting from x=0 to `mov x0, #5`. Positive assertions
+   might still pass if dead loop instructions are emitted. Caught by absence of `mov x0, #5`.
+2. Omit the back-edge `b` instruction, converting the loop to a single conditional branch
+   (dead loop). Caught by back-edge `b` assertion.
+3. Replace the runtime comparison with a compile-time constant condition. Caught by `cmp`
+   and `cset` presence assertions.
+
+**FLS §6.15.3**: While loop expressions. The condition is checked at runtime each iteration.
+**FLS §6.1.2 Constraint 1**: `fn main()` is not a const context — loop must execute at runtime.
+
+**Violated if**: `compile_to_asm(WHILE_SOURCE)` returns assembly that:
+- lacks `cmp` (condition not checked at runtime), OR
+- lacks `cbz` (no conditional exit branch), OR
+- lacks `b` back-edge (no loop at all), OR
+- contains `mov     x0, #5` (loop result was constant-folded)
+
+**Test**: `cargo test --test e2e -- runtime_while_emits_cmp_cset_cbz_and_b`

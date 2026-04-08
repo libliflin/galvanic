@@ -845,6 +845,23 @@ fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 
+echo "--- Claim 42: while loop emits runtime control flow (not constant-folded) ---"
+# Promise: `while x < 5 { x = x + 1; }` starting from x=0 must emit runtime
+# cmp+cset+cbz+back-edge and must NOT fold the 5-iteration result to `mov x0, #5`.
+# The loop body iterates x: 0→1→2→3→4→5. An interpreter could short-circuit this.
+#
+# FLS §6.15.3: While loop expressions evaluate the condition at runtime each iteration.
+# FLS §6.1.2 Constraint 1: fn main() is not a const context — loop executes at runtime.
+#
+# Introduced in cycle 78 (while loop falsification, FLS §6.15.3, §6.1.2).
+# References: claims.md Claim 42.
+
+if cargo test --test e2e --quiet -- runtime_while_emits_cmp_cset_cbz_and_b 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 42" "while loop test FAILED — loop control flow may be missing or result 5 was constant-folded to mov x0, #5"
+else
+    pass "Claim 42: while loop emits runtime cmp+cset+cbz+back-edge and result not folded to #5"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 

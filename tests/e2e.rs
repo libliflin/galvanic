@@ -657,6 +657,16 @@ fn runtime_while_emits_cmp_cset_cbz_and_b() {
         asm.contains("\n    b "),
         "expected unconditional `b` back-edge instruction in while loop, got:\n{asm}"
     );
+    // Adversarial gate: the loop runs 5 iterations (x goes 0→1→2→3→4→5).
+    // An interpreter could fold this to `mov x0, #5` without emitting any loop
+    // instructions. The positive assertions above verify structure exists, but
+    // they do not prevent a constant-folded *result* from co-existing with
+    // dead loop instructions. This negative assertion closes that gap.
+    // FLS §6.1.2 Constraint 1: fn main() is not a const context.
+    assert!(
+        !asm.contains("mov     x0, #5"),
+        "must not constant-fold while-loop result to `mov x0, #5`; loop must run at runtime, got:\n{asm}"
+    );
 }
 
 // ── Milestone 8: loop / break / continue ─────────────────────────────────────
