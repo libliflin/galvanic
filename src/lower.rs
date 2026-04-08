@@ -13481,7 +13481,48 @@ impl<'src> LowerCtx<'src> {
                         // Use IrTy::I32 as the type hint (not ret_ty) so that integer
                         // literal arguments (e.g., `add(3)` as a statement) are lowered
                         // correctly when ret_ty is IrTy::Unit.
+                        //
+                        // FLS §4.9 AMBIGUOUS: &[T] fat pointer arguments require two
+                        // registers (data ptr + length). Check for slice variables and
+                        // &arr borrows before falling through to scalar lowering.
                         for arg in args {
+                            // Case 1: argument is a &[T] slice variable (already a fat ptr).
+                            if let ExprKind::Path(segs) = &arg.kind
+                                && segs.len() == 1
+                            {
+                                let var_name = segs[0].text(self.source);
+                                if let Some(&s_slot) = self.locals.get(var_name)
+                                    && self.local_slice_slots.contains(&s_slot)
+                                {
+                                    // Pass data pointer then length (two consecutive slots).
+                                    let r_ptr = self.alloc_reg()?;
+                                    self.instrs.push(Instr::Load { dst: r_ptr, slot: s_slot });
+                                    all_regs.push(r_ptr);
+                                    let r_len = self.alloc_reg()?;
+                                    self.instrs.push(Instr::Load { dst: r_len, slot: s_slot + 1 });
+                                    all_regs.push(r_len);
+                                    continue;
+                                }
+                            }
+                            // Case 2: argument is &arr — borrow of an array variable.
+                            if let ExprKind::Unary { op: crate::ast::UnaryOp::Ref, operand: inner } = &arg.kind
+                                && let ExprKind::Path(segs) = &inner.kind
+                                && segs.len() == 1
+                            {
+                                let arr_name = segs[0].text(self.source);
+                                if let Some(&arr_base_slot) = self.locals.get(arr_name)
+                                    && let Some(&arr_len) = self.local_array_lens.get(&arr_base_slot)
+                                {
+                                    let r_addr = self.alloc_reg()?;
+                                    self.instrs.push(Instr::AddrOf { dst: r_addr, slot: arr_base_slot });
+                                    all_regs.push(r_addr);
+                                    let r_len = self.alloc_reg()?;
+                                    self.instrs.push(Instr::LoadImm(r_len, arr_len as i32));
+                                    all_regs.push(r_len);
+                                    continue;
+                                }
+                            }
+                            // Scalar or other argument: lower normally.
                             let v = self.lower_expr(arg, &IrTy::I32)?;
                             let r = self.val_to_reg(v)?;
                             all_regs.push(r);
@@ -15561,12 +15602,140 @@ impl<'src> LowerCtx<'src> {
             // flow skeleton (load, cmp, cbz, load, add imm, str, b) — 28 bytes, fits
             // in one 32-byte half of a 64-byte instruction cache line.
             ExprKind::For { pat, iter, body, label } => {
-                // FLS §6.15.1: for loops desugar via IntoIterator. Galvanic handles two
+                // FLS §6.15.1: for loops desugar via IntoIterator. Galvanic handles three
                 // iterator kinds at the IR level (no runtime trait dispatch):
                 //   1. Integer range (start..end / start..=end) — FLS §6.16
                 //   2. Local array variable — FLS §6.8, §6.9
+                //   3. &[T] slice parameter — FLS §4.9
                 //
-                // Check for an array variable iterator FIRST.
+                // Check for a slice parameter iterator FIRST (before array check).
+                // `for x in s` where `s` is a `&[i32]` slice parameter.
+                //
+                // Lowering strategy:
+                //   1. Load the data pointer from ptr_slot.
+                //   2. Load the runtime length from ptr_slot + 1.
+                //   3. Allocate a counter slot (0-based) and an element slot.
+                //   4. Loop: counter < length → load *(ptr + counter*8) into elem_slot
+                //      → run body → counter += 1 → back-edge.
+                //
+                // FLS §6.15.1 AMBIGUOUS: The spec desugars `for x in s` to
+                // `IntoIterator::into_iter(s)`, which requires trait dispatch.
+                // Galvanic special-cases `&[T]` at the IR level to avoid requiring
+                // a runtime IntoIterator implementation at this milestone.
+                //
+                // FLS §6.1.2:37–45: All loads (ptr, len, element) and comparisons
+                // are runtime instructions — the length is never compile-time folded.
+                //
+                // Cache-line note: the slice for loop emits ~11 instructions for the
+                // control flow skeleton — within two 64-byte cache lines.
+                let slice_iter: Option<u8> = if let ExprKind::Path(segs) = &iter.kind {
+                    if segs.len() == 1 {
+                        let vname = segs[0].text(self.source);
+                        match self.locals.get(vname).copied() {
+                            Some(ptr_slot) if self.local_slice_slots.contains(&ptr_slot) => {
+                                Some(ptr_slot)
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                if let Some(ptr_slot) = slice_iter {
+                    let pat_name = pat.text(self.source);
+
+                    // Allocate counter and element slots.
+                    let counter_slot = self.alloc_slot()?;
+                    let elem_slot = self.alloc_slot()?;
+
+                    let reg_mark = self.next_reg;
+
+                    // Load the data pointer (once, before the loop).
+                    // FLS §4.9: ptr_slot holds the base address of the slice elements.
+                    let r_base_ptr = self.alloc_reg()?;
+                    self.instrs.push(Instr::Load { dst: r_base_ptr, slot: ptr_slot });
+                    // Store base pointer in its own slot for reuse inside the loop.
+                    let base_ptr_slot = self.alloc_slot()?;
+                    self.instrs.push(Instr::Store { src: r_base_ptr, slot: base_ptr_slot });
+
+                    // Initialise counter to 0.
+                    let r_zero = self.alloc_reg()?;
+                    self.instrs.push(Instr::LoadImm(r_zero, 0));
+                    self.instrs.push(Instr::Store { src: r_zero, slot: counter_slot });
+
+                    // Labels: cond, incr, exit.
+                    let cond_label = self.alloc_label();
+                    let incr_label = self.alloc_label();
+                    let exit_label = self.alloc_label();
+
+                    self.loop_stack.push(LoopCtx {
+                        label: label.clone(),
+                        header_label: incr_label,
+                        exit_label,
+                        break_slot: None,
+                        break_ret_ty: IrTy::Unit,
+                        is_named_block: false,
+                    });
+
+                    // Bind the loop variable so the body can load it via Path.
+                    self.locals.insert(pat_name, elem_slot);
+
+                    // ── Condition: counter < length ───────────────────────────────────
+                    // FLS §4.9: Length lives at ptr_slot + 1 (runtime load).
+                    // FLS §6.1.2:37–45: This load and compare are runtime instructions.
+                    self.instrs.push(Instr::Label(cond_label));
+                    let r_counter = self.alloc_reg()?;
+                    self.instrs.push(Instr::Load { dst: r_counter, slot: counter_slot });
+                    let r_len = self.alloc_reg()?;
+                    // ptr_slot + 1 is the length slot (consecutive allocation).
+                    self.instrs.push(Instr::Load { dst: r_len, slot: ptr_slot + 1 });
+                    let r_cmp = self.alloc_reg()?;
+                    self.instrs.push(Instr::BinOp { op: IrBinOp::Lt, dst: r_cmp, lhs: r_counter, rhs: r_len });
+                    self.instrs.push(Instr::CondBranch { reg: r_cmp, label: exit_label });
+
+                    // ── Bind element: elem_slot = *(base_ptr + counter*8) ─────────────
+                    // FLS §4.9, §6.9: Load element through the fat pointer at runtime.
+                    let r_ptr2 = self.alloc_reg()?;
+                    self.instrs.push(Instr::Load { dst: r_ptr2, slot: base_ptr_slot });
+                    let r_counter2 = self.alloc_reg()?;
+                    self.instrs.push(Instr::Load { dst: r_counter2, slot: counter_slot });
+                    let r_eight = self.alloc_reg()?;
+                    self.instrs.push(Instr::LoadImm(r_eight, 8));
+                    let r_off = self.alloc_reg()?;
+                    self.instrs.push(Instr::BinOp { op: IrBinOp::Mul, dst: r_off, lhs: r_counter2, rhs: r_eight });
+                    let r_addr = self.alloc_reg()?;
+                    self.instrs.push(Instr::BinOp { op: IrBinOp::Add, dst: r_addr, lhs: r_ptr2, rhs: r_off });
+                    let r_elem = self.alloc_reg()?;
+                    self.instrs.push(Instr::LoadPtr { dst: r_elem, src: r_addr });
+                    self.instrs.push(Instr::Store { src: r_elem, slot: elem_slot });
+
+                    // ── Body ──────────────────────────────────────────────────────────
+                    self.lower_block_to_value(body, &IrTy::Unit)?;
+
+                    // ── Increment: counter += 1 ───────────────────────────────────────
+                    self.instrs.push(Instr::Label(incr_label));
+                    let r_cnt = self.alloc_reg()?;
+                    self.instrs.push(Instr::Load { dst: r_cnt, slot: counter_slot });
+                    let r_one = self.alloc_reg()?;
+                    self.instrs.push(Instr::LoadImm(r_one, 1));
+                    let r_next = self.alloc_reg()?;
+                    self.instrs.push(Instr::BinOp { op: IrBinOp::Add, dst: r_next, lhs: r_cnt, rhs: r_one });
+                    self.instrs.push(Instr::Store { src: r_next, slot: counter_slot });
+                    self.instrs.push(Instr::Branch(cond_label));
+
+                    // Exit.
+                    self.instrs.push(Instr::Label(exit_label));
+                    self.loop_stack.pop();
+                    self.next_reg = reg_mark;
+
+                    // FLS §6.15.1: "The type of a for loop expression is the unit type ()."
+                    return Ok(IrValue::Unit);
+                }
+
+                // Check for an array variable iterator NEXT.
                 // `for x in arr` where `arr` is a local i32 array variable.
                 // The loop desugars to a counted index loop: counter runs 0..arr_len,
                 // binding each element to the loop variable on each iteration.

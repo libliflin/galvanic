@@ -32588,3 +32588,232 @@ fn claim_78_slice_param_len_is_runtime_load_not_folded() {
         "main must not constant-fold combined slice length to #5: {asm}"
     );
 }
+
+// ── Milestone 194: for x in slice — FLS §6.15.1, §4.9 ───────────────────────
+//
+// `for x in s` where `s: &[i32]` iterates over the slice elements at runtime.
+// The loop desugars to a counter-based index loop using the fat-pointer length.
+//
+// FLS §6.15.1: For-loop expressions desugar via IntoIterator.
+// FLS §4.9: &[T] fat pointers carry (addr, len) at runtime.
+// FLS §6.1.2:37–45: All loads, comparisons, and branches are runtime instructions.
+
+#[test]
+fn milestone_194_for_slice_sum() {
+    let src = r#"
+fn sum(s: &[i32]) -> i32 {
+    let mut total = 0;
+    for x in s {
+        total = total + x;
+    }
+    total
+}
+fn main() -> i32 {
+    let a = [1, 2, 3, 4, 5];
+    sum(&a)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 15, "sum([1..5]) via for-slice must return 15, got {exit_code}");
+}
+
+#[test]
+fn milestone_194_for_slice_len_one() {
+    let src = r#"
+fn sum(s: &[i32]) -> i32 {
+    let mut total = 0;
+    for x in s { total = total + x; }
+    total
+}
+fn main() -> i32 {
+    let a = [42];
+    sum(&a)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "sum of single-element slice must be 42, got {exit_code}");
+}
+
+#[test]
+fn milestone_194_for_slice_first_element() {
+    let src = r#"
+fn first(s: &[i32]) -> i32 {
+    let mut result = 0;
+    for x in s {
+        result = x;
+        break;
+    }
+    result
+}
+fn main() -> i32 { let a = [7, 8, 9]; first(&a) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "for-slice break must yield first element 7, got {exit_code}");
+}
+
+#[test]
+fn milestone_194_for_slice_in_arithmetic() {
+    let src = r#"
+fn dot(a: &[i32], b: &[i32]) -> i32 {
+    let mut i = 0;
+    let mut acc = 0;
+    for x in a {
+        acc = acc + x * b[i];
+        i = i + 1;
+    }
+    acc
+}
+fn main() -> i32 {
+    let a = [1, 2, 3];
+    let b = [4, 5, 6];
+    dot(&a, &b)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 32, "dot([1,2,3],[4,5,6]) must be 32, got {exit_code}");
+}
+
+#[test]
+fn milestone_194_for_slice_passed_to_fn() {
+    let src = r#"
+fn double_sum(s: &[i32]) -> i32 {
+    let mut t = 0;
+    for x in s { t = t + x; }
+    t * 2
+}
+fn apply(f: fn(&[i32]) -> i32, s: &[i32]) -> i32 { f(s) }
+fn main() -> i32 {
+    let a = [1, 2, 3];
+    apply(double_sum, &a)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 12, "double_sum([1,2,3]) must return 12, got {exit_code}");
+}
+
+#[test]
+fn milestone_194_for_slice_called_twice() {
+    let src = r#"
+fn sum(s: &[i32]) -> i32 {
+    let mut total = 0;
+    for x in s { total = total + x; }
+    total
+}
+fn main() -> i32 {
+    let a = [1, 2, 3];
+    let b = [10, 20];
+    sum(&a) + sum(&b)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 36, "sum([1,2,3]) + sum([10,20]) must be 36, got {exit_code}");
+}
+
+#[test]
+fn milestone_194_for_slice_continue() {
+    let src = r#"
+fn sum_positive(s: &[i32]) -> i32 {
+    let mut total = 0;
+    for x in s {
+        if x < 0 { continue; }
+        total = total + x;
+    }
+    total
+}
+fn main() -> i32 {
+    let a = [3, -1, 4, -1, 5];
+    sum_positive(&a)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 12, "sum_positive([3,-1,4,-1,5]) must return 12, got {exit_code}");
+}
+
+#[test]
+fn milestone_194_for_slice_result_in_if() {
+    let src = r#"
+fn any_positive(s: &[i32]) -> i32 {
+    let mut found = 0;
+    for x in s {
+        if x > 0 { found = 1; break; }
+    }
+    found
+}
+fn main() -> i32 { let a = [-2, -1, 3]; any_positive(&a) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "any_positive([-2,-1,3]) must return 1, got {exit_code}");
+}
+
+// ── Assembly inspection: for-slice loop ─────────────────────────────────────
+
+/// `for x in s` over a `&[i32]` slice must emit a runtime `ldr` to load
+/// the fat-pointer length and a runtime `mul`/`add` for element pointer arithmetic.
+///
+/// FLS §4.9: The length is a runtime value in the fat pointer.
+/// FLS §6.1.2:37–45: All loop control instructions are runtime.
+#[test]
+fn runtime_for_slice_emits_ldr_and_ptr_arithmetic() {
+    let asm = compile_to_asm(r#"
+fn sum(s: &[i32]) -> i32 {
+    let mut total = 0;
+    for x in s { total = total + x; }
+    total
+}
+fn main() -> i32 { let a = [1, 2, 3]; sum(&a) }
+"#);
+    // The callee must emit ldr to load the length from the fat-pointer length slot.
+    assert!(
+        asm.contains("ldr"),
+        "for-slice loop must emit ldr to load length from fat pointer: {asm}"
+    );
+    // The callee must emit mul for the element byte-offset computation (counter * 8).
+    assert!(
+        asm.contains("mul"),
+        "for-slice loop must emit mul for element pointer arithmetic: {asm}"
+    );
+    // Must NOT constant-fold: the result (6) must not be a compile-time constant.
+    assert!(
+        !asm.contains("mov     x0, #6"),
+        "for-slice loop must NOT constant-fold sum([1,2,3]) to #6: {asm}"
+    );
+    // The loop must emit a back-edge branch.
+    assert!(
+        asm.contains("cbz") || asm.contains("cbnz"),
+        "for-slice loop must emit conditional branch for loop termination: {asm}"
+    );
+}
+
+/// Calling the for-slice sum function with two slices of different lengths
+/// must not fold either result — the callee must handle any length at runtime.
+///
+/// FLS §4.9: Fat-pointer length is runtime-determined.
+/// FLS §6.1.2:37–45: Non-const function bodies must emit runtime instructions.
+#[test]
+fn runtime_for_slice_called_twice_not_folded() {
+    let asm = compile_to_asm(r#"
+fn sum(s: &[i32]) -> i32 {
+    let mut total = 0;
+    for x in s { total = total + x; }
+    total
+}
+fn main() -> i32 {
+    let a = [1, 2, 3];
+    let b = [10, 20];
+    sum(&a) + sum(&b)
+}
+"#);
+    // Must not fold sum([1,2,3]) = 6 or sum([10,20]) = 30 or total = 36.
+    assert!(
+        !asm.contains("mov     x0, #6"),
+        "for-slice sum([1,2,3]) must not be constant-folded to #6: {asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #30"),
+        "for-slice sum([10,20]) must not be constant-folded to #30: {asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #36"),
+        "main result must not be constant-folded to #36: {asm}"
+    );
+}
