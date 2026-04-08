@@ -253,6 +253,23 @@ else
     pass "Claim 12: trait-bound generic dispatch emits monomorphized label and runtime bl (not folded)"
 fi
 
+# ── Claim 13: Associated constant in runtime computation emits add, not folded ─
+# Tests that `fn compute(x: i32) -> i32 { x + Config::MAX }` called as `compute(5)`:
+#   (a) emits a runtime `add` instruction (not constant-folded away)
+#   (b) does NOT emit `mov x0, #15` (the sum was not folded at the call site)
+# This guards the specific interaction: assoc const inlining (correct per FLS §7.1:10)
+# must NOT cascade into constant-folding when combined with a runtime parameter.
+# Distinct from Claim 1 (inline arithmetic) and Claim 6 (function call folding).
+# Introduced in cycle 22 (red-team, milestone 128 path, FLS §10.3).
+# References: claims.md Claim 13.
+
+echo "--- Claim 13: assoc const in runtime computation emits add (not folded) ---"
+if cargo test --test e2e --quiet -- runtime_assoc_const_in_computation_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 13" "runtime_assoc_const_in_computation_not_folded FAILED — assoc const may be triggering constant-folding of runtime computation when combined with a literal argument"
+else
+    pass "Claim 13: assoc const in runtime computation emits add (not folded)"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

@@ -261,6 +261,37 @@ contain `apply_scale__Foo:` (monomorphization absent), or fails to contain `bl F
 
 ---
 
+## Claim 13: Associated constant used in runtime computation emits runtime add, not folded constant
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: When an associated constant (`Config::MAX`) is used in a computation that
+also involves a function parameter, the result must not be constant-folded at the call
+site. `fn compute(x: i32) -> i32 { x + Config::MAX }` called as `compute(5)` must:
+1. Inline `Config::MAX` as an immediate (this is correct — constants are substituted per FLS §7.1:10).
+2. Emit a runtime `add` instruction to combine it with parameter `x`.
+3. NOT emit `mov x0, #15` — the sum must be computed at runtime, not folded.
+
+This claim guards a specific interaction: constant inlining (step 1) is correct behavior,
+but it must not cascade into constant-folding the entire expression when a runtime value
+is also present. The attack vector is: galvanic inlines `Config::MAX = 10`, then at the
+call site sees `compute(5)` with a literal, and folds `5 + 10 → 15`.
+
+This is distinct from Claim 1 (inline `1 + 2` arithmetic) and Claim 6 (function calls with
+literal args). Claim 13 specifically targets the *constant inlining + runtime combination*
+path introduced in milestone 128 (FLS §10.3). A compiler that correctly handles Claims 1
+and 6 could still regress on Claim 13 if associated constant inlining triggers a folding
+optimization that doesn't apply to stack-loaded variables.
+
+**Violated if**: `compile_to_asm(...)` for `fn compute(x: i32) -> i32 { x + Config::MAX }`
+called from `main` as `compute(5)` returns assembly that:
+- does NOT contain `add` (the runtime addition was optimized away), OR
+- contains `mov x0, #15` or `mov     x0, #15` (constant-folded the sum).
+
+**Test**: `cargo test --test e2e -- runtime_assoc_const_in_computation_not_folded`
+
+---
+
 ## Not Yet Claims (honest gaps)
 
 These are promises the project will eventually make but cannot yet be falsified:
