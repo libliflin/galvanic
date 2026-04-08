@@ -1254,6 +1254,27 @@ else
     pass "Claim 67: narrowing casts as u8/i8 truncate correctly (not identity)"
 fi
 
+# ── Claim 68: `x as u16` and `x as i16` narrowing casts truncate correctly ─────
+# FLS §6.5.9: Integer-to-integer casts to a narrower type must truncate to the
+# low N bits of the source value. `70000_i32 as u16` → 4464, `40000_i32 as i16` → negative.
+# Previously galvanic treated these as identity casts (no truncation instruction
+# emitted), returning the source value unchanged. The fix emits TruncU16 / SextI16.
+# Attack: returning 70000 instead of 4464 for `f(x) = (x as u16) as i32` with x=70000
+# is a concrete wrong-answer test that cannot pass by accident.
+# References: claims.md Claim 68.
+
+echo "--- Claim 68: narrowing cast as u16/i16 truncates correctly (not identity) ---"
+if cargo test --test e2e --quiet -- \
+    runtime_cast_to_u16_emits_and_truncation \
+    runtime_cast_to_i16_emits_sxth \
+    milestone_180_cast_u16_truncates_70000_to_4464 \
+    milestone_180_cast_i16_sign_extends_40000_to_negative \
+    2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 68" "narrowing cast u16/i16 truncation test FAILED — `x as u16` or `x as i16` may be treating the cast as identity instead of truncating/sign-extending"
+else
+    pass "Claim 68: narrowing casts as u16/i16 truncate correctly (not identity)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 

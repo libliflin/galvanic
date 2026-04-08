@@ -604,6 +604,44 @@ pub enum Instr {
         src: u8,
     },
 
+    /// Truncate a register to 16 unsigned bits. Milestone 180.
+    ///
+    /// `TruncU16 { dst, src }` → `and w{dst}, w{src}, #65535` on ARM64.
+    ///
+    /// Implements the FLS §6.5.9 narrowing cast semantics for `x as u16`:
+    /// the result is the low 16 bits of the source. For example, 70000_i32 as u16
+    /// yields 4464 (= 70000 mod 65536) rather than 70000.
+    ///
+    /// FLS §4.1: "The unsigned integer types have a range of [0, 2^N - 1]."
+    /// FLS §6.5.9: Narrowing integer casts truncate to the target type's bit width.
+    ///
+    /// Cache-line note: one 4-byte ARM64 `and` instruction per truncation.
+    TruncU16 {
+        /// Destination register (receives low 16 bits of src).
+        dst: u8,
+        /// Source register (holds the value to truncate).
+        src: u8,
+    },
+
+    /// Sign-extend a register from 16 signed bits. Milestone 180.
+    ///
+    /// `SextI16 { dst, src }` → `sxth x{dst}, w{src}` on ARM64.
+    ///
+    /// Implements the FLS §6.5.9 narrowing cast semantics for `x as i16`:
+    /// the result is the low 16 bits sign-extended to 64 bits. For example,
+    /// 40000_i32 as i16 yields -25536 (= 40000 - 65536) because bit 15 is set.
+    ///
+    /// FLS §4.1: "The signed integer types have a range of [-2^(N-1), 2^(N-1)-1]."
+    /// FLS §6.5.9: Narrowing signed integer casts sign-extend from the target width.
+    ///
+    /// Cache-line note: one 4-byte ARM64 `sxth` instruction per sign-extension.
+    SextI16 {
+        /// Destination register (receives sign-extended low 16 bits of src).
+        dst: u8,
+        /// Source register (holds the value to sign-extend).
+        src: u8,
+    },
+
     /// Call a named function with arguments; result goes into a virtual register.
     ///
     /// `Call { dst, name, args, float_args }` emits (for each arg[i] ≠ i):

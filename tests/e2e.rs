@@ -30308,3 +30308,132 @@ fn milestone_179_cast_i8_in_arithmetic() {
     };
     assert_eq!(exit, 44, "200 as i8 = -56; -56 + 100 = 44");
 }
+
+// ── Milestone 180: narrowing casts `as u16` / `as i16` (FLS §6.5.9) ─────────
+//
+// FLS §6.5.9: Integer-to-integer casts to a narrower type truncate to the
+// low N bits. Previously `as u16` and `as i16` were identity casts (no
+// truncation emitted). Fix: emit TruncU16 (and #65535) / SextI16 (sxth).
+
+/// Assembly inspection: `x as u16` emits `and #65535` truncation.
+/// Negative assertion: the untruncated source value must not appear as-is.
+#[test]
+fn runtime_cast_to_u16_emits_and_truncation() {
+    let asm = compile_to_asm("fn f(x: i32) -> i32 { (x as u16) as i32 }\nfn main() -> i32 { f(70000) }\n");
+    assert!(
+        asm.contains("and") && asm.contains("65535"),
+        "expected `and #65535` for u16 truncation, got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #70000") && !asm.contains("mov     x0, #4464"),
+        "must not constant-fold 70000 as u16 = 4464, got:\n{asm}"
+    );
+}
+
+/// Assembly inspection: `x as i16` emits `sxth` sign-extension.
+/// Uses a function parameter so the cast cannot be constant-folded away.
+#[test]
+fn runtime_cast_to_i16_emits_sxth() {
+    // f takes a parameter — constant folding is impossible since input is unknown.
+    // The cast `x as i16` must emit sxth even though 40000 is statically known at call site.
+    let asm = compile_to_asm("fn f(x: i32) -> i32 { (x as i16) as i32 }\nfn main() -> i32 { f(40000) }\n");
+    assert!(
+        asm.contains("sxth"),
+        "expected `sxth` for i16 sign-extension, got:\n{asm}"
+    );
+    // The function body must have the sxth before ret, not a pre-computed constant result.
+    // If constant-folded, f would be `mov x0, #-25536` or equivalent — but ARM64 can't
+    // encode -25536 as a single MOV immediate in all cases, so check sxth is present instead.
+    assert!(
+        !asm.contains("sxtb"),
+        "must emit sxth (16-bit), not sxtb (8-bit), got:\n{asm}"
+    );
+}
+
+/// Runtime: `x as u16` truncates to low 16 bits. 70000 mod 65536 = 4464.
+#[test]
+fn milestone_180_cast_u16_truncates_70000_to_4464() {
+    // 70000 = 65536 + 4464, so 70000 as u16 = 4464
+    let Some(exit) = compile_and_run(
+        "fn f(x: i32) -> i32 { (x as u16) as i32 }\nfn main() -> i32 { f(70000) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 4464, "70000 as u16 = 4464 (70000 mod 65536)");
+}
+
+/// Runtime: `x as u16` truncates 65536 to 0.
+#[test]
+fn milestone_180_cast_u16_truncates_65536_to_0() {
+    let Some(exit) = compile_and_run(
+        "fn f(x: i32) -> i32 { (x as u16) as i32 }\nfn main() -> i32 { f(65536) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 0, "65536 as u16 = 0");
+}
+
+/// Runtime: `x as i16` sign-extends. 40000 = 0x9C40; bit 15 set → -25536.
+#[test]
+fn milestone_180_cast_i16_sign_extends_40000_to_negative() {
+    // 40000 = 0x9C40, bit 15 = 1, so sign-extended to 64 bits gives -25536
+    let Some(exit) = compile_and_run(
+        "fn f(x: i32) -> i32 { if (x as i16) < 0 { 1 } else { 0 } }\nfn main() -> i32 { f(40000) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "40000 as i16 is negative (sign bit set)");
+}
+
+/// Runtime: `x as i16` preserves values in range. 1000 stays 1000.
+#[test]
+fn milestone_180_cast_i16_1000_stays_positive() {
+    let Some(exit) = compile_and_run(
+        "fn f(x: i32) -> i32 { (x as i16) as i32 }\nfn main() -> i32 { f(1000) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1000, "1000 as i16 = 1000 (within range)");
+}
+
+/// Runtime: `x as u16` result used in arithmetic.
+#[test]
+fn milestone_180_cast_u16_result_in_arithmetic() {
+    // f(x) = (x as u16) as i32 + 100; f(70000) = 4464 + 100 = 4564
+    let Some(exit) = compile_and_run(
+        "fn f(x: i32) -> i32 { (x as u16) as i32 + 100 }\nfn main() -> i32 { f(70000) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 4564, "70000 as u16 = 4464; 4464 + 100 = 4564");
+}
+
+/// Runtime: `x as u16` passed to function.
+#[test]
+fn milestone_180_cast_u16_passed_to_fn() {
+    let Some(exit) = compile_and_run(
+        "fn id(x: i32) -> i32 { x }\nfn f(x: i32) -> i32 { id((x as u16) as i32) }\nfn main() -> i32 { f(70000) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 4464, "70000 as u16 = 4464, passed through id()");
+}
+
+/// Runtime: `x as i16` used in arithmetic with the sign-extended value.
+#[test]
+fn milestone_180_cast_i16_in_arithmetic() {
+    // f(x) = (x as i16) as i32 + 100; for x = 40000 (→ -25536): -25536 + 100 = -25436
+    // Return value is truncated to u8 by the process; test as exit code mod 256.
+    // Use a smaller value instead: f(32868) = (32868 as i16) as i32 + 100
+    // 32868 = 0x8064, bit 15=1, two's complement i16 = 32868 - 65536 = -32668
+    // -32668 + 100 = -32568. That's hard to test via exit code.
+    // Use: f(x) = if (x as i16) < 0 { (x as i16) as i32 + 200 } else { 0 }
+    // f(40000): 40000 as i16 = -25536; -25536 + 200 = -25336 (still negative, hard exit code)
+    // Let's use a simpler check: f(65535) → 65535 as i16 = -1; -1 + 100 = 99
+    let Some(exit) = compile_and_run(
+        "fn f(x: i32) -> i32 { (x as i16) as i32 + 100 }\nfn main() -> i32 { f(65535) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 99, "65535 as i16 = -1; -1 + 100 = 99");
+}

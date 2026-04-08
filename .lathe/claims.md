@@ -2707,3 +2707,25 @@ least-significant bits." This is not ambiguous — truncation is required.
 - the function body lacks `and ... #255` in the assembly output
 
 **Tests**: `cargo test --test e2e -- runtime_cast_to_u8_emits_and_truncation runtime_cast_to_i8_emits_sxtb milestone_179_cast_u8_truncates_300_to_44 milestone_179_cast_i8_sign_extends_200_to_negative`
+
+---
+
+## Claim 68: `x as u16` and `x as i16` narrowing casts truncate correctly (not identity)
+
+**FLS §6.5.9**: An integer-to-integer cast to a narrower type retains only the low N bits.
+`70000_i32 as u16` → 4464 (70000 mod 65536). `40000_i32 as i16` → negative (bit 15 set).
+Previously galvanic treated these as identity casts — no truncation emitted.
+
+**ARM64 implementation**:
+- `as u16` → `and w{dst}, w{dst}, #65535` (TruncU16)
+- `as i16` → `sxth x{dst}, w{dst}` (SextI16)
+
+Without explicit truncation, `70000_i32 as u16` would produce 70000 in the destination
+register. Any subsequent comparison, store, or arithmetic would use the unwrapped value,
+producing incorrect results.
+
+**Violated if** for `fn f(x: i32) -> i32 { (x as u16) as i32 }` called with 70000:
+- returns 70000 instead of 4464, OR
+- the function body lacks `and ... #65535` in the assembly output
+
+**Tests**: `cargo test --test e2e -- runtime_cast_to_u16_emits_and_truncation runtime_cast_to_i16_emits_sxth milestone_180_cast_u16_truncates_70000_to_4464 milestone_180_cast_i16_sign_extends_40000_to_negative`

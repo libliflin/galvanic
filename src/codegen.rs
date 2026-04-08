@@ -724,6 +724,28 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
             )?;
         }
 
+        // FLS §6.5.9: Narrowing cast to u16 — mask to low 16 bits.
+        // ARM64: `and w{dst}, w{src}, #65535` — low 16 bits, zero-extended.
+        // The `w` register prefix zero-extends into the full 64-bit x-register.
+        // Cache-line note: one 4-byte instruction.
+        Instr::TruncU16 { dst, src } => {
+            writeln!(
+                out,
+                "    and     w{dst}, w{src}, #65535           // FLS §6.5.9: truncate u16 (mask to 16 bits)"
+            )?;
+        }
+
+        // FLS §6.5.9: Narrowing cast to i16 — sign-extend from 16 bits to 64 bits.
+        // ARM64: `sxth x{dst}, w{src}` — sign-extend halfword to 64 bits.
+        // If bit 15 of src is 1, all upper bits are filled with 1s; otherwise 0s.
+        // Cache-line note: one 4-byte instruction.
+        Instr::SextI16 { dst, src } => {
+            writeln!(
+                out,
+                "    sxth    x{dst}, w{src}                  // FLS §6.5.9: sign-extend i16 to 64-bit"
+            )?;
+        }
+
         // FLS §8.1: Store a virtual register to a stack slot.
         // ARM64: `str x{src}, [sp, #{offset}]` — offset = slot * 8.
         // Cache-line note: 8-byte slots keep stores naturally aligned;
