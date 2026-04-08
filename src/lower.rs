@@ -8783,6 +8783,75 @@ impl<'src> LowerCtx<'src> {
                     }
                 }
 
+                // FLS §4.13: `let y = x` — fat pointer re-bind.
+                //
+                // When the initializer is a plain variable name that is already
+                // registered in `local_dyn_types`, copy the fat pointer (data_ptr,
+                // vtable_ptr) to two new consecutive stack slots without requiring
+                // a `&dyn Trait` type annotation. This covers:
+                //   let y = x;              // type inferred from x's dyn registration
+                //   let y: &dyn Trait = x;  // explicit annotation, path initializer
+                //
+                // The copied fat pointer is indistinguishable in subsequent use from
+                // the original: method calls on `y` emit `CallVtable`, and passing `y`
+                // to a `fn f(&dyn Trait)` emits the two-register fat pointer argument
+                // via Case B of the call-site handler.
+                //
+                // FLS §4.13: AMBIGUOUS — The spec does not define how fat pointer
+                // type information propagates through let bindings without an explicit
+                // `&dyn Trait` annotation. Galvanic propagates the `local_dyn_types`
+                // registration, mirroring the slot layout of the source binding.
+                //
+                // Cache-line note: two Load + two Store per re-bind — same per-access
+                // cost as the original binding; no additional vtable rodata is emitted
+                // because the vtable label was already queued by the source binding.
+                if let Some(init_expr) = init.as_ref()
+                    && let ExprKind::Path(segs) = &init_expr.kind
+                    && segs.len() == 1
+                {
+                    let src_name = segs[0].text(self.source);
+                    if let Some(&src_data_slot) = self.locals.get(src_name)
+                        && let Some(trait_name) =
+                            self.local_dyn_types.get(&src_data_slot).cloned()
+                    {
+                        // Allocate two consecutive slots: new_data_slot and new_vtable_slot.
+                        // FLS §4.13: fat pointer layout — data ptr at slot S, vtable
+                        // ptr at slot S+1 (matching parameter spill convention).
+                        let new_data_slot = self.alloc_slot()?;
+                        let new_vtable_slot = self.alloc_slot()?;
+                        let _ = new_vtable_slot; // index is implicit: new_data_slot + 1
+
+                        // Copy data pointer: Load from src_data_slot, Store to new_data_slot.
+                        // FLS §6.1.2:37–45: Load and Store are runtime instructions.
+                        let data_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load {
+                            dst: data_reg,
+                            slot: src_data_slot,
+                        });
+                        self.instrs.push(Instr::Store {
+                            src: data_reg,
+                            slot: new_data_slot,
+                        });
+
+                        // Copy vtable pointer: Load from src_data_slot+1, Store to new_data_slot+1.
+                        let vtable_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load {
+                            dst: vtable_reg,
+                            slot: src_data_slot + 1,
+                        });
+                        self.instrs.push(Instr::Store {
+                            src: vtable_reg,
+                            slot: new_data_slot + 1,
+                        });
+
+                        // Register new variable in both maps so subsequent use of `y`
+                        // follows the same dyn dispatch paths as the original `x`.
+                        self.locals.insert(var_name, new_data_slot);
+                        self.local_dyn_types.insert(new_data_slot, trait_name);
+                        return Ok(());
+                    }
+                }
+
                 // FLS §4.13: `let x: &dyn Trait = &val;` — fat pointer local binding.
                 //
                 // When the type annotation is `&dyn Trait` and the initializer is

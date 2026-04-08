@@ -825,6 +825,24 @@ else
     pass "Claim 40: for loop emits runtime cbz+add+back-edge and result not folded to #10"
 fi
 
+# ── Claim 41 ──────────────────────────────────────────────────────────────────
+# Promise: `let y = x` where x is a &dyn Trait fat-pointer local must copy
+# both slots (data_ptr, vtable_ptr) and dispatch via blr at the use site.
+# The result (3*4=12) must NOT be constant-folded to `mov x0, #12`.
+#
+# FLS §4.13: Fat pointer re-bind propagates local_dyn_types registration.
+# FLS §6.1.2 Constraint 1: fn main() is not a const context — dispatch at runtime.
+#
+# Introduced in cycle 77 (fat pointer re-bind, FLS §4.13, Milestone 160).
+# References: claims.md Claim 41.
+
+echo "--- Claim 41: &dyn Trait fat pointer re-bind copies fat pointer and dispatches via blr (not folded) ---"
+if cargo test --test e2e --quiet -- runtime_dyn_trait_rebind_emits_load_for_fat_pointer runtime_dyn_trait_rebind_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 41" "dyn Trait rebind tests FAILED — fat pointer copy may be missing slots, dispatch may be folded, or result 3*4=12 was emitted as constant"
+else
+    pass "Claim 41: &dyn Trait fat pointer re-bind emits ldr+blr and result not folded to #12"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

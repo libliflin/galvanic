@@ -25750,3 +25750,247 @@ fn main() -> i32 { make_circle(5) }
         "vtable dispatch must use blr; got:\n{asm}"
     );
 }
+
+// ── Milestone 160: &dyn Trait fat pointer re-bind (FLS §4.13) ────────────────
+//
+// `let y = x` where `x` is already a `&dyn Trait` fat-pointer local copies
+// the two-slot fat pointer (data_ptr, vtable_ptr) to two new consecutive stack
+// slots and registers `y` in `local_dyn_types`. Subsequent method calls on `y`
+// and calls passing `y` to `fn f(&dyn Trait)` follow the same vtable dispatch
+// paths as the original `x`.
+//
+// This extends milestone 159 which only supported initial binding
+// (`let x: &dyn Trait = &val;`) — re-binding was unsupported.
+//
+// FLS §4.13: AMBIGUOUS — The spec does not specify how fat pointer type
+// information propagates through let bindings without an explicit `&dyn Trait`
+// annotation. Galvanic propagates the `local_dyn_types` registration to `y`.
+
+const DYN_TRAIT_REBIND_BASIC: &str = "
+trait Shape {
+    fn area(&self) -> i32;
+}
+struct Rect { w: i32, h: i32 }
+impl Shape for Rect {
+    fn area(&self) -> i32 { self.w * self.h }
+}
+fn use_shape(s: &dyn Shape) -> i32 { s.area() }
+fn main() -> i32 {
+    let r = Rect { w: 3, h: 4 };
+    let x: &dyn Shape = &r;
+    let y = x;
+    use_shape(y)
+}
+";
+
+#[test]
+fn milestone_160_dyn_trait_rebind_basic() {
+    // let y = x where x is a &dyn Trait local; pass y to fn(&dyn Shape).
+    let Some(exit_code) = compile_and_run(DYN_TRAIT_REBIND_BASIC) else {
+        return;
+    };
+    assert_eq!(exit_code, 12); // 3 * 4 = 12
+}
+
+#[test]
+fn milestone_160_dyn_trait_rebind_method_call() {
+    // Call a method directly on the re-bound variable: y.area().
+    let src = "
+trait Shape {
+    fn area(&self) -> i32;
+}
+struct Square { side: i32 }
+impl Shape for Square {
+    fn area(&self) -> i32 { self.side * self.side }
+}
+fn main() -> i32 {
+    let sq = Square { side: 5 };
+    let x: &dyn Shape = &sq;
+    let y = x;
+    y.area()
+}
+";
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 25); // 5 * 5 = 25
+}
+
+#[test]
+fn milestone_160_dyn_trait_rebind_two_types() {
+    // Two concrete types, each bound then re-bound; both dispatch correctly.
+    let src = "
+trait Compute {
+    fn value(&self) -> i32;
+}
+struct A { n: i32 }
+struct B { n: i32 }
+impl Compute for A {
+    fn value(&self) -> i32 { self.n + 1 }
+}
+impl Compute for B {
+    fn value(&self) -> i32 { self.n * 2 }
+}
+fn run(c: &dyn Compute) -> i32 { c.value() }
+fn main() -> i32 {
+    let a = A { n: 3 };
+    let b = B { n: 5 };
+    let ca: &dyn Compute = &a;
+    let cb: &dyn Compute = &b;
+    let ra = ca;
+    let rb = cb;
+    run(ra) + run(rb)
+}
+";
+    // (3+1) + (5*2) = 4 + 10 = 14
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 14);
+}
+
+#[test]
+fn milestone_160_dyn_trait_rebind_result_in_arithmetic() {
+    let src = "
+trait Val {
+    fn get(&self) -> i32;
+}
+struct Wrap { v: i32 }
+impl Val for Wrap {
+    fn get(&self) -> i32 { self.v * 3 }
+}
+fn fetch(v: &dyn Val) -> i32 { v.get() }
+fn main() -> i32 {
+    let w = Wrap { v: 4 };
+    let dv: &dyn Val = &w;
+    let dv2 = dv;
+    fetch(dv2) + 2
+}
+";
+    // 4*3 + 2 = 14
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 14);
+}
+
+#[test]
+fn milestone_160_dyn_trait_rebind_result_in_if() {
+    let src = "
+trait Toggle {
+    fn val(&self) -> i32;
+}
+struct Flag { on: i32 }
+impl Toggle for Flag {
+    fn val(&self) -> i32 { self.on }
+}
+fn get_flag(t: &dyn Toggle) -> i32 { t.val() }
+fn main() -> i32 {
+    let f = Flag { on: 1 };
+    let dt: &dyn Toggle = &f;
+    let dt2 = dt;
+    if get_flag(dt2) > 0 { 42 } else { 0 }
+}
+";
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 42);
+}
+
+#[test]
+fn milestone_160_dyn_trait_rebind_called_twice() {
+    let src = "
+trait Counter {
+    fn count(&self) -> i32;
+}
+struct Num { n: i32 }
+impl Counter for Num {
+    fn count(&self) -> i32 { self.n }
+}
+fn sum_twice(c: &dyn Counter) -> i32 { c.count() + c.count() }
+fn main() -> i32 {
+    let x = Num { n: 7 };
+    let dc: &dyn Counter = &x;
+    let dc2 = dc;
+    sum_twice(dc2)
+}
+";
+    // 7 + 7 = 14
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 14);
+}
+
+#[test]
+fn milestone_160_dyn_trait_rebind_on_parameter() {
+    let src = "
+trait Measure {
+    fn size(&self) -> i32;
+}
+struct Box1 { w: i32 }
+impl Measure for Box1 {
+    fn size(&self) -> i32 { self.w * 2 }
+}
+fn wrap(b: Box1) -> i32 {
+    let dm: &dyn Measure = &b;
+    let dm2 = dm;
+    dm2.size()
+}
+fn main() -> i32 { wrap(Box1 { w: 6 }) }
+";
+    // 6 * 2 = 12
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 12);
+}
+
+#[test]
+fn milestone_160_dyn_trait_rebind_passed_to_fn() {
+    let src = "
+trait Greet {
+    fn hello(&self) -> i32;
+}
+struct Point { x: i32, y: i32 }
+impl Greet for Point {
+    fn hello(&self) -> i32 { self.x + self.y }
+}
+fn use_greet(g: &dyn Greet) -> i32 { g.hello() }
+fn main() -> i32 {
+    let p = Point { x: 3, y: 8 };
+    let dg: &dyn Greet = &p;
+    let dg2 = dg;
+    use_greet(dg2)
+}
+";
+    // 3 + 8 = 11
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 11);
+}
+
+// Assembly inspection: fat pointer re-bind must emit loads from the source
+// fat pointer slots (ldr) and vtable dispatch (blr), NOT fold the result.
+//
+// Adversarial assertion: the re-bound pointer must be loaded at runtime, not
+// treated as a compile-time constant. If galvanic were to fold Rect{w:3,h:4}.area()
+// to 12, it would emit `mov x0, #12` without any vtable dispatch.
+
+#[test]
+fn runtime_dyn_trait_rebind_emits_load_for_fat_pointer() {
+    // Fat pointer re-bind must emit ldr to copy the pointer slots at runtime.
+    let asm = compile_to_asm(DYN_TRAIT_REBIND_BASIC);
+    assert!(
+        asm.contains("ldr"),
+        "fat pointer re-bind must emit ldr to copy pointer slots; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("blr"),
+        "re-bound dyn Trait dispatch must emit blr; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("vtable_Shape_Rect"),
+        "vtable label `vtable_Shape_Rect` must be present; got:\n{asm}"
+    );
+}
+
+#[test]
+fn runtime_dyn_trait_rebind_not_folded() {
+    // The result (3*4=12) must NOT be constant-folded even though both operands
+    // are statically known. The vtable dispatch through the re-bound fat pointer
+    // must execute at runtime.
+    let asm = compile_to_asm(DYN_TRAIT_REBIND_BASIC);
+    assert!(
+        !asm.contains("mov     x0, #12"),
+        "dyn Trait re-bind must NOT constant-fold area to 12; got:\n{asm}"
+    );
+}
