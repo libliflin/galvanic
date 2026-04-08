@@ -572,6 +572,44 @@ else
     pass "Claim 28: @ binding OR sub-pattern in if-let and match emit runtime orr accumulation (not folded)"
 fi
 
+# ── Claim 29: struct-returning match with parameter-dependent field arithmetic ─
+#
+# A struct-returning function with a match arm that computes fields from a
+# parameter must emit runtime cmp (scrutinee) and add (field arithmetic).
+# The result must NOT be constant-folded to `mov #N`.
+#
+# fn make(n: i32) -> Pair { match n { 1 => Pair { a: n + 10, b: n * 3 }, _ => Pair { a: 0, b: 0 } } }
+# fn main() -> i32 { make(1).a }
+#
+# References: claims.md Claim 29.
+
+echo "--- Claim 29: struct-returning match field arithmetic not folded ---"
+if cargo test --test e2e --quiet -- runtime_struct_match_field_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 29" "runtime_struct_match_field_not_folded FAILED — struct-returning match may be constant-folding n+10 to #11 instead of emitting runtime add"
+else
+    pass "Claim 29: struct-returning match field arithmetic emits runtime add (not folded)"
+fi
+
+# ── Claim 30: struct-returning if-else with parameter-dependent field arithmetic ─
+#
+# A struct-returning function with an if-else branch that computes fields from a
+# parameter must emit a runtime conditional branch and add instruction.
+# The result must NOT be constant-folded to `mov #N`.
+#
+# fn make(n: i32) -> Point { if n > 0 { Point { x: n + 1, y: n * 2 } } else { Point { x: 0, y: 0 } } }
+# fn main() -> i32 { make(1).x }
+#
+# Complements Claim 29 for the if-else path. The existing cbz test only checks
+# that a branch is present; this checks that field arithmetic is also runtime.
+# References: claims.md Claim 30.
+
+echo "--- Claim 30: struct-returning if-else field arithmetic not folded ---"
+if cargo test --test e2e --quiet -- runtime_struct_return_if_else_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 30" "runtime_struct_return_if_else_not_folded FAILED — struct-returning if-else may be constant-folding n+1 to #2 instead of emitting runtime add"
+else
+    pass "Claim 30: struct-returning if-else field arithmetic emits runtime add (not folded)"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""
