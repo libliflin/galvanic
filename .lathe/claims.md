@@ -419,6 +419,43 @@ The assembly inspection tests catch the last case without requiring cross tools.
 
 ---
 
+## Claim 22: while-let OR patterns emit runtime orr accumulation and cbz loop exit
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: When a `while let A | B | C = x { ... }` loop is compiled, galvanic must:
+1. Emit `orr` to accumulate equality results across all alternatives — not just check the first alternative.
+2. Emit `cbz` to branch out of the loop when no alternative matched (accumulated flag is 0).
+3. Emit a back-edge `b .L` branch to the loop header (loop structure is runtime, not compile-time unrolled).
+4. NOT constant-fold the loop counter when the scrutinee is derived from a function parameter.
+
+This claim guards the while-let OR pattern code path added in milestone 154 (cycle 50,
+FLS §5.1.11 + §6.15.4). The existing compile-and-run tests for milestone 154 verify
+correct iteration counts — but those tests require QEMU on CI and don't run locally.
+This claim provides local, cross-tool-free coverage of the same correctness property.
+
+**Attack vector**: A regression that drops the OR accumulation loop and replaces it with
+a single equality check against only the first alternative. Such a regression would:
+- Make `while let 1 | 2 | 3 = x` behave like `while let 1 = x` (exits after first non-1 value)
+- Be invisible locally (no assembly inspection test, no QEMU)
+- Fail the compile-and-run tests on CI (wrong iteration count) but only with cross tools
+
+The positive assertion (`orr` present) directly detects this regression without running the program.
+
+This is distinct from Claims 20–21 (@ binding patterns, let-else): those guard match-arm and
+let-else paths. This claim specifically covers the loop condition re-evaluation path in while-let,
+which re-checks the pattern on every iteration.
+
+**Violated if**: `compile_to_asm(...)` for `while let 1 | 2 | 3 = x { n += 1; x += 1; }` with
+`x` derived from a function parameter `start` returns assembly that:
+- lacks `orr` (OR accumulation dropped — only first alternative checked), OR
+- lacks `cbz` (loop exit branch absent — loop runs forever or never), OR
+- lacks `b .L` (back-edge absent — loop unrolled or eliminated at compile time).
+
+**Test**: `cargo test --test e2e -- runtime_while_let_or_emits_orr_accumulation runtime_while_let_or_result_not_folded`
+
+---
+
 ## Not Yet Claims (honest gaps)
 
 These are promises the project will eventually make but cannot yet be falsified:

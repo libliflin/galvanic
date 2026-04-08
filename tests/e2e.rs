@@ -24394,3 +24394,80 @@ fn main() -> i32 { classify(2) }
         "OR pattern in let-else result must load from slot (not folded to immediate): {asm}"
     );
 }
+
+/// Assembly check: OR pattern in while-let emits orr accumulation, cbz exit, and back-edge.
+///
+/// The pattern `while let 1 | 2 | 3 = x { ... }` with `x` derived from a function parameter
+/// must emit:
+///   - orr to accumulate equality results across alternatives (not just first alt)
+///   - cbz to branch out of the loop when accumulated flag is 0 (no alternative matched)
+///   - b .L back-edge to loop header (loop structure is runtime, not unrolled)
+///
+/// FLS §5.1.11 + §6.15.4: OR pattern check in while-let is runtime when scrutinee is
+/// a mutable variable updated each iteration — constant folding cannot unroll the loop.
+/// FLS §6.1.2 Constraint 1: non-const code emits runtime instructions.
+///
+/// Attack this guards against: a regression where the OR accumulation is dropped and
+/// only the first alternative is checked (using a simple equality, not orr). The
+/// compile-and-run tests catch this on CI (wrong iteration count), but only with QEMU.
+/// This assembly inspection test catches the same regression locally without cross tools.
+#[test]
+fn runtime_while_let_or_emits_orr_accumulation() {
+    let src = r#"
+fn count_up(start: i32) -> i32 {
+    let mut x = start;
+    let mut n = 0;
+    while let 1 | 2 | 3 = x {
+        n = n + 1;
+        x = x + 1;
+    }
+    n
+}
+fn main() -> i32 { count_up(1) }
+"#;
+    let asm = compile_to_asm(src);
+    // OR accumulation must emit `orr` to combine equality results across alternatives.
+    assert!(asm.contains("orr"), "OR pattern in while-let must emit orr for accumulation: {asm}");
+    // Must emit a conditional branch to exit the loop when no alternative matched.
+    assert!(asm.contains("cbz"), "OR pattern in while-let must emit cbz for loop exit: {asm}");
+    // Must emit a back-edge branch (loop structure is runtime, not compile-time unrolled).
+    assert!(
+        asm.contains("b       .L") || asm.contains("b .L"),
+        "while-let must emit back-edge branch: {asm}"
+    );
+}
+
+/// Assembly check: OR pattern in while-let result not folded when scrutinee comes from a parameter.
+///
+/// `count_up(start)` must emit runtime orr+cbz for the condition and load the counter `n`
+/// from its stack slot — since `start` is a function parameter, the loop count is unknown
+/// at compile time.
+///
+/// Attack: constant folding through the loop body. Since `start` is unknown, the loop count
+/// cannot be determined, so `n` must be loaded from its slot (ldr present) and must NOT be
+/// a compile-time constant (no `mov x0, #2` for start=2's result of n=2).
+///
+/// FLS §6.1.2 Constraint 1.
+#[test]
+fn runtime_while_let_or_result_not_folded() {
+    let src = r#"
+fn count_up(start: i32) -> i32 {
+    let mut x = start;
+    let mut n = 0;
+    while let 1 | 2 = x {
+        n = n + 1;
+        x = x + 1;
+    }
+    n
+}
+fn main() -> i32 { count_up(1) }
+"#;
+    let asm = compile_to_asm(src);
+    assert!(asm.contains("orr"), "OR pattern in while-let must emit runtime orr for accumulation: {asm}");
+    // `n` must be loaded from its stack slot — not folded to a compile-time constant.
+    // `start` is a function parameter, so the loop count is unknown at compile time.
+    assert!(
+        asm.contains("ldr     x"),
+        "while-let OR result must load counter from stack slot (not folded to immediate): {asm}"
+    );
+}

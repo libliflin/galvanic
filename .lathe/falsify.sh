@@ -429,6 +429,31 @@ else
     pass "Claim 21: let-else emits runtime discriminant check and binding is not folded"
 fi
 
+# ── Claim 22: while-let OR patterns emit runtime orr+cbz for loop condition ───
+# Tests two things:
+#   (a) `while let 1 | 2 | 3 = x { ... }` with x from a function parameter emits:
+#       - `orr` for OR accumulation across alternatives (not just first alt checked)
+#       - `cbz` for the conditional loop exit on accumulated flag = 0
+#       - `b .L` for the back-edge (loop is runtime, not compile-time unrolled)
+#   (b) The counter variable `n` is not constant-folded — ldr is present.
+#
+# Attack this guards against: dropping OR accumulation and falling back to a single
+# equality check against only the first alternative. The compile-and-run tests for
+# milestone 154 catch this on CI (wrong iteration count) but require QEMU. This
+# assembly inspection test catches the same regression locally.
+#
+# Distinct from Claim 20 (@ binding patterns, match-arm path) and Claim 21 (let-else).
+# This covers the loop condition re-evaluation path in while-let (FLS §5.1.11 + §6.15.4).
+# Introduced in cycle 52 (red-team, milestone 154 follow-up).
+# References: claims.md Claim 22.
+
+echo "--- Claim 22: while-let OR pattern emits orr accumulation and cbz (not folded) ---"
+if cargo test --test e2e --quiet -- runtime_while_let_or_emits_orr_accumulation runtime_while_let_or_result_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 22" "runtime_while_let_or_emits_orr_accumulation or runtime_while_let_or_result_not_folded FAILED — while-let OR pattern may not be emitting orr accumulation, cbz exit, or back-edge; or result was constant-folded"
+else
+    pass "Claim 22: while-let OR pattern emits runtime orr+cbz+back-edge (not folded)"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""
