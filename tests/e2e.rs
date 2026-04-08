@@ -20429,3 +20429,309 @@ fn main() -> i32 { run(4) }
         "trait method must dispatch via bl Foo__scale: {asm}"
     );
 }
+
+// =============================================================================
+// Milestone 141 — Where clauses on struct, enum, and trait definitions
+//   FLS §4.14: Trait and lifetime bounds — where clauses on type definitions.
+//
+//   Where clauses may appear on struct, enum, and trait definitions in addition
+//   to functions and impl blocks. They constrain the generic type parameters.
+//   Galvanic parses and discards the bounds; runtime codegen is unaffected.
+//
+//   These tests verify the syntax is accepted and the programs compile and run
+//   correctly. The generic field accesses are monomorphized to i32 at call-site.
+//
+//   FLS §4.14 AMBIGUOUS: The spec does not specify when where-clause bounds on
+//   type definitions are checked (parse time, type-check time, or mono time).
+// =============================================================================
+
+// Struct with a where clause: galvanic parses and discards the bound, then
+// monomorphizes T to i32 from the call-site. Self.val returns i32 directly.
+#[test]
+fn milestone_141_struct_where_clause_basic() {
+    let src = r#"
+struct Wrapper<T> where T: Copy { val: T }
+impl<T> Wrapper<T> where T: Copy { fn get(&self) -> i32 { self.val } }
+fn main() -> i32 {
+    let w = Wrapper { val: 5 };
+    w.get()
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 5);
+}
+
+#[test]
+fn milestone_141_struct_where_clause_in_arithmetic() {
+    let src = r#"
+struct Wrapper<T> where T: Copy { val: T }
+impl<T> Wrapper<T> where T: Copy { fn get(&self) -> i32 { self.val } }
+fn main() -> i32 {
+    let w = Wrapper { val: 3 };
+    w.get() + 4
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 7);
+}
+
+#[test]
+fn milestone_141_struct_where_clause_passed_to_fn() {
+    let src = r#"
+struct Wrapper<T> where T: Copy { val: T }
+impl<T> Wrapper<T> where T: Copy { fn get(&self) -> i32 { self.val } }
+fn use_wrapper(w: Wrapper<i32>) -> i32 { w.get() }
+fn main() -> i32 {
+    let w = Wrapper { val: 7 };
+    use_wrapper(w)
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 7);
+}
+
+#[test]
+fn milestone_141_struct_where_clause_on_parameter() {
+    let src = r#"
+struct Wrapper<T> where T: Copy { val: T }
+impl<T> Wrapper<T> where T: Copy { fn get(&self) -> i32 { self.val } }
+fn run(n: i32) -> i32 {
+    let w = Wrapper { val: n };
+    w.get()
+}
+fn main() -> i32 { run(9) }
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 9);
+}
+
+#[test]
+fn milestone_141_struct_where_clause_result_in_if() {
+    let src = r#"
+struct Wrapper<T> where T: Copy { val: T }
+impl<T> Wrapper<T> where T: Copy { fn get(&self) -> i32 { self.val } }
+fn run(n: i32) -> i32 {
+    let w = Wrapper { val: n };
+    if w.get() > 5 { 1 } else { 0 }
+}
+fn main() -> i32 { run(7) }
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 1);
+}
+
+#[test]
+fn milestone_141_struct_where_clause_two_params() {
+    let src = r#"
+struct Pair<T, U> where T: Copy, U: Copy { first: T, second: U }
+impl<T, U> Pair<T, U> where T: Copy, U: Copy {
+    fn sum(&self) -> i32 { self.first + self.second }
+}
+fn main() -> i32 {
+    let p = Pair { first: 3, second: 4 };
+    p.sum()
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 7);
+}
+
+// Enum with a where clause: galvanic parses and discards the bound.
+// The enum arms carry an i32 value (T monomorphized at call-site).
+#[test]
+fn milestone_141_enum_where_clause_basic() {
+    let src = r#"
+enum Maybe<T> where T: Copy { Some(T), None }
+fn get_val(m: Maybe<i32>) -> i32 {
+    match m { Maybe::Some(v) => v, Maybe::None => 0 }
+}
+fn main() -> i32 { get_val(Maybe::Some(6)) }
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 6);
+}
+
+#[test]
+fn milestone_141_enum_where_clause_none_arm() {
+    let src = r#"
+enum Maybe<T> where T: Copy { Some(T), None }
+fn get_val(m: Maybe<i32>) -> i32 {
+    match m { Maybe::Some(v) => v, Maybe::None => 0 }
+}
+fn main() -> i32 { get_val(Maybe::None) }
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 0);
+}
+
+#[test]
+fn milestone_141_enum_where_clause_in_arithmetic() {
+    let src = r#"
+enum Maybe<T> where T: Copy { Some(T), None }
+fn get_val(m: Maybe<i32>) -> i32 {
+    match m { Maybe::Some(v) => v, Maybe::None => 0 }
+}
+fn main() -> i32 { get_val(Maybe::Some(4)) + 3 }
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 7);
+}
+
+#[test]
+fn milestone_141_enum_where_clause_on_parameter() {
+    let src = r#"
+enum Maybe<T> where T: Copy { Some(T), None }
+fn get_val(m: Maybe<i32>) -> i32 {
+    match m { Maybe::Some(v) => v, Maybe::None => 0 }
+}
+fn run(n: i32) -> i32 { get_val(Maybe::Some(n)) }
+fn main() -> i32 { run(8) }
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 8);
+}
+
+// Trait with a where clause on its definition: the bound is parsed and
+// discarded. Implementations and calls work as normal.
+#[test]
+fn milestone_141_trait_where_clause_basic() {
+    let src = r#"
+trait Transform where Self: Sized {
+    fn transform(&self, n: i32) -> i32;
+}
+struct Foo { x: i32 }
+impl Transform for Foo {
+    fn transform(&self, n: i32) -> i32 { self.x + n }
+}
+fn apply<T: Transform>(t: T, n: i32) -> i32 { t.transform(n) }
+fn main() -> i32 {
+    let f = Foo { x: 3 };
+    apply(f, 4)
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 7);
+}
+
+#[test]
+fn milestone_141_trait_where_clause_in_arithmetic() {
+    let src = r#"
+trait Transform where Self: Sized {
+    fn transform(&self, n: i32) -> i32;
+}
+struct Foo { x: i32 }
+impl Transform for Foo {
+    fn transform(&self, n: i32) -> i32 { self.x + n }
+}
+fn apply<T: Transform>(t: T, n: i32) -> i32 { t.transform(n) }
+fn main() -> i32 {
+    let f = Foo { x: 2 };
+    apply(f, 3) + 1
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 6);
+}
+
+#[test]
+fn milestone_141_trait_where_clause_result_passed_to_fn() {
+    let src = r#"
+trait Transform where Self: Sized {
+    fn transform(&self, n: i32) -> i32;
+}
+struct Foo { x: i32 }
+impl Transform for Foo {
+    fn transform(&self, n: i32) -> i32 { self.x + n }
+}
+fn apply<T: Transform>(t: T, n: i32) -> i32 { t.transform(n) }
+fn double(x: i32) -> i32 { x + x }
+fn main() -> i32 {
+    let f = Foo { x: 3 };
+    double(apply(f, 2))
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 10);
+}
+
+#[test]
+fn milestone_141_trait_where_clause_on_parameter() {
+    let src = r#"
+trait Transform where Self: Sized {
+    fn transform(&self, n: i32) -> i32;
+}
+struct Foo { x: i32 }
+impl Transform for Foo {
+    fn transform(&self, n: i32) -> i32 { self.x + n }
+}
+fn apply<T: Transform>(t: T, n: i32) -> i32 { t.transform(n) }
+fn run(x: i32, n: i32) -> i32 {
+    let f = Foo { x };
+    apply(f, n)
+}
+fn main() -> i32 { run(4, 5) }
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 9);
+}
+
+// Assembly inspection: struct with where clause emits runtime field load and bl.
+// The `run` function takes a parameter so the value is unknown at compile time.
+// A folding interpreter would emit `mov x0, #n` for a literal, but cannot fold
+// through a function parameter — so this test uses bl + ldr, not a constant.
+#[test]
+fn runtime_struct_where_clause_emits_ldr_and_bl() {
+    let src = r#"
+struct Wrapper<T> where T: Copy { val: T }
+impl<T> Wrapper<T> where T: Copy { fn get(&self) -> i32 { self.val } }
+fn run(n: i32) -> i32 {
+    let w = Wrapper { val: n };
+    w.get()
+}
+fn main() -> i32 { run(5) }
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("ldr"),
+        "struct-with-where-clause field access must emit ldr: {asm}"
+    );
+    assert!(
+        asm.contains("bl"),
+        "struct-with-where-clause method call must emit bl: {asm}"
+    );
+    // The method body must use ldr to read the field at runtime, not a mov immediate.
+    // (mov x0, #5 is expected as the call argument in main — checking bl ensures
+    // the method is dispatched at runtime and the field is read via ldr.)
+}
+
+// Assembly inspection: trait with where clause emits monomorphized label and bl
+#[test]
+fn runtime_trait_where_clause_on_def_emits_mangled_label() {
+    let src = r#"
+trait Transform where Self: Sized {
+    fn transform(&self, n: i32) -> i32;
+}
+struct Foo { x: i32 }
+impl Transform for Foo {
+    fn transform(&self, n: i32) -> i32 { self.x + n }
+}
+fn apply<T: Transform>(t: T, n: i32) -> i32 { t.transform(n) }
+fn main() -> i32 {
+    let f = Foo { x: 3 };
+    apply(f, 4)
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("apply__Foo:"),
+        "trait-with-where-clause generic must emit monomorphized label apply__Foo: {asm}"
+    );
+    assert!(
+        asm.contains("bl      Foo__transform") || asm.contains("bl Foo__transform"),
+        "must dispatch via bl Foo__transform: {asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #7"),
+        "result must not be constant-folded: {asm}"
+    );
+}
