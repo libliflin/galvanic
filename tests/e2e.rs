@@ -975,6 +975,43 @@ fn runtime_rem_emits_sdiv_and_msub() {
     );
 }
 
+/// Assembly inspection: remainder via function parameters emits `sdiv` + `msub`
+/// and the result is NOT constant-folded to `#1` (or any immediate).
+///
+/// Claim 60: remainder operator must emit runtime `sdiv`+`msub`, not constant-fold.
+///
+/// FLS §6.5.5: Remainder operator `%`.
+/// FLS §6.1.2:37–45: Non-const contexts must execute at runtime.
+///
+/// The companion test to `runtime_rem_emits_sdiv_and_msub`. The original test used
+/// `fn main() -> i32 { 10 % 3 }` — inline literals that a constant-folding
+/// interpreter could evaluate to `mov x0, #1` without emitting any runtime
+/// instructions. This test uses function parameters, which are unknown at compile
+/// time, so a conforming compiler must emit `sdiv`+`msub` at runtime.
+#[test]
+fn runtime_rem_emits_sdiv_and_msub_not_folded() {
+    let asm = compile_to_asm(
+        "fn f(x: i32, y: i32) -> i32 { x % y }\nfn main() -> i32 { f(10, 3) }\n",
+    );
+    assert!(
+        asm.contains("sdiv"),
+        "expected `sdiv` in function body for `x % y`, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("msub"),
+        "expected `msub` in function body for `x % y`, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("bl"),
+        "expected `bl` call to `f` at call site, got:\n{asm}"
+    );
+    // 10 % 3 = 1: must not be folded to an immediate load of #1 in main
+    assert!(
+        !asm.contains("mov     x0, #1\n"),
+        "remainder must not constant-fold to `mov x0, #1`:\n{asm}"
+    );
+}
+
 // ── Milestone 11: lazy boolean operators && and || ───────────────────────────
 //
 // FLS §6.5.8: Lazy boolean operator expressions. Both `&&` and `||` use

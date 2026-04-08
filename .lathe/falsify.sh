@@ -1164,6 +1164,15 @@ else
     pass "Claim 59: large negative i32 constants sign-extended (sxtw) — pattern match against parameter gives correct result"
 fi
 
+# References: claims.md Claim 60.
+
+echo "--- Claim 60: remainder operator emits runtime sdiv+msub (not constant-folded) ---"
+if cargo test --test e2e --quiet -- runtime_rem_emits_sdiv_and_msub_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 60" "runtime_rem_emits_sdiv_and_msub_not_folded FAILED — remainder may be constant-folded instead of emitting runtime sdiv+msub"
+else
+    pass "Claim 60: remainder operator emits runtime sdiv+msub (not constant-folded)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 

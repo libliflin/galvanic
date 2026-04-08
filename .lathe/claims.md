@@ -2432,3 +2432,32 @@ correctly sign-extended.
 - `compile_and_run(LARGE_NEG_PATTERN)` returns 0 instead of 1 (wrong arm taken)
 
 **Tests**: `cargo test --test e2e -- runtime_large_neg_const_emits_sxtw runtime_large_neg_const_pattern_not_folded milestone_175_neg_large_pattern_match_taken`
+
+---
+
+## Claim 60: remainder operator emits runtime `sdiv`+`msub`, not constant-folded
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: The remainder operator `%` must emit `sdiv` and `msub` ARM64 instructions
+at runtime for a function whose operands are parameters (unknown at compile time).
+The call site must emit `bl`. The result must not be constant-folded into an immediate.
+
+The original `runtime_rem_emits_sdiv_and_msub` test used `fn main() -> i32 { 10 % 3 }` —
+inline literals. A constant-folding interpreter could emit `mov x0, #1` and pass that
+test. Claim 60 requires function parameters, which are unknown at compile time.
+
+This completes the Claim 57/58 story for all five arithmetic operators:
+`add` (Claim 57), `mul` (Claim 57), `sub` (Claim 58), `sdiv` (Claim 58), `rem` (Claim 60).
+
+**FLS §6.5.5**: The remainder operator must execute at runtime in non-const contexts.
+**FLS §6.1.2 Constraint 1**: Function bodies are not const contexts; inputs are not
+statically known when the function is called with runtime parameters.
+
+**Violated if**: `compile_to_asm("fn f(x: i32, y: i32) -> i32 { x % y } ...")`:
+- lacks `sdiv` in the function body, OR
+- lacks `msub` in the function body, OR
+- lacks `bl` at the call site, OR
+- contains `mov x0, #1` (constant-folded result of 10 % 3) in main
+
+**Tests**: `cargo test --test e2e -- runtime_rem_emits_sdiv_and_msub_not_folded`
