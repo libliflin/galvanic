@@ -30985,3 +30985,352 @@ fn milestone_183_u16_tuple_struct_two_narrow_fields() {
     // p.0 = 60000 (no overflow), p.1 = 10000 + 60000 = 70000 wraps to 4464 < 5000
     assert_eq!(exit, 1, "p.0 = 60000; p.1 = 70000 wraps to 4464 < 5000");
 }
+
+// ── Milestone 184: narrow integer types in enum tuple variant fields normalised at construction ──
+
+#[test]
+fn milestone_184_u8_enum_tuple_variant_wraps_on_construction() {
+    // FLS §4.1, §6.23: u8 enum tuple variant field stores the wrapped value at construction.
+    // 200 + 100 = 300; as u8 = 44. 44 < 100 must be true (exit 1).
+    let Some(exit) = compile_and_run(
+        "enum Wrap { Val(u8) }\n\
+         fn build(a: u8, b: u8) -> Wrap { Wrap::Val(a + b) }\n\
+         fn main() -> i32 {\n\
+             let w = build(200, 100);\n\
+             match w {\n\
+                 Wrap::Val(v) => if v < 100 { 1 } else { 0 }\n\
+             }\n\
+         }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "200_u8 + 100_u8 wraps to 44; 44 < 100 should be true");
+}
+
+#[test]
+fn milestone_184_u16_enum_tuple_variant_wraps_on_construction() {
+    // FLS §4.1, §6.23: u16 enum tuple variant field stores the wrapped value at construction.
+    // 65000 + 1000 = 66000; as u16 = 464. 464 < 500 must be true (exit 1).
+    let Some(exit) = compile_and_run(
+        "enum Wrap { Val(u16) }\n\
+         fn build(a: u16, b: u16) -> Wrap { Wrap::Val(a + b) }\n\
+         fn main() -> i32 {\n\
+             let w = build(65000, 1000);\n\
+             match w {\n\
+                 Wrap::Val(v) => if v < 500 { 1 } else { 0 }\n\
+             }\n\
+         }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "65000_u16 + 1000_u16 wraps to 464; 464 < 500 should be true");
+}
+
+#[test]
+fn milestone_184_i16_enum_tuple_variant_wraps_on_construction() {
+    // FLS §4.1, §6.23: i16 enum tuple variant field stores the sign-extended wrapped value.
+    // 30000 + 5000 = 35000; as i16 overflows → negative. Exit 1 if result < 0.
+    let Some(exit) = compile_and_run(
+        "enum Wrap { Val(i16) }\n\
+         fn build(a: i16, b: i16) -> Wrap { Wrap::Val(a + b) }\n\
+         fn main() -> i32 {\n\
+             let w = build(30000, 5000);\n\
+             match w {\n\
+                 Wrap::Val(v) => {\n\
+                     let x: i32 = v as i32;\n\
+                     if x < 0 { 1 } else { 0 }\n\
+                 }\n\
+             }\n\
+         }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "30000_i16 + 5000_i16 overflows to negative; v < 0 should be true");
+}
+
+#[test]
+fn milestone_184_u8_enum_tuple_variant_identity_field() {
+    // Non-overflow case: value preserved unchanged.
+    let Some(exit) = compile_and_run(
+        "enum Wrap { Val(u8) }\n\
+         fn build(a: u8) -> Wrap { Wrap::Val(a) }\n\
+         fn main() -> i32 {\n\
+             let w = build(42);\n\
+             match w {\n\
+                 Wrap::Val(v) => v as i32\n\
+             }\n\
+         }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 42);
+}
+
+#[test]
+fn milestone_184_u16_enum_tuple_variant_field_in_arithmetic() {
+    // FLS §4.1, §6.23: wrapped field value is correctly used in arithmetic after extraction.
+    // 65000 + 1000 = 66000; wraps to 464 at u16 boundary; 464 + 1 = 465.
+    // Use conditional to stay in 0..255 range (Linux exit-code truncation).
+    let Some(exit) = compile_and_run(
+        "enum Wrap { Val(u16) }\n\
+         fn build(a: u16, b: u16) -> Wrap { Wrap::Val(a + b) }\n\
+         fn main() -> i32 {\n\
+             let w = build(65000, 1000);\n\
+             match w {\n\
+                 Wrap::Val(v) => if v as i32 + 1 == 465 { 1 } else { 0 }\n\
+             }\n\
+         }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "wrapped field 464 + 1 should equal 465");
+}
+
+#[test]
+fn milestone_184_u8_enum_tuple_variant_passed_to_fn() {
+    // FLS §4.1, §6.23: wrapped enum tuple variant field passed as argument.
+    let Some(exit) = compile_and_run(
+        "enum Wrap { Val(u8) }\n\
+         fn build(a: u8, b: u8) -> Wrap { Wrap::Val(a + b) }\n\
+         fn check(v: u8) -> i32 { if v < 50 { 1 } else { 0 } }\n\
+         fn main() -> i32 {\n\
+             let w = build(200, 100);\n\
+             match w {\n\
+                 Wrap::Val(v) => check(v)\n\
+             }\n\
+         }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "200_u8 + 100_u8 wraps to 44; check(44) should return 1");
+}
+
+#[test]
+fn milestone_184_u16_enum_tuple_variant_two_narrow_fields() {
+    // FLS §4.1, §6.23: Both narrow fields in an enum tuple variant are wrapped.
+    let Some(exit) = compile_and_run(
+        "enum Pair { Both(u16, u16) }\n\
+         fn build(x: u16, y: u16) -> Pair { Pair::Both(x, y + x) }\n\
+         fn main() -> i32 {\n\
+             let p = build(60000, 10000);\n\
+             match p {\n\
+                 Pair::Both(a, b) => if a as i32 == 60000 && b < 5000 { 1 } else { 0 }\n\
+             }\n\
+         }\n",
+    ) else {
+        return;
+    };
+    // a = 60000 (no overflow), b = 10000 + 60000 = 70000 wraps to 4464 < 5000
+    assert_eq!(exit, 1, "a = 60000; b = 70000 wraps to 4464 < 5000");
+}
+
+// ── Assembly inspection for milestone 184 ────────────────────────────────────
+
+#[test]
+fn runtime_u8_enum_variant_field_construction_applies_trunc() {
+    // FLS §4.1, §6.23: enum tuple variant construction with u8 field must emit
+    // TruncU8 (and w_,w_,#255) before Store — not a raw i32 store.
+    // Using function parameters prevents constant folding.
+    // Assign result to variable before match to satisfy enum-scrutinee requirement.
+    let asm = compile_to_asm(
+        "enum Wrap { Val(u8) }\n\
+         fn build(a: u8, b: u8) -> Wrap { Wrap::Val(a + b) }\n\
+         fn main() -> i32 {\n\
+             let w = build(200, 100);\n\
+             match w {\n\
+                 Wrap::Val(v) => v as i32\n\
+             }\n\
+         }\n",
+    );
+    assert!(asm.contains("and     w"), "expected and-mask for u8 truncation in enum variant construction");
+    assert!(!asm.contains("mov     x0, #44"), "must not fold 200+100 wrapping to constant #44");
+}
+
+#[test]
+fn runtime_u16_enum_variant_field_construction_not_constant_folded() {
+    // FLS §4.1, §6.23: enum tuple variant construction with u16 field must not be
+    // constant-folded — the wrapping arithmetic must execute at runtime.
+    // Assign result to variable before match to satisfy enum-scrutinee requirement.
+    let asm = compile_to_asm(
+        "enum Wrap { Val(u16) }\n\
+         fn build(a: u16, b: u16) -> Wrap { Wrap::Val(a + b) }\n\
+         fn main() -> i32 {\n\
+             let w = build(65000, 1000);\n\
+             match w {\n\
+                 Wrap::Val(v) => v as i32\n\
+             }\n\
+         }\n",
+    );
+    assert!(asm.contains("and     w"), "expected and-mask for u16 truncation in enum variant construction");
+    assert!(!asm.contains("mov     x0, #464"), "must not fold 65000+1000 wrapping to constant #464");
+}
+
+// ── Milestone 185: narrow integer types in named enum variant fields (FLS §4.1, §6.23) ──
+
+/// Assembly inspection: TruncU8 is emitted for a named enum variant field of type u8,
+/// and the stored value is not constant-folded.
+#[test]
+fn runtime_u8_named_enum_variant_field_construction_applies_trunc() {
+    // FLS §4.1, §6.23: named enum variant construction with u8 field must emit
+    // TruncU8 (and w_,w_,#255) before Store — not a raw i32 store.
+    // Using function parameters prevents constant folding.
+    let asm = compile_to_asm(
+        "enum Wrap { Val { x: u8 } }\n\
+         fn build(a: u8, b: u8) -> Wrap { Wrap::Val { x: a + b } }\n\
+         fn main() -> i32 {\n\
+             let w = build(200, 100);\n\
+             match w {\n\
+                 Wrap::Val { x: v } => v as i32\n\
+             }\n\
+         }\n",
+    );
+    assert!(asm.contains("and     w"), "expected and-mask for u8 truncation in named enum variant construction");
+    assert!(!asm.contains("mov     x0, #44"), "must not fold 200+100 wrapping to constant #44");
+}
+
+/// Assembly inspection: SextI16 is emitted for a named enum variant field of type i16.
+#[test]
+fn runtime_i16_named_enum_variant_field_construction_applies_sxth() {
+    // FLS §4.1, §6.23: named enum variant construction with i16 field must emit sxth.
+    let asm = compile_to_asm(
+        "enum Wrap { Val { x: i16 } }\n\
+         fn build(a: i16, b: i16) -> Wrap { Wrap::Val { x: a + b } }\n\
+         fn main() -> i32 {\n\
+             let w = build(30000, 5000);\n\
+             match w {\n\
+                 Wrap::Val { x: v } => v as i32\n\
+             }\n\
+         }\n",
+    );
+    assert!(asm.contains("sxth"), "expected sxth sign-extension for i16 named enum variant field");
+    assert!(!asm.contains("mov     x0, #-30536"), "must not fold wrapped i16 value to constant");
+}
+
+#[test]
+fn milestone_185_u8_named_variant_wraps_on_construction() {
+    // FLS §4.1, §6.23: u8 named enum variant field stores the wrapped value at construction.
+    // 200 + 100 = 300; as u8 = 44. 44 < 100 must be true (exit 1).
+    let Some(exit) = compile_and_run(
+        "enum Wrap { Val { x: u8 } }\n\
+         fn build(a: u8, b: u8) -> Wrap { Wrap::Val { x: a + b } }\n\
+         fn main() -> i32 {\n\
+             let w = build(200, 100);\n\
+             match w {\n\
+                 Wrap::Val { x: v } => if v < 100 { 1 } else { 0 }\n\
+             }\n\
+         }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "200_u8 + 100_u8 wraps to 44; 44 < 100 should be true");
+}
+
+#[test]
+fn milestone_185_u16_named_variant_wraps_on_construction() {
+    // FLS §4.1, §6.23: u16 named enum variant field stores the wrapped value at construction.
+    // 65000 + 1000 = 66000; as u16 = 464. 464 < 500 must be true (exit 1).
+    let Some(exit) = compile_and_run(
+        "enum Wrap { Val { x: u16 } }\n\
+         fn build(a: u16, b: u16) -> Wrap { Wrap::Val { x: a + b } }\n\
+         fn main() -> i32 {\n\
+             let w = build(65000, 1000);\n\
+             match w {\n\
+                 Wrap::Val { x: v } => if v < 500 { 1 } else { 0 }\n\
+             }\n\
+         }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "65000_u16 + 1000_u16 wraps to 464; 464 < 500 should be true");
+}
+
+#[test]
+fn milestone_185_i16_named_variant_wraps_on_construction() {
+    // FLS §4.1, §6.23: i16 named enum variant field stores the wrapped value at construction.
+    // 30000 + 5000 = 35000; as i16 = -30536. -30536 < 0 must be true (exit 1).
+    let Some(exit) = compile_and_run(
+        "enum Wrap { Val { x: i16 } }\n\
+         fn build(a: i16, b: i16) -> Wrap { Wrap::Val { x: a + b } }\n\
+         fn main() -> i32 {\n\
+             let w = build(30000, 5000);\n\
+             match w {\n\
+                 Wrap::Val { x: v } => if (v as i32) < 0 { 1 } else { 0 }\n\
+             }\n\
+         }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "30000_i16 + 5000_i16 wraps to -30536; -30536 < 0 should be true");
+}
+
+#[test]
+fn milestone_185_u8_named_variant_identity_field() {
+    // FLS §4.1: u8 named enum variant field passes through without corruption
+    // when the value fits in range.
+    let Some(exit) = compile_and_run(
+        "enum Wrap { Val { x: u8 } }\n\
+         fn wrap(v: u8) -> Wrap { Wrap::Val { x: v } }\n\
+         fn main() -> i32 {\n\
+             let w = wrap(42);\n\
+             match w { Wrap::Val { x: v } => v as i32 }\n\
+         }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 42);
+}
+
+#[test]
+fn milestone_185_u8_named_variant_passed_to_fn() {
+    // FLS §4.1, §6.23: u8 named variant field value survives being passed to a function.
+    let Some(exit) = compile_and_run(
+        "enum Wrap { Val { x: u8 } }\n\
+         fn get(w: Wrap) -> i32 {\n\
+             match w { Wrap::Val { x: v } => v as i32 }\n\
+         }\n\
+         fn main() -> i32 {\n\
+             let w = Wrap::Val { x: 200_u8 + 100_u8 };\n\
+             get(w)\n\
+         }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 44, "200_u8 + 100_u8 wraps to 44");
+}
+
+#[test]
+fn milestone_185_u16_named_variant_field_in_arithmetic() {
+    // FLS §4.1, §6.23: u16 named variant field participates correctly in arithmetic.
+    let Some(exit) = compile_and_run(
+        "enum Wrap { Val { x: u16 } }\n\
+         fn build(a: u16, b: u16) -> Wrap { Wrap::Val { x: a + b } }\n\
+         fn main() -> i32 {\n\
+             let w = build(65000, 1000);\n\
+             match w {\n\
+                 Wrap::Val { x: v } => if v as i32 + 1 == 465 { 1 } else { 0 }\n\
+             }\n\
+         }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "65000_u16 + 1000_u16 wraps to 464; 464 + 1 == 465");
+}
+
+#[test]
+fn milestone_185_u16_named_variant_two_narrow_fields() {
+    // FLS §4.1, §6.23: Both narrow named fields in an enum variant are wrapped.
+    let Some(exit) = compile_and_run(
+        "enum Pair { Both { a: u16, b: u16 } }\n\
+         fn build(x: u16, y: u16) -> Pair { Pair::Both { a: x, b: y + x } }\n\
+         fn main() -> i32 {\n\
+             let p = build(60000, 10000);\n\
+             match p {\n\
+                 Pair::Both { a, b } => if a as i32 == 60000 && b < 5000 { 1 } else { 0 }\n\
+             }\n\
+         }\n",
+    ) else {
+        return;
+    };
+    // a = 60000 (no overflow), b = 10000 + 60000 = 70000 wraps to 4464 < 5000
+    assert_eq!(exit, 1, "a = 60000; b = 70000 wraps to 4464 < 5000");
+}

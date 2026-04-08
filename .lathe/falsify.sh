@@ -1307,6 +1307,32 @@ else
     pass "Claim 70: narrow integer struct fields are normalised (truncated/sign-extended) at construction time"
 fi
 
+echo "--- Claim 71: narrow integer enum tuple variant fields normalised at construction time ---"
+if cargo test --test e2e --quiet -- \
+    runtime_u8_enum_variant_field_construction_applies_trunc \
+    runtime_u16_enum_variant_field_construction_not_constant_folded \
+    milestone_184_u8_enum_tuple_variant_wraps_on_construction \
+    milestone_184_u16_enum_tuple_variant_wraps_on_construction \
+    milestone_184_i16_enum_tuple_variant_wraps_on_construction \
+    2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 71" "narrow enum variant field normalisation FAILED — enum tuple variant fields with u8/i8/u16/i16 types may store unwrapped values at construction"
+else
+    pass "Claim 71: narrow integer enum tuple variant fields are normalised (truncated/sign-extended) at construction time"
+fi
+
+echo "--- Claim 72: narrow integer named enum variant fields normalised at construction time ---"
+if cargo test --test e2e --quiet -- \
+    runtime_u8_named_enum_variant_field_construction_applies_trunc \
+    runtime_i16_named_enum_variant_field_construction_applies_sxth \
+    milestone_185_u8_named_variant_wraps_on_construction \
+    milestone_185_u16_named_variant_wraps_on_construction \
+    milestone_185_i16_named_variant_wraps_on_construction \
+    2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 72" "narrow named enum variant field normalisation FAILED — named variant fields with u8/i8/u16/i16 types may store unwrapped values at construction"
+else
+    pass "Claim 72: narrow integer named enum variant fields are normalised (truncated/sign-extended) at construction time"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 

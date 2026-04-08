@@ -723,6 +723,12 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     // Used to select StoreF64/StoreF32 vs Store during variant construction and
     // LoadF64Slot/LoadF32Slot vs Load when binding fields in TupleStruct patterns.
     let mut enum_variant_float_field_types: HashMap<String, HashMap<String, Vec<Option<IrTy>>>> = HashMap::new();
+    // FLS §4.1, §6.23: Per-field narrow integer type for enum variants.
+    // Maps enum_name → variant_name → [field_narrow_types].
+    // `None` = not a narrow type; `Some(U8/I8/U16/I16)` = field requires
+    // TruncU8/SextI8/TruncU16/SextI16 at construction time to normalise
+    // values that may have overflowed the narrower register width.
+    let mut enum_variant_narrow_field_types: HashMap<String, HashMap<String, Vec<Option<IrTy>>>> = HashMap::new();
     // FLS §6.11, §6.13, §4.11: Track per-field struct type names for nested struct
     // construction and chained field access. `None` = scalar field, `Some(name)` =
     // field whose type is another named struct (requiring multiple stack slots).
@@ -905,6 +911,9 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                 // FLS §4.2, §15: Per-variant float field type tracking.
                 // Maps variant_name → [field_float_types] for tuple variants.
                 let mut variant_float_types: HashMap<String, Vec<Option<IrTy>>> = HashMap::new();
+                // FLS §4.1, §6.23: Per-variant narrow integer field type tracking.
+                // Maps variant_name → [field_narrow_types] for tuple/named variants.
+                let mut variant_narrow_types: HashMap<String, Vec<Option<IrTy>>> = HashMap::new();
                 for (discriminant, variant) in e.variants.iter().enumerate() {
                     use crate::ast::EnumVariantKind;
                     let variant_name = variant.name.text(source).to_owned();
@@ -932,7 +941,26 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                                     _ => None,
                                 })
                                 .collect();
-                            variant_float_types.insert(variant_name, float_tys);
+                            variant_float_types.insert(variant_name.clone(), float_tys);
+                            // FLS §4.1, §6.23: Record narrow integer field positions.
+                            let narrow_tys: Vec<Option<IrTy>> = fields
+                                .iter()
+                                .map(|f| match &f.ty.kind {
+                                    TyKind::Path(segs) if segs.len() == 1 => {
+                                        match segs[0].text(source) {
+                                            "u8" => Some(IrTy::U8),
+                                            "i8" => Some(IrTy::I8),
+                                            "u16" => Some(IrTy::U16),
+                                            "i16" => Some(IrTy::I16),
+                                            _ => None,
+                                        }
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            if narrow_tys.iter().any(|t| t.is_some()) {
+                                variant_narrow_types.insert(variant_name, narrow_tys);
+                            }
                         }
                         // FLS §15.3: Named-field variant. Store names in declaration order
                         // so that construction and patterns can map name → slot index.
@@ -958,14 +986,36 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                                 })
                                 .collect();
                             if float_tys.iter().any(|t| t.is_some()) {
-                                variant_float_types.insert(variant_name, float_tys);
+                                variant_float_types.insert(variant_name.clone(), float_tys);
+                            }
+                            // FLS §4.1, §6.23: Record narrow integer field positions.
+                            let narrow_tys: Vec<Option<IrTy>> = fields
+                                .iter()
+                                .map(|f| match &f.ty.kind {
+                                    TyKind::Path(segs) if segs.len() == 1 => {
+                                        match segs[0].text(source) {
+                                            "u8" => Some(IrTy::U8),
+                                            "i8" => Some(IrTy::I8),
+                                            "u16" => Some(IrTy::U16),
+                                            "i16" => Some(IrTy::I16),
+                                            _ => None,
+                                        }
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            if narrow_tys.iter().any(|t| t.is_some()) {
+                                variant_narrow_types.insert(variant_name, narrow_tys);
                             }
                         }
                     }
                 }
                 enum_defs.insert(enum_name.clone(), variants);
                 if !variant_float_types.is_empty() {
-                    enum_variant_float_field_types.insert(enum_name, variant_float_types);
+                    enum_variant_float_field_types.insert(enum_name.clone(), variant_float_types);
+                }
+                if !variant_narrow_types.is_empty() {
+                    enum_variant_narrow_field_types.insert(enum_name, variant_narrow_types);
                 }
             }
             ItemKind::Fn(_) | ItemKind::Impl(_) | ItemKind::Trait(_) | ItemKind::Const(_) | ItemKind::Static(_) | ItemKind::TypeAlias(_) => {}
@@ -1902,7 +1952,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                 if !fn_def.generic_params.is_empty() || has_impl_trait {
                     continue;
                 }
-                let (ir_fn, closure_fns, fn_trampolines, next_label, needed, vtable_reqs) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &tuple_struct_float_field_types, &tuple_struct_narrow_field_types, &enum_defs, &enum_variant_float_field_types, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &const_f64_vals, &const_f32_vals, &assoc_const_vals, &static_names, &static_f64_names, &static_f32_names, &fn_names, &struct_raw_field_types, &struct_generic_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, &struct_narrow_field_types, &generic_fn_param_counts, &HashMap::new(), &HashMap::new(), &trait_method_order, &fn_dyn_param_traits, &fn_dyn_return_traits, None, label_base)?;
+                let (ir_fn, closure_fns, fn_trampolines, next_label, needed, vtable_reqs) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &tuple_struct_float_field_types, &tuple_struct_narrow_field_types, &enum_defs, &enum_variant_float_field_types, &enum_variant_narrow_field_types, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &const_f64_vals, &const_f32_vals, &assoc_const_vals, &static_names, &static_f64_names, &static_f32_names, &fn_names, &struct_raw_field_types, &struct_generic_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, &struct_narrow_field_types, &generic_fn_param_counts, &HashMap::new(), &HashMap::new(), &trait_method_order, &fn_dyn_param_traits, &fn_dyn_return_traits, None, label_base)?;
                 label_base = next_label;
                 fns.push(ir_fn);
                 fns.extend(closure_fns);
@@ -2012,6 +2062,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         &tuple_struct_narrow_field_types,
                         &enum_defs,
                         &enum_variant_float_field_types,
+                        &enum_variant_narrow_field_types,
                         &method_self_kinds,
                         &mut_self_scalar_return_fns,
                         &struct_return_fns,
@@ -2089,6 +2140,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                                 &tuple_struct_narrow_field_types,
                                 &enum_defs,
                                 &enum_variant_float_field_types,
+                                &enum_variant_narrow_field_types,
                                 &method_self_kinds,
                                 &mut_self_scalar_return_fns,
                                 &struct_return_fns,
@@ -2271,6 +2323,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
             &tuple_struct_narrow_field_types,
             &enum_defs,
             &enum_variant_float_field_types,
+            &enum_variant_narrow_field_types,
             &method_self_kinds,
             &mut_self_scalar_return_fns,
             &struct_return_fns,
@@ -2442,6 +2495,10 @@ fn lower_fn(
     tuple_struct_narrow_field_types: &HashMap<String, Vec<Option<IrTy>>>,
     enum_defs: &EnumDefs,
     enum_variant_float_field_types: &HashMap<String, HashMap<String, Vec<Option<IrTy>>>>,
+    // FLS §4.1, §6.23: Per-field narrow integer types for enum variants.
+    // Used to emit TruncU8/SextI8/TruncU16/SextI16 when constructing enum variants
+    // with narrow-typed fields, so mid-body comparisons see correctly wrapped values.
+    enum_variant_narrow_field_types: &HashMap<String, HashMap<String, Vec<Option<IrTy>>>>,
     method_self_kinds: &HashMap<String, SelfKind>,
     mut_self_scalar_return_fns: &std::collections::HashSet<String>,
     struct_return_fns: &HashMap<String, String>,
@@ -2648,7 +2705,7 @@ fn lower_fn(
         Some(block) => block,
     };
 
-    let mut ctx = LowerCtx::new(source, &name, ret_ty, struct_defs, tuple_struct_defs, tuple_struct_float_field_types, tuple_struct_narrow_field_types, enum_defs, enum_variant_float_field_types, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, f64_return_fns, f32_return_fns, const_vals, const_f64_vals, const_f32_vals, assoc_const_vals, static_names, static_f64_names, static_f32_names, fn_names, struct_field_types, struct_generic_field_types, struct_field_offsets, struct_sizes, type_aliases, struct_float_field_types, struct_narrow_field_types, generic_fn_param_counts.clone(), generic_type_subst, trait_method_order, fn_dyn_param_traits, fn_dyn_return_traits, start_label);
+    let mut ctx = LowerCtx::new(source, &name, ret_ty, struct_defs, tuple_struct_defs, tuple_struct_float_field_types, tuple_struct_narrow_field_types, enum_defs, enum_variant_float_field_types, enum_variant_narrow_field_types, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, f64_return_fns, f32_return_fns, const_vals, const_f64_vals, const_f32_vals, assoc_const_vals, static_names, static_f64_names, static_f32_names, fn_names, struct_field_types, struct_generic_field_types, struct_field_offsets, struct_sizes, type_aliases, struct_float_field_types, struct_narrow_field_types, generic_fn_param_counts.clone(), generic_type_subst, trait_method_order, fn_dyn_param_traits, fn_dyn_return_traits, start_label);
 
     // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
     // to stack slots. Each parameter slot is allocated in parameter order
@@ -4271,6 +4328,15 @@ struct LowerCtx<'src> {
     /// Cache-line note: read-only during lowering; not on any hot path.
     enum_variant_float_field_types: &'src HashMap<String, HashMap<String, Vec<Option<IrTy>>>>,
 
+    /// Per-field narrow integer type for enum variants (tuple and named).
+    ///
+    /// FLS §4.1, §6.23: Maps enum_name → variant_name → [field_narrow_types].
+    /// `None` = not a narrow type; `Some(U8/I8/U16/I16)` = field requires
+    /// TruncU8/SextI8/TruncU16/SextI16 at construction time.
+    ///
+    /// Cache-line note: read-only during lowering; not on any hot path.
+    enum_variant_narrow_field_types: &'src HashMap<String, HashMap<String, Vec<Option<IrTy>>>>,
+
     /// Method self-kind registry: maps mangled method name → SelfKind.
     ///
     /// FLS §10.1: `&mut self` methods use a different calling convention
@@ -5123,6 +5189,7 @@ impl<'src> LowerCtx<'src> {
         tuple_struct_narrow_field_types: &'src HashMap<String, Vec<Option<IrTy>>>,
         enum_defs: &'src EnumDefs,
         enum_variant_float_field_types: &'src HashMap<String, HashMap<String, Vec<Option<IrTy>>>>,
+        enum_variant_narrow_field_types: &'src HashMap<String, HashMap<String, Vec<Option<IrTy>>>>,
         method_self_kinds: &'src HashMap<String, SelfKind>,
         mut_self_scalar_return_fns: &'src std::collections::HashSet<String>,
         struct_return_fns: &'src HashMap<String, String>,
@@ -5173,6 +5240,7 @@ impl<'src> LowerCtx<'src> {
             tuple_struct_narrow_field_types,
             enum_defs,
             enum_variant_float_field_types,
+            enum_variant_narrow_field_types,
             method_self_kinds,
             mut_self_scalar_return_fns,
             struct_return_fns,
@@ -5309,6 +5377,26 @@ impl<'src> LowerCtx<'src> {
             .get(enum_name)
             .and_then(|vm| vm.get(variant_name))
             .and_then(|fts| fts.get(field_idx))
+            .copied()
+            .flatten()
+    }
+
+    /// Return the narrow integer IrTy for a given enum variant field, if any.
+    ///
+    /// FLS §4.1, §6.23: Used at construction sites to decide whether to emit
+    /// TruncU8/SextI8/TruncU16/SextI16 before the Store instruction, normalising
+    /// values that may have overflowed the narrower register width.
+    /// Returns `None` for non-narrow integer/bool/float fields.
+    fn enum_variant_field_narrow_ty(
+        &self,
+        enum_name: &str,
+        variant_name: &str,
+        field_idx: usize,
+    ) -> Option<IrTy> {
+        self.enum_variant_narrow_field_types
+            .get(enum_name)
+            .and_then(|vm| vm.get(variant_name))
+            .and_then(|nts| nts.get(field_idx))
             .copied()
             .flatten()
     }
@@ -6331,6 +6419,7 @@ impl<'src> LowerCtx<'src> {
                     self.instrs.push(Instr::LoadImm(disc_reg, discriminant));
                     self.instrs.push(Instr::Store { src: disc_reg, slot: base_slot });
                     // FLS §4.2, §15: Float fields use StoreF64/StoreF32.
+                    // FLS §4.1, §6.23: Narrow integer fields are normalised before Store.
                     for (i, arg) in args.iter().enumerate() {
                         let slot = base_slot + 1 + i as u8;
                         match self.enum_variant_field_float_ty(enum_name, variant_name, i) {
@@ -6359,6 +6448,13 @@ impl<'src> LowerCtx<'src> {
                             _ => {
                                 let val = self.lower_expr(arg, &IrTy::I32)?;
                                 let src = self.val_to_reg(val)?;
+                                match self.enum_variant_field_narrow_ty(enum_name, variant_name, i) {
+                                    Some(IrTy::U8) => self.instrs.push(Instr::TruncU8 { dst: src, src }),
+                                    Some(IrTy::I8) => self.instrs.push(Instr::SextI8 { dst: src, src }),
+                                    Some(IrTy::U16) => self.instrs.push(Instr::TruncU16 { dst: src, src }),
+                                    Some(IrTy::I16) => self.instrs.push(Instr::SextI16 { dst: src, src }),
+                                    _ => {}
+                                }
                                 self.instrs.push(Instr::Store { src, slot });
                             }
                         }
@@ -6385,6 +6481,7 @@ impl<'src> LowerCtx<'src> {
                     self.instrs.push(Instr::Store { src: disc_reg, slot: base_slot });
                     // Store fields in declaration order.
                     // FLS §4.2, §15: Float fields use StoreF64/StoreF32.
+                    // FLS §4.1, §6.23: Narrow integer fields are normalised before Store.
                     for (field_idx, field_name) in field_names.iter().enumerate() {
                         let slot = base_slot + 1 + field_idx as u8;
                         let field_init = lit_fields
@@ -6421,6 +6518,13 @@ impl<'src> LowerCtx<'src> {
                             _ => {
                                 let val = self.lower_expr(&field_init.1, &IrTy::I32)?;
                                 let src = self.val_to_reg(val)?;
+                                match self.enum_variant_field_narrow_ty(enum_name, variant_name, field_idx) {
+                                    Some(IrTy::U8) => self.instrs.push(Instr::TruncU8 { dst: src, src }),
+                                    Some(IrTy::I8) => self.instrs.push(Instr::SextI8 { dst: src, src }),
+                                    Some(IrTy::U16) => self.instrs.push(Instr::TruncU16 { dst: src, src }),
+                                    Some(IrTy::I16) => self.instrs.push(Instr::SextI16 { dst: src, src }),
+                                    _ => {}
+                                }
                                 self.instrs.push(Instr::Store { src, slot });
                             }
                         }
@@ -8766,6 +8870,7 @@ impl<'src> LowerCtx<'src> {
                         // declaration order for layout stability.
                         // FLS §4.2, §15: Float fields use StoreF64/StoreF32;
                         // integer/bool fields use the regular Store instruction.
+                        // FLS §4.1, §6.23: Narrow integer fields are normalised before Store.
                         for (field_idx, field_name) in field_names.iter().enumerate() {
                             let slot = base_slot + 1 + field_idx as u8;
                             let field_init = lit_fields
@@ -8802,6 +8907,13 @@ impl<'src> LowerCtx<'src> {
                                 _ => {
                                     let val = self.lower_expr(&field_init.1, &IrTy::I32)?;
                                     let src = self.val_to_reg(val)?;
+                                    match self.enum_variant_field_narrow_ty(enum_name, variant_name, field_idx) {
+                                        Some(IrTy::U8) => self.instrs.push(Instr::TruncU8 { dst: src, src }),
+                                        Some(IrTy::I8) => self.instrs.push(Instr::SextI8 { dst: src, src }),
+                                        Some(IrTy::U16) => self.instrs.push(Instr::TruncU16 { dst: src, src }),
+                                        Some(IrTy::I16) => self.instrs.push(Instr::SextI16 { dst: src, src }),
+                                        _ => {}
+                                    }
                                     self.instrs.push(Instr::Store { src, slot });
                                 }
                             }
@@ -8854,6 +8966,7 @@ impl<'src> LowerCtx<'src> {
                         // Store each field in source order.
                         // FLS §4.2, §15: Float fields use StoreF64/StoreF32;
                         // integer/bool fields use the regular Store instruction.
+                        // FLS §4.1, §6.23: Narrow integer fields are normalised before Store.
                         for (i, arg) in args.iter().enumerate() {
                             let slot = base_slot + 1 + i as u8;
                             match self.enum_variant_field_float_ty(enum_name, variant_name, i) {
@@ -8882,6 +8995,13 @@ impl<'src> LowerCtx<'src> {
                                 _ => {
                                     let val = self.lower_expr(arg, &IrTy::I32)?;
                                     let src = self.val_to_reg(val)?;
+                                    match self.enum_variant_field_narrow_ty(enum_name, variant_name, i) {
+                                        Some(IrTy::U8) => self.instrs.push(Instr::TruncU8 { dst: src, src }),
+                                        Some(IrTy::I8) => self.instrs.push(Instr::SextI8 { dst: src, src }),
+                                        Some(IrTy::U16) => self.instrs.push(Instr::TruncU16 { dst: src, src }),
+                                        Some(IrTy::I16) => self.instrs.push(Instr::SextI16 { dst: src, src }),
+                                        _ => {}
+                                    }
                                     self.instrs.push(Instr::Store { src, slot });
                                 }
                             }
@@ -9831,6 +9951,7 @@ impl<'src> LowerCtx<'src> {
                     self.tuple_struct_narrow_field_types,
                     self.enum_defs,
                     self.enum_variant_float_field_types,
+                    self.enum_variant_narrow_field_types,
                     self.method_self_kinds,
                     self.mut_self_scalar_return_fns,
                     self.struct_return_fns,
@@ -17368,6 +17489,7 @@ impl<'src> LowerCtx<'src> {
                     self.tuple_struct_narrow_field_types,
                     self.enum_defs,
                     self.enum_variant_float_field_types,
+                    self.enum_variant_narrow_field_types,
                     self.method_self_kinds,
                     self.mut_self_scalar_return_fns,
                     self.struct_return_fns,
