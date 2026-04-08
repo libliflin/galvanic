@@ -30940,18 +30940,19 @@ fn milestone_183_u8_tuple_struct_identity_field() {
 #[test]
 fn milestone_183_u16_tuple_struct_field_in_arithmetic() {
     // FLS §4.1, §6.23: wrapped field value is correctly used in arithmetic.
+    // 65000 + 1000 = 66000; wraps to 464 at u16 boundary; 464 + 1 = 465.
+    // Use a conditional to keep the exit code in the 0..255 range (Linux truncates).
     let Some(exit) = compile_and_run(
         "struct Short(u16);\n\
          fn build(a: u16, b: u16) -> Short { Short(a + b) }\n\
          fn main() -> i32 {\n\
              let n = build(65000, 1000);\n\
-             n.0 as i32 + 1\n\
+             if n.0 as i32 + 1 == 465 { 1 } else { 0 }\n\
          }\n",
     ) else {
         return;
     };
-    // 65000 + 1000 = 66000; wraps to 464; 464 + 1 = 465
-    assert_eq!(exit, 465, "wrapped field 464 + 1 = 465");
+    assert_eq!(exit, 1, "wrapped field 464 + 1 should equal 465");
 }
 
 #[test]

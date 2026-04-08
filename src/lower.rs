@@ -16566,6 +16566,45 @@ impl<'src> LowerCtx<'src> {
                 {
                     let fn_name = segs[0].text(self.source);
                     if let Some(struct_name) = self.struct_return_free_fns.get(fn_name).cloned() {
+                        // FLS §14.2: The called function may return either a named struct
+                        // (field access by name) or a tuple struct (field access by integer index).
+                        // Check tuple_struct_defs first, then fall through to struct_defs.
+                        if let Some(&n_fields) = self.tuple_struct_defs.get(struct_name.as_str()) {
+                            // Tuple struct: field_name is an integer index like "0", "1".
+                            let field_idx: usize = field_name.parse().map_err(|_| {
+                                LowerError::Unsupported(format!(
+                                    "invalid tuple field index `{field_name}` on `{struct_name}`"
+                                ))
+                            })?;
+
+                            // Allocate N temporary slots for the tuple struct return value.
+                            let base_slot = self.alloc_slot()?;
+                            for _ in 1..n_fields {
+                                self.alloc_slot()?;
+                            }
+
+                            // Evaluate arguments.
+                            let mut arg_regs: Vec<u8> = Vec::new();
+                            for arg_expr in args.iter() {
+                                let val = self.lower_expr(arg_expr, &IrTy::I32)?;
+                                let reg = self.val_to_reg(val)?;
+                                arg_regs.push(reg);
+                            }
+
+                            self.has_calls = true;
+                            self.instrs.push(Instr::CallMut {
+                                name: fn_name.to_owned(),
+                                args: arg_regs,
+                                write_back_slot: base_slot,
+                                n_fields: n_fields as u8,
+                            });
+
+                            // Load the requested field from its slot.
+                            let dst = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst, slot: base_slot + field_idx as u8 });
+                            return Ok(IrValue::Reg(dst));
+                        }
+
                         let field_names = self
                             .struct_defs
                             .get(&struct_name)
