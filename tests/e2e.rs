@@ -30984,4 +30984,3 @@ fn milestone_183_u16_tuple_struct_two_narrow_fields() {
     // p.0 = 60000 (no overflow), p.1 = 10000 + 60000 = 70000 wraps to 4464 < 5000
     assert_eq!(exit, 1, "p.0 = 60000; p.1 = 70000 wraps to 4464 < 5000");
 }
-

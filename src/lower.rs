@@ -1647,6 +1647,12 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                 if struct_defs.contains_key(ret_name) {
                     // FLS §9: Free function returning a named struct.
                     struct_return_free_fns.insert(fn_name.to_owned(), ret_name.to_owned());
+                } else if tuple_struct_defs.contains_key(ret_name) {
+                    // FLS §9, §14.2: Free function returning a tuple struct.
+                    // Same RetFields ABI as named-struct returns — fields packed
+                    // in x0..x{N-1}. Registered here so call sites use CallMut
+                    // write-back and field access resolves via local_tuple_lens.
+                    struct_return_free_fns.insert(fn_name.to_owned(), ret_name.to_owned());
                 }
             }
             // FLS §9, §11: Functions with `-> impl Trait` return use static dispatch.
@@ -2574,6 +2580,12 @@ fn lower_fn(
                                 // Function returning a struct type.
                                 // Use Unit as a placeholder IrTy; the actual return
                                 // is handled via RetFields in the body lowering below.
+                                (IrTy::Unit, Some(ret_name.to_owned()), None, None)
+                            } else if tuple_struct_defs.contains_key(ret_name) {
+                                // FLS §9, §14.2: Function returning a tuple struct type.
+                                // Same RetFields ABI as named-struct returns: N fields
+                                // packed into x0..x{N-1}. The body lowering path for
+                                // `struct_ret_name` handles both named and tuple structs.
                                 (IrTy::Unit, Some(ret_name.to_owned()), None, None)
                             } else if enum_defs.contains_key(ret_name) {
                                 // FLS §9, §15: Free function returning an enum type.
@@ -3509,9 +3521,12 @@ fn lower_fn(
         //
         // Cache-line note: lower_struct_expr_into emits N store instructions per
         // struct-literal arm + the RetFields N-ldr sequence = 2N instructions total.
+        // FLS §14.2: Tuple structs have field counts in `tuple_struct_defs`, not
+        // `struct_defs`. Check both so that `fn f() -> Byte { Byte(x) }` works.
         let n_fields = struct_defs.get(struct_name.as_str())
-            .ok_or_else(|| LowerError::Unsupported(format!("unknown struct `{struct_name}`")))?
-            .len();
+            .map(|f| f.len())
+            .or_else(|| tuple_struct_defs.get(struct_name.as_str()).copied())
+            .ok_or_else(|| LowerError::Unsupported(format!("unknown struct `{struct_name}`")))?;
 
         // Lower all statements.
         for stmt in &body.stmts {
@@ -7239,6 +7254,43 @@ impl<'src> LowerCtx<'src> {
                 Ok(())
             }
 
+            // FLS §14.2, §6.12.1: Tuple struct constructor `Foo(expr, ...)` in
+            // return position. The callee returns the struct by packing field
+            // values into x0..x{N-1} via RetFields. This arm stores each field
+            // argument into the consecutive return slots before RetFields fires.
+            //
+            // FLS §4.1, §6.23: Narrow-typed fields (u8/i8/u16/i16) are
+            // normalised with TruncU8/SextI8/TruncU16/SextI16 before Store,
+            // identical to the tuple-struct-constructor-in-let path.
+            //
+            // Cache-line note: N argument lowers + N stores = 2N instructions;
+            // same density as the StructLit arm for named structs.
+            ExprKind::Call { callee, args } => {
+                if let ExprKind::Path(segs) = &callee.kind
+                    && segs.len() == 1
+                    && self.tuple_struct_defs.contains_key(segs[0].text(self.source))
+                {
+                    let ctor_name = segs[0].text(self.source);
+                    for (i, arg_expr) in args.iter().enumerate() {
+                        let val = self.lower_expr(arg_expr, &IrTy::I32)?;
+                        let src = self.val_to_reg(val)?;
+                        // FLS §4.1, §6.23: Normalise narrow-typed fields.
+                        match self.tuple_struct_field_narrow_ty(ctor_name, i) {
+                            Some(IrTy::U8) => self.instrs.push(Instr::TruncU8 { dst: src, src }),
+                            Some(IrTy::I8) => self.instrs.push(Instr::SextI8 { dst: src, src }),
+                            Some(IrTy::U16) => self.instrs.push(Instr::TruncU16 { dst: src, src }),
+                            Some(IrTy::I16) => self.instrs.push(Instr::SextI16 { dst: src, src }),
+                            _ => {}
+                        }
+                        self.instrs.push(Instr::Store { src, slot: base_slot + i as u8 });
+                    }
+                    return Ok(());
+                }
+                Err(LowerError::Unsupported(format!(
+                    "struct return (`{struct_name}`): unsupported call expression form",
+                )))
+            }
+
             _ => Err(LowerError::Unsupported(format!(
                 "struct return (`{struct_name}`): unsupported expression form",
             ))),
@@ -8249,15 +8301,18 @@ impl<'src> LowerCtx<'src> {
                 {
                     let fn_name = segs[0].text(self.source);
                     if let Some(struct_name) = self.struct_return_free_fns.get(fn_name).cloned() {
-                        let field_names = self.struct_defs
-                            .get(&struct_name)
-                            .ok_or_else(|| {
-                                LowerError::Unsupported(format!(
-                                    "unknown struct `{struct_name}` from free fn `{fn_name}`"
-                                ))
-                            })?
-                            .clone();
-                        let n_fields = field_names.len();
+                        // FLS §14.2: Both named structs (in struct_defs) and tuple
+                        // structs (in tuple_struct_defs) are registered in
+                        // struct_return_free_fns. Look up field count in either map.
+                        let n_fields = if let Some(fns) = self.struct_defs.get(&struct_name) {
+                            fns.len()
+                        } else if let Some(&n) = self.tuple_struct_defs.get(struct_name.as_str()) {
+                            n
+                        } else {
+                            return Err(LowerError::Unsupported(format!(
+                                "unknown struct `{struct_name}` from free fn `{fn_name}`"
+                            )));
+                        };
 
                         // Allocate N consecutive slots for the new struct variable.
                         let base_slot = self.alloc_slot()?;
@@ -8265,7 +8320,17 @@ impl<'src> LowerCtx<'src> {
                             self.alloc_slot()?;
                         }
                         self.locals.insert(var_name, base_slot);
-                        self.local_struct_types.insert(base_slot, struct_name.clone());
+                        // FLS §14.2: Tuple struct variables use local_tuple_lens so
+                        // that `.0`, `.1` field access resolves via integer index
+                        // (the same path as `let n = Foo(v)` direct construction).
+                        // Named struct variables use local_struct_types for field
+                        // name → offset lookup.
+                        if self.tuple_struct_defs.contains_key(struct_name.as_str()) {
+                            self.local_tuple_lens.insert(base_slot, n_fields);
+                            self.local_tuple_struct_types.insert(base_slot, struct_name.clone());
+                        } else {
+                            self.local_struct_types.insert(base_slot, struct_name.clone());
+                        }
 
                         // Evaluate arguments and collect their virtual registers.
                         let mut arg_regs: Vec<u8> = Vec::new();
