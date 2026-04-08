@@ -13783,7 +13783,14 @@ impl<'src> LowerCtx<'src> {
                     // it's a runtime instruction per the IR model).
                     //
                     // Cache-line note: two instructions (8 bytes) to pass a slice.
-                    if let ExprKind::Unary { op: crate::ast::UnaryOp::Ref, operand: inner } = &arg.kind
+                    // FLS §4.9 AMBIGUOUS: &mut [T] fat pointer has same layout as &[T].
+                    // Galvanic handles both `&arr` and `&mut arr` the same way here:
+                    // pass (base_addr, len) as two registers. The callee spills both to
+                    // ptr_slot and len_slot (ptr_slot + 1) regardless of mutability.
+                    if let ExprKind::Unary {
+                        op: crate::ast::UnaryOp::Ref | crate::ast::UnaryOp::RefMut,
+                        operand: inner,
+                    } = &arg.kind
                         && let ExprKind::Path(segs) = &inner.kind
                         && segs.len() == 1
                     {
