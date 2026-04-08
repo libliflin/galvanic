@@ -32063,3 +32063,302 @@ fn claim_76_u8_chained_const_ref_wraps_at_8_bits() {
     };
     assert_eq!(exit_code, 1, "claim_76: Y=X+100 (X=200,u8) must be 44 — got exit {exit_code} (0=Y was 300)");
 }
+
+// ─── Milestone 191: narrow integer const items wrap for subtraction and ───────
+// ─── multiplication (not just addition)                                  ───────
+//
+// FLS §6.23, §4.1: Narrow integer types have specific bit-widths. The const
+// evaluator works in i32; `narrow_const_value` must apply the declared type's
+// bit-width to ALL operations (add, sub, mul), not only addition.
+//
+// Adversarial failure modes addressed here:
+//  • Subtraction underflow: if `narrow_const_value` clamps negative raw values to
+//    0 rather than wrapping via two's complement, `5 - 10 = -5` would become 0
+//    instead of 251 as u8.
+//  • Multiplication overflow: if `narrow_const_value` is not called for mul
+//    results, `100 * 3 = 300` would be stored un-narrowed instead of 44 as u8.
+//  • Chained subtraction: if the narrowed value of X is used as an operand in Y's
+//    initializer and the i32 subtraction underflows before narrowing is applied,
+//    Y could be wrong.
+//
+// FLS §6.23 AMBIGUOUS: Overflow/underflow in const contexts should be a
+// compile-time error. Galvanic wraps as a pragmatic choice.
+
+// u8 subtraction underflow: 5 - 10 = -5 → as u8 = 251.
+#[test]
+fn milestone_191_u8_const_sub_underflow() {
+    let Some(exit_code) = compile_and_run(
+        "const X: u8 = 5 - 10;\nfn check(v: i32) -> i32 { if v == 251 { 1 } else { 0 } }\nfn main() -> i32 { check(X as i32) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "u8 const 5-10 must wrap to 251; got exit {exit_code} (0=X was 0 or -5)");
+}
+
+// u8 multiplication wrap: 100 * 3 = 300 → as u8 = 44.
+#[test]
+fn milestone_191_u8_const_mul_wraps() {
+    let Some(exit_code) = compile_and_run(
+        "const X: u8 = 100 * 3;\nfn check(v: i32) -> i32 { if v == 44 { 1 } else { 0 } }\nfn main() -> i32 { check(X as i32) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "u8 const 100*3 must wrap to 44; got exit {exit_code} (0=X was 300 un-narrowed)");
+}
+
+// Chained subtraction underflow: const X: u8 = 10; const Y: u8 = X - 20.
+// X = 10 (no wrap), Y = 10 - 20 = -10 → as u8 = 246.
+// This was specifically called out in Cycle 133 "Next" as untested.
+#[test]
+fn milestone_191_u8_const_chained_sub_underflow() {
+    let Some(exit_code) = compile_and_run(
+        "const X: u8 = 10;\nconst Y: u8 = X - 20;\nfn check(v: i32) -> i32 { if v == 246 { 1 } else { 0 } }\nfn main() -> i32 { check(Y as i32) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "u8 chained const Y=X-20 (X=10) must wrap to 246; got exit {exit_code}");
+}
+
+// i8 subtraction underflow: -100 - 50 = -150 → as i8 = 106.
+#[test]
+fn milestone_191_i8_const_sub_underflow() {
+    let Some(exit_code) = compile_and_run(
+        "const X: i8 = -100 - 50;\nfn check(v: i32) -> i32 { if v == 106 { 1 } else { 0 } }\nfn main() -> i32 { check(X as i32) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "i8 const -100-50 must wrap to 106; got exit {exit_code}");
+}
+
+// Assembly inspection: u8 subtraction underflow emits #251, not #0 (saturating).
+//
+// If `narrow_const_value` clamped negative values to 0:
+//   `5 - 10 = -5` → clamp to 0 → `mov x0, #0`
+// Correct behaviour: `-5 as u8 = 251` → `mov x0, #251`
+#[test]
+fn runtime_u8_const_sub_underflow_emits_loadimm_251() {
+    let asm = compile_to_asm(
+        "const X: u8 = 5 - 10;\nfn main() -> i32 { X as i32 }\n",
+    );
+    assert!(
+        asm.contains("#251"),
+        "u8 const 5-10 must emit #251 (two's-complement wrap of -5), got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #0 "),
+        "u8 const 5-10 must NOT emit #0 (saturating subtraction would give 0): {asm}"
+    );
+    assert!(
+        !asm.contains("#-5"),
+        "u8 const 5-10 must NOT emit #-5 (un-narrowed i32 value): {asm}"
+    );
+}
+
+// Assembly inspection: u8 multiplication wrap emits #44, not #300.
+#[test]
+fn runtime_u8_const_mul_wrap_emits_loadimm_44() {
+    let asm = compile_to_asm(
+        "const X: u8 = 100 * 3;\nfn main() -> i32 { X as i32 }\n",
+    );
+    assert!(
+        asm.contains("#44") || asm.contains("#0x2c"),
+        "u8 const 100*3 must emit #44 (0x2c after wrapping 300), got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("#300") && !asm.contains("#0x12c"),
+        "u8 const 100*3 must NOT emit #300 (un-narrowed i32): {asm}"
+    );
+}
+
+// Assembly inspection: chained u8 subtraction emits #246, not #0 or #-10.
+#[test]
+fn runtime_u8_const_chained_sub_emits_loadimm_246() {
+    let asm = compile_to_asm(
+        "const X: u8 = 10;\nconst Y: u8 = X - 20;\nfn main() -> i32 { Y as i32 }\n",
+    );
+    assert!(
+        asm.contains("#246"),
+        "chained u8 const Y=X-20 (X=10) must emit #246, got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #0 "),
+        "chained u8 const subtraction must NOT emit #0 (saturating): {asm}"
+    );
+}
+
+// ── Milestone 192: &str parameters with .len() (FLS §2.4.6 / §4.8) ──────────
+//
+// A function that receives `&str` can call `.len()` on its parameter.
+// Galvanic passes `&str` as a single byte-length register (the full fat-pointer
+// ABI — data pointer + length — is deferred until string dereferencing is needed).
+//
+// FLS §2.4.6: String literals. FLS §4.8: Reference types.
+// FLS §4.7 AMBIGUOUS: `str` is an unsized type; `&str` is a fat pointer in the
+// full Rust ABI, but galvanic uses a single-register byte-length convention.
+
+#[test]
+fn milestone_192_str_param_len_hello() {
+    let Some(exit_code) = compile_and_run(
+        "fn str_len(s: &str) -> usize { s.len() }\nfn main() -> i32 { str_len(\"hello\") as i32 }\n",
+    ) else { return; };
+    assert_eq!(exit_code, 5, "str_len(\"hello\") must return 5");
+}
+
+#[test]
+fn milestone_192_str_param_len_empty() {
+    let Some(exit_code) = compile_and_run(
+        "fn str_len(s: &str) -> usize { s.len() }\nfn main() -> i32 { str_len(\"\") as i32 }\n",
+    ) else { return; };
+    assert_eq!(exit_code, 0, "str_len(\"\") must return 0");
+}
+
+#[test]
+fn milestone_192_str_param_len_in_arithmetic() {
+    let Some(exit_code) = compile_and_run(
+        "fn str_len(s: &str) -> usize { s.len() }\nfn main() -> i32 { (str_len(\"hi\") * 3) as i32 }\n",
+    ) else { return; };
+    assert_eq!(exit_code, 6, "str_len(\"hi\") * 3 must be 6");
+}
+
+#[test]
+fn milestone_192_str_param_len_in_if() {
+    let Some(exit_code) = compile_and_run(
+        "fn str_len(s: &str) -> usize { s.len() }\nfn main() -> i32 { if str_len(\"hello\") > 3 { 1 } else { 0 } }\n",
+    ) else { return; };
+    assert_eq!(exit_code, 1, "if str_len > 3 must take true branch");
+}
+
+#[test]
+fn milestone_192_str_param_len_let_binding() {
+    let Some(exit_code) = compile_and_run(
+        "fn str_len(s: &str) -> usize { s.len() }\nfn main() -> i32 { let n = str_len(\"hello world\"); n as i32 }\n",
+    ) else { return; };
+    assert_eq!(exit_code, 11, "str_len(\"hello world\") must be 11");
+}
+
+#[test]
+fn milestone_192_str_param_len_passed_to_fn() {
+    let Some(exit_code) = compile_and_run(
+        "fn str_len(s: &str) -> usize { s.len() }\nfn double(n: usize) -> usize { n * 2 }\nfn main() -> i32 { double(str_len(\"abc\")) as i32 }\n",
+    ) else { return; };
+    assert_eq!(exit_code, 6, "double(str_len(\"abc\")) must be 6");
+}
+
+#[test]
+fn milestone_192_str_param_two_params() {
+    let Some(exit_code) = compile_and_run(
+        "fn combined_len(a: &str, b: &str) -> usize { a.len() + b.len() }\nfn main() -> i32 { combined_len(\"hi\", \"hello\") as i32 }\n",
+    ) else { return; };
+    assert_eq!(exit_code, 7, "combined_len(\"hi\", \"hello\") must be 7");
+}
+
+#[test]
+fn milestone_192_str_param_called_twice() {
+    let Some(exit_code) = compile_and_run(
+        "fn str_len(s: &str) -> usize { s.len() }\nfn main() -> i32 { (str_len(\"hi\") + str_len(\"hello world\")) as i32 }\n",
+    ) else { return; };
+    assert_eq!(exit_code, 13, "str_len(\"hi\") + str_len(\"hello world\") must be 13");
+}
+
+// Assembly inspection: &str parameter must emit ldr from slot (not a constant).
+//
+// A function receiving &str spills the byte-length from x0 to a stack slot,
+// then ldr from that slot when evaluating .len(). If galvanic constant-folded
+// the string length into the callee body, it would emit mov rather than ldr.
+//
+// FLS §6.1.2:37–45: non-const functions must emit runtime instructions.
+// FLS §4.8: reference parameter is a runtime value, not a compile-time constant.
+#[test]
+fn runtime_str_param_len_emits_ldr_not_constant() {
+    let asm = compile_to_asm(
+        "fn str_len(s: &str) -> usize { s.len() }\nfn main() -> i32 { str_len(\"hello\") as i32 }\n",
+    );
+    assert!(
+        asm.contains("ldr"),
+        "str_len must emit ldr to load s from stack slot (not a compile-time constant): {asm}"
+    );
+    assert!(
+        asm.contains("bl"),
+        "str_len must be called via bl (runtime dispatch, not inlined): {asm}"
+    );
+}
+
+#[test]
+fn runtime_str_param_len_not_folded() {
+    // Two calls with different string lengths. If str_len were constant-folded,
+    // both calls would emit the same constant. The ldr in the callee body proves
+    // the result comes from the parameter slot, not from a compile-time value.
+    let asm = compile_to_asm(
+        "fn str_len(s: &str) -> usize { s.len() }\nfn main() -> i32 { (str_len(\"hi\") + str_len(\"hello\")) as i32 }\n",
+    );
+    // Caller prepares argument lengths (2 and 5) as immediates; callee loads from slot.
+    assert!(
+        asm.contains("ldr"),
+        "str_len callee must emit ldr to load parameter from slot (not constant): {asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #7"),
+        "must not fold both calls to the combined constant #7: {asm}"
+    );
+}
+
+// Claim 77 adversarial: narrow integer const items wrap for sub/mul, not just add.
+//
+// Claim 75 tested addition (200+100=300→44). Claim 77 extends the fence to
+// subtraction underflow and multiplication overflow.
+//
+// Adversarial failure modes:
+//  1. narrow_const_value clamps negatives to 0: 5-10=-5 → 0, not 251
+//  2. narrow_const_value not called for mul results: 100*3=300 stored, not 44
+//  3. eval_const_expr returns None for underflowing i32 sub (wrong - i32 can hold -5)
+//
+// FLS §6.23, §4.1: all arithmetic in const contexts must respect declared width.
+// FLS §6.23 AMBIGUOUS: underflow should error; galvanic wraps pragmatically.
+#[test]
+fn claim_77_u8_const_sub_and_mul_wrap_not_saturate() {
+    // Subtraction underflow: 5 - 10 = -5 → as u8 = 251 (not 0 from saturation)
+    let asm = compile_to_asm(
+        "const X: u8 = 5 - 10;\nfn main() -> i32 { X as i32 }\n",
+    );
+    assert!(
+        asm.contains("#251"),
+        "claim_77 ASM: u8 const 5-10 must emit #251 (two's-complement), got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #0 "),
+        "claim_77 ASM: u8 const 5-10 must NOT emit #0 (saturating subtraction): {asm}"
+    );
+    assert!(
+        !asm.contains("#-5"),
+        "claim_77 ASM: u8 const 5-10 must NOT emit #-5 (un-narrowed i32): {asm}"
+    );
+
+    // Multiplication overflow: 100 * 3 = 300 → as u8 = 44 (not 300)
+    let asm2 = compile_to_asm(
+        "const X: u8 = 100 * 3;\nfn main() -> i32 { X as i32 }\n",
+    );
+    assert!(
+        asm2.contains("#44") || asm2.contains("#0x2c"),
+        "claim_77 ASM: u8 const 100*3 must emit #44 (wrapped), got:\n{asm2}"
+    );
+    assert!(
+        !asm2.contains("#300"),
+        "claim_77 ASM: u8 const 100*3 must NOT emit #300 (un-narrowed): {asm2}"
+    );
+
+    // Runtime comparison — subtraction underflow
+    let Some(exit_code) = compile_and_run(
+        "const X: u8 = 5 - 10;\nfn check(v: i32) -> i32 { if v == 251 { 1 } else { 0 } }\nfn main() -> i32 { check(X as i32) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 1, "claim_77: u8 const 5-10 must be 251 — exit {exit_code} (0=wrong wrap)");
+
+    // Runtime comparison — multiplication overflow
+    let Some(exit_code2) = compile_and_run(
+        "const X: u8 = 100 * 3;\nfn check(v: i32) -> i32 { if v == 44 { 1 } else { 0 } }\nfn main() -> i32 { check(X as i32) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code2, 1, "claim_77: u8 const 100*3 must be 44 — exit {exit_code2} (0=un-narrowed 300)");
+}
