@@ -24211,3 +24211,186 @@ fn main() -> i32 { classify(2) }
         "OR pattern in if-let must not constant-fold result to #10: {asm}"
     );
 }
+
+// ── Milestone 155: OR patterns in let-else (FLS §5.1.11, §8.1) ───────────────
+
+/// OR pattern in let-else: first alternative matches, binding continues.
+/// `let 1 | 2 | 3 = x else { return 0 }` where x=1 → returns 1.
+/// FLS §5.1.11: OR pattern matches if any alternative matches.
+/// FLS §8.1: let-else with refutable pattern; else block must diverge.
+#[test]
+fn milestone_155_let_else_or_first_alt_matches() {
+    let src = r#"
+fn classify(x: i32) -> i32 {
+    let 1 | 2 | 3 = x else { return 0 };
+    x
+}
+fn main() -> i32 { classify(1) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected 1 when x=1 matches first alt, got {exit_code}");
+}
+
+/// OR pattern in let-else: second alternative matches.
+#[test]
+fn milestone_155_let_else_or_second_alt_matches() {
+    let src = r#"
+fn classify(x: i32) -> i32 {
+    let 1 | 2 | 3 = x else { return 0 };
+    x
+}
+fn main() -> i32 { classify(2) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2, "expected 2 when x=2 matches second alt, got {exit_code}");
+}
+
+/// OR pattern in let-else: no alternative matches → else block runs and returns 0.
+#[test]
+fn milestone_155_let_else_or_no_match_else_taken() {
+    let src = r#"
+fn classify(x: i32) -> i32 {
+    let 1 | 2 | 3 = x else { return 0 };
+    x
+}
+fn main() -> i32 { classify(5) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected 0 when x=5 matches no alt, got {exit_code}");
+}
+
+/// OR pattern in let-else: on parameter — prevents constant folding.
+#[test]
+fn milestone_155_let_else_or_on_parameter() {
+    let src = r#"
+fn filter(x: i32) -> i32 {
+    let 10 | 20 | 30 = x else { return 99 };
+    x
+}
+fn main() -> i32 { filter(20) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 20, "expected 20 when x=20, got {exit_code}");
+}
+
+/// OR pattern in let-else: on parameter, else branch taken.
+#[test]
+fn milestone_155_let_else_or_on_parameter_else() {
+    let src = r#"
+fn filter(x: i32) -> i32 {
+    let 10 | 20 | 30 = x else { return 99 };
+    x
+}
+fn main() -> i32 { filter(15) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 99, "expected 99 when x=15 matches nothing, got {exit_code}");
+}
+
+/// OR pattern in let-else with enum unit variants.
+/// `let Status::Active | Status::Pending = s else { return 0 }`.
+#[test]
+fn milestone_155_let_else_or_enum_variants_first() {
+    let src = r#"
+enum Status { Active, Pending, Closed }
+fn check(s: Status) -> i32 {
+    let Status::Active | Status::Pending = s else { return 0 };
+    1
+}
+fn main() -> i32 { check(Status::Active) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected 1 for Active, got {exit_code}");
+}
+
+/// OR pattern in let-else with enum unit variants: second variant matches.
+#[test]
+fn milestone_155_let_else_or_enum_variants_second() {
+    let src = r#"
+enum Status { Active, Pending, Closed }
+fn check(s: Status) -> i32 {
+    let Status::Active | Status::Pending = s else { return 0 };
+    1
+}
+fn main() -> i32 { check(Status::Pending) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected 1 for Pending, got {exit_code}");
+}
+
+/// OR pattern in let-else with enum unit variants: unmatched variant triggers else.
+#[test]
+fn milestone_155_let_else_or_enum_variants_else() {
+    let src = r#"
+enum Status { Active, Pending, Closed }
+fn check(s: Status) -> i32 {
+    let Status::Active | Status::Pending = s else { return 0 };
+    1
+}
+fn main() -> i32 { check(Status::Closed) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected 0 for Closed (unmatched), got {exit_code}");
+}
+
+/// OR pattern in let-else: result used in arithmetic.
+#[test]
+fn milestone_155_let_else_or_result_in_arithmetic() {
+    let src = r#"
+fn safe_add(x: i32) -> i32 {
+    let 1 | 2 | 3 = x else { return 0 };
+    x + 10
+}
+fn main() -> i32 { safe_add(2) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 12, "expected 12 (2+10), got {exit_code}");
+}
+
+// ── Assembly inspection: OR patterns in let-else ──────────────────────────────
+
+/// Assembly check: OR pattern in let-else emits orr accumulation and cbz.
+///
+/// The pattern `let 1 | 2 = x else { return 0 }` must emit:
+///   - orr to accumulate equality results across alternatives
+///   - cbz to branch to else block on no-match
+///
+/// FLS §5.1.11 + §8.1: OR pattern in let-else is runtime when scrutinee is parameter.
+/// FLS §6.1.2 Constraint 1: non-const code emits runtime instructions.
+#[test]
+fn runtime_let_else_or_emits_orr_accumulation() {
+    let src = r#"
+fn classify(x: i32) -> i32 {
+    let 1 | 2 = x else { return 0 };
+    x
+}
+fn main() -> i32 { classify(1) }
+"#;
+    let asm = compile_to_asm(src);
+    assert!(asm.contains("orr"), "OR pattern in let-else must emit orr for accumulation: {asm}");
+    assert!(asm.contains("cbz"), "OR pattern in let-else must emit cbz for branch: {asm}");
+}
+
+/// Assembly check: OR pattern in let-else result not folded when scrutinee is parameter.
+///
+/// `classify(x)` must emit runtime orr+cbz and load x from its stack slot —
+/// cannot fold when `x` is a parameter unknown at compile time.
+/// FLS §6.1.2 Constraint 1.
+#[test]
+fn runtime_let_else_or_result_not_folded() {
+    let src = r#"
+fn classify(x: i32) -> i32 {
+    let 1 | 2 | 3 = x else { return 0 };
+    x
+}
+fn main() -> i32 { classify(2) }
+"#;
+    let asm = compile_to_asm(src);
+    assert!(asm.contains("orr"), "OR pattern in let-else must emit runtime orr: {asm}");
+    // Result `x` must be loaded from parameter stack slot — ldr proves it is not folded.
+    // A constant-folding interpreter would emit `mov x0, #<N>` with no ldr in classify.
+    assert!(
+        asm.contains("ldr     x"),
+        "OR pattern in let-else result must load from slot (not folded to immediate): {asm}"
+    );
+}
