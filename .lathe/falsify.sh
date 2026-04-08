@@ -514,6 +514,23 @@ else
     pass "Claim 25: let-else mixed-kind OR emits runtime orr+cbz for both alternatives (not folded)"
 fi
 
+# ── Claim 26: @ binding pattern in let-else emits runtime check and binding ───
+#
+# Promise: `let n @ 1..=5 = x else { return 0 }; n * 2` must emit cmp (range
+# check), cbz (else-branch), and mul/add (binding use) — not `mov x0, #6`.
+# Without the Pat::Bound arm in let-else lowering, the program fails at
+# compile time with "Unsupported". With constant folding, the result is #6.
+#
+# Introduced in cycle 62 (FLS §5.1.4 + §8.1 — let-else @ binding lowering).
+# References: claims.md Claim 26.
+
+echo "--- Claim 26: @ binding pattern in let-else emits runtime check and binding (not folded) ---"
+if cargo test --test e2e --quiet -- runtime_let_else_bound_pattern_emits_cmp_and_binding_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 26" "runtime_let_else_bound_pattern_emits_cmp_and_binding_not_folded FAILED — let-else @ binding may not emit runtime range check, else-branch, or binding use; or result was constant-folded"
+else
+    pass "Claim 26: let-else @ binding emits runtime cmp+cbz+binding (not folded)"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

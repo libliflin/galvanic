@@ -24959,3 +24959,157 @@ fn main() -> i32 { classify(15) }
         "let-else mixed OR must not constant-fold result to #1: {asm}"
     );
 }
+
+// ── Milestone 157: @ binding patterns in let-else (FLS §5.1.4, §8.1) ────────
+
+/// Verify that `let n @ 1..=5 = x else { return 0 }; n * 2` emits a runtime
+/// range check (cmp instructions) and binds the value at runtime (not folded).
+///
+/// Adversarial: the scrutinee is a function parameter — the range check cannot
+/// be folded to a constant. An interpreter would emit `mov x0, #6` for `f(3)`.
+/// A compiler must emit `cmp` (range bounds check) plus `add` (for `n * 2`).
+///
+/// FLS §5.1.4: `@` pattern checks the sub-pattern, then binds if matched.
+/// FLS §8.1: let-else bindings are in scope after the statement.
+/// FLS §6.1.2 Constraint 1: `fn f` is not a const context → runtime codegen.
+#[test]
+fn runtime_let_else_bound_pattern_emits_cmp_and_binding_not_folded() {
+    let src = r#"
+fn f(x: i32) -> i32 {
+    let n @ 1..=5 = x else { return 0 };
+    n * 2
+}
+fn main() -> i32 { f(3) }
+"#;
+    let asm = compile_to_asm(src);
+    // Range check must emit cmp instructions (not folded).
+    assert!(asm.contains("cmp"), "let-else @ range must emit cmp for range bounds check: {asm}");
+    // Binding must emit cbz (conditional branch for else).
+    assert!(asm.contains("cbz"), "let-else @ range must emit cbz for else-branch: {asm}");
+    // mul instruction or add chain for n * 2 must appear.
+    assert!(
+        asm.contains("mul") || asm.contains("add"),
+        "let-else @ binding must emit multiply/add for n * 2: {asm}"
+    );
+    // f(3) → 3*2 = 6; must NOT be constant-folded.
+    assert!(
+        !asm.contains("mov     x0, #6"),
+        "let-else @ binding result must NOT be constant-folded to #6: {asm}"
+    );
+}
+
+/// Literal sub-pattern variant: `let n @ 42 = x else { return 0 }; n + 1`.
+///
+/// Adversarial: `f(42)` → 43. An interpreter would emit `mov x0, #43`.
+/// A compiler must emit an equality check (cmp/sub) and a runtime add.
+///
+/// FLS §5.1.4, §5.2, §8.1.
+#[test]
+fn runtime_let_else_bound_literal_emits_eq_check_not_folded() {
+    let src = r#"
+fn f(x: i32) -> i32 {
+    let n @ 42 = x else { return 0 };
+    n + 1
+}
+fn main() -> i32 { f(42) }
+"#;
+    let asm = compile_to_asm(src);
+    // Equality check for the literal 42.
+    assert!(asm.contains("cmp") || asm.contains("sub"), "let-else @ literal must emit equality check: {asm}");
+    assert!(asm.contains("cbz"), "let-else @ literal must emit cbz for else-branch: {asm}");
+    // f(42) → 43; must NOT be constant-folded.
+    assert!(
+        !asm.contains("mov     x0, #43"),
+        "let-else @ literal result must NOT be constant-folded to #43: {asm}"
+    );
+}
+
+// ── Compile-and-run tests for milestone 157 ──────────────────────────────────
+
+#[test]
+fn milestone_157_let_else_bound_range_match() {
+    let Some(exit_code) = compile_and_run(
+        "fn f(x: i32) -> i32 { let n @ 1..=5 = x else { return 0 }; n * 2 }\n\
+         fn main() -> i32 { f(3) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 6); // 3 * 2
+}
+
+#[test]
+fn milestone_157_let_else_bound_range_else_taken() {
+    let Some(exit_code) = compile_and_run(
+        "fn f(x: i32) -> i32 { let n @ 1..=5 = x else { return 0 }; n * 2 }\n\
+         fn main() -> i32 { f(9) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 0); // 9 not in 1..=5 → else returns 0
+}
+
+#[test]
+fn milestone_157_let_else_bound_range_boundary_lo() {
+    let Some(exit_code) = compile_and_run(
+        "fn f(x: i32) -> i32 { let n @ 1..=5 = x else { return 0 }; n * 2 }\n\
+         fn main() -> i32 { f(1) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 2); // 1 * 2
+}
+
+#[test]
+fn milestone_157_let_else_bound_range_boundary_hi() {
+    let Some(exit_code) = compile_and_run(
+        "fn f(x: i32) -> i32 { let n @ 1..=5 = x else { return 0 }; n * 2 }\n\
+         fn main() -> i32 { f(5) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 10); // 5 * 2
+}
+
+#[test]
+fn milestone_157_let_else_bound_literal_match() {
+    let Some(exit_code) = compile_and_run(
+        "fn f(x: i32) -> i32 { let n @ 42 = x else { return 0 }; n + 1 }\n\
+         fn main() -> i32 { f(42) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 43);
+}
+
+#[test]
+fn milestone_157_let_else_bound_literal_else_taken() {
+    let Some(exit_code) = compile_and_run(
+        "fn f(x: i32) -> i32 { let n @ 42 = x else { return 0 }; n + 1 }\n\
+         fn main() -> i32 { f(7) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 0); // 7 ≠ 42 → else
+}
+
+#[test]
+fn milestone_157_let_else_bound_on_parameter() {
+    let Some(exit_code) = compile_and_run(
+        "fn f(x: i32) -> i32 { let n @ 0..=9 = x else { return 99 }; n }\n\
+         fn main() -> i32 { f(7) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 7);
+}
+
+#[test]
+fn milestone_157_let_else_bound_result_in_arithmetic() {
+    let Some(exit_code) = compile_and_run(
+        "fn f(x: i32) -> i32 { let n @ 1..=10 = x else { return 0 }; n + 3 }\n\
+         fn main() -> i32 { f(4) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 7); // 4 + 3
+}
