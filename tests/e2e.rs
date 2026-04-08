@@ -33362,11 +33362,11 @@ fn milestone_196_for_arr_mut_borrow_param() {
     let Some(exit_code) = compile_and_run(
         "fn negate_all(mut a: [i32; 3]) -> i32 {\
  for x in &mut a { *x = 0 - *x; } a[0] + a[1] + a[2] }\n\
-fn main() -> i32 { negate_all([1, 2, 3]) }\n",
+fn main() -> i32 { negate_all([-1, -2, -3]) }\n",
     ) else {
         return;
     };
-    assert_eq!(exit_code, -6, "expected -6 (sum of negated [1,2,3]), got {exit_code}");
+    assert_eq!(exit_code, 6, "expected 6 (sum of negated [-1,-2,-3] = [1,2,3]), got {exit_code}");
 }
 
 /// Milestone 196: mutation result used in arithmetic.

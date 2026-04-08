@@ -2077,6 +2077,34 @@ impl<'src> Parser<'src> {
         self.parse_assign()
     }
 
+    /// Returns `true` if `expr` is a "block-like" expression (one that ends
+    /// with a closing brace `}`).
+    ///
+    /// FLS §6.21 / Rust Reference §Expressions:
+    /// Block-like expressions (`if`, `match`, `loop`, `while`, `for`, bare
+    /// blocks) do not continue to the right with binary operators in statement
+    /// position. For example, `if c {} * x` should parse as two statements
+    /// (`if c {}` and `*x`), NOT as `(if c {}) * x` (multiplication).
+    ///
+    /// This check is used in every binary-operator parse function to stop
+    /// consuming operators once the LHS is a block-like expression.
+    ///
+    /// FLS §6.21 AMBIGUOUS: The spec does not explicitly define this
+    /// disambiguation rule; it is inherited from Rust's expression grammar.
+    fn is_expr_with_block(expr: &Expr) -> bool {
+        matches!(
+            expr.kind,
+            ExprKind::Block(_)
+                | ExprKind::If { .. }
+                | ExprKind::IfLet { .. }
+                | ExprKind::Loop { .. }
+                | ExprKind::While { .. }
+                | ExprKind::WhileLet { .. }
+                | ExprKind::For { .. }
+                | ExprKind::Match { .. }
+        )
+    }
+
     /// Assignment and compound assignment — FLS §6.5.10, §6.5.11. Right-associative.
     ///
     /// Plain `=` lowers to `ExprKind::Binary { op: BinOp::Assign, .. }`.
@@ -2086,6 +2114,11 @@ impl<'src> Parser<'src> {
     /// from plain assignment. The left-hand side must be a place expression.
     fn parse_assign(&mut self) -> Result<Expr, ParseError> {
         let lhs = self.parse_range()?;
+
+        // Block-like LHS cannot be the LHS of assignment in statement context.
+        if Self::is_expr_with_block(&lhs) {
+            return Ok(lhs);
+        }
 
         if self.eat(TokenKind::Eq) {
             let rhs = self.parse_assign()?; // right-associative
@@ -2149,6 +2182,10 @@ impl<'src> Parser<'src> {
     fn parse_range(&mut self) -> Result<Expr, ParseError> {
         let lhs = self.parse_or()?;
 
+        if Self::is_expr_with_block(&lhs) {
+            return Ok(lhs);
+        }
+
         if self.peek_kind() == TokenKind::DotDot || self.peek_kind() == TokenKind::DotDotEq {
             let inclusive = self.peek_kind() == TokenKind::DotDotEq;
             self.advance();
@@ -2171,7 +2208,7 @@ impl<'src> Parser<'src> {
     fn parse_or(&mut self) -> Result<Expr, ParseError> {
         let mut lhs = self.parse_and()?;
 
-        while self.peek_kind() == TokenKind::OrOr {
+        while !Self::is_expr_with_block(&lhs) && self.peek_kind() == TokenKind::OrOr {
             self.advance();
             let rhs = self.parse_and()?;
             let span = lhs.span.to(rhs.span);
@@ -2188,7 +2225,7 @@ impl<'src> Parser<'src> {
     fn parse_and(&mut self) -> Result<Expr, ParseError> {
         let mut lhs = self.parse_cmp()?;
 
-        while self.peek_kind() == TokenKind::AndAnd {
+        while !Self::is_expr_with_block(&lhs) && self.peek_kind() == TokenKind::AndAnd {
             self.advance();
             let rhs = self.parse_cmp()?;
             let span = lhs.span.to(rhs.span);
@@ -2213,6 +2250,7 @@ impl<'src> Parser<'src> {
         let mut lhs = self.parse_bitor()?;
 
         loop {
+            if Self::is_expr_with_block(&lhs) { break; }
             let op = match self.peek_kind() {
                 TokenKind::EqEq => BinOp::Eq,
                 TokenKind::Ne => BinOp::Ne,
@@ -2238,7 +2276,7 @@ impl<'src> Parser<'src> {
     fn parse_bitor(&mut self) -> Result<Expr, ParseError> {
         let mut lhs = self.parse_bitxor()?;
 
-        while self.peek_kind() == TokenKind::Or {
+        while !Self::is_expr_with_block(&lhs) && self.peek_kind() == TokenKind::Or {
             self.advance();
             let rhs = self.parse_bitxor()?;
             let span = lhs.span.to(rhs.span);
@@ -2259,7 +2297,7 @@ impl<'src> Parser<'src> {
     fn parse_bitxor(&mut self) -> Result<Expr, ParseError> {
         let mut lhs = self.parse_bitand()?;
 
-        while self.peek_kind() == TokenKind::Caret {
+        while !Self::is_expr_with_block(&lhs) && self.peek_kind() == TokenKind::Caret {
             self.advance();
             let rhs = self.parse_bitand()?;
             let span = lhs.span.to(rhs.span);
@@ -2287,7 +2325,7 @@ impl<'src> Parser<'src> {
     fn parse_bitand(&mut self) -> Result<Expr, ParseError> {
         let mut lhs = self.parse_shift()?;
 
-        while self.peek_kind() == TokenKind::And {
+        while !Self::is_expr_with_block(&lhs) && self.peek_kind() == TokenKind::And {
             self.advance();
             let rhs = self.parse_shift()?;
             let span = lhs.span.to(rhs.span);
@@ -2309,6 +2347,7 @@ impl<'src> Parser<'src> {
         let mut lhs = self.parse_additive()?;
 
         loop {
+            if Self::is_expr_with_block(&lhs) { break; }
             let op = match self.peek_kind() {
                 TokenKind::Shl => BinOp::Shl,
                 TokenKind::Shr => BinOp::Shr,
@@ -2331,6 +2370,7 @@ impl<'src> Parser<'src> {
         let mut lhs = self.parse_multiplicative()?;
 
         loop {
+            if Self::is_expr_with_block(&lhs) { break; }
             let op = match self.peek_kind() {
                 TokenKind::Plus => BinOp::Add,
                 TokenKind::Minus => BinOp::Sub,
@@ -2384,6 +2424,7 @@ impl<'src> Parser<'src> {
         let mut lhs = self.parse_cast()?;
 
         loop {
+            if Self::is_expr_with_block(&lhs) { break; }
             let op = match self.peek_kind() {
                 TokenKind::Star => BinOp::Mul,
                 TokenKind::Slash => BinOp::Div,
