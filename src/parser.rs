@@ -587,6 +587,14 @@ impl<'src> Parser<'src> {
         let name = self.current_span();
         self.advance();
 
+        // FLS §4.14: Optional where clause on trait definition.
+        // `trait Transform where Self: Sized { ... }`
+        // The where clause is parsed and discarded — galvanic does not enforce
+        // trait bounds at the type-system level during monomorphization.
+        // FLS §4.14 AMBIGUOUS: The spec does not specify whether where-clause bounds
+        // on trait definitions are checked at definition time or implementation time.
+        self.parse_where_clause();
+
         self.expect(TokenKind::OpenBrace)?;
 
         let mut methods = Vec::new();
@@ -708,12 +716,20 @@ impl<'src> Parser<'src> {
             ) {
                 break;
             }
-            // Consume the LHS type (identifier, possibly `&` for lifetime-bounded types).
-            if self.peek_kind() == TokenKind::Ident {
-                self.advance(); // skip type param name or path
+            // Consume the LHS type (identifier or `Self`, possibly `&`-prefixed).
+            // FLS §4.14: LHS may be a type parameter (`T`), the receiver type
+            // (`Self`), or a reference type (`&T`). `Self` is a keyword, not an
+            // identifier — handle both cases.
+            if self.peek_kind() == TokenKind::Ident
+                || self.peek_kind() == TokenKind::KwSelfUpper
+            {
+                self.advance(); // skip type param name, path, or `Self`
             } else if self.peek_kind() == TokenKind::And {
                 self.advance(); // skip `&`
-                if self.peek_kind() == TokenKind::Ident {
+                if matches!(
+                    self.peek_kind(),
+                    TokenKind::Ident | TokenKind::KwSelfUpper
+                ) {
                     self.advance(); // skip the type after `&`
                 }
             } else {
@@ -942,6 +958,14 @@ impl<'src> Parser<'src> {
             }
         }
 
+        // FLS §4.14: Optional where clause on struct definition.
+        // `struct Wrapper<T> where T: Getter { val: T }`
+        // Bounds are parsed and discarded — galvanic's monomorphization infers
+        // concrete types from call-site arguments, not from where-clause bounds.
+        // FLS §4.14 AMBIGUOUS: The spec does not specify when where-clause bounds
+        // on struct definitions are checked (parse time, type-check, or mono).
+        self.parse_where_clause();
+
         let (kind, end) = match self.peek_kind() {
             // Named-field struct: `struct Foo { … }`
             TokenKind::OpenBrace => {
@@ -1027,6 +1051,13 @@ impl<'src> Parser<'src> {
             }
             self.expect(TokenKind::Gt)?;
         }
+
+        // FLS §4.14: Optional where clause on enum definition.
+        // `enum Maybe<T> where T: Sized { Some(T), None }`
+        // Bounds are parsed and discarded — same strategy as structs and fns.
+        // FLS §4.14 AMBIGUOUS: The spec does not specify when where-clause bounds
+        // on enum definitions are checked (parse time, type-check, or mono).
+        self.parse_where_clause();
 
         // Enum body is always `{ … }`.
         self.expect(TokenKind::OpenBrace)?;

@@ -127,3 +127,8 @@ fn fls_12_1_trait_bounds() {
 fn fls_4_14_where_clauses() {
     assert_galvanic_accepts("fls_4_14_where_clauses.rs");
 }
+
+#[test]
+fn fls_4_14_where_clauses_on_types() {
+    assert_galvanic_accepts("fls_4_14_where_clauses_on_types.rs");
+}
