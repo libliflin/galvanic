@@ -24142,6 +24142,66 @@ fn main() -> i32 { count_while_in_set(5) }
     assert_eq!(exit_code, 0, "expected 0 iterations when start=5 not in set, got {exit_code}");
 }
 
+/// Milestone 154: while-let with OR pattern over enum variants — first alternative matches.
+///
+/// `while let Status::Active | Status::Pending = s` must execute the body when s is Active.
+/// FLS §5.1.11 + §6.15.4.
+#[test]
+fn milestone_154_while_let_or_enum_variants_first() {
+    let src = r#"
+enum Status { Active, Pending, Closed }
+fn check(s: Status) -> i32 {
+    while let Status::Active | Status::Pending = s {
+        return 1;
+    }
+    0
+}
+fn main() -> i32 { check(Status::Active) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "Active matches Active|Pending, expected 1, got {exit_code}");
+}
+
+/// Milestone 154: while-let with OR pattern over enum variants — second alternative matches.
+///
+/// `while let Status::Active | Status::Pending = s` must execute the body when s is Pending.
+/// FLS §5.1.11 + §6.15.4.
+#[test]
+fn milestone_154_while_let_or_enum_variants_second() {
+    let src = r#"
+enum Status { Active, Pending, Closed }
+fn check(s: Status) -> i32 {
+    while let Status::Active | Status::Pending = s {
+        return 2;
+    }
+    0
+}
+fn main() -> i32 { check(Status::Pending) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2, "Pending matches Active|Pending, expected 2, got {exit_code}");
+}
+
+/// Milestone 154: while-let with OR pattern over enum variants — no match, loop skipped.
+///
+/// `while let Status::Active | Status::Pending = s` must skip the body when s is Closed.
+/// FLS §5.1.11 + §6.15.4.
+#[test]
+fn milestone_154_while_let_or_enum_variants_else() {
+    let src = r#"
+enum Status { Active, Pending, Closed }
+fn check(s: Status) -> i32 {
+    while let Status::Active | Status::Pending = s {
+        return 1;
+    }
+    0
+}
+fn main() -> i32 { check(Status::Closed) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "Closed does not match Active|Pending, expected 0, got {exit_code}");
+}
+
 // ── Assembly inspection: OR patterns in if-let ────────────────────────────────
 
 /// Assembly check: OR pattern in if-let emits orr accumulation and cbz.
@@ -24469,5 +24529,47 @@ fn main() -> i32 { count_up(1) }
     assert!(
         asm.contains("ldr     x"),
         "while-let OR result must load counter from stack slot (not folded to immediate): {asm}"
+    );
+}
+
+/// Assembly check: OR pattern in while-let with enum variants emits orr and cbz.
+///
+/// Verifies the enum-variant OR path through `pat_scalar_imm` within a while-let loop header.
+/// The scrutinee `s` is a function parameter, so the discriminant check is runtime.
+///
+///   while let Status::Active | Status::Pending = s { ... }
+///
+/// Must emit:
+///   - orr to accumulate discriminant equality results for both alternatives
+///   - cbz to exit the loop when accumulated flag is 0
+///
+/// This parallels `runtime_if_let_or_enum_emits_orr_accumulation` but for the while-let context.
+/// Attack: dropping OR accumulation and checking only the first alternative (Status::Active).
+/// That regression passes `check(Status::Active)` but fails `check(Status::Pending)` — and
+/// would be invisible without this locally-runnable assembly check.
+///
+/// FLS §5.1.11 + §6.15.4: OR pattern check in while-let is runtime for enum-variant patterns.
+/// FLS §6.1.2 Constraint 1: non-const code emits runtime instructions.
+#[test]
+fn runtime_while_let_or_enum_emits_orr_accumulation() {
+    let src = r#"
+enum Status { Active, Pending, Closed }
+fn check(s: Status) -> i32 {
+    while let Status::Active | Status::Pending = s {
+        return 1;
+    }
+    0
+}
+fn main() -> i32 { check(Status::Active) }
+"#;
+    let asm = compile_to_asm(src);
+    // OR accumulation must emit `orr` to combine discriminant equality results for both variants.
+    assert!(asm.contains("orr"), "OR pattern with enum variants in while-let must emit orr: {asm}");
+    // Must emit a conditional branch to exit the loop when no variant matched.
+    assert!(asm.contains("cbz"), "OR pattern with enum variants in while-let must emit cbz: {asm}");
+    // Must NOT constant-fold — Status::Active has discriminant 0, but the check is runtime.
+    assert!(
+        !asm.contains("mov     x0, #1\n\tret"),
+        "OR pattern in while-let must not constant-fold result to #1: {asm}"
     );
 }
