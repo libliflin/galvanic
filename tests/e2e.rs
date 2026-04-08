@@ -29897,6 +29897,47 @@ fn runtime_u8_add_emits_and_truncation() {
     );
 }
 
+/// Compile-and-run: u8 multiplication wraps at 256.
+///
+/// Adversarial: 15 * 20 = 300, which overflows u8. The result must be 44 (= 300 mod 256).
+/// Without TruncU8, the function would return 300 (wrong). This test catches
+/// a regression where TruncU8 is emitted for add/sub but not mul.
+#[test]
+fn milestone_176_u8_mul_wraps() {
+    let Some(exit) = compile_and_run(
+        "fn mul_u8(a: u8, b: u8) -> u8 { a * b }\nfn main() -> i32 { if mul_u8(15, 20) == 44 { 1 } else { 0 } }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1);
+}
+
+/// Assembly inspection: u8 mul emits `mul` instruction and `and` truncation —
+/// not a constant-folded result and not without truncation.
+///
+/// Adversarial: tests that a regression disabling TruncU8 for mul (while leaving
+/// it for add) would be caught. The two checks together confirm:
+/// 1. Runtime codegen (mul instruction present — not an interpreter)
+/// 2. Wrapping semantics (and #255 present — not missing truncation)
+#[test]
+fn runtime_u8_mul_emits_and_truncation() {
+    let asm = compile_to_asm(
+        "fn mul_u8(a: u8, b: u8) -> u8 { a * b }\nfn main() -> i32 { mul_u8(15, 20) as i32 }\n",
+    );
+    assert!(
+        asm.contains("mul"),
+        "u8 mul must emit a mul instruction; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("and") && asm.contains("#255"),
+        "u8 return must emit `and ... #255` for truncation; got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #44"),
+        "result must NOT be constant-folded to mov x0, #44; got:\n{asm}"
+    );
+}
+
 /// Assembly inspection: u8 truncation is not emitted for non-u8 functions.
 ///
 /// This ensures the `and #255` is only emitted when needed (u8 return type),

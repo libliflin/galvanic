@@ -2587,25 +2587,26 @@ function parameters are not statically known at compile time.
 
 ---
 
-## Claim 64: u8 arithmetic emits runtime `add` and `and` truncation (not constant-folded)
+## Claim 64: u8 arithmetic emits runtime instructions and `and` truncation (not constant-folded)
 
 **Stakeholder**: William (researcher), Compiler Researchers
 
 **Promise**: The `u8` type wraps at 256 per FLS §6.23. When a function returns
 `u8`, galvanic must emit both:
-1. The arithmetic instruction (`add`, `sub`, etc.) at runtime — proving this is
+1. The arithmetic instruction (`add`, `sub`, `mul`, etc.) at runtime — proving this is
    a compiler, not an interpreter, and
 2. An `and w{r}, w{r}, #255` instruction (TruncU8) at the return boundary —
-   proving the overflow wrapping semantics are correctly implemented.
+   proving the overflow wrapping semantics are correctly implemented for ALL operators,
+   not just `add`.
 
-Without TruncU8, `200_u8 + 100_u8` would return 300 instead of 44. A comparison
-`add_u8(200, 100) == 44` would fail (return 0) without truncation. The compile-and-run
-test catches this.
+Without TruncU8, `200_u8 + 100_u8` would return 300 instead of 44. Similarly,
+`15_u8 * 20_u8 = 300` must wrap to 44. The falsification suite tests both add and mul
+to prevent operator-specific regressions (e.g., TruncU8 disabled for mul only).
 
 **FLS §4.1**: "The unsigned integer types have a range of [0, 2^N - 1]."
 **FLS §6.23**: At runtime, integer arithmetic wraps in two's complement. For u8, the
 modulus is 256.
-**FLS §6.1.2 Constraint 1**: Function parameters are not const contexts; the `add`
+**FLS §6.1.2 Constraint 1**: Function parameters are not const contexts; the arithmetic
 must be emitted at runtime even though the values happen to be known at the call site.
 
 **Violated if** `compile_to_asm("fn add_u8(a: u8, b: u8) -> u8 { a + b } ...")`:
@@ -2613,4 +2614,9 @@ must be emitted at runtime even though the values happen to be known at the call
 - lacks `and ... #255` (no truncation, wrapping semantics broken), OR
 - contains `mov x0, #44` (constant-folded to the wrapped result without runtime code)
 
-**Tests**: `cargo test --test e2e -- runtime_u8_add_emits_and_truncation milestone_176_u8_add_wraps`
+**Violated if** `compile_to_asm("fn mul_u8(a: u8, b: u8) -> u8 { a * b } ...")`:
+- lacks `mul` in the function body (no arithmetic emitted), OR
+- lacks `and ... #255` (TruncU8 missing for mul — operator-specific regression), OR
+- contains `mov x0, #44` (constant-folded — `15 * 20 = 300 mod 256 = 44`)
+
+**Tests**: `cargo test --test e2e -- runtime_u8_add_emits_and_truncation runtime_u8_mul_emits_and_truncation milestone_176_u8_add_wraps milestone_176_u8_mul_wraps`
