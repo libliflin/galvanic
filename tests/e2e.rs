@@ -23261,3 +23261,189 @@ fn main() -> i32 {
     let Some(exit_code) = compile_and_run(src) else { return; };
     assert_eq!(exit_code, 23); // 4*2 + 15 = 8 + 15 = 23
 }
+
+// ── Milestone 151: `impl FnOnce` in parameter position (FLS §6.14, §4.13) ─────
+//
+// FnOnce is the base trait of the closure trait hierarchy. Every closure
+// implements FnOnce: call_once(self, args) takes `self` by value, consuming
+// the closure and its captured environment.
+//
+// FLS §4.13: Fn, FnMut, FnOnce — the three callable closure traits.
+// FLS §6.14: Every closure type implements FnOnce. Closures that do not mutate
+//             captures also implement FnMut and Fn.
+// FLS §6.22: Capturing — for Copy types, "consuming" a capture is a copy.
+//
+// Galvanic represents `impl FnOnce(T) -> R` as TyKind::FnPtr, the same
+// representation as `impl Fn(T) -> R`. The call site emits `blr xN` — an
+// indirect call through a register holding the closure function pointer.
+// This is correct: FnOnce::call_once can only be called once, so there is
+// no observable difference between Fn and FnOnce call sites in the codegen.
+//
+// FLS §4.13: AMBIGUOUS — the spec does not specify how FnOnce's single-call
+// constraint should manifest in codegen for a compiler without a borrow
+// checker. Galvanic documents this: the constraint is type-theoretic only;
+// the emitted assembly is identical to an Fn call.
+
+/// Milestone 151: basic `impl FnOnce() -> i32` — non-capturing closure.
+///
+/// FLS §6.14: A non-capturing closure `|| 42` implements all three callable
+/// traits (Fn, FnMut, FnOnce) and may be passed wherever any is expected.
+#[test]
+fn milestone_151_fn_once_basic() {
+    let src = r#"
+fn consume(f: impl FnOnce() -> i32) -> i32 { f() }
+fn main() -> i32 { consume(|| 42) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "|| 42 returns 42, got {exit_code}");
+}
+
+/// Milestone 151: FnOnce capturing a value by move.
+///
+/// FLS §6.14: A `move` closure consumes its captures into the closure
+/// environment. FLS §6.22: For Copy types the move is a copy.
+#[test]
+fn milestone_151_fn_once_captures_value() {
+    let src = r#"
+fn consume(f: impl FnOnce() -> i32) -> i32 { f() }
+fn main() -> i32 {
+    let x = 7;
+    consume(move || x)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "move || x should return x=7, got {exit_code}");
+}
+
+/// Milestone 151: FnOnce with a runtime-unknown captured value.
+///
+/// FLS §6.1.2: `make_and_run(n)` is not a const context; the captured `n`
+/// is a runtime value. The closure must not be folded to a constant.
+#[test]
+fn milestone_151_fn_once_on_parameter() {
+    let src = r#"
+fn consume(f: impl FnOnce() -> i32) -> i32 { f() }
+fn make_and_run(n: i32) -> i32 { consume(move || n) }
+fn main() -> i32 { make_and_run(13) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 13, "captured parameter n=13, got {exit_code}");
+}
+
+/// Milestone 151: FnOnce result used in arithmetic.
+///
+/// FLS §6.12.1: The return value of calling an `impl FnOnce` is an rvalue
+/// usable in further expressions.
+#[test]
+fn milestone_151_fn_once_result_in_arithmetic() {
+    let src = r#"
+fn consume(f: impl FnOnce() -> i32) -> i32 { f() }
+fn main() -> i32 { consume(|| 20) + consume(|| 22) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "20+22=42, got {exit_code}");
+}
+
+/// Milestone 151: FnOnce result used in an if expression.
+///
+/// FLS §6.17: The result of calling `impl FnOnce` can be used as a condition
+/// or as a branch value.
+#[test]
+fn milestone_151_fn_once_result_in_if() {
+    let src = r#"
+fn consume(f: impl FnOnce() -> i32) -> i32 { f() }
+fn main() -> i32 {
+    let x = consume(|| 5);
+    if x > 3 { x } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 5, "consume(|| 5) > 3 → 5, got {exit_code}");
+}
+
+/// Milestone 151: FnOnce result passed to another function.
+///
+/// FLS §6.12.1: The call result is a value that can be forwarded as an argument.
+#[test]
+fn milestone_151_fn_once_result_passed_to_fn() {
+    let src = r#"
+fn consume(f: impl FnOnce() -> i32) -> i32 { f() }
+fn double(n: i32) -> i32 { n * 2 }
+fn main() -> i32 { double(consume(|| 21)) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "double(21)=42, got {exit_code}");
+}
+
+/// Milestone 151: two different closures both satisfy `impl FnOnce`.
+///
+/// FLS §6.14: Each closure literal is a distinct anonymous type. Both implement
+/// FnOnce and can be passed independently to the same accepting function.
+#[test]
+fn milestone_151_fn_once_two_types() {
+    let src = r#"
+fn consume(f: impl FnOnce() -> i32) -> i32 { f() }
+fn add(a: i32, b: i32) -> i32 { a + b }
+fn main() -> i32 { add(consume(|| 20), consume(|| 22)) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "20+22=42, got {exit_code}");
+}
+
+/// Milestone 151: FnOnce called from a non-generic wrapper.
+///
+/// FLS §12: Monomorphization: the `impl FnOnce` monomorphization is performed
+/// at the call site; the wrapper function itself is not generic.
+#[test]
+fn milestone_151_fn_once_called_from_non_generic() {
+    let src = r#"
+fn consume(f: impl FnOnce() -> i32) -> i32 { f() }
+fn invoke() -> i32 { consume(|| 42) }
+fn main() -> i32 { invoke() }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 42, "invoke() → 42, got {exit_code}");
+}
+
+/// Assembly check: `impl FnOnce` call emits `blr` (not a folded constant).
+///
+/// FLS §6.1.2 (Constraint 1): `make_and_run(n)` where `n` is a function
+/// parameter is not a const context. The call must execute at runtime via
+/// `blr xN`, not be folded to `mov x0, #13`.
+#[test]
+fn runtime_fn_once_call_emits_blr_not_folded() {
+    let src = r#"
+fn consume(f: impl FnOnce() -> i32) -> i32 { f() }
+fn make_and_run(n: i32) -> i32 { consume(move || n) }
+fn main() -> i32 { make_and_run(21) }
+"#;
+    let asm = compile_to_asm(src);
+    // The impl FnOnce call inside `consume` must use `blr` (indirect call through register).
+    assert!(asm.contains("blr"), "impl FnOnce call must emit blr: {asm}");
+    // The closure must be emitted as a separate function label, not inlined as a constant.
+    assert!(
+        asm.contains("__closure_make_and_run_0"),
+        "closure function label must be emitted (not folded): {asm}"
+    );
+}
+
+/// Assembly check: FnOnce closure with arithmetic in the body emits runtime add.
+///
+/// FLS §6.1.2 (Constraint 1): `run(x)` where `x` is a function parameter
+/// is not a const context. The closure body `x + 1` must emit an `add`
+/// instruction, not be folded to a constant.
+#[test]
+fn runtime_fn_once_capture_emits_runtime_add() {
+    let src = r#"
+fn consume(f: impl FnOnce() -> i32) -> i32 { f() }
+fn run(x: i32) -> i32 { consume(move || x + 1) }
+fn main() -> i32 { run(41) }
+"#;
+    let asm = compile_to_asm(src);
+    assert!(asm.contains("blr"), "impl FnOnce call must emit blr: {asm}");
+    assert!(asm.contains("add"), "closure body x+1 must emit add instruction: {asm}");
+    assert!(
+        !asm.contains("mov     x0, #42"),
+        "must not constant-fold x+1 to #42: {asm}"
+    );
+}
