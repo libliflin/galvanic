@@ -1436,7 +1436,7 @@ pub enum IrValue {
     ///
     /// ARM64 note: `i32` constants up to 16 bits emit as `mov x0, #n`
     /// (a single `MOVZ` instruction, 4 bytes, always cache-line-aligned).
-    /// Larger values require `MOVZ`/`MOVK` sequences — future work.
+    /// Larger values use `MOVZ`+`MOVK` sequences (8 bytes, 2 instruction slots).
     I32(i32),
 
     /// The unit value `()`.

@@ -375,26 +375,19 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
         }
 
         // FLS §2.4.4.1: Load integer immediate into virtual register.
-        // ARM64: `mov x{reg}, #{n}` covers both positive and negative values.
-        //   Positive (0 ≤ n ≤ 65535): assembler emits MOVZ.
-        //   Negative (-65536 ≤ n ≤ -1): assembler emits MOVN (move NOT).
-        //     Example: `mov x0, #-1` → MOVN x0, #0 (encodes as NOT(0) = -1).
-        //
-        // The GNU assembler (aarch64-linux-gnu-as) accepts `mov xN, #n`
-        // for any i16-range immediate and selects the correct encoding.
-        // Values outside the immediate range require MOVZ+MOVK sequences —
-        // not yet supported; deferred to a future milestone.
+        // ARM64: values in [-65536, 65535] assemble to a single MOVZ or MOVN.
+        // Larger 32-bit values require a MOVZ+MOVK pair (2 instructions, 8 bytes).
         //
         // FLS §5.2: Negative literal patterns materialise their value via
-        // LoadImm with a negative immediate — this is the first caller of
-        // negative LoadImm.
+        // LoadImm with a negative immediate.
         //
-        // Cache-line note: one ARM64 instruction (MOVZ or MOVN) = 4 bytes.
+        // FLS §6.23: AMBIGUOUS — galvanic uses 64-bit registers for i32 values;
+        // large constants loaded via MOVZ+MOVK are zero-extended (not sign-extended).
+        // Arithmetic on such values is correct for the low 32 bits.
+        //
+        // Cache-line note: small immediates = 4 bytes (1 slot); large = 8 bytes (2 slots).
         Instr::LoadImm(reg, n) => {
-            writeln!(
-                out,
-                "    mov     x{reg}, #{n:<19} // FLS §2.4.4.1: load imm {n}"
-            )?;
+            emit_imm32(out, *reg as usize, *n)?;
         }
 
         // FLS §7.2: Load from a static variable in the data section.
@@ -1473,11 +1466,38 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
     Ok(())
 }
 
-/// Emit instructions that place `value` into `x0` for return.
+/// Emit ARM64 instructions to load a 32-bit immediate into register `x{reg}`.
 ///
-/// ARM64 note: `mov x0, #n` assembles to `MOVZ x0, #n` for 0 ≤ n ≤ 65535.
-/// Negative values and values > 65535 require multi-instruction sequences
-/// and are not yet supported.
+/// ARM64 encoding:
+/// - Values in [-65536, 65535]: single `mov` (GAS selects MOVZ or MOVN).
+/// - Other 32-bit values: MOVZ for low 16 bits + MOVK to insert high 16 bits.
+///
+/// FLS §2.4.4.1: Integer literal materialization.
+/// FLS §6.23: AMBIGUOUS — values loaded with MOVZ+MOVK are zero-extended in
+/// the 64-bit register; sign extension is not performed.
+/// Cache-line note: small immediates = 1 instruction (4 bytes); large = 2 (8 bytes).
+fn emit_imm32(out: &mut String, reg: usize, n: i32) -> Result<(), CodegenError> {
+    if (-65536..=65535).contains(&n) {
+        // Single instruction: GAS selects MOVZ (positive) or MOVN (negative).
+        writeln!(out, "    mov     x{reg}, #{n:<19} // FLS §2.4.4.1: load imm {n}")?;
+    } else {
+        // Two-instruction MOVZ+MOVK for 32-bit values outside i16-adjacent range.
+        // Treat as 32-bit two's-complement bit pattern, split into two 16-bit halves.
+        let bits = n as u32;
+        let lo16 = bits & 0xFFFF;
+        let hi16 = (bits >> 16) & 0xFFFF;
+        if lo16 == 0 {
+            // Low 16 bits are zero: single MOVZ with shift suffices.
+            writeln!(out, "    movz    x{reg}, #0x{hi16:04x}, lsl #16  // FLS §2.4.4.1: load imm {n} (hi16 only)")?;
+        } else {
+            writeln!(out, "    movz    x{reg}, #0x{lo16:04x}           // FLS §2.4.4.1: load imm {n} (lo16)")?;
+            writeln!(out, "    movk    x{reg}, #0x{hi16:04x}, lsl #16  // FLS §2.4.4.1: load imm {n} (hi16)")?;
+        }
+    }
+    Ok(())
+}
+
+/// Emit instructions that place `value` into `x0` for return.
 ///
 /// FLS §2.4.4.1: Integer literals.
 /// FLS §6.19: Return expressions — result in x0.
@@ -1486,9 +1506,7 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
 fn emit_load_x0(out: &mut String, value: &IrValue) -> Result<(), CodegenError> {
     match value {
         IrValue::I32(n) => {
-            // ARM64: `mov x0, #n` for both positive and negative immediates.
-            // Negative values encode as MOVN (GNU assembler selects automatically).
-            writeln!(out, "    mov     x0, #{n}             // FLS §2.4.4.1: integer literal {n}")?;
+            emit_imm32(out, 0, *n)?;
         }
         IrValue::Unit => {
             // FLS §4.4: unit return. Convention: exit code 0 for main.
