@@ -1,52 +1,54 @@
-# Changelog — Cycle 104
+# Changelog — Cycle 107
 
 ## Who This Helps
-- **William (researcher)**: Claim 58 closes the arithmetic-operator coverage gap in
-  the falsification suite. Previously Claim 57 only defended `add` and `mul` for
-  large-value non-folding; `sub` and `div` were tested only with tiny literals in
-  `fn main()` (no function parameters), which is a weaker adversarial pattern.
-  A folding interpreter that special-cased addition and multiplication but evaluated
-  subtraction or division at compile time would pass all prior claims. It cannot
-  pass Claim 58.
-- **Compiler Researchers**: The four basic arithmetic operators now have symmetric
-  adversarial coverage. The pattern (function-parameter input → assert instruction
-  emitted + assert result not folded) is consistently applied across `add`, `mul`,
-  `sub`, and `sdiv`.
+- **William (researcher)**: The remainder operator `%` now has adversarial falsification
+  coverage. Previously `runtime_rem_emits_sdiv_and_msub` used `fn main() -> i32 { 10 % 3 }`
+  — inline literals that a constant-folding interpreter could evaluate to `mov x0, #1`
+  without emitting any runtime instructions. Claim 60 uses function parameters, closing
+  the last gap in the five-operator arithmetic coverage story.
+- **Compiler Researchers**: The arithmetic operator coverage is now symmetric:
+  `add` (Claim 57), `mul` (Claim 57), `sub` (Claim 58), `sdiv` (Claim 58), `rem`
+  (Claim 60). Each has a parameter-based adversarial test. The pattern is consistent
+  and complete for this operator class.
 
 ## Observed
-- Claim 57 (cycle 103) tested large-value `add` and `mul` with the parameter-pattern.
-- `runtime_sub_emits_sub_instruction` used `fn main() -> i32 { 10 - 3 }` — no
-  function parameters, smaller values. A constant-folding pass would fold this but
-  there's no negative assertion on the folded literal.
-- `runtime_div_emits_sdiv` used `fn main() -> i32 { 10 / 2 }` — also no parameters,
-  only one negative assertion (`!asm.contains("mov x0, #5")`), but still weaker than
-  the parameter-pattern used for Claim 57.
-- Division is the most expensive arithmetic operator and the one most tempting to
-  evaluate at compile time when inputs are statically known. It had the weakest
-  non-folding assertion.
+- Previous cycle's "Next" noted: "`runtime_rem_emits_sdiv_and_msub` still uses inline
+  literals without function parameters and lacks a negative 'not folded' assertion."
+- Claims 57 and 58 (cycles 103–104) added parameter-based tests for add, mul, sub,
+  and sdiv. Remainder was skipped because it was already tested — but the existing test
+  was weaker than the adversarial pattern.
+- The original test: `compile_to_asm("fn main() -> i32 { 10 % 3 }\n")`. No negative
+  assertion prevents a constant-folding interpreter from passing it.
 
 ## Applied
-- **`tests/e2e.rs`**: Added two assembly inspection tests:
-  - `runtime_large_int_sub_emits_sub_not_folded`: `fn f(x: i32, y: i32) -> i32 { x - y }`
-    called as `f(2000000000, 1)`; asserts `sub` emitted, `bl` emitted, `1999999999` not present.
-  - `runtime_large_int_div_emits_sdiv_not_folded`: `fn f(x: i32, y: i32) -> i32 { x / y }`
-    called as `f(2000000000, 4)`; asserts `sdiv` emitted, `bl` emitted, `500000000` not present.
-- **`.lathe/claims.md`**: Added Claim 58 with full rationale.
-- **`.lathe/falsify.sh`**: Added Claim 58 adversarial check.
+- **`tests/e2e.rs`**: Added `runtime_rem_emits_sdiv_and_msub_not_folded`:
+  - Uses `fn f(x: i32, y: i32) -> i32 { x % y }` with `f(10, 3)` — parameters prevent
+    constant folding.
+  - Positive assertions: `sdiv` in function body, `msub` in function body, `bl` at call site.
+  - Negative assertion: `!asm.contains("mov     x0, #1\n")` — the folded result of 10 % 3.
+- **`.lathe/claims.md`**: Added Claim 60 entry completing the arithmetic operator story.
+- **`.lathe/falsify.sh`**: Added Claim 60 check.
+- **Branch**: Rebased onto `origin/main` after M174 was merged (PR #203). M174,
+  Cycle 103 changelog, Claim 58, and Fix-CI commits dropped as already-upstream;
+  only M175 (Claim 59) carried forward.
 
 ## Validated
-- `cargo test --test e2e -- runtime_large_int_sub_emits_sub_not_folded runtime_large_int_div_emits_sdiv_not_folded` — 2 passed
-- `cargo test --quiet` — 1484 e2e, all pass; 211 unit; 30 fixture; 1 smoke; 0 failed
+- `cargo build` — clean
+- `cargo test --quiet` — 1493 passed; 0 failed (1 new test)
 - `cargo clippy -- -D warnings` — clean
+- The new test passes: `sdiv`, `msub`, and `bl` are present; `mov x0, #1` is absent.
 
 ## FLS Notes
-- No new FLS ambiguities discovered. Claim 58 exercises the same FLS §6.1.2 and §6.5.5
-  constraints as Claim 57, applied to the remaining operators.
+- **FLS §6.5.5**: The remainder operator is defined as `a % b = a - (a / b) * b`. The
+  ARM64 two-instruction sequence (sdiv + msub) implements this definition exactly.
+  The spec does not specify the instruction sequence — implementation choice. No ambiguity.
+- **FLS §6.1.2 Constraint 1**: Function bodies are non-const contexts; remainder
+  executes at runtime.
 
 ## Next
-- The four basic arithmetic operators now have symmetric adversarial coverage.
-- Remaining potential gap: `rem` (`%`) with large values — `runtime_rem_emits_sdiv_and_msub`
-  uses inline literals (no parameter pattern). Could add Claim 59.
-- Or: M175 — `unsafe impl<T> where T: Bound` where-clause form (parser already
-  supports where clauses in impl blocks; would be a pure test milestone).
-- Or: §6.5.3 Negation operator for u32 (unsigned negation; FLS §6.5.3 is silent).
+- All five basic arithmetic operators now have adversarial parameter-based falsification
+  coverage (Claims 57, 58, 60).
+- The next gap worth closing: additional integer types (i8, i16, u8, u16). Currently
+  only i32, u32, i64, usize are fully tested. FLS §4.2 numeric types include all of these.
+  Adding u8 arithmetic would be a natural next milestone, building on the existing
+  byte literal infrastructure (milestones 90/92).

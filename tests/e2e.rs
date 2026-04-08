@@ -975,6 +975,43 @@ fn runtime_rem_emits_sdiv_and_msub() {
     );
 }
 
+/// Assembly inspection: remainder via function parameters emits `sdiv` + `msub`
+/// and the result is NOT constant-folded to `#1` (or any immediate).
+///
+/// Claim 60: remainder operator must emit runtime `sdiv`+`msub`, not constant-fold.
+///
+/// FLS §6.5.5: Remainder operator `%`.
+/// FLS §6.1.2:37–45: Non-const contexts must execute at runtime.
+///
+/// The companion test to `runtime_rem_emits_sdiv_and_msub`. The original test used
+/// `fn main() -> i32 { 10 % 3 }` — inline literals that a constant-folding
+/// interpreter could evaluate to `mov x0, #1` without emitting any runtime
+/// instructions. This test uses function parameters, which are unknown at compile
+/// time, so a conforming compiler must emit `sdiv`+`msub` at runtime.
+#[test]
+fn runtime_rem_emits_sdiv_and_msub_not_folded() {
+    let asm = compile_to_asm(
+        "fn f(x: i32, y: i32) -> i32 { x % y }\nfn main() -> i32 { f(10, 3) }\n",
+    );
+    assert!(
+        asm.contains("sdiv"),
+        "expected `sdiv` in function body for `x % y`, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("msub"),
+        "expected `msub` in function body for `x % y`, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("bl"),
+        "expected `bl` call to `f` at call site, got:\n{asm}"
+    );
+    // 10 % 3 = 1: must not be folded to an immediate load of #1 in main
+    assert!(
+        !asm.contains("mov     x0, #1\n"),
+        "remainder must not constant-fold to `mov x0, #1`:\n{asm}"
+    );
+}
+
 // ── Milestone 11: lazy boolean operators && and || ───────────────────────────
 //
 // FLS §6.5.8: Lazy boolean operator expressions. Both `&&` and `||` use
@@ -29355,5 +29392,171 @@ fn runtime_large_int_div_emits_sdiv_not_folded() {
     assert!(
         !asm.contains("500000000"),
         "result 500000000 must NOT be constant-folded; got:\n{asm}"
+    );
+}
+
+// ── Milestone 175: large negative i32 constants — sign extension via sxtw ────
+//
+// FLS §2.4.4.1: Integer literals have i32 type. galvanic loads large i32 values
+// (outside [-65536, 65535]) via MOVZ+MOVK, which zero-extends the 32-bit bit
+// pattern into the 64-bit register. For negative values this is wrong: -100000
+// as i32 is 0xFFFE7960 in 32-bit two's complement, but MOVZ+MOVK produces
+// 0x00000000FFFE7960 in the 64-bit register instead of 0xFFFFFFFFFFFE7960.
+//
+// When a function parameter carries -100000 (loaded via `neg` which IS a 64-bit
+// operation producing 0xFFFFFFFFFFFE7960), comparing it with a large negative
+// constant loaded from LoadImm would compare 0xFFFFFFFFFFFE7960 against
+// 0x00000000FFFE7960 — a mismatch even though both represent the same i32 value.
+//
+// Fix: emit `sxtw x{reg}, w{reg}` after MOVZ+MOVK. sxtw sign-extends the
+// 32-bit pattern in w{reg} to 64 bits in x{reg}. For positive large values
+// (bit 31 of the 32-bit pattern = 0), sxtw is a no-op.
+//
+// FLS §5.2: Literal patterns (negative literal patterns via NegLitInt).
+// FLS §6.5.7: Comparison operators — signed 64-bit cmp must use correctly
+//             sign-extended values.
+
+/// Milestone 175: negative large constant equality pattern match, taken arm.
+///
+/// FLS §5.2: Literal patterns — the -100000 pattern must match a parameter
+/// carrying -100000. Without sign extension the loaded pattern value
+/// (0x00000000FFFE7960) differs from the parameter value (0xFFFFFFFFFFFE7960).
+#[test]
+fn milestone_175_neg_large_pattern_match_taken() {
+    let src = r#"
+fn f(x: i32) -> i32 { match x { -100000 => 1, _ => 0 } }
+fn main() -> i32 { f(-100000) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected -100000 == -100000 pattern to return 1, got {exit_code}");
+}
+
+/// Milestone 175: negative large constant equality pattern, non-matching arm.
+///
+/// FLS §5.2: A literal pattern for -100000 must NOT match -100001.
+#[test]
+fn milestone_175_neg_large_pattern_match_not_taken() {
+    let src = r#"
+fn f(x: i32) -> i32 { match x { -100000 => 1, _ => 0 } }
+fn main() -> i32 { f(-100001) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected -100001 not matching -100000 to return 0, got {exit_code}");
+}
+
+/// Milestone 175: if equality check with large negative constant, taken.
+///
+/// FLS §6.17: If expressions. FLS §6.5.7: Equality comparison.
+#[test]
+fn milestone_175_neg_large_if_eq_taken() {
+    let src = r#"
+fn f(x: i32) -> i32 { if x == -100000 { 1 } else { 0 } }
+fn main() -> i32 { f(-100000) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected x == -100000 to be true, got {exit_code}");
+}
+
+/// Milestone 175: large negative constant arithmetic (add).
+///
+/// FLS §6.5.5: -100000 + 100001 = 1.
+#[test]
+fn milestone_175_neg_large_arithmetic() {
+    let src = r#"
+fn f(x: i32, y: i32) -> i32 { x + y }
+fn main() -> i32 { f(-100000, 100001) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected -100000 + 100001 = 1, got {exit_code}");
+}
+
+/// Milestone 175: large negative constant less-than comparison (taken).
+///
+/// FLS §6.5.7: -200000 < -100000 must be true.
+#[test]
+fn milestone_175_neg_large_lt_taken() {
+    let src = r#"
+fn f(x: i32) -> i32 { if x < -100000 { 1 } else { 0 } }
+fn main() -> i32 { f(-200000) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected -200000 < -100000 to be true, got {exit_code}");
+}
+
+/// Milestone 175: large negative constant greater-than comparison (taken).
+///
+/// FLS §6.5.7: -100000 > -200000 must be true.
+#[test]
+fn milestone_175_neg_large_gt_taken() {
+    let src = r#"
+fn f(x: i32) -> i32 { if x > -200000 { 1 } else { 0 } }
+fn main() -> i32 { f(-100000) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected -100000 > -200000 to be true, got {exit_code}");
+}
+
+/// Milestone 175: large negative const item used in equality comparison.
+///
+/// FLS §7.1:10: Const items are substituted at use sites via LoadImm.
+/// The substituted value (-100000) must be sign-extended so that comparing
+/// it against a parameter carrying -100000 gives equality.
+#[test]
+fn milestone_175_neg_large_const_item_eq() {
+    let src = r#"
+const NEG_LARGE: i32 = -100000;
+fn f(x: i32) -> i32 { if x == NEG_LARGE { 1 } else { 0 } }
+fn main() -> i32 { f(-100000) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected x == NEG_LARGE const (-100000) to be true, got {exit_code}");
+}
+
+/// Milestone 175: large negative range pattern lower bound (taken).
+///
+/// FLS §5.2: Range patterns. The bounds -200000 and -100000 are materialised
+/// via LoadImm and must be sign-extended for the range comparisons to work.
+#[test]
+fn milestone_175_neg_large_range_pattern() {
+    let src = r#"
+fn f(x: i32) -> i32 { match x { -200000..=-100000 => 1, _ => 0 } }
+fn main() -> i32 { f(-150000) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected -150000 in range -200000..=-100000, got {exit_code}");
+}
+
+/// Assembly inspection: large negative constant emits `sxtw` after MOVZ+MOVK.
+///
+/// FLS §2.4.4.1: The MOVZ+MOVK+sxtw sequence is the correct encoding for large
+/// i32 values that need sign extension in 64-bit register context.
+/// Claim 59: sign extension is present (not zero-extended).
+#[test]
+fn runtime_large_neg_const_emits_sxtw() {
+    let asm = compile_to_asm(
+        "fn f(x: i32) -> i32 { match x { -100000 => 1, _ => 0 } }\nfn main() -> i32 { f(-100000) }\n",
+    );
+    assert!(
+        asm.contains("sxtw"),
+        "large negative constant (-100000) must emit sxtw for sign extension; got:\n{asm}"
+    );
+}
+
+/// Assembly inspection: large negative constant pattern match is not folded.
+///
+/// Claim 59: a match arm with a large negative literal pattern must emit a
+/// runtime comparison (`cmp`) — the match cannot be folded to an immediate.
+#[test]
+fn runtime_large_neg_const_pattern_not_folded() {
+    let asm = compile_to_asm(
+        "fn f(x: i32) -> i32 { match x { -100000 => 1, _ => 0 } }\nfn main() -> i32 { f(-100000) }\n",
+    );
+    assert!(
+        asm.contains("cmp"),
+        "large negative pattern match must emit runtime cmp; got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #1"),
+        "result must NOT be constant-folded to mov x0, #1; got:\n{asm}"
     );
 }

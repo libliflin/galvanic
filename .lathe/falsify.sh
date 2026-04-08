@@ -1155,6 +1155,24 @@ else
     pass "Claim 58: large-value integer sub/div emit runtime sub/sdiv (not constant-folded)"
 fi
 
+# References: claims.md Claim 59.
+
+echo "--- Claim 59: large negative i32 constants sign-extended for correct 64-bit comparisons ---"
+if cargo test --test e2e --quiet -- runtime_large_neg_const_emits_sxtw runtime_large_neg_const_pattern_not_folded milestone_175_neg_large_pattern_match_taken 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 59" "runtime_large_neg_const_emits_sxtw or pattern_match_taken FAILED — large negative constants may be zero-extended (sxtw missing) causing wrong comparisons"
+else
+    pass "Claim 59: large negative i32 constants sign-extended (sxtw) — pattern match against parameter gives correct result"
+fi
+
+# References: claims.md Claim 60.
+
+echo "--- Claim 60: remainder operator emits runtime sdiv+msub (not constant-folded) ---"
+if cargo test --test e2e --quiet -- runtime_rem_emits_sdiv_and_msub_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 60" "runtime_rem_emits_sdiv_and_msub_not_folded FAILED — remainder may be constant-folded instead of emitting runtime sdiv+msub"
+else
+    pass "Claim 60: remainder operator emits runtime sdiv+msub (not constant-folded)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 
