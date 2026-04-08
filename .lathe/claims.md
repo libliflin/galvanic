@@ -1573,3 +1573,63 @@ conditions must be evaluated at runtime; the if expression result must not be fo
 - contains `mov     x0, #7` (result was constant-folded, bypassing the runtime branch)
 
 **Test**: `cargo test --test e2e -- runtime_if_emits_cbz`
+
+---
+
+## Claim 44: &dyn Trait-returning function emits runtime bl + vtable blr (not constant-folded)
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: A function with return type `&dyn Trait` must:
+1. Emit `bl forward` at the call site — a real runtime function call, not inlined or folded.
+2. Emit `blr` for the subsequent vtable dispatch on the returned fat pointer — not devirtualized or constant-folded.
+3. Emit `ldr x0` / `ldr x1` in the callee (RetFields for fat pointer).
+4. Emit `str x0` / `str x1` at the call site (CallRetFatPtr, storing the returned halves).
+5. NOT emit a constant-folded result (e.g., `mov x0, #7`).
+
+```rust
+trait Animal { fn sound(&self) -> i32; }
+struct Dog { x: i32 }
+impl Animal for Dog { fn sound(&self) -> i32 { self.x } }
+fn forward(a: &dyn Animal) -> &dyn Animal { a }
+fn main() -> i32 {
+    let d = Dog { x: 7 };
+    let a: &dyn Animal = &d;
+    let b = forward(a);
+    b.sound()
+}
+```
+
+Must emit:
+- `bl      forward` — runtime call to the dyn-returning function
+- `blr` — vtable indirect dispatch on the returned fat pointer
+- `ldr     x0,` and `ldr     x1,` — fat pointer halves loaded at callee return
+- `str     x0,` and `str     x1,` — fat pointer halves stored at call site
+- NOT `mov     x0, #7` — result must not be constant-folded
+
+**Why this claim matters**: Milestone 162 added `&dyn Trait` as a function return type.
+Without this claim, a regression that:
+- devirtualizes the returned fat pointer (replacing `blr` with a direct `bl Dog__sound`), OR
+- constant-folds the whole pipeline (`mov x0, #7`), OR
+- drops the fat pointer ABI conventions (treating return as scalar)
+would be invisible to all compile-and-run tests (exit code is still 7).
+
+**Attack vectors**:
+1. Constant-fold `forward(a).sound()` to `mov x0, #7` — passes exit-code check, misses ABI.
+2. Devirtualize the returned trait object (call `Dog__sound` directly via `bl`, not `blr`).
+3. Return only one slot (data ptr) from `forward`, treating `&dyn Trait` as a scalar pointer.
+   The other tests' `str x1` assertion catches this.
+
+**FLS §4.13**: Trait objects are fat pointers (data_ptr, vtable_ptr). A function returning
+`&dyn Trait` must propagate both halves.
+**FLS §4.13 AMBIGUOUS**: The ABI for fat pointer returns is not defined by the spec.
+Galvanic uses (x0=data_ptr, x1=vtable_ptr), matching the parameter convention.
+
+**Violated if**: `compile_to_asm(DYN_TRAIT_RETURN_BASIC)` returns assembly that:
+- lacks `bl      forward` (call to dyn-returning fn was inlined/folded), OR
+- lacks `blr` (returned fat pointer not dispatched via vtable), OR
+- lacks `ldr     x0,` or `ldr     x1,` (callee not loading fat pointer halves), OR
+- lacks `str     x0,` or `str     x1,` (call site not storing returned fat pointer), OR
+- contains `mov     x0, #7` (result constant-folded)
+
+**Tests**: `cargo test --test e2e -- runtime_dyn_return_emits_fat_ptr_loads_and_stores runtime_dyn_return_not_folded`
