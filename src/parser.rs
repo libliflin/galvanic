@@ -336,18 +336,50 @@ impl<'src> Parser<'src> {
                 // or `T: A + B`. The bound is recorded in the AST for future
                 // use; at this milestone galvanic infers the concrete type from
                 // the call-site argument type rather than the bound annotation.
+                // FLS §10.2: Associated type bindings use angle-bracket syntax:
+                // `T: Container<Item = i32>` — consume and discard the args.
+                //
+                // FLS §12.1 AMBIGUOUS: The FLS does not specify how `>>` (lexed
+                // as a single Shr token) should be split in generic contexts.
+                // Galvanic tracks whether `>>` consumed the outer `>` implicitly.
+                let mut consumed_outer_gt = false;
                 if self.eat(TokenKind::Colon) {
-                    loop {
+                    'bound_loop: loop {
                         if self.peek_kind() == TokenKind::Ident {
                             self.advance(); // skip bound trait name
+                            // Consume optional type args: `Trait<AssocType = Ty>`.
+                            if self.peek_kind() == TokenKind::Lt {
+                                self.advance(); // eat `<`
+                                let mut depth = 1usize;
+                                while depth > 0 && self.peek_kind() != TokenKind::Eof {
+                                    match self.peek_kind() {
+                                        TokenKind::Lt => { self.advance(); depth += 1; }
+                                        TokenKind::Shr => {
+                                            // `>>` acts as two `>`. If depth==1, the
+                                            // second `>` belongs to the outer param list.
+                                            self.advance();
+                                            if depth >= 2 {
+                                                depth -= 2;
+                                            } else {
+                                                depth = 0;
+                                                consumed_outer_gt = true;
+                                            }
+                                        }
+                                        TokenKind::Gt => { self.advance(); depth -= 1; }
+                                        _ => { self.advance(); }
+                                    }
+                                }
+                            }
                         }
-                        if !self.eat(TokenKind::Plus) {
-                            break;
+                        if consumed_outer_gt || !self.eat(TokenKind::Plus) {
+                            break 'bound_loop;
                         }
                     }
                 }
                 if !self.eat(TokenKind::Comma) {
-                    self.expect(TokenKind::Gt)?;
+                    if !consumed_outer_gt {
+                        self.expect(TokenKind::Gt)?;
+                    }
                     break;
                 }
             }
@@ -429,18 +461,46 @@ impl<'src> Parser<'src> {
                 generic_params.push(self.current_span());
                 self.advance();
                 // FLS §12.1, §4.14: Optional inline trait bound `T: TraitName`.
+                // FLS §10.2: Associated type bindings use angle-bracket syntax:
+                // `T: Container<Item = i32>` — consume and discard the args.
+                // FLS §12.1 AMBIGUOUS: `>>` is a single Shr token; when depth==1
+                // it simultaneously closes our inner `<...>` and the outer `<T>`.
+                let mut consumed_outer_gt = false;
                 if self.eat(TokenKind::Colon) {
-                    loop {
+                    'impl_bound_loop: loop {
                         if self.peek_kind() == TokenKind::Ident {
-                            self.advance();
+                            self.advance(); // skip bound trait name
+                            // Consume optional type args: `Trait<AssocType = Ty>`.
+                            if self.peek_kind() == TokenKind::Lt {
+                                self.advance(); // eat `<`
+                                let mut depth = 1usize;
+                                while depth > 0 && self.peek_kind() != TokenKind::Eof {
+                                    match self.peek_kind() {
+                                        TokenKind::Lt => { self.advance(); depth += 1; }
+                                        TokenKind::Shr => {
+                                            self.advance();
+                                            if depth >= 2 {
+                                                depth -= 2;
+                                            } else {
+                                                depth = 0;
+                                                consumed_outer_gt = true;
+                                            }
+                                        }
+                                        TokenKind::Gt => { self.advance(); depth -= 1; }
+                                        _ => { self.advance(); }
+                                    }
+                                }
+                            }
                         }
-                        if !self.eat(TokenKind::Plus) {
-                            break;
+                        if consumed_outer_gt || !self.eat(TokenKind::Plus) {
+                            break 'impl_bound_loop;
                         }
                     }
                 }
                 if !self.eat(TokenKind::Comma) {
-                    self.expect(TokenKind::Gt)?;
+                    if !consumed_outer_gt {
+                        self.expect(TokenKind::Gt)?;
+                    }
                     break;
                 }
             }

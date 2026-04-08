@@ -22448,3 +22448,307 @@ fn main() -> i32 {
         "area result (12) must NOT be constant-folded: {asm}"
     );
 }
+
+// ── Milestone 148: Associated type bindings in trait bounds (FLS §10.2, §12.1) ─
+
+/// Milestone 148: generic function with associated type binding in bound.
+///
+/// FLS §10.2: Associated types may be constrained in trait bounds via
+/// `T: Trait<AssocType = ConcreteType>`. Galvanic parses and discards the
+/// binding — monomorphization resolves the method from the call-site type.
+///
+/// FLS §10.2: AMBIGUOUS — The spec does not specify whether the compiler must
+/// verify that the concrete type satisfies the associated type binding, or only
+/// use it for type inference. Galvanic trusts the programmer's annotation.
+#[test]
+fn milestone_148_assoc_type_bound_basic() {
+    let src = r#"
+trait Container {
+    type Item;
+    fn get_val(&self) -> i32;
+}
+struct Wrapper { val: i32 }
+impl Container for Wrapper {
+    type Item = i32;
+    fn get_val(&self) -> i32 { self.val }
+}
+fn extract<T: Container<Item = i32>>(c: T) -> i32 { c.get_val() }
+fn main() -> i32 {
+    let w = Wrapper { val: 7 };
+    extract(w)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7);
+}
+
+/// Milestone 148: two concrete types via same generic fn with assoc type bound.
+#[test]
+fn milestone_148_assoc_type_bound_two_impls() {
+    let src = r#"
+trait Container {
+    type Item;
+    fn get_val(&self) -> i32;
+}
+struct Wrapper { val: i32 }
+struct Doubler { val: i32 }
+impl Container for Wrapper {
+    type Item = i32;
+    fn get_val(&self) -> i32 { self.val }
+}
+impl Container for Doubler {
+    type Item = i32;
+    fn get_val(&self) -> i32 { self.val * 2 }
+}
+fn extract<T: Container<Item = i32>>(c: T) -> i32 { c.get_val() }
+fn main() -> i32 {
+    let w = Wrapper { val: 7 };
+    let d = Doubler { val: 5 };
+    extract(w) + extract(d)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 17); // 7 + 5*2
+}
+
+/// Milestone 148: result of generic fn with assoc type bound used in arithmetic.
+#[test]
+fn milestone_148_assoc_type_bound_result_in_arithmetic() {
+    let src = r#"
+trait Provider {
+    type Output;
+    fn value(&self) -> i32;
+}
+struct Source { n: i32 }
+impl Provider for Source {
+    type Output = i32;
+    fn value(&self) -> i32 { self.n }
+}
+fn fetch<T: Provider<Output = i32>>(p: T) -> i32 { p.value() }
+fn main() -> i32 {
+    let s = Source { n: 6 };
+    fetch(s) * 3
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 18); // 6 * 3
+}
+
+/// Milestone 148: assoc type bound on function called from a non-generic context.
+#[test]
+fn milestone_148_assoc_type_bound_called_from_non_generic() {
+    let src = r#"
+trait Measurable {
+    type Length;
+    fn measure(&self) -> i32;
+}
+struct Ruler { inches: i32 }
+impl Measurable for Ruler {
+    type Length = i32;
+    fn measure(&self) -> i32 { self.inches }
+}
+fn read_measure<T: Measurable<Length = i32>>(m: T) -> i32 { m.measure() }
+fn double_measure(inches: i32) -> i32 { inches * 2 }
+fn main() -> i32 {
+    let r = Ruler { inches: 5 };
+    double_measure(read_measure(r))
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10); // 5 * 2
+}
+
+/// Milestone 148: assoc type bound result passed to another function.
+#[test]
+fn milestone_148_assoc_type_bound_result_passed_to_fn() {
+    let src = r#"
+trait Source {
+    type Item;
+    fn next(&self) -> i32;
+}
+struct Counter { val: i32 }
+impl Source for Counter {
+    type Item = i32;
+    fn next(&self) -> i32 { self.val + 1 }
+}
+fn get<T: Source<Item = i32>>(s: T) -> i32 { s.next() }
+fn double(x: i32) -> i32 { x * 2 }
+fn main() -> i32 {
+    let c = Counter { val: 4 };
+    double(get(c))
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10); // (4+1)*2
+}
+
+/// Milestone 148: assoc type bound with multiple bounds (`T: A<Item=i32> + B`).
+#[test]
+fn milestone_148_assoc_type_bound_plus_second_bound() {
+    let src = r#"
+trait Container {
+    type Item;
+    fn get_val(&self) -> i32;
+}
+trait Labeled {
+    fn label(&self) -> i32;
+}
+struct Tagged { val: i32, id: i32 }
+impl Container for Tagged {
+    type Item = i32;
+    fn get_val(&self) -> i32 { self.val }
+}
+impl Labeled for Tagged {
+    fn label(&self) -> i32 { self.id }
+}
+fn sum_tag<T: Container<Item = i32> + Labeled>(t: T) -> i32 {
+    t.get_val() + t.label()
+}
+fn main() -> i32 {
+    let t = Tagged { val: 3, id: 4 };
+    sum_tag(t)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7); // 3 + 4
+}
+
+/// Milestone 148: assoc type bound in where clause (`where T: Trait<Item = i32>`).
+#[test]
+fn milestone_148_assoc_type_bound_in_where_clause() {
+    let src = r#"
+trait Producer {
+    type Item;
+    fn produce(&self) -> i32;
+}
+struct Factory { x: i32 }
+impl Producer for Factory {
+    type Item = i32;
+    fn produce(&self) -> i32 { self.x * 3 }
+}
+fn make<T>(p: T) -> i32 where T: Producer<Item = i32> { p.produce() }
+fn main() -> i32 {
+    let f = Factory { x: 4 };
+    make(f)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 12); // 4 * 3
+}
+
+/// Milestone 148: assoc type bound used in if-expression.
+#[test]
+fn milestone_148_assoc_type_bound_result_in_if() {
+    let src = r#"
+trait Sensor {
+    type Reading;
+    fn read(&self) -> i32;
+}
+struct Thermometer { temp: i32 }
+impl Sensor for Thermometer {
+    type Reading = i32;
+    fn read(&self) -> i32 { self.temp }
+}
+fn check<T: Sensor<Reading = i32>>(s: T) -> i32 {
+    if s.read() > 5 { 1 } else { 0 }
+}
+fn main() -> i32 {
+    let hot = Thermometer { temp: 10 };
+    let cold = Thermometer { temp: 2 };
+    check(hot) + check(cold)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1); // 1 + 0
+}
+
+// ── Assembly inspection: milestone 148 ───────────────────────────────────────
+
+/// Assembly check: generic fn with `T: Trait<Item=i32>` bound emits a
+/// monomorphized `bl` call (not constant-folded).
+///
+/// FLS §10.2, §12.1: The associated type binding constrains the caller's type
+/// but does not affect monomorphization — galvanic dispatches via the concrete
+/// type at the call site. The result must NOT be folded.
+///
+/// Design: `get_val` returns `self.val + 1` so the struct init (`mov x0, #9`)
+/// differs from the final result (10). If folded, `mov x0, #10` appears in main
+/// with no `bl`. If compiled correctly, `bl extract__Wrapper` is present.
+#[test]
+fn runtime_assoc_type_bound_emits_monomorphized_bl_not_folded() {
+    let src = r#"
+trait Container {
+    type Item;
+    fn get_val(&self) -> i32;
+}
+struct Wrapper { val: i32 }
+impl Container for Wrapper {
+    type Item = i32;
+    fn get_val(&self) -> i32 { self.val + 1 }
+}
+fn extract<T: Container<Item = i32>>(c: T) -> i32 { c.get_val() }
+fn main() -> i32 {
+    let w = Wrapper { val: 9 };
+    extract(w)
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("bl      extract__Wrapper"),
+        "generic fn with assoc type bound must emit bl extract__Wrapper: {asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #10"),
+        "generic fn with assoc type bound must NOT constant-fold result=10: {asm}"
+    );
+}
+
+/// Assembly check: two concrete types via generic fn with assoc type bound both
+/// emit monomorphized labels.
+///
+/// FLS §12.1: Each distinct concrete type argument generates a separate
+/// monomorphized function body. Both `Wrapper__get_val` and `Doubler__get_val`
+/// must appear in the assembly.
+///
+/// Design: the sum is 7 + 5*2 = 17. If constant-folded, main emits `mov x0, #17`
+/// with no `bl` calls. The positive assertions (both labels present) already
+/// prove two monomorphizations occurred; the negative assertion rules out folding.
+#[test]
+fn runtime_assoc_type_bound_two_types_both_monomorphized() {
+    let src = r#"
+trait Container {
+    type Item;
+    fn get_val(&self) -> i32;
+}
+struct Wrapper { val: i32 }
+struct Doubler { val: i32 }
+impl Container for Wrapper {
+    type Item = i32;
+    fn get_val(&self) -> i32 { self.val }
+}
+impl Container for Doubler {
+    type Item = i32;
+    fn get_val(&self) -> i32 { self.val * 2 }
+}
+fn extract<T: Container<Item = i32>>(c: T) -> i32 { c.get_val() }
+fn main() -> i32 {
+    let w = Wrapper { val: 7 };
+    let d = Doubler { val: 5 };
+    extract(w) + extract(d)
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("Wrapper__get_val"),
+        "Wrapper monomorphization must emit Wrapper__get_val label: {asm}"
+    );
+    assert!(
+        asm.contains("Doubler__get_val"),
+        "Doubler monomorphization must emit Doubler__get_val label: {asm}"
+    );
+    // Final sum 7 + 5*2 = 17 must not be constant-folded:
+    assert!(
+        !asm.contains("mov     x0, #17"),
+        "combined result (17) must NOT be constant-folded: {asm}"
+    );
+}
