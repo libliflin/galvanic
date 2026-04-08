@@ -11125,7 +11125,11 @@ impl<'src> LowerCtx<'src> {
                     let suffix = concrete_types.join("_");
                     let mangled = format!("{fn_name}__{suffix}");
                     // Record the base name with concrete types for the mono loop.
-                    if !self.needed_monos.iter().any(|(n, _)| n == &fn_name) {
+                    // Deduplicate on (name, concrete_types) to support the same
+                    // generic function called with different concrete types (e.g.,
+                    // `get_val(a)` and `get_val(b)` where a: A and b: B must both
+                    // generate monomorphizations: get_val__A and get_val__B).
+                    if !self.needed_monos.iter().any(|(n, c)| n == &fn_name && c == &concrete_types) {
                         self.needed_monos.push((fn_name.clone(), concrete_types));
                     }
                     mangled
@@ -14311,7 +14315,7 @@ impl<'src> LowerCtx<'src> {
                     let concrete_types: Vec<String> =
                         std::iter::repeat_n("i32".to_owned(), n_params).collect();
                     let suffix = concrete_types.join("_");
-                    if !self.needed_monos.iter().any(|(n, _)| n == &base_mangled) {
+                    if !self.needed_monos.iter().any(|(n, c)| n == &base_mangled && c == &concrete_types) {
                         self.needed_monos.push((base_mangled.clone(), concrete_types));
                     }
                     format!("{base_mangled}__{suffix}")

@@ -20185,3 +20185,33 @@ fn main() -> i32 { run(4) }
         "trait method must dispatch via bl Foo__scale: {asm}"
     );
 }
+
+#[test]
+fn runtime_trait_bound_two_types_both_generated() {
+    // Verify that calling a generic function with TWO different concrete types
+    // produces TWO distinct monomorphized labels (get_val__A and get_val__B).
+    // This guards against the deduplication bug where only the first concrete
+    // type is monomorphized.
+    let src = r#"
+trait Value { fn val(&self) -> i32; }
+struct A { x: i32 }
+struct B { y: i32 }
+impl Value for A { fn val(&self) -> i32 { self.x } }
+impl Value for B { fn val(&self) -> i32 { self.y + 1 } }
+fn get_val<T: Value>(t: T) -> i32 { t.val() }
+fn main() -> i32 {
+    let a = A { x: 5 };
+    let b = B { y: 6 };
+    get_val(a) + get_val(b)
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("get_val__A:"),
+        "must emit get_val__A monomorphization: {asm}"
+    );
+    assert!(
+        asm.contains("get_val__B:"),
+        "must emit get_val__B monomorphization (second concrete type): {asm}"
+    );
+}
