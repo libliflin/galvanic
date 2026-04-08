@@ -1,3 +1,35 @@
+# Changelog — Cycle 88
+
+## Who This Helps
+- **William (researcher)**: Claim 47 closes the gap where a regression in M165 (default methods calling supertrait methods) would pass all exit-code tests invisibly. The falsification suite now enforces every cycle that: (1) a default method calling a supertrait abstract method emits `bl Foo__base_val` and `add`, not a folded `#10`; (2) chained default methods each emit separate `bl` dispatches, not a folded `#12`.
+- **Compiler Researchers**: Claim 47 documents an FLS §10.1.1 AMBIGUITY: the spec does not specify whether a default method body calling a supertrait method should inline the call or dispatch via `bl`. Galvanic uses `bl` (no inlining), consistent with the general no-constant-folding constraint. This is now adversarially guarded.
+
+## Observed
+- All 46 falsification claims pass; CI was green on the previous cycle.
+- Cycle 87 added M165 (default methods calling supertrait methods) with two assembly inspection tests: `runtime_supertrait_default_call_emits_bl_not_folded` and `runtime_supertrait_default_chain_not_folded`.
+- Neither test was registered in `falsify.sh` — the invariant was unguarded. This follows the same pattern as Claims 45 and 46: the feature milestone is added in one cycle, the falsification claim is added in the next.
+- Previous cycle's "Next" explicitly identified Claim 47 as the missing guard.
+
+## Applied
+- **`.lathe/claims.md`**: Added Claim 47 with full adversarial documentation — five distinct attack vectors (fold Pattern 1 to #10, drop bl Foo__base_val, fold Pattern 2 to #12, inline doubled dropping bl Foo__doubled, inline value dropping bl Foo__value), FLS citations (§4.14, §10.1.1 with AMBIGUOUS note, §6.1.2), violated-if conditions for both patterns.
+- **`.lathe/falsify.sh`**: Added Claim 47 check after Claim 46, running `runtime_supertrait_default_call_emits_bl_not_folded` and `runtime_supertrait_default_chain_not_folded`.
+
+## Validated
+- `.lathe/falsify.sh` — 46/46 pass (was 45, +1 new claim)
+- `cargo build` — clean (no code changes; claims/falsify only)
+- Claim 47 passes on first run against existing M165 implementation
+
+## FLS Notes
+- **FLS §10.1.1 AMBIGUOUS**: The spec does not specify whether a default method body calling a supertrait method should inline the call or dispatch via `bl`. Galvanic's choice (no inlining, always `bl`) is now adversarially documented in Claim 47. A spec clarification here would strengthen the research output.
+- **FLS §4.14**: The claim covers the intersection of supertrait bounds and default methods — a combination the spec addresses separately but does not explicitly describe in interaction.
+
+## Next
+- M166: Supertrait enforcement — when `impl Derived for Foo` is present, verify `impl Base for Foo` also exists. Currently galvanic silently allows this without checking.
+- Or: `where Self: Trait` constraints inside trait method bodies (FLS §4.14 gap not yet covered).
+- Or: Next FLS section — §6.16 Range Expressions or §6.18 Match Expressions with tuple patterns.
+
+---
+
 # Changelog — Cycle 87
 
 ## Who This Helps
