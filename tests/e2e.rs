@@ -10650,6 +10650,46 @@ fn main() -> i32 { let p = make(1); p.x }
     );
 }
 
+/// Assembly check: struct-returning match with parameter-dependent fields must
+/// not constant-fold arithmetic even when called with a literal argument.
+///
+/// The litmus test: `n + 10` with `n` from a parameter cannot be folded to
+/// `#11` at compile time. The compiler must emit `add` at runtime.
+///
+/// FLS §6.18: match arms execute at runtime; scrutinee comparison emits `cmp`.
+/// FLS §6.1.2:37–45: `n + 10` is not a const context — runtime `add` required.
+/// FLS §9: Function parameters are runtime values, not compile-time constants.
+#[test]
+fn runtime_struct_match_field_not_folded() {
+    let src = r#"
+struct Pair { a: i32, b: i32 }
+fn make(n: i32) -> Pair {
+    match n {
+        1 => Pair { a: n + 10, b: n * 3 },
+        _ => Pair { a: 0, b: 0 },
+    }
+}
+fn main() -> i32 { make(1).a }
+"#;
+    let asm = compile_to_asm(src);
+    // The match must emit a runtime comparison (cmp) for the scrutinee.
+    assert!(
+        asm.contains("cmp"),
+        "expected cmp for match scrutinee in struct-returning match:\n{asm}"
+    );
+    // `n + 10` must emit a runtime add instruction, not fold to a constant.
+    assert!(
+        asm.contains("add"),
+        "expected add instruction for n + 10 in struct-returning match:\n{asm}"
+    );
+    // A constant-folding interpreter would evaluate make(1) → Pair { a: 11, b: 3 }
+    // and emit `mov x0, #11` without executing the match at runtime.
+    assert!(
+        !asm.contains("mov     x0, #11") && !asm.contains("mov x0, #11"),
+        "must not fold make(1).a to constant 11 — match body must execute at runtime:\n{asm}"
+    );
+}
+
 /// Assembly check: struct-returning free function used directly as argument.
 ///
 /// `sum(make(1))` must NOT capture only x0 after `bl make` — it must store
