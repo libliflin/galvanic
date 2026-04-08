@@ -28947,3 +28947,195 @@ fn main() -> i32 {
         "unsafe generic impl must emit monomorphized function label; got:\n{asm}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Milestone 173: `unsafe impl<T: Bound>` — unsafe impl with a bounded type
+// parameter (FLS §19, §12.1, §4.14).
+//
+// M173 combines M172 (`unsafe impl<T>`) with §4.14 trait bounds on the generic
+// parameter.  The bound is a compile-time safety contract only; the emitted
+// assembly is identical to an unbounded `unsafe impl<T>`.  The `is_unsafe` flag
+// and the inline bound `T: Marker` are recorded on `ImplDef` but do not change
+// codegen — the monomorphized method body must still emit runtime instructions.
+// ---------------------------------------------------------------------------
+
+/// Milestone 173: basic unsafe impl<T: Bound> — method returns the inner field.
+#[test]
+fn milestone_173_unsafe_bounded_impl_basic() {
+    let Some(exit_code) = compile_and_run(r#"
+unsafe trait GetInner { fn get_inner(&self) -> i32; }
+trait Marker {}
+struct Wrapper<T> { inner: T }
+impl Marker for i32 {}
+unsafe impl<T: Marker> GetInner for Wrapper<T> { fn get_inner(&self) -> i32 { self.inner } }
+fn main() -> i32 { let w = Wrapper { inner: 7 }; w.get_inner() }
+"#) else { return; };
+    assert_eq!(exit_code, 7);
+}
+
+/// Milestone 173: two distinct monomorphizations of unsafe impl<T: Bound>.
+#[test]
+fn milestone_173_unsafe_bounded_impl_two_impls() {
+    let Some(exit_code) = compile_and_run(r#"
+unsafe trait GetInner { fn get_inner(&self) -> i32; }
+trait Marker {}
+struct Wrapper<T> { inner: T }
+impl Marker for i32 {}
+unsafe impl<T: Marker> GetInner for Wrapper<T> { fn get_inner(&self) -> i32 { self.inner } }
+fn main() -> i32 {
+    let a = Wrapper { inner: 3 };
+    let b = Wrapper { inner: 4 };
+    a.get_inner() + b.get_inner()
+}
+"#) else { return; };
+    assert_eq!(exit_code, 7);
+}
+
+/// Milestone 173: result used in arithmetic.
+#[test]
+fn milestone_173_unsafe_bounded_impl_result_in_arithmetic() {
+    let Some(exit_code) = compile_and_run(r#"
+unsafe trait GetInner { fn get_inner(&self) -> i32; }
+trait Marker {}
+struct Wrapper<T> { inner: T }
+impl Marker for i32 {}
+unsafe impl<T: Marker> GetInner for Wrapper<T> { fn get_inner(&self) -> i32 { self.inner } }
+fn main() -> i32 { let w = Wrapper { inner: 7 }; w.get_inner() + 3 }
+"#) else { return; };
+    assert_eq!(exit_code, 10);
+}
+
+/// Milestone 173: called on a concrete-typed parameter.
+#[test]
+fn milestone_173_unsafe_bounded_impl_on_parameter() {
+    let Some(exit_code) = compile_and_run(r#"
+unsafe trait GetInner { fn get_inner(&self) -> i32; }
+trait Marker {}
+struct Wrapper<T> { inner: T }
+impl Marker for i32 {}
+unsafe impl<T: Marker> GetInner for Wrapper<T> { fn get_inner(&self) -> i32 { self.inner } }
+fn extract(w: Wrapper<i32>) -> i32 { w.get_inner() }
+fn main() -> i32 { let w = Wrapper { inner: 9 }; extract(w) }
+"#) else { return; };
+    assert_eq!(exit_code, 9);
+}
+
+/// Milestone 173: result passed to another function.
+#[test]
+fn milestone_173_unsafe_bounded_impl_result_passed_to_fn() {
+    let Some(exit_code) = compile_and_run(r#"
+unsafe trait GetInner { fn get_inner(&self) -> i32; }
+trait Marker {}
+struct Wrapper<T> { inner: T }
+impl Marker for i32 {}
+unsafe impl<T: Marker> GetInner for Wrapper<T> { fn get_inner(&self) -> i32 { self.inner } }
+fn double(x: i32) -> i32 { x * 2 }
+fn main() -> i32 { let w = Wrapper { inner: 5 }; double(w.get_inner()) }
+"#) else { return; };
+    assert_eq!(exit_code, 10);
+}
+
+/// Milestone 173: result used in an if condition.
+#[test]
+fn milestone_173_unsafe_bounded_impl_result_in_if() {
+    let Some(exit_code) = compile_and_run(r#"
+unsafe trait GetInner { fn get_inner(&self) -> i32; }
+trait Marker {}
+struct Wrapper<T> { inner: T }
+impl Marker for i32 {}
+unsafe impl<T: Marker> GetInner for Wrapper<T> { fn get_inner(&self) -> i32 { self.inner } }
+fn main() -> i32 { let w = Wrapper { inner: 8 }; if w.get_inner() > 5 { 1 } else { 0 } }
+"#) else { return; };
+    assert_eq!(exit_code, 1);
+}
+
+/// Milestone 173: called twice on the same wrapper.
+#[test]
+fn milestone_173_unsafe_bounded_impl_called_twice() {
+    let Some(exit_code) = compile_and_run(r#"
+unsafe trait GetInner { fn get_inner(&self) -> i32; }
+trait Marker {}
+struct Wrapper<T> { inner: T }
+impl Marker for i32 {}
+unsafe impl<T: Marker> GetInner for Wrapper<T> { fn get_inner(&self) -> i32 { self.inner } }
+fn main() -> i32 {
+    let w = Wrapper { inner: 4 };
+    w.get_inner() + w.get_inner()
+}
+"#) else { return; };
+    assert_eq!(exit_code, 8);
+}
+
+/// Milestone 173: multiple methods in an unsafe impl<T: Bound>.
+#[test]
+fn milestone_173_unsafe_bounded_impl_multiple_methods() {
+    let Some(exit_code) = compile_and_run(r#"
+unsafe trait Ops { fn add_one(&self) -> i32; fn double(&self) -> i32; }
+trait Marker {}
+struct Wrapper<T> { inner: T }
+impl Marker for i32 {}
+unsafe impl<T: Marker> Ops for Wrapper<T> {
+    fn add_one(&self) -> i32 { self.inner + 1 }
+    fn double(&self) -> i32 { self.inner + self.inner }
+}
+fn main() -> i32 {
+    let w = Wrapper { inner: 3 };
+    w.add_one() + w.double()
+}
+"#) else { return; };
+    assert_eq!(exit_code, 10); // (3+1) + (3+3)
+}
+
+/// Assembly inspection: unsafe impl<T: Bound> method body emits mul (not constant-folded).
+#[test]
+fn runtime_unsafe_bounded_impl_body_emits_mul_not_folded() {
+    let asm = compile_to_asm(r#"
+unsafe trait Scale { fn scale(&self, n: i32) -> i32; }
+trait Marker {}
+struct Wrapper<T> { inner: T }
+impl Marker for i32 {}
+unsafe impl<T: Marker> Scale for Wrapper<T> {
+    fn scale(&self, n: i32) -> i32 { self.inner * n }
+}
+fn main() -> i32 {
+    let w = Wrapper { inner: 3 };
+    w.scale(4)
+}
+"#);
+    assert!(
+        asm.contains("mul"),
+        "unsafe impl<T: Bound> method body must emit runtime mul; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("bl"),
+        "unsafe impl<T: Bound> call site must emit runtime bl; got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #12") && !asm.contains("mov x0, #12"),
+        "result 3*4=12 must NOT be constant-folded; got:\n{asm}"
+    );
+}
+
+/// Assembly inspection: unsafe impl<T: Bound> call emits monomorphized label.
+#[test]
+fn runtime_unsafe_bounded_impl_call_emits_bl_not_folded() {
+    let asm = compile_to_asm(r#"
+unsafe trait GetInner { fn get_inner(&self) -> i32; }
+trait Marker {}
+struct Wrapper<T> { inner: T }
+impl Marker for i32 {}
+unsafe impl<T: Marker> GetInner for Wrapper<T> { fn get_inner(&self) -> i32 { self.inner } }
+fn main() -> i32 {
+    let w = Wrapper { inner: 7 };
+    w.get_inner()
+}
+"#);
+    assert!(
+        asm.contains("bl"),
+        "unsafe impl<T: Bound> call site must emit runtime bl; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("Wrapper__get_inner"),
+        "unsafe impl<T: Bound> must emit monomorphized function label; got:\n{asm}"
+    );
+}

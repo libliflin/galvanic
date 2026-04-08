@@ -2294,3 +2294,44 @@ execute at runtime.
 - contains `mov x0, #12` (result 3*4=12 constant-folded)
 
 **Tests**: `cargo test --test e2e -- runtime_unsafe_generic_impl_body_emits_mul_not_folded runtime_unsafe_generic_impl_call_emits_bl_not_folded`
+
+---
+
+## Claim 56: `unsafe impl<T: Bound>` emits runtime bl and mul (not constant-folded)
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: `unsafe impl<T: Bound> Trait for Wrapper<T>` codegen is identical to
+`unsafe impl<T> Trait for Wrapper<T>` (Claim 55). Adding a trait bound to the
+type parameter is a compile-time safety contract — it constrains which concrete
+types may be used but does not change the emitted assembly. A method body with
+arithmetic (`self.inner * n`) must emit a runtime `mul` instruction. The call
+site must emit `bl`. The bound `T: Marker` must not cause the method body to be
+inlined or constant-folded.
+
+This is distinct from:
+- Claim 55: `unsafe impl<T>` without bounds
+- Claim 9/12: generic trait impl without `unsafe`
+
+**What this guards against**:
+1. The inline bound `T: Bound` causing the parser or lowerer to mishandle the impl.
+2. Treating `unsafe impl<T: Bound>` as a special case that folds the method body.
+3. Failing to emit `bl` at the call site for a bounded unsafe generic method.
+
+**FLS §19 AMBIGUOUS**: The spec does not specify how `unsafe impl<T: Bound>`
+interacts with generic monomorphization. Galvanic records `is_unsafe` and the
+bound on `ImplDef` but enforces neither at runtime.
+
+**FLS §12.1, §4.14**: Inline bounds (`T: TraitName`) in generic parameter lists
+are parsed and discarded during lowering — they constrain which types are valid
+at the call site (static property) but do not affect codegen.
+
+**FLS §6.1.2 Constraint 1**: Method bodies are not const contexts — they must
+execute at runtime regardless of trait bounds on the type parameter.
+
+**Violated if**: `compile_to_asm(UNSAFE_BOUNDED_SCALE)` returns assembly that:
+- lacks `mul` in the method body, OR
+- lacks `bl` at the call site, OR
+- contains `mov x0, #12` (result 3*4=12 constant-folded)
+
+**Tests**: `cargo test --test e2e -- runtime_unsafe_bounded_impl_body_emits_mul_not_folded runtime_unsafe_bounded_impl_call_emits_bl_not_folded`
