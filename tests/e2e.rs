@@ -19755,3 +19755,204 @@ fn main() -> i32 { wrap_and_unwrap(7) }
         "main must call wrap_and_unwrap, not be the only function: {asm}"
     );
 }
+
+// ── Milestone 138: Generic trait implementations (FLS §12.1 + §11.1) ─────────
+
+/// Milestone 138: basic `impl<T> Trait for Type<T>` — trait method extracts inner field.
+///
+/// FLS §12.1: An impl block may declare type parameters (`impl<T>`).
+/// FLS §11.1: A trait impl provides concrete implementations of a trait's methods.
+/// Combined: `impl<T> Trait for Type<T>` is a generic trait implementation.
+#[test]
+fn milestone_138_generic_trait_impl_basic() {
+    let src = r#"
+trait Getter { fn get(&self) -> i32; }
+struct Wrapper<T> { inner: T }
+impl<T> Getter for Wrapper<T> {
+    fn get(&self) -> i32 { self.inner }
+}
+fn main() -> i32 {
+    let w = Wrapper { inner: 5 };
+    w.get()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 5);
+}
+
+/// Milestone 138: generic trait impl method uses arithmetic in body.
+#[test]
+fn milestone_138_generic_trait_impl_arithmetic() {
+    let src = r#"
+trait Doubler { fn double(&self) -> i32; }
+struct Wrapper<T> { inner: T }
+impl<T> Doubler for Wrapper<T> {
+    fn double(&self) -> i32 { self.inner + self.inner }
+}
+fn main() -> i32 {
+    let w = Wrapper { inner: 4 };
+    w.double()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 8);
+}
+
+/// Milestone 138: generic trait impl method called on a parameter.
+#[test]
+fn milestone_138_generic_trait_impl_on_parameter() {
+    let src = r#"
+trait Getter { fn get(&self) -> i32; }
+struct Wrapper<T> { inner: T }
+impl<T> Getter for Wrapper<T> {
+    fn get(&self) -> i32 { self.inner }
+}
+fn extract(w: Wrapper<i32>) -> i32 { w.get() }
+fn main() -> i32 {
+    let w = Wrapper { inner: 7 };
+    extract(w)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 7);
+}
+
+/// Milestone 138: trait method result used in arithmetic.
+#[test]
+fn milestone_138_generic_trait_impl_result_in_arithmetic() {
+    let src = r#"
+trait Getter { fn get(&self) -> i32; }
+struct Wrapper<T> { inner: T }
+impl<T> Getter for Wrapper<T> {
+    fn get(&self) -> i32 { self.inner }
+}
+fn main() -> i32 {
+    let w = Wrapper { inner: 3 };
+    w.get() + w.get()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 6);
+}
+
+/// Milestone 138: trait method called twice on same instance.
+#[test]
+fn milestone_138_generic_trait_impl_called_twice() {
+    let src = r#"
+trait Getter { fn get(&self) -> i32; }
+struct Wrapper<T> { inner: T }
+impl<T> Getter for Wrapper<T> {
+    fn get(&self) -> i32 { self.inner }
+}
+fn main() -> i32 {
+    let a = Wrapper { inner: 2 };
+    let b = Wrapper { inner: 3 };
+    a.get() + b.get()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 5);
+}
+
+/// Milestone 138: two different generic struct types implement the same trait.
+///
+/// FLS §13: Multiple types may implement the same trait.
+#[test]
+fn milestone_138_generic_trait_impl_two_impls() {
+    let src = r#"
+trait Getter { fn get(&self) -> i32; }
+struct BoxA<T> { val: T }
+struct BoxB<T> { val: T }
+impl<T> Getter for BoxA<T> {
+    fn get(&self) -> i32 { self.val }
+}
+impl<T> Getter for BoxB<T> {
+    fn get(&self) -> i32 { self.val + 1 }
+}
+fn main() -> i32 {
+    let a = BoxA { val: 4 };
+    let b = BoxB { val: 4 };
+    a.get() + b.get()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 9);
+}
+
+/// Milestone 138: generic trait impl coexists with inherent impl.
+///
+/// FLS §11: A struct may have both inherent and trait impls.
+#[test]
+fn milestone_138_generic_trait_impl_with_inherent() {
+    let src = r#"
+trait Getter { fn get(&self) -> i32; }
+struct Wrapper<T> { inner: T }
+impl<T> Wrapper<T> {
+    fn raw(&self) -> i32 { self.inner }
+}
+impl<T> Getter for Wrapper<T> {
+    fn get(&self) -> i32 { self.inner + 1 }
+}
+fn main() -> i32 {
+    let w = Wrapper { inner: 6 };
+    w.raw() + w.get()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 13);
+}
+
+/// Milestone 138: generic trait impl called from a non-generic function.
+///
+/// FLS §12.1: The call site (non-generic function) triggers monomorphization.
+#[test]
+fn milestone_138_generic_trait_impl_called_from_non_generic() {
+    let src = r#"
+trait Getter { fn get(&self) -> i32; }
+struct Wrapper<T> { inner: T }
+impl<T> Getter for Wrapper<T> {
+    fn get(&self) -> i32 { self.inner }
+}
+fn use_wrapper(w: Wrapper<i32>) -> i32 { w.get() * 2 }
+fn main() -> i32 { use_wrapper(Wrapper { inner: 5 }) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 10);
+}
+
+/// Assembly inspection: generic trait impl emits a mangled call, not a folded constant.
+///
+/// `use_wrapper(w)` takes a parameter — galvanic cannot constant-fold the result.
+/// The assembly must contain `bl Wrapper__get__i32` (the monomorphized mangled name).
+///
+/// FLS §12.1: Monomorphized generic methods use the mangled label `TypeName__method__i32`.
+#[test]
+fn runtime_generic_trait_impl_emits_mangled_call() {
+    let src = r#"
+trait Getter { fn get(&self) -> i32; }
+struct Wrapper<T> { inner: T }
+impl<T> Getter for Wrapper<T> {
+    fn get(&self) -> i32 { self.inner }
+}
+fn use_wrapper(w: Wrapper<i32>) -> i32 { w.get() }
+fn main() -> i32 { use_wrapper(Wrapper { inner: 7 }) }
+"#;
+    let asm = compile_to_asm(src);
+    // The monomorphized method label must appear in the assembly.
+    assert!(
+        asm.contains("Wrapper__get__i32"),
+        "generic trait impl must emit monomorphized label Wrapper__get__i32: {asm}"
+    );
+    // The call to use_wrapper must appear in the assembly — if the whole chain were
+    // constant-folded, `bl use_wrapper` would be absent.
+    assert!(
+        asm.contains("bl      use_wrapper") || asm.contains("bl use_wrapper"),
+        "call to use_wrapper must emit bl — must not be constant-folded: {asm}"
+    );
+    // The monomorphized method body must be a separate function, not inlined/folded.
+    // If Wrapper__get__i32 were folded away, main would not call use_wrapper at all.
+    assert!(
+        asm.contains("bl      Wrapper__get__i32") || asm.contains("bl Wrapper__get__i32"),
+        "use_wrapper must call Wrapper__get__i32 via bl — not inline/fold: {asm}"
+    );
+}
