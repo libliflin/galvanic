@@ -2106,14 +2106,28 @@ impl<'src> Parser<'src> {
                 Ok(Pat::Slice(pats))
             }
             // Integer literal pattern. FLS §5.2.
-            // Used in let-else OR patterns: `let 1 | 2 | 3 = x else { ... };`
+            // Also handles range patterns `lo..=hi` and `lo..hi`. FLS §5.1.9.
+            // Used in let-else OR patterns: `let 1 | 2..=5 = x else { ... };`
             // FLS §8.1: let-else accepts refutable patterns.
             TokenKind::LitInteger => {
                 let tok = self.advance();
                 let val = parse_int_literal(tok.text(self.src));
+                // FLS §5.1.9: `lo..=hi` — inclusive range pattern.
+                if self.peek_kind() == TokenKind::DotDotEq {
+                    self.advance(); // consume `..=`
+                    let hi = self.parse_range_bound()?;
+                    return Ok(Pat::RangeInclusive { lo: val as i128, hi });
+                }
+                // FLS §5.1.9: `lo..hi` — exclusive range pattern.
+                if self.peek_kind() == TokenKind::DotDot {
+                    self.advance(); // consume `..`
+                    let hi = self.parse_range_bound()?;
+                    return Ok(Pat::RangeExclusive { lo: val as i128, hi });
+                }
                 Ok(Pat::LitInt(val))
             }
             // Negative integer literal pattern `-n`. FLS §5.2.
+            // Also handles negative lower bounds in range patterns. FLS §5.1.9.
             TokenKind::Minus => {
                 self.advance(); // consume `-`
                 if self.peek_kind() != TokenKind::LitInteger {
@@ -2123,6 +2137,18 @@ impl<'src> Parser<'src> {
                 }
                 let tok = self.advance();
                 let val = parse_int_literal(tok.text(self.src));
+                // FLS §5.1.9: `-lo..=hi` — inclusive range with negative lower bound.
+                if self.peek_kind() == TokenKind::DotDotEq {
+                    self.advance(); // consume `..=`
+                    let hi = self.parse_range_bound()?;
+                    return Ok(Pat::RangeInclusive { lo: -(val as i128), hi });
+                }
+                // FLS §5.1.9: `-lo..hi` — exclusive range with negative lower bound.
+                if self.peek_kind() == TokenKind::DotDot {
+                    self.advance(); // consume `..`
+                    let hi = self.parse_range_bound()?;
+                    return Ok(Pat::RangeExclusive { lo: -(val as i128), hi });
+                }
                 Ok(Pat::NegLitInt(val))
             }
             // Boolean literal patterns. FLS §5.2.

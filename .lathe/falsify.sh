@@ -492,6 +492,28 @@ else
     pass "Claim 24: match guard with function parameter emits runtime comparison (not folded)"
 fi
 
+# ── Claim 25: let-else mixed OR (literal + range) emits runtime check for both alts ─
+# Tests that `let 1 | 10..=20 = n else { return 0 }` in a function with parameter n:
+#   (a) emits `orr` — both the literal and range alternatives are checked (not just first)
+#   (b) emits `cbz` — else block branch fires when no alternative matches
+#   (c) does NOT emit `mov x0, #1; ret` — result not constant-folded
+#
+# This guards against two failure modes:
+#   1. Parser regression: `parse_let_pattern` did not handle `..=` after a LitInteger,
+#      causing "expected Semi, found DotDotEq" on valid Rust code.
+#   2. Lowering regression: `accum_or_alt` not called for range alternatives in let-else,
+#      causing `classify(15)` to incorrectly take the else branch (only `1` checked).
+#
+# Introduced in cycle 60 (red-team, discovered parser bug, FLS §5.1.9 + §5.1.11 + §8.1).
+# References: claims.md Claim 25.
+
+echo "--- Claim 25: let-else mixed OR (literal + range) emits runtime orr+cbz ---"
+if cargo test --test e2e --quiet -- runtime_let_else_or_mixed_emits_orr_accumulation 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 25" "runtime_let_else_or_mixed_emits_orr_accumulation FAILED — let-else with mixed OR (literal|range) may not emit orr accumulation for all alternatives, or result was constant-folded"
+else
+    pass "Claim 25: let-else mixed-kind OR emits runtime orr+cbz for both alternatives (not folded)"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

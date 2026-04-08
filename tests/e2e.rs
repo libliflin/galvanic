@@ -24874,3 +24874,88 @@ fn main() -> i32 { classify(1) }
         "mixed OR pattern must emit runtime comparison instructions: {asm}"
     );
 }
+
+// ── Milestone 156 (cont.): mixed-kind OR in let-else (FLS §5.1.11, §8.1) ────
+//
+// Cycle 59 added `accum_or_alt` to 5 OR pattern sites including let-else, but
+// tests only covered match, if-let, and while-let with mixed-kind alternatives.
+// Let-else is a distinct lowering path — a bug there would be invisible.
+//
+// These tests are the adversarial close on that gap (Claim 25).
+
+/// let-else with mixed OR (literal + range): literal alternative matches.
+/// `let 1 | 10..=20 = n else { return 0 }` — n=1 hits the literal arm.
+#[test]
+fn milestone_156_let_else_or_literal_and_range_hits_literal() {
+    let src = r#"
+fn classify(n: i32) -> i32 {
+    let 1 | 10..=20 = n else { return 0 };
+    1
+}
+fn main() -> i32 { classify(1) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected 1 when n=1 hits literal alt, got {exit_code}");
+}
+
+/// let-else with mixed OR (literal + range): range alternative matches.
+#[test]
+fn milestone_156_let_else_or_literal_and_range_hits_range() {
+    let src = r#"
+fn classify(n: i32) -> i32 {
+    let 1 | 10..=20 = n else { return 0 };
+    1
+}
+fn main() -> i32 { classify(15) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected 1 when n=15 hits range alt, got {exit_code}");
+}
+
+/// let-else with mixed OR (literal + range): neither matches → else taken.
+#[test]
+fn milestone_156_let_else_or_literal_and_range_no_match() {
+    let src = r#"
+fn classify(n: i32) -> i32 {
+    let 1 | 10..=20 = n else { return 0 };
+    1
+}
+fn main() -> i32 { classify(5) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected 0 when n=5 matches nothing, got {exit_code}");
+}
+
+/// Assembly inspection (Claim 25): let-else mixed OR emits orr accumulation and cbz.
+///
+/// The pattern `let 1 | 10..=20 = n else { return 0 }` must:
+///   - emit `orr` to accumulate the literal-equality and range-check results
+///   - emit `cbz` to branch to the else block when no alternative matched
+///   - NOT fold the result to a constant when called with a literal argument
+///
+/// This is the definitive test that `accum_or_alt` is actually invoked for the
+/// let-else code path (not just for match/if-let/while-let).
+///
+/// Adversarial scenario: if let-else fell back to single-alternative checking,
+/// `let 1 | 10..=20 = 15` would fail (only checks literal 1, 15 ≠ 1 → else taken).
+/// The falsification catches this: absence of `orr` signals only one arm was evaluated.
+///
+/// FLS §5.1.11 (OR patterns), §8.1 (let-else), §6.1.2 Constraint 1.
+#[test]
+fn runtime_let_else_or_mixed_emits_orr_accumulation() {
+    let src = r#"
+fn classify(n: i32) -> i32 {
+    let 1 | 10..=20 = n else { return 0 };
+    1
+}
+fn main() -> i32 { classify(15) }
+"#;
+    let asm = compile_to_asm(src);
+    assert!(asm.contains("orr"), "let-else mixed OR must emit orr for accumulation: {asm}");
+    assert!(asm.contains("cbz"), "let-else mixed OR must emit cbz for else-branch: {asm}");
+    // classify(15) → 1, but result must not be a bare `mov x0, #1; ret` without checks.
+    assert!(
+        !asm.contains("mov     x0, #1\n\tret"),
+        "let-else mixed OR must not constant-fold result to #1: {asm}"
+    );
+}
