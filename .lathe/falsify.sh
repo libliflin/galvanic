@@ -1083,6 +1083,42 @@ else
     pass "Claim 53: unsafe trait method emits runtime bl and mul (not constant-folded)"
 fi
 
+# ── Claim 54: `unsafe fn` inside `unsafe trait` — M170+M171 combined ─────────
+#
+# Promise: A method declared `unsafe fn` inside `unsafe trait` and implemented
+# in `unsafe impl` must produce the same runtime codegen as any other method.
+# The combined presence of unsafe qualifiers on the trait, impl, AND method must
+# not trigger any special folding or skipping of code.
+#
+# This guards the intersection of M170 (unsafe fn) and M171 (unsafe trait/impl):
+#   - M170's Claim 52 only tests standalone top-level `unsafe fn`.
+#   - M171's Claim 53 only tests `unsafe trait` with regular (non-unsafe) methods.
+#   - Neither claim guards the combination: `unsafe fn` inside `unsafe impl Foo
+#     for Bar` where `Foo` is an `unsafe trait`.
+#
+# Pattern:
+#   `unsafe trait Compute { unsafe fn compute(&self, a, b) -> i32; }`
+#   `unsafe impl Compute for M { unsafe fn compute(...) { self.0 * a + b } }`
+#   `fn main() -> i32 { let m = M(3); unsafe { m.compute(4, 5) } }`
+#   Expected: 3*4+5 = 17. Must emit mul + bl, not fold to mov x0, #17.
+#
+# FLS §19: `unsafe fn` bodies are not const contexts (FLS §6.1.2 Constraint 1).
+# FLS §19 AMBIGUOUS: Spec does not specify how `unsafe fn` inside `unsafe trait`
+#   interacts with enforcement. Galvanic records flags and defers enforcement.
+#
+# Attack vector: treat `unsafe fn` inside `unsafe impl` as a special case that
+#   constant-folds the body (e.g., assuming unsafe implies "compile-time known").
+#
+# Introduced in cycle 100 (red-team: M170+M171 combination unguarded).
+# References: claims.md Claim 54.
+
+echo "--- Claim 54: unsafe fn inside unsafe trait emits runtime bl and mul (not constant-folded) ---"
+if cargo test --test e2e --quiet -- runtime_unsafe_fn_in_unsafe_trait_emits_bl_and_mul_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 54" "runtime_unsafe_fn_in_unsafe_trait_emits_bl_and_mul_not_folded FAILED — unsafe fn inside unsafe trait may be constant-folded, bl missing, or mul missing"
+else
+    pass "Claim 54: unsafe fn inside unsafe trait emits runtime bl and mul (not constant-folded)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 

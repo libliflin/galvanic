@@ -28724,3 +28724,54 @@ fn main() -> i32 { let s = S(7); s.scale(2) }
         "result must NOT be constant-folded to #14; got:\n{asm}"
     );
 }
+
+// Assembly inspection: `unsafe fn` method inside `unsafe trait` — combined M170+M171.
+//
+// FLS §19: An `unsafe trait` method may itself be declared `unsafe fn`. This
+// combination is distinct from:
+//   Claim 52 = standalone top-level `unsafe fn`
+//   Claim 53 = `unsafe trait` with regular (non-unsafe) `fn` methods
+// Here the method is *both* inside an `unsafe trait`/`unsafe impl` AND is itself
+// an `unsafe fn`, requiring an `unsafe { }` block at the call site.
+//
+// Pattern: `unsafe fn compute(&self, a, b) -> i32 { self.0 * a + b }` called via
+//   `unsafe { m.compute(4, 5) }` on an instance where `m.0 = 3`.
+//   Expected result: 3 * 4 + 5 = 17.
+//
+// Positive: `mul` — runtime multiply in the method body (not constant-folded).
+// Positive: `bl`  — runtime call to the method (not inlined or devirtualized).
+// Negative: NOT `mov x0, #17` — result 3*4+5=17 must not be folded to a constant.
+//
+// FLS §19: unsafe fn body is not a const context (FLS §6.1.2 Constraint 1).
+// FLS §19 AMBIGUOUS: spec does not specify how `unsafe fn` inside `unsafe trait`
+//   interacts with enforcement (galvanic defers enforcement of both qualifiers).
+//
+// Introduced as Claim 54 in cycle 100 (red-team: M170+M171 combination unguarded).
+#[test]
+fn runtime_unsafe_fn_in_unsafe_trait_emits_bl_and_mul_not_folded() {
+    let asm = compile_to_asm(r#"
+unsafe trait Compute {
+    unsafe fn compute(&self, a: i32, b: i32) -> i32;
+}
+struct M(i32);
+unsafe impl Compute for M {
+    unsafe fn compute(&self, a: i32, b: i32) -> i32 { self.0 * a + b }
+}
+fn main() -> i32 {
+    let m = M(3);
+    unsafe { m.compute(4, 5) }
+}
+"#);
+    assert!(
+        asm.contains("mul"),
+        "unsafe fn inside unsafe trait must emit runtime mul; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("bl"),
+        "unsafe fn inside unsafe trait must emit runtime bl for method call; got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #17") && !asm.contains("mov x0, #17"),
+        "result 3*4+5=17 must NOT be constant-folded; got:\n{asm}"
+    );
+}
