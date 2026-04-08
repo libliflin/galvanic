@@ -3582,12 +3582,12 @@ fn lower_fn(
         //
         // Cache-line note: two slots (16 bytes) per slice param vs one slot for a
         // scalar — necessary cost for runtime-determined element counts.
-        if let TyKind::Ref { inner, .. } = &param.ty.kind
+        if let TyKind::Ref { mutable, inner, .. } = &param.ty.kind
             && matches!(&inner.kind, TyKind::Slice { .. })
         {
             if reg_idx + 2 > 8 {
                 return Err(LowerError::Unsupported(
-                    "&[T] parameter exceeds ARM64 register window (needs 2 registers)".into(),
+                    "&[T] / &mut [T] parameter exceeds ARM64 register window (needs 2 registers)".into(),
                 ));
             }
             let ptr_slot = ctx.alloc_slot()?;
@@ -3597,6 +3597,11 @@ fn lower_fn(
             ctx.instrs.push(Instr::Store { src: (reg_idx + 1) as u8, slot: ptr_slot + 1 });
             ctx.locals.insert(param_name, ptr_slot);
             ctx.local_slice_slots.insert(ptr_slot);
+            // Track mutable slices separately so `for x in s` (where s: &mut [T])
+            // yields element addresses instead of values. FLS §4.9, §6.15.1.
+            if *mutable {
+                ctx.local_mut_slice_slots.insert(ptr_slot);
+            }
             reg_idx += 2;
             continue;
         }
@@ -4691,6 +4696,25 @@ struct LowerCtx<'src> {
     /// for a scalar reference — necessary cost for runtime-length slices.
     local_slice_slots: std::collections::HashSet<u8>,
 
+    /// Stack slots holding `&mut [T]` fat-pointer bases (mutable slices).
+    ///
+    /// These slots are also in `local_slice_slots` so `.len()` and indexing
+    /// work unchanged. The additional tracking here lets `for x in s` yield
+    /// element addresses (via pointer arithmetic, no dereference) rather than
+    /// element values when `s: &mut [T]` — enabling `*x = val` in the body.
+    ///
+    /// FLS §4.9, §6.15.1: `for x in s` where `s: &mut [T]` should desugar via
+    /// `IntoIterator::into_iter(s)` with `&mut T` yield type; galvanic special-
+    /// cases `&mut [T]` at the IR level (no runtime trait dispatch).
+    ///
+    /// FLS §6.15.1 AMBIGUOUS: The spec requires IntoIterator dispatch; the loop
+    /// variable `x` should have type `&mut T`. Galvanic's loop variable slot holds
+    /// the element address (i64 pointer) — same observable semantics for `*x`
+    /// reads and writes, but the binding type is not tracked.
+    ///
+    /// Cache-line note: same two-slot layout as `&[T]` (ptr + len = 16 bytes).
+    local_mut_slice_slots: std::collections::HashSet<u8>,
+
     /// Stack slots within a closure body that hold addresses to outer-scope
     /// mutable captured variables (FnMut semantics, FLS §6.22).
     ///
@@ -5441,6 +5465,7 @@ impl<'src> LowerCtx<'src> {
             local_fn_ptr_slots: std::collections::HashSet::new(),
             local_str_slots: std::collections::HashSet::new(),
             local_slice_slots: std::collections::HashSet::new(),
+            local_mut_slice_slots: std::collections::HashSet::new(),
             ptr_capture_slots: std::collections::HashSet::new(),
             u8_locals: std::collections::HashSet::new(),
             i8_locals: std::collections::HashSet::new(),
@@ -13758,7 +13783,14 @@ impl<'src> LowerCtx<'src> {
                     // it's a runtime instruction per the IR model).
                     //
                     // Cache-line note: two instructions (8 bytes) to pass a slice.
-                    if let ExprKind::Unary { op: crate::ast::UnaryOp::Ref, operand: inner } = &arg.kind
+                    // FLS §4.9 AMBIGUOUS: &mut [T] fat pointer has same layout as &[T].
+                    // Galvanic handles both `&arr` and `&mut arr` the same way here:
+                    // pass (base_addr, len) as two registers. The callee spills both to
+                    // ptr_slot and len_slot (ptr_slot + 1) regardless of mutability.
+                    if let ExprKind::Unary {
+                        op: crate::ast::UnaryOp::Ref | crate::ast::UnaryOp::RefMut,
+                        operand: inner,
+                    } = &arg.kind
                         && let ExprKind::Path(segs) = &inner.kind
                         && segs.len() == 1
                     {
@@ -15650,12 +15682,20 @@ impl<'src> LowerCtx<'src> {
                 //
                 // Cache-line note: the slice for loop emits ~11 instructions for the
                 // control flow skeleton — within two 64-byte cache lines.
-                let slice_iter: Option<u8> = if let ExprKind::Path(segs) = &iter.kind {
+                // Detect `for x in s` / `for x in s_mut` where `s: &[T]` or `s: &mut [T]`.
+                // Returns `Some((ptr_slot, is_mut))` when a slice iterator is found.
+                // `is_mut = true` means the loop variable should hold element addresses
+                // (enabling `*x = val`) rather than element values.
+                //
+                // FLS §6.15.1 AMBIGUOUS: desugaring requires IntoIterator; galvanic
+                // special-cases `&[T]` / `&mut [T]` at the IR level.
+                let slice_iter: Option<(u8, bool)> = if let ExprKind::Path(segs) = &iter.kind {
                     if segs.len() == 1 {
                         let vname = segs[0].text(self.source);
                         match self.locals.get(vname).copied() {
                             Some(ptr_slot) if self.local_slice_slots.contains(&ptr_slot) => {
-                                Some(ptr_slot)
+                                let is_mut = self.local_mut_slice_slots.contains(&ptr_slot);
+                                Some((ptr_slot, is_mut))
                             }
                             _ => None,
                         }
@@ -15666,7 +15706,7 @@ impl<'src> LowerCtx<'src> {
                     None
                 };
 
-                if let Some(ptr_slot) = slice_iter {
+                if let Some((ptr_slot, is_mut_slice)) = slice_iter {
                     let pat_name = pat.text(self.source);
 
                     // Allocate counter and element slots.
@@ -15718,8 +15758,16 @@ impl<'src> LowerCtx<'src> {
                     self.instrs.push(Instr::BinOp { op: IrBinOp::Lt, dst: r_cmp, lhs: r_counter, rhs: r_len });
                     self.instrs.push(Instr::CondBranch { reg: r_cmp, label: exit_label });
 
-                    // ── Bind element: elem_slot = *(base_ptr + counter*8) ─────────────
-                    // FLS §4.9, §6.9: Load element through the fat pointer at runtime.
+                    // ── Bind element ──────────────────────────────────────────────────
+                    // Compute base_ptr + counter * 8, then either:
+                    //   &[T]:     load the element value via LoadPtr → elem_slot holds the value.
+                    //   &mut [T]: store the element address → elem_slot holds a pointer.
+                    //             The body uses `*x = val` (StorePtr) to mutate in-place.
+                    //
+                    // FLS §4.9, §6.9: Element loaded through the fat pointer at runtime.
+                    // FLS §6.5.1: `*x = val` desugars to StorePtr through the pointer in elem_slot.
+                    // FLS §6.15.1 AMBIGUOUS: &mut [T] should yield `&mut T` loop variables via
+                    // IntoIterator; galvanic stores the element address directly.
                     let r_ptr2 = self.alloc_reg()?;
                     self.instrs.push(Instr::Load { dst: r_ptr2, slot: base_ptr_slot });
                     let r_counter2 = self.alloc_reg()?;
@@ -15730,9 +15778,18 @@ impl<'src> LowerCtx<'src> {
                     self.instrs.push(Instr::BinOp { op: IrBinOp::Mul, dst: r_off, lhs: r_counter2, rhs: r_eight });
                     let r_addr = self.alloc_reg()?;
                     self.instrs.push(Instr::BinOp { op: IrBinOp::Add, dst: r_addr, lhs: r_ptr2, rhs: r_off });
-                    let r_elem = self.alloc_reg()?;
-                    self.instrs.push(Instr::LoadPtr { dst: r_elem, src: r_addr });
-                    self.instrs.push(Instr::Store { src: r_elem, slot: elem_slot });
+                    if is_mut_slice {
+                        // For &mut [T]: elem_slot holds the element address (pointer).
+                        // The loop variable `x` acts as `&mut T` — body writes `*x = val`.
+                        // Cache-line note: same instruction count as the immutable path
+                        // (no LoadPtr emitted) — the address replaces the value directly.
+                        self.instrs.push(Instr::Store { src: r_addr, slot: elem_slot });
+                    } else {
+                        // For &[T]: load element value through the pointer; elem_slot holds the value.
+                        let r_elem = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadPtr { dst: r_elem, src: r_addr });
+                        self.instrs.push(Instr::Store { src: r_elem, slot: elem_slot });
+                    }
 
                     // ── Body ──────────────────────────────────────────────────────────
                     self.lower_block_to_value(body, &IrTy::Unit)?;
@@ -18176,6 +18233,16 @@ impl<'src> LowerCtx<'src> {
                         }
                         // Mark as slice so .len() and indexing emit fat-ptr loads.
                         closure_ctx.local_slice_slots.insert(ptr_slot);
+                        // Track mutable slices so `for x in s` yields element addresses.
+                        // FLS §4.9, §6.15.1: &mut [T] iteration yields &mut T element refs.
+                        let is_fat_mut_slice = param.ty.as_ref().map(|ty| {
+                            matches!(&ty.kind,
+                                crate::ast::TyKind::Ref { mutable: true, inner, .. }
+                                if matches!(inner.kind, crate::ast::TyKind::Slice { .. }))
+                        }).unwrap_or(false);
+                        if is_fat_mut_slice {
+                            closure_ctx.local_mut_slice_slots.insert(ptr_slot);
+                        }
                         reg_offset += 2;
                     } else {
                         let slot = closure_ctx.alloc_slot()?;

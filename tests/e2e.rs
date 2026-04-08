@@ -33540,3 +33540,182 @@ fn main() -> i32 { negate_all([1, 2, 3]) }\n",
         "result must not be constant-folded to -6: {asm}"
     );
 }
+
+// ── Milestone 197: for x in &mut slice — FLS §6.15.1, §4.9 ──────────────────────────────────
+//
+// `for x in s` where `s: &mut [T]` — the loop variable `x` holds the address
+// of each element (acting as `&mut T`). The body can write `*x = val` to mutate
+// elements in-place through the slice fat-pointer.
+//
+// FLS §6.15.1 AMBIGUOUS: The spec desugars `for x in s` to
+// `IntoIterator::into_iter(s)`. The `IntoIterator` impl for `&mut [T]` is a
+// standard library item; galvanic special-cases it at the IR level.
+//
+// FLS §4.9 AMBIGUOUS: The loop variable `x` should have type `&mut T`.
+// Galvanic stores the element address in `x`'s slot (an i64 pointer), which
+// behaves identically for `*x` reads and writes on Copy element types.
+//
+// This mirrors Milestone 196 (`for x in &mut arr`) but for slice parameters —
+// extending in-place mutation to callers that pass any-length slices.
+
+/// Milestone 197: double elements in-place via `for x in s` where `s: &mut [i32]`.
+///
+/// FLS §6.15.1, §4.9, §6.5.1, §6.5.10.
+#[test]
+fn milestone_197_for_mut_slice_double_in_place() {
+    let Some(exit_code) = compile_and_run(
+        "fn double_all(s: &mut [i32]) -> i32 { for x in s { *x = *x * 2; } 0 }\n\
+fn main() -> i32 { let mut a = [1, 2, 3]; double_all(&mut a); a[0] + a[1] + a[2] }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 12, "expected 12 (2+4+6), got {exit_code}");
+}
+
+/// Milestone 197: increment each element by 1.
+#[test]
+fn milestone_197_for_mut_slice_increment() {
+    let Some(exit_code) = compile_and_run(
+        "fn inc_all(s: &mut [i32]) -> i32 { for x in s { *x = *x + 1; } 0 }\n\
+fn main() -> i32 { let mut a = [10, 20, 30]; inc_all(&mut a); a[0] + a[1] + a[2] }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 63, "expected 63 (11+21+31), got {exit_code}");
+}
+
+/// Milestone 197: set all elements to a fixed value.
+#[test]
+fn milestone_197_for_mut_slice_set_all() {
+    let Some(exit_code) = compile_and_run(
+        "fn fill(s: &mut [i32]) -> i32 { for x in s { *x = 7; } 0 }\n\
+fn main() -> i32 { let mut a = [1, 2, 3, 4]; fill(&mut a); a[0] + a[1] + a[2] + a[3] }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 28, "expected 28 (7*4), got {exit_code}");
+}
+
+/// Milestone 197: single-element slice mutation.
+#[test]
+fn milestone_197_for_mut_slice_single_element() {
+    let Some(exit_code) = compile_and_run(
+        "fn double_one(s: &mut [i32]) -> i32 { for x in s { *x = *x * 2; } 0 }\n\
+fn main() -> i32 { let mut a = [21]; double_one(&mut a); a[0] }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 42, "expected 42, got {exit_code}");
+}
+
+/// Milestone 197: result used in arithmetic after mutation.
+#[test]
+fn milestone_197_for_mut_slice_result_in_arithmetic() {
+    let Some(exit_code) = compile_and_run(
+        "fn double_sum(s: &mut [i32]) -> i32 { for x in s { *x = *x * 2; } 0 }\n\
+fn main() -> i32 { let mut a = [5, 5, 5]; double_sum(&mut a); a[0] + a[1] + a[2] + 1 }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 31, "expected 31 (10+10+10+1), got {exit_code}");
+}
+
+/// Milestone 197: called twice with different slices (adversarial: no folding).
+#[test]
+fn milestone_197_for_mut_slice_called_twice() {
+    let Some(exit_code) = compile_and_run(
+        "fn triple_first(s: &mut [i32]) -> i32 { for x in s { *x = *x * 3; } 0 }\n\
+fn main() -> i32 {\
+ let mut a = [4, 5]; triple_first(&mut a);\
+ let mut b = [6, 7]; triple_first(&mut b);\
+ a[0] + b[0] }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 30, "expected 30 (12+18), got {exit_code}");
+}
+
+/// Milestone 197: loop with continue (skip negatives during mutation).
+#[test]
+fn milestone_197_for_mut_slice_continue() {
+    let Some(exit_code) = compile_and_run(
+        "fn double_positives(s: &mut [i32]) -> i32 {\
+ for x in s { if *x < 0 { continue; } *x = *x * 2; } 0 }\n\
+fn main() -> i32 {\
+ let mut a = [1, -1, 3, -3]; double_positives(&mut a);\
+ a[0] + a[1] + a[2] + a[3] }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 4, "expected 4 (2 + -1 + 6 + -3), got {exit_code}");
+}
+
+/// Milestone 197: mutation through a function that takes the slice as a parameter
+/// (adversarial — element values unknown at compile time, no folding possible).
+#[test]
+fn milestone_197_for_mut_slice_param() {
+    let Some(exit_code) = compile_and_run(
+        "fn negate_all(s: &mut [i32]) -> i32 { for x in s { *x = 0 - *x; } 0 }\n\
+fn main() -> i32 { let mut a = [-1, -2, -3]; negate_all(&mut a); a[0] + a[1] + a[2] }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 6, "expected 6 (1+2+3), got {exit_code}");
+}
+
+/// Assembly inspection: `for x in s` where `s: &mut [i32]` emits pointer arithmetic
+/// (mul + add) to compute each element's address, and a store through that pointer.
+/// The result must NOT be constant-folded.
+///
+/// Positive assertion: `mul` for `counter * 8` is present in the assembly.
+/// Negative assertion: the constant-folded sum is NOT a compile-time immediate.
+///
+/// FLS §4.9, §6.15.1, §6.1.2:37–45.
+#[test]
+fn runtime_for_mut_slice_emits_mul_and_store_not_folded() {
+    let asm = compile_to_asm(
+        "fn double_all(s: &mut [i32]) -> i32 { for x in s { *x = *x * 2; } 0 }\n\
+fn main() -> i32 { let mut a = [1, 2, 3]; double_all(&mut a); a[0] + a[1] + a[2] }\n",
+    );
+    // The loop must emit `mul` for the byte-offset computation (counter * 8).
+    assert!(
+        asm.contains("mul"),
+        "for-mut-slice loop must emit mul for element pointer arithmetic: {asm}"
+    );
+    // Must emit a store through the pointer (StorePtr → str [xN]).
+    assert!(
+        asm.contains("str"),
+        "for-mut-slice loop must emit str to write through element pointer: {asm}"
+    );
+    // Must NOT constant-fold the doubled sum (12) to a compile-time immediate.
+    assert!(
+        !asm.contains("mov     x0, #12"),
+        "for-mut-slice result must not be constant-folded to #12: {asm}"
+    );
+}
+
+/// Assembly inspection: called with two slices — neither result is constant-folded.
+/// This rules out any specialization on specific argument values.
+///
+/// FLS §4.9: Fat-pointer length is a runtime value — the loop body cannot be
+/// pre-computed for any specific element sequence.
+#[test]
+fn runtime_for_mut_slice_called_twice_not_folded() {
+    let asm = compile_to_asm(
+        "fn negate_all(s: &mut [i32]) -> i32 { for x in s { *x = 0 - *x; } 0 }\n\
+fn main() -> i32 {\
+ let mut a = [1, 2, 3]; negate_all(&mut a);\
+ let mut b = [10, 20]; negate_all(&mut b);\
+ a[0] + b[0] }\n",
+    );
+    // Neither folded intermediate (-1, -2, -3 → 1+2+3 = 6 or -10 etc.) should appear.
+    assert!(
+        !asm.contains("mov     x0, #-1") && !asm.contains("mov     x0, #-6"),
+        "for-mut-slice result must not be constant-folded to -1 or -6: {asm}"
+    );
+    // The mul must still appear — pointer arithmetic is runtime.
+    assert!(
+        asm.contains("mul"),
+        "for-mut-slice loop must emit mul for element pointer arithmetic: {asm}"
+    );
+}

@@ -3095,3 +3095,29 @@ The `lsl #3` is the distinguishing signature of element address computation (vs 
 - Assembly contains `mov     x0, #66` (combined result was folded)
 
 **Tests**: `cargo test --test e2e -- claim_83_for_array_param_emits_indexed_load_not_folded runtime_for_array_emits_load_indexed runtime_for_array_two_arrays_not_folded`
+
+---
+
+## Claim 84: `for x in s` where `s: &mut [T]` yields element addresses and enables in-place mutation (not constant-folded)
+
+**Stakeholder**: William (researcher), CI / Validation Infrastructure
+
+**Promise**: When a function takes a `&mut [i32]` parameter and iterates it with `for x in s`, the loop variable `x` must hold the address of each element — not a copy of the value. Writing `*x = val` inside the body must mutate the original slice element in-place. The loop must emit runtime pointer arithmetic (`mul` for byte-offset computation) — never constant-folded from any specific element values.
+
+**Why this is load-bearing**: Milestone 197 extends mutable iteration from local arrays (`for x in &mut arr`, Milestone 196) to slice parameters (`for x in s` where `s: &mut [T]`). The critical difference from `for x in s` where `s: &[T]` (Milestone 194) is that the loop variable must hold the element address, not the element value. If galvanic mistakenly copies element values (as in the immutable case), `*x = val` would write to a temporary rather than the original slice element — the mutations would be silently lost.
+
+**ARM64 implementation**: In `lower.rs`, the `for x in s` path for `&mut [T]` detects `local_mut_slice_slots` and stores the computed element address (`r_addr = r_ptr + counter * 8`) directly into `elem_slot` without a `LoadPtr`. The body's `*x = val` then uses `StorePtr` to write through that address. The assembly must contain `mul` (counter * 8) and `str` (write through pointer).
+
+**FLS §6.15.1**: For loop body executes at runtime; loop variable `x` should have type `&mut T`.
+**FLS §4.9**: `&mut [T]` is a fat pointer (data ptr + length); both are runtime values.
+**FLS §6.1.2:37–45**: Non-const function bodies emit runtime instructions.
+**FLS §6.15.1 AMBIGUOUS**: `for x in s` should desugar to `IntoIterator::into_iter(s)`, requiring the standard library `IntoIterator` impl for `&mut [T]`. Galvanic special-cases `&mut [T]` at the IR level.
+**FLS §4.9 AMBIGUOUS**: The loop variable `x` should have type `&mut T`. Galvanic stores the element address in `x`'s slot (i64 pointer) — same observable behavior for `*x` reads/writes on Copy types.
+
+**Violated if**:
+- Assembly for `double_all(s: &mut [i32])` does NOT contain `mul` (pointer arithmetic absent), OR
+- Assembly does NOT contain `str` (element write-back absent — mutations would be lost), OR
+- Assembly contains `mov x0, #12` (result constant-folded to doubled sum of [1,2,3]), OR
+- Runtime check: `double_all(&mut [1,2,3])` modifies the slice incorrectly
+
+**Tests**: `cargo test --test e2e -- runtime_for_mut_slice_emits_mul_and_store_not_folded runtime_for_mut_slice_called_twice_not_folded milestone_197_for_mut_slice_double_in_place milestone_197_for_mut_slice_param`
