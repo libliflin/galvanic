@@ -30180,6 +30180,48 @@ fn milestone_178_i8_compound_add_wraps_mid_body() {
     assert_eq!(exit, 1, "100_i8 + 50_i8 wraps to -106; -106 < 0 should be true");
 }
 
+/// Compile-and-run: i8 multiplication wraps at ±128.
+///
+/// Adversarial: 15 * 20 = 300, which overflows i8. The result must be 44 (= 300 as i8,
+/// i.e. sign-extended from 0x2C). Without SextI8 on the mul path, the function would
+/// return 300 (wrong). This test catches a regression where SextI8 is emitted for
+/// add/sub but not mul.
+#[test]
+fn milestone_177_i8_mul_wraps() {
+    let Some(exit) = compile_and_run(
+        "fn mul_i8(a: i8, b: i8) -> i8 { a * b }\nfn main() -> i32 { if mul_i8(15, 20) == 44 { 1 } else { 0 } }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "15_i8 * 20_i8 = 300 → 300 as i8 = 44");
+}
+
+/// Assembly inspection: i8 mul emits `mul` instruction and `sxtb` sign-extension —
+/// not a constant-folded result and not without sign-extension.
+///
+/// Claim 65 extension: tests that a regression disabling SextI8 for mul (while leaving
+/// it for add) would be caught. The two checks confirm:
+/// 1. Runtime codegen (mul instruction present — not an interpreter)
+/// 2. Wrapping semantics (sxtb present — not missing sign-extension on mul path)
+#[test]
+fn runtime_i8_mul_emits_sxtb_sign_extension() {
+    let asm = compile_to_asm(
+        "fn mul_i8(a: i8, b: i8) -> i8 { a * b }\nfn main() -> i32 { mul_i8(15, 20) as i32 }\n",
+    );
+    assert!(
+        asm.contains("mul"),
+        "i8 mul must emit a mul instruction; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("sxtb"),
+        "i8 return must emit `sxtb` for sign-extension (SextI8); got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #44"),
+        "result must NOT be constant-folded to mov x0, #44; got:\n{asm}"
+    );
+}
+
 // ── Milestone 179: narrowing casts `as u8` and `as i8` truncate correctly ────
 //
 // FLS §6.5.9: An integer-to-integer cast to a narrower type retains only the
@@ -30641,6 +30683,48 @@ fn milestone_181_u16_mul_wraps() {
         return;
     };
     assert_eq!(exit, 1, "300_u16 * 300_u16 = 90000 → 90000 mod 65536 = 24464");
+}
+
+/// Compile-and-run: i16 multiplication wraps at ±32768.
+///
+/// Adversarial: 200 * 200 = 40000, which overflows i16 (max 32767). The result must be
+/// -25536 (= 40000 as i16, two's complement: 40000 - 65536 = -25536). Without SextI16
+/// on the mul path, the function returns 40000 (wrong). This catches a regression where
+/// SextI16 is emitted for add/sub but not mul.
+#[test]
+fn milestone_181_i16_mul_wraps() {
+    let Some(exit) = compile_and_run(
+        "fn mul_i16(a: i16, b: i16) -> i16 { a * b }\nfn main() -> i32 { if mul_i16(200, 200) == -25536 { 1 } else { 0 } }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "200_i16 * 200_i16 = 40000 → 40000 as i16 = -25536");
+}
+
+/// Assembly inspection: i16 mul emits `mul` instruction and `sxth` sign-extension —
+/// not a constant-folded result and not without sign-extension.
+///
+/// Claim 69 extension: tests that a regression disabling SextI16 for mul (while leaving
+/// it for add) would be caught. The two checks confirm:
+/// 1. Runtime codegen (mul instruction present — not an interpreter)
+/// 2. Wrapping semantics (sxth present — not missing sign-extension on mul path)
+#[test]
+fn runtime_i16_mul_emits_sxth_sign_extension() {
+    let asm = compile_to_asm(
+        "fn mul_i16(a: i16, b: i16) -> i16 { a * b }\nfn main() -> i32 { mul_i16(200, 200) as i32 }\n",
+    );
+    assert!(
+        asm.contains("mul"),
+        "i16 mul must emit a mul instruction; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("sxth"),
+        "i16 return must emit `sxth` for sign-extension (SextI16); got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #40000"),
+        "result must NOT be constant-folded to mov x0, #40000; got:\n{asm}"
+    );
 }
 
 // ── Milestone 182: narrow integer types (u8/i8/u16/i16) in struct fields ────

@@ -2649,7 +2649,11 @@ must be emitted at runtime even though the values happen to be known at the call
 - lacks `sxtb` (no sign-extension, wrapping semantics broken), OR
 - contains `mov x0, #150` or `mov x0, #-106` (constant-folded without runtime code)
 
-**Tests**: `cargo test --test e2e -- runtime_i8_add_emits_sxtb_sign_extension milestone_177_i8_add_wraps milestone_177_i8_sub_wraps`
+**Also violated if** `compile_to_asm("fn mul_i8(a: i8, b: i8) -> i8 { a * b } ...")`:
+- lacks `mul` (mul not emitted at runtime), OR
+- lacks `sxtb` (sign-extension missing on mul path — asymmetric with add path)
+
+**Tests**: `cargo test --test e2e -- runtime_i8_add_emits_sxtb_sign_extension runtime_i8_mul_emits_sxtb_sign_extension milestone_177_i8_add_wraps milestone_177_i8_sub_wraps milestone_177_i8_mul_wraps`
 
 ---
 
@@ -2759,7 +2763,11 @@ two's complement. The wrapping must be observable at the type's own boundaries.
 - returns 65600 instead of 64, OR
 - the function body lacks `and ... #65535` in the assembly output
 
-**Tests**: `cargo test --test e2e -- runtime_u16_add_emits_and_truncation runtime_i16_add_emits_sxth milestone_181_u16_add_wraps milestone_181_i16_add_wraps milestone_181_u16_compound_add_wraps_mid_body milestone_181_i16_compound_add_wraps_mid_body`
+**Also violated if** `compile_to_asm("fn mul_i16(a: i16, b: i16) -> i16 { a * b } ...")`:
+- lacks `mul` (mul not emitted at runtime), OR
+- lacks `sxth` (sign-extension missing on mul path — asymmetric with add path)
+
+**Tests**: `cargo test --test e2e -- runtime_u16_add_emits_and_truncation runtime_i16_add_emits_sxth runtime_i16_mul_emits_sxth_sign_extension milestone_181_u16_add_wraps milestone_181_u16_mul_wraps milestone_181_i16_add_wraps milestone_181_i16_mul_wraps milestone_181_u16_compound_add_wraps_mid_body milestone_181_i16_compound_add_wraps_mid_body`
 
 ---
 

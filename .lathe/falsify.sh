@@ -1211,9 +1211,9 @@ fi
 
 # References: claims.md Claim 65.
 
-echo "--- Claim 65: i8 arithmetic emits runtime add and sxtb sign-extension (not constant-folded) ---"
-if cargo test --test e2e --quiet -- runtime_i8_add_emits_sxtb_sign_extension milestone_177_i8_add_wraps milestone_177_i8_sub_wraps 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 65" "i8 assembly inspection or wrapping test FAILED — i8 arithmetic may be constant-folded or missing SextI8"
+echo "--- Claim 65: i8 arithmetic emits runtime add/mul and sxtb sign-extension (not constant-folded) ---"
+if cargo test --test e2e --quiet -- runtime_i8_add_emits_sxtb_sign_extension runtime_i8_mul_emits_sxtb_sign_extension milestone_177_i8_add_wraps milestone_177_i8_sub_wraps milestone_177_i8_mul_wraps 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 65" "i8 assembly inspection or wrapping test FAILED — i8 arithmetic (add or mul) may be constant-folded or missing SextI8"
 else
     pass "Claim 65: i8 arithmetic emits runtime add and sxtb sign-extension (not constant-folded)"
 fi
@@ -1281,16 +1281,19 @@ fi
 # the function returns 65600 and the if-check fails. Similarly for i16.
 # References: claims.md Claim 69.
 
-echo "--- Claim 69: u16 arithmetic wraps at 16-bit boundaries (not identity) ---"
+echo "--- Claim 69: u16/i16 arithmetic wraps at 16-bit boundaries (not identity) ---"
 if cargo test --test e2e --quiet -- \
     runtime_u16_add_emits_and_truncation \
     runtime_i16_add_emits_sxth \
+    runtime_i16_mul_emits_sxth_sign_extension \
     milestone_181_u16_add_wraps \
+    milestone_181_u16_mul_wraps \
     milestone_181_i16_add_wraps \
+    milestone_181_i16_mul_wraps \
     milestone_181_u16_compound_add_wraps_mid_body \
     milestone_181_i16_compound_add_wraps_mid_body \
     2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 69" "u16/i16 arithmetic wrapping test FAILED — u16/i16 arithmetic may not wrap at 16-bit boundaries"
+    fail "Claim 69" "u16/i16 arithmetic wrapping test FAILED — u16/i16 arithmetic (add or mul) may not wrap at 16-bit boundaries"
 else
     pass "Claim 69: u16/i16 arithmetic wraps at 16-bit boundaries (not identity through 32-bit registers)"
 fi
