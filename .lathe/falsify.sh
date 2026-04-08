@@ -699,6 +699,32 @@ else
     pass "Claim 34: assoc type method result not folded (runtime mul emitted)"
 fi
 
+# ── Claim 35: Generic functions with assoc type bounds emit monomorphized calls ─
+#
+# A generic function `fn extract<T: Container<Item = i32>>(c: T) -> i32 { c.get_val() }`
+# must:
+#   (a) emit `bl extract__Wrapper` — monomorphized call, not constant-folded
+#   (b) NOT emit `mov x0, #10` — `extract(Wrapper { val: 9 })` must not be folded
+#
+# The two-type variant additionally checks that both `Wrapper__get_val` and
+# `Doubler__get_val` labels are present, and that the sum `7 + 5*2 = 17` is
+# NOT folded to `mov x0, #17`.
+#
+# This covers the §10.2 + §12.1 associated type bound path (`T: Trait<Assoc = U>`),
+# distinct from:
+#   Claims 9–12  = plain trait bounds without associated type binding
+#   Claim 34     = direct associated type method dispatch, not via generic parameter
+#
+# Introduced in cycle 71 (FLS §10.2 + §12.1 — assoc type bounds falsification).
+# References: claims.md Claim 35.
+
+echo "--- Claim 35: generic fn with assoc type bound emits monomorphized bl (not folded) ---"
+if cargo test --test e2e --quiet -- runtime_assoc_type_bound_emits_monomorphized_bl_not_folded runtime_assoc_type_bound_two_types_both_monomorphized 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 35" "runtime_assoc_type_bound_emits_monomorphized_bl_not_folded or runtime_assoc_type_bound_two_types_both_monomorphized FAILED — generic fn with assoc type bound may not emit monomorphized call, or result was constant-folded"
+else
+    pass "Claim 35: generic fn with assoc type bound emits monomorphized bl (not folded)"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""
