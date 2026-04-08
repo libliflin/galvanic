@@ -4115,33 +4115,41 @@ struct LowerCtx<'src> {
     /// Cache-line note: same slot footprint as a scalar `i32` — no extra cost.
     local_str_slots: std::collections::HashSet<u8>,
 
+    /// Stack slots within a closure body that hold addresses to outer-scope
+    /// mutable captured variables (FnMut semantics, FLS §6.22).
+    ///
+    /// FLS §6.22: When a closure assigns to a captured variable, the capture is
+    /// passed by address (`AddrOf(outer_slot)`) rather than by value (`Load`).
+    /// This slot stores a pointer (an i64 address on ARM64); reading the variable
+    /// emits `LoadPtr` and writing emits `StorePtr`.
+    ///
+    /// Cache-line note: pointer occupies one stack slot (8 bytes) — same as scalar.
+    ptr_capture_slots: std::collections::HashSet<u8>,
+
     /// Captured outer-scope slots for each closure fn-pointer slot.
     ///
     /// FLS §6.22: Capturing closures capture free variables from the enclosing
-    /// scope by value. Galvanic compiles each captured variable as a hidden
-    /// leading parameter of the closure's hidden function. At every call site
-    /// the captured values are loaded from their outer-scope slots and prepended
-    /// to the explicit argument list before `CallIndirect` is emitted.
+    /// scope. Immutable captures (bool=false) pass the value; mutable captures
+    /// (bool=true) pass the address of the outer-scope stack slot so the closure
+    /// body can write back (FnMut semantics).
     ///
-    /// Maps `fn_ptr_slot → vec![outer_slot_0, outer_slot_1, ...]` in the order
+    /// Maps `fn_ptr_slot → vec![(outer_slot, is_addr), ...]` in the order
     /// the captures appear in the closure body (first-seen, deduplicated).
     ///
     /// Cache-line note: read/write during closure lowering only; not on the hot
-    /// arithmetic path. Map entry is 24 bytes per captured variable.
-    local_capture_args: HashMap<u8, Vec<u8>>,
+    /// arithmetic path.
+    local_capture_args: HashMap<u8, Vec<(u8, bool)>>,
 
     /// Side-channel from `lower_expr(Closure)` to the surrounding `lower_stmt(Let)`.
     ///
     /// FLS §6.22, §8.1: When a capturing closure is lowered, this field records
-    /// the outer-scope slots it captures (in parameter order). The let-binding
-    /// handler drains this after storing the closure address to register the
-    /// captures for the new fn-pointer slot.
+    /// the outer-scope slots it captures (in parameter order), with a flag for
+    /// whether each is passed by address (mutable capture) or by value.
     ///
-    /// `None` when the most recently lowered closure had no captures (or when
-    /// no closure has been lowered yet).
+    /// `None` when the most recently lowered closure had no captures.
     ///
-    /// Cache-line note: `Option<Vec<u8>>` = 24 bytes (None = 0 heap allocation).
-    last_closure_captures: Option<Vec<u8>>,
+    /// Cache-line note: `Option<Vec<(u8,bool)>>` = 24 bytes (None = 0 heap alloc).
+    last_closure_captures: Option<Vec<(u8, bool)>>,
 
     /// Side-channel: the name of the most recently lowered capturing closure.
     ///
@@ -4598,6 +4606,111 @@ fn find_captures<'src>(
     }
 }
 
+/// Detects which captured variable names are mutated (assigned to) in the closure body.
+///
+/// FLS §6.22: A closure that assigns to a captured variable requires FnMut semantics.
+/// Galvanic implements this by passing the address of the outer-scope stack slot
+/// (via `AddrOf`) instead of the value, enabling write-through from within the body.
+///
+/// Returns the set of capture names (String) that appear on the LHS of an assignment
+/// or compound assignment anywhere in `body`.
+///
+/// Cache-line note: called once per closure during lowering; not on a hot path.
+fn find_mut_captures(
+    body: &crate::ast::Expr,
+    captured_names: &std::collections::HashSet<&str>,
+    source: &str,
+) -> std::collections::HashSet<String> {
+    let mut mutated = std::collections::HashSet::new();
+    walk_expr_for_mutations(body, captured_names, source, &mut mutated);
+    mutated
+}
+
+fn walk_expr_for_mutations(
+    expr: &crate::ast::Expr,
+    captured_names: &std::collections::HashSet<&str>,
+    source: &str,
+    mutated: &mut std::collections::HashSet<String>,
+) {
+    use crate::ast::{BinOp, ExprKind, StmtKind};
+    match &expr.kind {
+        // Direct assignment `n = expr` — LHS may be a captured variable.
+        ExprKind::Binary { op: BinOp::Assign, lhs, rhs } => {
+            if let ExprKind::Path(segs) = &lhs.kind
+                && segs.len() == 1
+            {
+                let name = segs[0].text(source);
+                if captured_names.contains(name) {
+                    mutated.insert(name.to_owned());
+                }
+            }
+            walk_expr_for_mutations(rhs, captured_names, source, mutated);
+        }
+        // Compound assignment `n += expr` — target may be a captured variable.
+        ExprKind::CompoundAssign { target, value, .. } => {
+            if let ExprKind::Path(segs) = &target.kind
+                && segs.len() == 1
+            {
+                let name = segs[0].text(source);
+                if captured_names.contains(name) {
+                    mutated.insert(name.to_owned());
+                }
+            }
+            walk_expr_for_mutations(value, captured_names, source, mutated);
+        }
+        // Block: walk stmts and tail.
+        ExprKind::Block(block) | ExprKind::UnsafeBlock(block) => {
+            for stmt in &block.stmts {
+                match &stmt.kind {
+                    StmtKind::Expr(e) => {
+                        walk_expr_for_mutations(e, captured_names, source, mutated);
+                    }
+                    StmtKind::Let { init: Some(init_expr), .. } => {
+                        walk_expr_for_mutations(init_expr, captured_names, source, mutated);
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(tail) = &block.tail {
+                walk_expr_for_mutations(tail, captured_names, source, mutated);
+            }
+        }
+        // If / if-else: walk condition and both branches.
+        ExprKind::If { cond, then_block, else_expr } => {
+            walk_expr_for_mutations(cond, captured_names, source, mutated);
+            for stmt in &then_block.stmts {
+                if let StmtKind::Expr(e) = &stmt.kind {
+                    walk_expr_for_mutations(e, captured_names, source, mutated);
+                }
+            }
+            if let Some(tail) = &then_block.tail {
+                walk_expr_for_mutations(tail, captured_names, source, mutated);
+            }
+            if let Some(else_e) = else_expr {
+                walk_expr_for_mutations(else_e, captured_names, source, mutated);
+            }
+        }
+        // Other binary expressions — walk both operands.
+        ExprKind::Binary { lhs, rhs, .. } => {
+            walk_expr_for_mutations(lhs, captured_names, source, mutated);
+            walk_expr_for_mutations(rhs, captured_names, source, mutated);
+        }
+        // Unary — walk the operand.
+        ExprKind::Unary { operand, .. } => {
+            walk_expr_for_mutations(operand, captured_names, source, mutated);
+        }
+        // Call — walk all args.
+        ExprKind::Call { callee, args } => {
+            walk_expr_for_mutations(callee, captured_names, source, mutated);
+            for arg in args {
+                walk_expr_for_mutations(arg, captured_names, source, mutated);
+            }
+        }
+        // Literals, paths, return, break, continue, etc. — no mutations.
+        _ => {}
+    }
+}
+
 impl<'src> LowerCtx<'src> {
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -4687,6 +4800,7 @@ impl<'src> LowerCtx<'src> {
             local_tuple_struct_types: HashMap::new(),
             local_fn_ptr_slots: std::collections::HashSet::new(),
             local_str_slots: std::collections::HashSet::new(),
+            ptr_capture_slots: std::collections::HashSet::new(),
             local_capture_args: HashMap::new(),
             last_closure_captures: None,
             last_closure_name: None,
@@ -8418,6 +8532,7 @@ impl<'src> LowerCtx<'src> {
                     if matches!(init_expr.kind, ExprKind::Closure { .. }) {
                         self.local_fn_ptr_slots.insert(slot);
                         if let Some(cap_slots) = self.last_closure_captures.take() {
+                            // cap_slots: Vec<(outer_slot, is_addr)>
                             self.local_capture_args.insert(slot, cap_slots);
                         }
                         // Clear trampoline side-channels (consumed by let, not by call-arg path).
@@ -8849,7 +8964,15 @@ impl<'src> LowerCtx<'src> {
                     LowerError::Unsupported(format!("undefined variable `{var_name}`"))
                 })?;
                 let dst = self.alloc_reg()?;
-                self.instrs.push(Instr::Load { dst, slot });
+                if self.ptr_capture_slots.contains(&slot) {
+                    // FLS §6.22 FnMut: the slot holds a pointer to the outer-scope
+                    // variable. Load the address first, then dereference it.
+                    let ptr_reg = self.alloc_reg()?;
+                    self.instrs.push(Instr::Load { dst: ptr_reg, slot });
+                    self.instrs.push(Instr::LoadPtr { dst, src: ptr_reg });
+                } else {
+                    self.instrs.push(Instr::Load { dst, slot });
+                }
                 Ok(IrValue::Reg(dst))
             }
 
@@ -11469,11 +11592,15 @@ impl<'src> LowerCtx<'src> {
                         // prepend them as hidden leading arguments before the
                         // explicit arguments. The hidden closure function receives
                         // captures in x0..x{k-1} and explicit args in x{k}..
-                        let cap_slots: Vec<u8> = self.local_capture_args
+                        //
+                        // FLS §6.22: Mutable captures (is_addr=true) pass the
+                        // address of the outer slot via AddrOf (FnMut semantics).
+                        // Immutable captures pass the value via Load.
+                        let cap_entries: Vec<(u8, bool)> = self.local_capture_args
                             .get(&ptr_slot)
                             .cloned()
                             .unwrap_or_default();
-                        let n_caps = cap_slots.len();
+                        let n_caps = cap_entries.len();
                         let total_args = n_caps + args.len();
                         if total_args > 8 {
                             return Err(LowerError::Unsupported(format!(
@@ -11481,18 +11608,24 @@ impl<'src> LowerCtx<'src> {
                                  exceeds 8-register ARM64 window"
                             )));
                         }
-                        // Load captured values first (they must stay stable while
-                        // explicit args are evaluated, so load them before the
-                        // explicit argument expressions).
+                        // Pass capture values/addresses first (before explicit args).
                         let mut all_regs = Vec::with_capacity(total_args);
-                        for cap_slot in cap_slots {
+                        for (cap_slot, is_addr) in cap_entries {
                             let r = self.alloc_reg()?;
-                            self.instrs.push(Instr::Load { dst: r, slot: cap_slot });
+                            if is_addr {
+                                // FnMut: pass address so the closure can write back.
+                                self.instrs.push(Instr::AddrOf { dst: r, slot: cap_slot });
+                            } else {
+                                self.instrs.push(Instr::Load { dst: r, slot: cap_slot });
+                            }
                             all_regs.push(r);
                         }
                         // Lower explicit arguments left-to-right (FLS §6.4:14).
+                        // Use IrTy::I32 as the type hint (not ret_ty) so that integer
+                        // literal arguments (e.g., `add(3)` as a statement) are lowered
+                        // correctly when ret_ty is IrTy::Unit.
                         for arg in args {
-                            let v = self.lower_expr(arg, ret_ty)?;
+                            let v = self.lower_expr(arg, &IrTy::I32)?;
                             let r = self.val_to_reg(v)?;
                             all_regs.push(r);
                         }
@@ -12044,7 +12177,7 @@ impl<'src> LowerCtx<'src> {
                         // `bl apply`, and (3) tail-calls the actual closure.
                         //
                         // Cache-line note: trampoline is 3–6 instructions (12–24 bytes).
-                        if let Some(cap_slots) = self.last_closure_captures.take() {
+                        if let Some(cap_entries) = self.last_closure_captures.take() {
                             let closure_name = self.last_closure_name.take()
                                 .expect("last_closure_name set when last_closure_captures is set");
                             let n_explicit = self.last_closure_n_explicit.take().unwrap_or(0);
@@ -12053,9 +12186,14 @@ impl<'src> LowerCtx<'src> {
                             // x27 (cap 0), x26 (cap 1), x25 (cap 2), …
                             // These precede the Call instruction, so they execute
                             // before `bl apply` and are preserved through it.
-                            for (cap_idx, &cap_slot) in cap_slots.iter().enumerate() {
+                            // For mutable captures (is_addr=true), pass the address.
+                            for (cap_idx, &(cap_slot, is_addr)) in cap_entries.iter().enumerate() {
                                 let dest_reg = 27u8.saturating_sub(cap_idx as u8);
-                                self.instrs.push(Instr::Load { dst: dest_reg, slot: cap_slot });
+                                if is_addr {
+                                    self.instrs.push(Instr::AddrOf { dst: dest_reg, slot: cap_slot });
+                                } else {
+                                    self.instrs.push(Instr::Load { dst: dest_reg, slot: cap_slot });
+                                }
                             }
 
                             // Record the trampoline to be emitted.
@@ -12063,7 +12201,7 @@ impl<'src> LowerCtx<'src> {
                             self.pending_trampolines.push(crate::ir::ClosureTrampoline {
                                 name: trampoline_name.clone(),
                                 closure_name,
-                                n_caps: cap_slots.len(),
+                                n_caps: cap_entries.len(),
                                 n_explicit,
                             });
 
@@ -12404,7 +12542,15 @@ impl<'src> LowerCtx<'src> {
                 // existing let-binding convention.
                 let rhs_val = self.lower_expr(rhs, &IrTy::I32)?;
                 let src = self.val_to_reg(rhs_val)?;
-                self.instrs.push(Instr::Store { src, slot });
+                // FLS §6.22 FnMut: if slot holds an address (mutable capture),
+                // write through the pointer rather than storing to the slot directly.
+                if self.ptr_capture_slots.contains(&slot) {
+                    let ptr_reg = self.alloc_reg()?;
+                    self.instrs.push(Instr::Load { dst: ptr_reg, slot });
+                    self.instrs.push(Instr::StorePtr { src, addr: ptr_reg });
+                } else {
+                    self.instrs.push(Instr::Store { src, slot });
+                }
 
                 // FLS §6.5.10: assignment expressions have type `()`.
                 Ok(IrValue::Unit)
@@ -12570,6 +12716,34 @@ impl<'src> LowerCtx<'src> {
                         ));
                     }
                 };
+
+                // FLS §6.22 FnMut: if slot holds an address (mutable capture),
+                // use LoadPtr/StorePtr for read-modify-write through the pointer.
+                if self.ptr_capture_slots.contains(&slot) {
+                    let ptr_reg = self.alloc_reg()?;
+                    self.instrs.push(Instr::Load { dst: ptr_reg, slot });
+                    let lhs_reg = self.alloc_reg()?;
+                    self.instrs.push(Instr::LoadPtr { dst: lhs_reg, src: ptr_reg });
+                    let rhs_val = self.lower_expr(value, &IrTy::I32)?;
+                    let rhs_reg = self.val_to_reg(rhs_val)?;
+                    let ir_op = match op {
+                        BinOp::Add    => IrBinOp::Add,
+                        BinOp::Sub    => IrBinOp::Sub,
+                        BinOp::Mul    => IrBinOp::Mul,
+                        BinOp::Div    => IrBinOp::Div,
+                        BinOp::Rem    => IrBinOp::Rem,
+                        BinOp::BitAnd => IrBinOp::BitAnd,
+                        BinOp::BitOr  => IrBinOp::BitOr,
+                        BinOp::BitXor => IrBinOp::BitXor,
+                        BinOp::Shl    => IrBinOp::Shl,
+                        BinOp::Shr    => IrBinOp::Shr,
+                        _ => unreachable!("compound assignment op must be arithmetic or bitwise"),
+                    };
+                    let res_reg = self.alloc_reg()?;
+                    self.instrs.push(Instr::BinOp { op: ir_op, dst: res_reg, lhs: lhs_reg, rhs: rhs_reg });
+                    self.instrs.push(Instr::StorePtr { src: res_reg, addr: ptr_reg });
+                    return Ok(IrValue::Unit);
+                }
 
                 // Load current value of target at runtime.
                 // FLS §6.1.2:37–45: this load is a runtime instruction.
@@ -15382,11 +15556,24 @@ impl<'src> LowerCtx<'src> {
                 // FLS §6.22: Captures precede explicit parameters in the ABI so
                 // the caller can pass them without knowing the explicit-param arity.
                 // FLS §6.1.2:37–45: All spills are runtime store instructions.
+                //
+                // FLS §6.22: Mutable captures (assigned to in the body) are passed
+                // by address from the caller (FnMut semantics). The closure body
+                // reads/writes through the pointer via LoadPtr/StorePtr.
+                // FLS §6.22: AMBIGUOUS — the spec does not define the ABI for
+                // mutable captures. Galvanic's choice: pass &outer_slot (AddrOf).
+                let captured_name_set: std::collections::HashSet<&str> =
+                    captures.iter().map(|(name, _)| *name).collect();
+                let mut_captures = find_mut_captures(body, &captured_name_set, self.source);
                 let n_captures = captures.len();
                 for (i, (cap_name, _outer_slot)) in captures.iter().enumerate() {
                     let slot = closure_ctx.alloc_slot()?;
                     closure_ctx.instrs.push(Instr::Store { src: i as u8, slot });
                     closure_ctx.locals.insert(cap_name, slot);
+                    // If this capture is mutated, mark the slot as a pointer capture.
+                    if mut_captures.contains(*cap_name) {
+                        closure_ctx.ptr_capture_slots.insert(slot);
+                    }
                 }
 
                 // ── Spill explicit parameters (FLS §6.14, §9) ────────────────
@@ -15460,7 +15647,10 @@ impl<'src> LowerCtx<'src> {
                 // Also record the closure name and explicit parameter count for the
                 // call-arg trampoline generator (FLS §6.22, §4.13).
                 if !captures.is_empty() {
-                    let outer_slots: Vec<u8> = captures.iter().map(|(_, s)| *s).collect();
+                    let outer_slots: Vec<(u8, bool)> = captures
+                        .iter()
+                        .map(|(name, s)| (*s, mut_captures.contains(*name)))
+                        .collect();
                     self.last_closure_captures = Some(outer_slots);
                     self.last_closure_name = Some(closure_name.clone());
                     self.last_closure_n_explicit = Some(params.len());

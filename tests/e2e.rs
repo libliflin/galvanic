@@ -22752,3 +22752,244 @@ fn main() -> i32 {
         "combined result (17) must NOT be constant-folded: {asm}"
     );
 }
+
+// ── Milestone 149: FnMut closures — mutable capture (FLS §6.14, §6.22) ──────
+//
+// A FnMut closure mutates one or more captured variables. Galvanic passes the
+// address of the outer-scope stack slot (`AddrOf`) rather than its value, so
+// that the closure body can write back through the pointer. Each call sees the
+// updated value from the previous call.
+//
+// FLS §6.14: Closures that mutate captured variables implement FnMut.
+// FLS §6.22: "A closure expression captures variables from the surrounding
+//             environment." Mutable captures require write-back semantics.
+// FLS §6.22: AMBIGUOUS — the spec does not specify the ABI for mutable
+//             captures. Galvanic's choice: pass &outer_slot via AddrOf.
+
+/// Milestone 149: basic FnMut closure — single counter captured by address.
+///
+/// FLS §6.22: `n += 1` inside the closure mutates the outer `n` because
+/// the closure receives a pointer to `n`'s stack slot.
+/// Second call sees n=1 (from first call) and returns 2.
+#[test]
+fn milestone_149_fn_mut_basic() {
+    let src = r#"
+fn main() -> i32 {
+    let mut n = 0;
+    let mut inc = || { n += 1; n };
+    inc();
+    inc()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2, "second call must return 2 (n was incremented by first call), got {exit_code}");
+}
+
+/// Milestone 149: FnMut closure called three times.
+///
+/// FLS §6.22: Each call increments n; third call returns n=3.
+#[test]
+fn milestone_149_fn_mut_three_calls() {
+    let src = r#"
+fn main() -> i32 {
+    let mut n = 0;
+    let mut inc = || { n += 1; n };
+    inc();
+    inc();
+    inc()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "third call must return 3, got {exit_code}");
+}
+
+/// Milestone 149: FnMut closure with non-zero initial value.
+///
+/// FLS §6.22: Mutable capture initializes from the outer variable's current value.
+#[test]
+fn milestone_149_fn_mut_nonzero_start() {
+    let src = r#"
+fn main() -> i32 {
+    let mut n = 10;
+    let mut add5 = || { n += 5; n };
+    add5();
+    add5()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 20, "10+5+5=20, got {exit_code}");
+}
+
+/// Milestone 149: FnMut closure result used in arithmetic.
+///
+/// FLS §6.22: The return value of a FnMut call is the post-mutation value.
+#[test]
+fn milestone_149_fn_mut_result_in_arithmetic() {
+    let src = r#"
+fn main() -> i32 {
+    let mut n = 0;
+    let mut inc = || { n += 1; n };
+    let a = inc();
+    let b = inc();
+    a + b
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "1+2=3 (first returns 1, second returns 2), got {exit_code}");
+}
+
+/// Milestone 149: FnMut closure with parameter and mutable capture.
+///
+/// FLS §6.22: A closure can have both a mutable capture and explicit parameters.
+/// The capture accumulates across calls; the parameter is fresh each call.
+#[test]
+fn milestone_149_fn_mut_with_param() {
+    let src = r#"
+fn main() -> i32 {
+    let mut sum = 0;
+    let mut add = |x: i32| { sum += x; sum };
+    add(3);
+    add(7)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "sum+=3 then sum+=7 → return 10, got {exit_code}");
+}
+
+/// Milestone 149: FnMut closure captures a runtime parameter.
+///
+/// FLS §6.22: The outer variable to be captured can itself be a function parameter,
+/// preventing constant folding at compile time.
+#[test]
+fn milestone_149_fn_mut_captures_parameter() {
+    let src = r#"
+fn run(start: i32) -> i32 {
+    let mut n = start;
+    let mut inc = || { n += 1; n };
+    inc();
+    inc()
+}
+fn main() -> i32 {
+    run(5)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "start=5, inc twice → 7, got {exit_code}");
+}
+
+/// Milestone 149: FnMut closure with subtraction.
+///
+/// FLS §6.22: Mutable captures work with any compound assignment operator.
+#[test]
+fn milestone_149_fn_mut_subtract() {
+    let src = r#"
+fn main() -> i32 {
+    let mut n = 10;
+    let mut dec = || { n -= 3; n };
+    dec();
+    dec()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 4, "10-3-3=4, got {exit_code}");
+}
+
+/// Milestone 149: FnMut closure, result checked in if.
+///
+/// FLS §6.22: The post-mutation value can be used in control flow.
+#[test]
+fn milestone_149_fn_mut_result_in_if() {
+    let src = r#"
+fn main() -> i32 {
+    let mut n = 0;
+    let mut inc = || { n += 1; n };
+    inc();
+    if inc() > 1 { 1 } else { 0 }
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "second call returns 2 > 1 → true branch → 1, got {exit_code}");
+}
+
+// ── Assembly inspection: FnMut closures ──────────────────────────────────────
+
+/// Assembly check: FnMut closure passes address of outer slot, not value.
+///
+/// FLS §6.22: Mutable capture uses AddrOf (add x, sp, #N) not Load (ldr x, [sp, #N]).
+/// The closure body must contain a pointer dereference (ldr x, [x]) for reading
+/// and a pointer write (str x, [x]) for mutation. The result must NOT be folded.
+///
+/// This is the primary "FnMut not by-value" check — if galvanic passed the value
+/// instead of the address, the second call would return 1 (not 2), and more
+/// importantly, the assembly would show `ldr x, [sp]` (stack load) for the capture
+/// arg rather than `add x, sp, #N` (address-of).
+#[test]
+fn runtime_fn_mut_emits_addr_of_and_load_store_ptr() {
+    let src = r#"
+fn main() -> i32 {
+    let mut n = 0;
+    let mut inc = || { n += 1; n };
+    inc();
+    inc()
+}
+"#;
+    let asm = compile_to_asm(src);
+    // The call site must pass the address of the outer slot via AddrOf (add x, sp, #N).
+    assert!(
+        asm.contains("add     x") && asm.contains(", sp, #"),
+        "FnMut capture must pass address via add x, sp, #N (AddrOf):\n{asm}"
+    );
+    // The closure body must dereference the pointer to read the value.
+    // LoadPtr emits `ldr xN, [xM]` (indirect through register, not stack slot).
+    let has_indirect_ldr = asm.lines().any(|l| {
+        let trimmed = l.trim();
+        trimmed.starts_with("ldr") && trimmed.contains("[x") && !trimmed.contains("[sp")
+    });
+    assert!(has_indirect_ldr, "FnMut closure body must emit ldr xN, [xM] (LoadPtr through pointer):\n{asm}");
+    // The closure body must write back through the pointer.
+    let has_indirect_str = asm.lines().any(|l| {
+        let trimmed = l.trim();
+        trimmed.starts_with("str") && trimmed.contains("[x") && !trimmed.contains("[sp")
+    });
+    assert!(has_indirect_str, "FnMut closure body must emit str xN, [xM] (StorePtr through pointer):\n{asm}");
+    // Result must not be constant-folded.
+    assert!(
+        !asm.contains("mov     x0, #2"),
+        "FnMut result (2) must NOT be constant-folded to mov x0, #2:\n{asm}"
+    );
+}
+
+/// Assembly check: FnMut with parameter — mutable capture + explicit arg both emitted.
+///
+/// FLS §6.22: Mutable capture (n, passed by address) precedes the explicit parameter
+/// (x, passed by value). Both must appear in the assembly as separate arguments.
+#[test]
+fn runtime_fn_mut_with_param_not_folded() {
+    let src = r#"
+fn run(start: i32) -> i32 {
+    let mut sum = 0;
+    let mut add = |x: i32| { sum += x; sum };
+    add(start);
+    add(start)
+}
+fn main() -> i32 {
+    run(3)
+}
+"#;
+    let asm = compile_to_asm(src);
+    // Closure must exist.
+    assert!(
+        asm.lines().any(|l| l.starts_with("__closure_")),
+        "FnMut closure must emit a hidden function label:\n{asm}"
+    );
+    // Must pass address (AddrOf for mutable capture).
+    assert!(
+        asm.contains("add     x") && asm.contains(", sp, #"),
+        "FnMut must pass address of mutable capture via AddrOf:\n{asm}"
+    );
+    // Result 3+3=6 must not be constant-folded.
+    assert!(
+        !asm.contains("mov     x0, #6"),
+        "FnMut result (6) must NOT be constant-folded:\n{asm}"
+    );
+}
