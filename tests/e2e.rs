@@ -30445,3 +30445,200 @@ fn milestone_180_cast_i16_in_arithmetic() {
     };
     assert_eq!(exit, 99, "65535 as i16 = -1; -1 + 100 = 99");
 }
+
+// ── Milestone 181: u16 / i16 native arithmetic with wrapping (FLS §4.1, §6.23) ─
+//
+// FLS §4.1: u16 range is 0..=65535; i16 range is -32768..=32767.
+// FLS §6.23: At runtime, arithmetic on these types wraps in two's complement.
+// Previously u16 mapped to IrTy::U32 and i16 to IrTy::I32 — no wrapping emitted.
+// Fix: add IrTy::U16 and IrTy::I16 with TruncU16/SextI16 at return boundaries
+// and compound-assignment boundaries, matching the u8/i8 pattern.
+
+/// Assembly inspection: a function returning u16 emits `and #65535` truncation.
+///
+/// Adversarial: uses function parameters so the add cannot be constant-folded.
+/// Claim 69: u16 arithmetic emits runtime add and TruncU16 (not constant-folded).
+#[test]
+fn runtime_u16_add_emits_and_truncation() {
+    let asm = compile_to_asm(
+        "fn add_u16(a: u16, b: u16) -> u16 { a + b }\nfn main() -> i32 { add_u16(1, 2) as i32 }\n",
+    );
+    assert!(
+        asm.contains("add") && asm.contains("and") && asm.contains("65535"),
+        "expected add + and #65535 for u16 return, got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #3"),
+        "must not constant-fold 1+2=3; got:\n{asm}"
+    );
+}
+
+/// Assembly inspection: a function returning i16 emits `sxth` sign-extension.
+///
+/// Adversarial: uses function parameters so the add cannot be constant-folded.
+#[test]
+fn runtime_i16_add_emits_sxth() {
+    let asm = compile_to_asm(
+        "fn add_i16(a: i16, b: i16) -> i16 { a + b }\nfn main() -> i32 { add_i16(1, 2) as i32 }\n",
+    );
+    assert!(
+        asm.contains("add") && asm.contains("sxth"),
+        "expected add + sxth for i16 return, got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #3"),
+        "must not constant-fold 1+2=3; got:\n{asm}"
+    );
+}
+
+#[test]
+fn milestone_181_u16_add_wraps() {
+    // 65500 + 100 = 65600; 65600 mod 65536 = 64; 64 < 100 → return 1
+    // Without wrapping: 65600 < 100 → false → return 0
+    let Some(exit) = compile_and_run(
+        "fn add_u16(a: u16, b: u16) -> u16 { a + b }\nfn main() -> i32 { if add_u16(65500, 100) as i32 == 64 { 1 } else { 0 } }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "65500_u16 + 100_u16 should wrap to 64 (65600 mod 65536)");
+}
+
+#[test]
+fn milestone_181_u16_sub_wraps() {
+    // 10 - 20 = -10; as u16 = 65526 (two's complement wrap); 65526 > 100 → return 1
+    // Without wrapping: -10 → value is negative or zero as i32 comparison fails differently
+    let Some(exit) = compile_and_run(
+        "fn sub_u16(a: u16, b: u16) -> u16 { a - b }\nfn main() -> i32 { if sub_u16(10, 20) as i32 == 65526 { 1 } else { 0 } }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "10_u16 - 20_u16 should wrap to 65526");
+}
+
+#[test]
+fn milestone_181_i16_add_wraps() {
+    // 32760 + 100 = 32860; 32860 > 32767 → wraps to 32860 - 65536 = -32676
+    // -32676 < 0 → return 1; without wrapping: 32860 > 0 → return 0
+    let Some(exit) = compile_and_run(
+        "fn add_i16(a: i16, b: i16) -> i16 { a + b }\nfn main() -> i32 { if add_i16(32760, 100) as i32 == -32676 { 1 } else { 0 } }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "32760_i16 + 100_i16 should wrap to -32676");
+}
+
+#[test]
+fn milestone_181_u16_identity() {
+    let Some(exit) = compile_and_run(
+        "fn id_u16(x: u16) -> u16 { x }\nfn main() -> i32 { id_u16(42) as i32 }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 42);
+}
+
+#[test]
+fn milestone_181_i16_identity() {
+    let Some(exit) = compile_and_run(
+        "fn id_i16(x: i16) -> i16 { x }\nfn main() -> i32 { id_i16(42) as i32 }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 42);
+}
+
+#[test]
+fn milestone_181_u16_in_arithmetic() {
+    let Some(exit) = compile_and_run(
+        "fn add_u16(a: u16, b: u16) -> u16 { a + b }\nfn main() -> i32 { add_u16(3, 5) as i32 }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 8);
+}
+
+#[test]
+fn milestone_181_u16_passed_to_fn() {
+    let Some(exit) = compile_and_run(
+        "fn double(x: u16) -> u16 { x + x }\nfn main() -> i32 { double(100) as i32 }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 200);
+}
+
+#[test]
+fn milestone_181_u16_passed_to_fn_wrap() {
+    // double(40000) = 80000; 80000 mod 65536 = 14464; if == 14464 → 1
+    let Some(exit) = compile_and_run(
+        "fn double(x: u16) -> u16 { x + x }\nfn main() -> i32 { if double(40000) as i32 == 14464 { 1 } else { 0 } }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "double(40000_u16): 80000 mod 65536 = 14464");
+}
+
+#[test]
+fn milestone_181_u16_result_in_if() {
+    let Some(exit) = compile_and_run(
+        "fn add_u16(a: u16, b: u16) -> u16 { a + b }\nfn main() -> i32 { if add_u16(1, 1) as i32 == 2 { 7 } else { 0 } }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 7);
+}
+
+#[test]
+fn milestone_181_u16_compound_add_wraps_mid_body() {
+    // x: u16 = 65500; x += 100; → x = 64; if x < 100 → return 1
+    // Without wrapping: x = 65600; 65600 < 100 → false → return 0
+    let Some(exit) = compile_and_run(
+        "fn test(a: u16, b: u16) -> i32 { let mut x: u16 = a; x += b; if (x as i32) < 100 { 1 } else { 0 } }\nfn main() -> i32 { test(65500, 100) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "65500_u16 += 100 should wrap to 64; 64 < 100 → 1");
+}
+
+#[test]
+fn milestone_181_i16_compound_add_wraps_mid_body() {
+    // x: i16 = 32760; x += 100; → x = -32676; -32676 < 0 → return 1
+    // Without wrapping: x = 32860; 32860 >= 0 → return 0
+    let Some(exit) = compile_and_run(
+        "fn test(a: i16, b: i16) -> i32 { let mut x: i16 = a; x += b; if (x as i32) < 0 { 1 } else { 0 } }\nfn main() -> i32 { test(32760, 100) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "32760_i16 += 100 should wrap to -32676; -32676 < 0 → 1");
+}
+
+#[test]
+fn milestone_181_i16_called_twice() {
+    let Some(exit) = compile_and_run(
+        "fn add_i16(a: i16, b: i16) -> i16 { a + b }\nfn main() -> i32 { add_i16(1, 2) as i32 + add_i16(3, 4) as i32 }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 10);
+}
+
+#[test]
+fn milestone_181_u16_called_twice() {
+    let Some(exit) = compile_and_run(
+        "fn add_u16(a: u16, b: u16) -> u16 { a + b }\nfn main() -> i32 { add_u16(1, 2) as i32 + add_u16(3, 4) as i32 }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 10);
+}
+
+#[test]
+fn milestone_181_u16_mul_wraps() {
+    // 300 * 300 = 90000; 90000 mod 65536 = 24464; if == 24464 → 1
+    let Some(exit) = compile_and_run(
+        "fn mul_u16(a: u16, b: u16) -> u16 { a * b }\nfn main() -> i32 { if mul_u16(300, 300) as i32 == 24464 { 1 } else { 0 } }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "300_u16 * 300_u16 = 90000 → 90000 mod 65536 = 24464");
+}

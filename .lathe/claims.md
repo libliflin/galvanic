@@ -2729,3 +2729,34 @@ producing incorrect results.
 - the function body lacks `and ... #65535` in the assembly output
 
 **Tests**: `cargo test --test e2e -- runtime_cast_to_u16_emits_and_truncation runtime_cast_to_i16_emits_sxth milestone_180_cast_u16_truncates_70000_to_4464 milestone_180_cast_i16_sign_extends_40000_to_negative`
+
+---
+
+## Claim 69: u16/i16 arithmetic wraps at 16-bit boundaries (not identity through 32-bit registers)
+
+**Stakeholder**: William (researcher), FLS / Ferrocene ecosystem
+
+**Promise**: When a function declares `u16` or `i16` parameters and return type,
+arithmetic on those values wraps at 16-bit boundaries. `65500_u16 + 100_u16`
+returns 64 (not 65600). `32760_i16 + 100_i16` returns -32676 (not 32860).
+
+Previously `u16` mapped to `IrTy::U32` and `i16` to `IrTy::I32` — no boundary
+normalization was emitted. Return values were not truncated/sign-extended, so
+overflow was silently swallowed in the 32-bit register representation.
+
+**ARM64 implementation**:
+- `-> u16` return boundary: `and w{r}, w{r}, #65535` (TruncU16)
+- `-> i16` return boundary: `sxth x{r}, w{r}` (SextI16)
+- `x += b` where `x: u16`: TruncU16 before store-back
+- `x += b` where `x: i16`: SextI16 before store-back
+
+**FLS §4.1**: u16 range is 0..=65535; i16 range is -32768..=32767.
+**FLS §6.23**: At runtime without overflow checks, integer arithmetic wraps in
+two's complement. The wrapping must be observable at the type's own boundaries.
+**FLS §6.1.2 Constraint 1**: Non-const code generates runtime instructions.
+
+**Violated if** for `fn add_u16(a: u16, b: u16) -> u16 { a + b }` called with `(65500, 100)`:
+- returns 65600 instead of 64, OR
+- the function body lacks `and ... #65535` in the assembly output
+
+**Tests**: `cargo test --test e2e -- runtime_u16_add_emits_and_truncation runtime_i16_add_emits_sxth milestone_181_u16_add_wraps milestone_181_i16_add_wraps milestone_181_u16_compound_add_wraps_mid_body milestone_181_i16_compound_add_wraps_mid_body`

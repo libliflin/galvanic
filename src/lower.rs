@@ -3348,7 +3348,7 @@ fn lower_fn(
         // FLS §4.1: i32 parameters occupy one 64-bit register (x0–x7).
         // FLS §4.1: All primitive integer types and bool are supported as
         // parameters. Each uses one 64-bit ARM64 register (x0–x7).
-        if !matches!(param_ty, IrTy::I32 | IrTy::I8 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::FnPtr) {
+        if !matches!(param_ty, IrTy::I32 | IrTy::I8 | IrTy::I16 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::U16 | IrTy::FnPtr) {
             return Err(LowerError::Unsupported(
                 "parameter type other than i32/bool/u32/i64/u64/usize/isize/i8/i16/u8/u16/fn ptr/f64/f32".into(),
             ));
@@ -3363,12 +3363,18 @@ fn lower_fn(
             ctx.local_fn_ptr_slots.insert(slot);
         }
         // FLS §4.1, §6.23: track narrow-type parameters so compound assignment
-        // can apply the correct wrapping instruction (TruncU8 / SextI8).
+        // can apply the correct wrapping instruction (TruncU8 / SextI8 / TruncU16 / SextI16).
         if param_ty == IrTy::U8 {
             ctx.u8_locals.insert(param_name);
         }
         if param_ty == IrTy::I8 {
             ctx.i8_locals.insert(param_name);
+        }
+        if param_ty == IrTy::U16 {
+            ctx.u16_locals.insert(param_name);
+        }
+        if param_ty == IrTy::I16 {
+            ctx.i16_locals.insert(param_name);
         }
         reg_idx += 1;
     }
@@ -3898,9 +3904,13 @@ fn lower_ty(
         }
         TyKind::Path(segments) if segments.len() == 1 => {
             match segments[0].text(source) {
-                // FLS §4.1: Signed integer types. i16/i64/isize use signed 64-bit
-                // registers on ARM64 (width narrowing is deferred for i16/i64/isize).
-                "i32" | "i16" | "i64" | "isize" => Ok(IrTy::I32),
+                // FLS §4.1: Signed integer types. i64/isize use signed 64-bit
+                // registers on ARM64 (width narrowing is deferred for i64/isize).
+                "i32" | "i64" | "isize" => Ok(IrTy::I32),
+                // FLS §4.1: The i16 type. Arithmetic uses the same signed ops as
+                // I32 (sdiv, asr). At return boundaries, SextI16 sign-extends
+                // the result to 16 bits for correct FLS §6.23 wrapping semantics.
+                "i16" => Ok(IrTy::I16),
                 // FLS §4.1: The i8 type. Arithmetic uses the same signed ops as
                 // I32 (sdiv, asr). At return boundaries, SextI8 sign-extends
                 // the result to 8 bits for correct FLS §6.23 wrapping semantics.
@@ -3914,10 +3924,14 @@ fn lower_ty(
                 // as U32 (udiv, lsr). At return boundaries, TruncU8 masks the
                 // result to 8 bits for correct FLS §6.23 overflow wrapping.
                 "u8" => Ok(IrTy::U8),
-                // FLS §4.1: Unsigned integer types. u16/u32/u64/usize all
+                // FLS §4.1: Unsigned integer types. u32/u64/usize all
                 // use 64-bit registers on ARM64. Unsigned division uses `udiv`
                 // and unsigned right shift uses `lsr` (see IrBinOp::UDiv/UShr).
-                "u16" | "u32" | "u64" | "usize" => Ok(IrTy::U32),
+                "u32" | "u64" | "usize" => Ok(IrTy::U32),
+                // FLS §4.1: The u16 type. Arithmetic uses the same unsigned ops
+                // as U32 (udiv, lsr). At return boundaries, TruncU16 masks the
+                // result to 16 bits for correct FLS §6.23 overflow wrapping.
+                "u16" => Ok(IrTy::U16),
                 // FLS §2.4.5: The `char` type is a Unicode scalar value — a u32
                 // in the range [0, 0x10FFFF]. On ARM64, char is stored in a
                 // 64-bit general-purpose register identical to `u32`.
@@ -4383,6 +4397,24 @@ struct LowerCtx<'src> {
     ///
     /// Populated from `let x: i8 = …` annotations and i8 function parameters.
     i8_locals: std::collections::HashSet<&'src str>,
+
+    /// Names of local variables explicitly declared with type `u16`.
+    ///
+    /// FLS §4.1, §6.23: u16 arithmetic wraps at 65536. Compound assignment must
+    /// apply `TruncU16` (`and w{r}, w{r}, #65535`) after the binary operation
+    /// before storing the result back, so mid-body reads see the wrapped value.
+    ///
+    /// Populated from `let x: u16 = …` annotations and u16 function parameters.
+    u16_locals: std::collections::HashSet<&'src str>,
+
+    /// Names of local variables explicitly declared with type `i16`.
+    ///
+    /// FLS §4.1, §6.23: i16 arithmetic wraps at ±32768. Compound assignment must
+    /// apply `SextI16` (`sxth x{r}, w{r}`) after the binary operation to sign-extend
+    /// the lower 16 bits into the full 64-bit register before storing back.
+    ///
+    /// Populated from `let x: i16 = …` annotations and i16 function parameters.
+    i16_locals: std::collections::HashSet<&'src str>,
 
     /// Captured outer-scope slots for each closure fn-pointer slot.
     ///
@@ -5072,6 +5104,8 @@ impl<'src> LowerCtx<'src> {
             ptr_capture_slots: std::collections::HashSet::new(),
             u8_locals: std::collections::HashSet::new(),
             i8_locals: std::collections::HashSet::new(),
+            u16_locals: std::collections::HashSet::new(),
+            i16_locals: std::collections::HashSet::new(),
             local_capture_args: HashMap::new(),
             last_closure_captures: None,
             last_closure_name: None,
@@ -6114,6 +6148,8 @@ impl<'src> LowerCtx<'src> {
             match ret_ty {
                 IrTy::U8 => self.instrs.push(Instr::TruncU8 { dst: r, src: r }),
                 IrTy::I8 => self.instrs.push(Instr::SextI8 { dst: r, src: r }),
+                IrTy::U16 => self.instrs.push(Instr::TruncU16 { dst: r, src: r }),
+                IrTy::I16 => self.instrs.push(Instr::SextI16 { dst: r, src: r }),
                 _ => {}
             }
         }
@@ -9392,12 +9428,12 @@ impl<'src> LowerCtx<'src> {
                     return Ok(());
                 }
 
-                // FLS §4.1, §6.23: Track u8 / i8 let bindings by variable name.
-                // Unlike f64/f32, u8/i8 use the same integer load/store instructions —
-                // no separate slot map needed. We just record the name so compound
-                // assignment can emit the correct wrapping instruction (TruncU8 / SextI8)
-                // when it stores back to this slot, preventing mid-body reads of the
-                // variable from seeing unwrapped (> 255 / not sign-extended) values.
+                // FLS §4.1, §6.23: Track u8 / i8 / u16 / i16 let bindings by variable name.
+                // Unlike f64/f32, these use the same integer load/store instructions —
+                // no separate slot map needed. We record the name so compound assignment
+                // can emit the correct wrapping instruction (TruncU8 / SextI8 / TruncU16 / SextI16)
+                // when storing back to this slot, preventing mid-body reads from seeing
+                // unwrapped values (> 255 / not sign-extended / > 65535 / etc.).
                 let declared_u8 = ty.as_ref().is_some_and(|t| {
                     matches!(&t.kind, crate::ast::TyKind::Path(segs)
                         if segs.len() == 1 && segs[0].text(self.source) == "u8")
@@ -9411,6 +9447,20 @@ impl<'src> LowerCtx<'src> {
                 });
                 if declared_i8 {
                     self.i8_locals.insert(var_name);
+                }
+                let declared_u16 = ty.as_ref().is_some_and(|t| {
+                    matches!(&t.kind, crate::ast::TyKind::Path(segs)
+                        if segs.len() == 1 && segs[0].text(self.source) == "u16")
+                });
+                if declared_u16 {
+                    self.u16_locals.insert(var_name);
+                }
+                let declared_i16 = ty.as_ref().is_some_and(|t| {
+                    matches!(&t.kind, crate::ast::TyKind::Path(segs)
+                        if segs.len() == 1 && segs[0].text(self.source) == "i16")
+                });
+                if declared_i16 {
+                    self.i16_locals.insert(var_name);
                 }
 
                 if let Some(init_expr) = init.as_ref() {
@@ -9712,6 +9762,33 @@ impl<'src> LowerCtx<'src> {
                         if *n > 127 {
                             return Err(LowerError::Unsupported(format!(
                                 "i8 literal {n} out of range 0..=127 (negative values via unary negation)"
+                            )));
+                        }
+                        let r = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(r, *n as i32));
+                        Ok(IrValue::Reg(r))
+                    }
+                    // FLS §4.1: u16 literal. Values 0..=65535 fit in a LoadImm (as i32).
+                    // Values > 65535 are a compile-time error (FLS §6.23: overflow
+                    // in const context is an error, not wrapping).
+                    IrTy::U16 => {
+                        if *n > 65535 {
+                            return Err(LowerError::Unsupported(format!(
+                                "u16 literal {n} out of range 0..=65535"
+                            )));
+                        }
+                        let r = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(r, *n as i32));
+                        Ok(IrValue::Reg(r))
+                    }
+                    // FLS §4.1: i16 literal. Positive values 0..=32767 fit in a LoadImm.
+                    // Values > 32767 are a compile-time error (FLS §6.23: overflow
+                    // in const context is an error). Negative i16 values arrive as
+                    // Unary(Neg, LitInt(n)) — the literal node itself is always >= 0.
+                    IrTy::I16 => {
+                        if *n > 32767 {
+                            return Err(LowerError::Unsupported(format!(
+                                "i16 literal {n} out of range 0..=32767 (negative values via unary negation)"
                             )));
                         }
                         let r = self.alloc_reg()?;
@@ -10077,7 +10154,7 @@ impl<'src> LowerCtx<'src> {
                 match ret_ty {
                     // FLS §4.1: i8 uses the same signed arithmetic as i32.
                     // SextI8 is emitted at return boundaries, not per-operation.
-                    IrTy::I32 | IrTy::I8 => {
+                    IrTy::I32 | IrTy::I8 | IrTy::I16 => {
                         // Lower the leftmost leaf (not a binary arithmetic node).
                         let mut acc_val = self.lower_expr(leftmost, ret_ty)?;
 
@@ -10135,9 +10212,9 @@ impl<'src> LowerCtx<'src> {
                     // FLS §4.1: Unsigned integer arithmetic (u8, u16, u32, u64).
                     // Same spill/reload logic as signed, but division uses `udiv`
                     // (IrBinOp::UDiv) and right shift uses `lsr` (IrBinOp::UShr)
-                    // for correct unsigned semantics. For u8, TruncU8 is emitted
-                    // at return boundaries (not per-operation) per FLS §6.23.
-                    IrTy::U32 | IrTy::U8 => {
+                    // for correct unsigned semantics. For u8/u16, TruncU8/TruncU16
+                    // is emitted at return boundaries (not per-operation) per FLS §6.23.
+                    IrTy::U32 | IrTy::U8 | IrTy::U16 => {
                         let mut acc_val = self.lower_expr(leftmost, ret_ty)?;
 
                         for (step_op, rhs_expr) in &spine {
@@ -10321,7 +10398,7 @@ impl<'src> LowerCtx<'src> {
                     //
                     // Cache-line note: the phi slot is one 8-byte stack entry;
                     // read exactly once after the if expression completes.
-                    IrTy::I32 | IrTy::I8 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::FnPtr => {
+                    IrTy::I32 | IrTy::I8 | IrTy::I16 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::U16 | IrTy::FnPtr => {
                         let else_label = self.alloc_label();
                         let end_label = self.alloc_label();
 
@@ -11106,7 +11183,7 @@ impl<'src> LowerCtx<'src> {
                 }
 
                 match ret_ty {
-                    IrTy::I32 | IrTy::I8 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::FnPtr => {
+                    IrTy::I32 | IrTy::I8 | IrTy::I16 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::U16 | IrTy::FnPtr => {
                         let phi_slot = self.alloc_slot()?;
 
                         // Then branch.
@@ -11355,7 +11432,7 @@ impl<'src> LowerCtx<'src> {
                 let exit_label = self.alloc_label();
 
                 match ret_ty {
-                    IrTy::I32 | IrTy::I8 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::FnPtr => {
+                    IrTy::I32 | IrTy::I8 | IrTy::I16 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::U16 | IrTy::FnPtr => {
                         let phi_slot = self.alloc_slot()?;
 
                         for arm in checked_arms {
@@ -14114,6 +14191,10 @@ impl<'src> LowerCtx<'src> {
                         self.instrs.push(Instr::TruncU8 { dst, src: dst });
                     } else if self.i8_locals.contains(target_name) {
                         self.instrs.push(Instr::SextI8 { dst, src: dst });
+                    } else if self.u16_locals.contains(target_name) {
+                        self.instrs.push(Instr::TruncU16 { dst, src: dst });
+                    } else if self.i16_locals.contains(target_name) {
+                        self.instrs.push(Instr::SextI16 { dst, src: dst });
                     }
                 }
 
@@ -15621,6 +15702,8 @@ impl<'src> LowerCtx<'src> {
                         match fn_ret_ty {
                             IrTy::U8 => self.instrs.push(Instr::TruncU8 { dst: r, src: r }),
                             IrTy::I8 => self.instrs.push(Instr::SextI8 { dst: r, src: r }),
+                            IrTy::U16 => self.instrs.push(Instr::TruncU16 { dst: r, src: r }),
+                            IrTy::I16 => self.instrs.push(Instr::SextI16 { dst: r, src: r }),
                             _ => {}
                         }
                         IrValue::Reg(r)

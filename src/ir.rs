@@ -1632,6 +1632,38 @@ pub enum IrTy {
     /// `sxtb` instruction at return boundaries.
     I8,
 
+    /// The 16-bit unsigned integer type `u16`. FLS §4.1. Milestone 181.
+    ///
+    /// Arithmetic uses the same instructions as `IrTy::U32` (unsigned division,
+    /// logical shift right). The key difference: at function return and on
+    /// explicit `return` expressions, a `TruncU16` instruction masks the result
+    /// to the low 16 bits (`and w{r}, w{r}, #65535`), implementing the FLS §6.23
+    /// wrapping semantics for u16.
+    ///
+    /// FLS §4.1: The unsigned integer types have a range of [0, 2^N-1]. For u16: 0..=65535.
+    /// FLS §6.23: At runtime without overflow checks, integer arithmetic wraps
+    /// in two's complement. For u16, the modulus is 65536.
+    ///
+    /// Cache-line note: same register width as `IrTy::U32`; one extra
+    /// `and` instruction at return boundaries.
+    U16,
+
+    /// The 16-bit signed integer type `i16`. FLS §4.1. Milestone 181.
+    ///
+    /// Arithmetic uses the same instructions as `IrTy::I32` (signed division,
+    /// arithmetic shift right). The key difference: at function return and on
+    /// explicit `return` expressions, a `SextI16` instruction sign-extends the
+    /// result from 16 bits (`sxth x{r}, w{r}`), implementing the FLS §6.23
+    /// wrapping semantics for i16.
+    ///
+    /// FLS §4.1: The signed integer types have a range of [-2^(N-1), 2^(N-1)-1]. For i16: -32768..=32767.
+    /// FLS §6.23: At runtime without overflow checks, integer arithmetic wraps
+    /// in two's complement. For i16, the range is -32768..=32767.
+    ///
+    /// Cache-line note: same register width as `IrTy::I32`; one extra
+    /// `sxth` instruction at return boundaries.
+    I16,
+
     /// A function pointer type `fn(T1, ...) -> R`. FLS §4.9.
     ///
     /// Function pointers are 64-bit addresses — one ARM64 register, identical

@@ -1275,6 +1275,26 @@ else
     pass "Claim 68: narrowing casts as u16/i16 truncate correctly (not identity)"
 fi
 
+# Claim 69: u16/i16 arithmetic wraps at 16-bit boundaries (not identity through 32-bit registers).
+# Attack: `fn add_u16(a: u16, b: u16) -> u16 { a + b }` with (65500, 100) = 65600 without wrapping,
+# but should be 64 (65600 mod 65536). If TruncU16 is not emitted at the return boundary,
+# the function returns 65600 and the if-check fails. Similarly for i16.
+# References: claims.md Claim 69.
+
+echo "--- Claim 69: u16 arithmetic wraps at 16-bit boundaries (not identity) ---"
+if cargo test --test e2e --quiet -- \
+    runtime_u16_add_emits_and_truncation \
+    runtime_i16_add_emits_sxth \
+    milestone_181_u16_add_wraps \
+    milestone_181_i16_add_wraps \
+    milestone_181_u16_compound_add_wraps_mid_body \
+    milestone_181_i16_compound_add_wraps_mid_body \
+    2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 69" "u16/i16 arithmetic wrapping test FAILED — u16/i16 arithmetic may not wrap at 16-bit boundaries"
+else
+    pass "Claim 69: u16/i16 arithmetic wraps at 16-bit boundaries (not identity through 32-bit registers)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 
