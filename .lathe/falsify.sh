@@ -767,6 +767,20 @@ else
     pass "Claim 37: &dyn Trait let binding stores fat pointer and dispatches via blr (not folded)"
 fi
 
+# Unsafe block bodies must emit runtime instructions — unsafe is not a const context.
+# Attack: constant-fold triple(4) = 12 to mov x0, #12 because the body is statically known.
+# FLS §6.4.4 + §6.1.2 Constraint 1: unsafe block is not a const context.
+#
+# Introduced in cycle 74 (red-team, unsafe block path, FLS §6.4.4 + §6.1.2).
+# References: claims.md Claim 38.
+
+echo "--- Claim 38: unsafe block body emits runtime mul (not constant-folded) ---"
+if cargo test --test e2e --quiet -- runtime_unsafe_block_emits_runtime_instructions_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 38" "runtime_unsafe_block_emits_runtime_instructions_not_folded FAILED — unsafe block body may be constant-folded (unsafe is NOT a const context per FLS §6.4.4)"
+else
+    pass "Claim 38: unsafe block body emits runtime mul (not constant-folded)"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""
