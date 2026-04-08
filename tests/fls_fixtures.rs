@@ -142,3 +142,8 @@ fn fls_11_impl_trait() {
 fn fls_4_13_dyn_trait() {
     assert_galvanic_accepts("fls_4_13_dyn_trait.rs");
 }
+
+#[test]
+fn fls_10_2_assoc_type_bounds() {
+    assert_galvanic_accepts("fls_10_2_assoc_type_bounds.rs");
+}
