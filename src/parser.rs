@@ -807,12 +807,21 @@ impl<'src> Parser<'src> {
             }
             // Consume the LHS type (identifier or `Self`, possibly `&`-prefixed).
             // FLS §4.14: LHS may be a type parameter (`T`), the receiver type
-            // (`Self`), or a reference type (`&T`). `Self` is a keyword, not an
-            // identifier — handle both cases.
+            // (`Self`), a reference type (`&T`), or a type-projection `T::AssocType`.
+            // `Self` is a keyword, not an identifier — handle both cases.
+            // FLS §10.2 / §4.14: `where C::Item: Trait` constrains the associated
+            // type projection. The LHS `C::Item` is consumed as `Ident :: Ident`.
             if self.peek_kind() == TokenKind::Ident
                 || self.peek_kind() == TokenKind::KwSelfUpper
             {
                 self.advance(); // skip type param name, path, or `Self`
+                // FLS §10.2: Also consume `:: AssocName` for projections like `C::Item`.
+                if self.peek_kind() == TokenKind::ColonColon {
+                    self.advance(); // skip `::`
+                    if self.peek_kind() == TokenKind::Ident {
+                        self.advance(); // skip associated type name (e.g. `Item`)
+                    }
+                }
             } else if self.peek_kind() == TokenKind::And {
                 self.advance(); // skip `&`
                 if matches!(

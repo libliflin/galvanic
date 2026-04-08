@@ -28087,3 +28087,332 @@ fn main() -> i32 {
         "result must NOT be constant-folded to #6; got:\n{asm}"
     );
 }
+
+// ── Milestone 169: where C::Item: Trait — where clause predicate on associated
+//    type projection (FLS §10.2, §4.14) ────────────────────────────────────
+//
+// `where C::Item: Trait` predicates allow generic functions to constrain what
+// the associated type of a type parameter must implement. Galvanic parses
+// the predicate and relies on monomorphization: at each call site, the concrete
+// type of `C::Item` is known.
+//
+// FLS §4.14: "Where clause predicates impose constraints on subject types."
+// FLS §10.2: "An associated type is a type alias declared in a trait."
+// FLS §10.2 / §4.14: AMBIGUOUS — The FLS does not specify how `where C::Item: Trait`
+// constrains dispatch. Galvanic parses the predicate; enforcement relies on the
+// concrete impl being present at the call site.
+//
+// Tests cover:
+//   1. Basic where proj bound — single type
+//   2. Two concrete types, both monomorphized
+//   3. Result in arithmetic
+//   4. Result in if expression
+//   5. On a parameter (passed through fn)
+//   6. Result passed to another function
+//   7. Called twice
+//   8. Combined with assoc const
+
+/// Milestone 169: basic `where C::Item: Marker` — single type, result 10.
+#[test]
+fn milestone_169_where_proj_basic() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Container {
+    type Item;
+    fn get_val(&self) -> i32;
+}
+trait Marker {}
+struct Holder { val: i32 }
+impl Container for Holder {
+    type Item = i32;
+    fn get_val(&self) -> i32 { self.val }
+}
+impl Marker for i32 {}
+fn process<C: Container>(c: C) -> i32 where C::Item: Marker {
+    c.get_val() * 2
+}
+fn main() -> i32 {
+    let h = Holder { val: 5 };
+    process(h)
+}
+"#) else { return; };
+    assert_eq!(exit_code, 10);
+}
+
+/// Milestone 169: two concrete types, both using the same generic fn with where proj bound.
+#[test]
+fn milestone_169_where_proj_two_impls() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Container {
+    type Item;
+    fn get_val(&self) -> i32;
+}
+trait Marker {}
+struct Holder { val: i32 }
+struct Doubler { val: i32 }
+impl Container for Holder {
+    type Item = i32;
+    fn get_val(&self) -> i32 { self.val }
+}
+impl Container for Doubler {
+    type Item = i32;
+    fn get_val(&self) -> i32 { self.val * 2 }
+}
+impl Marker for i32 {}
+fn process<C: Container>(c: C) -> i32 where C::Item: Marker {
+    c.get_val() + 1
+}
+fn main() -> i32 {
+    let h = Holder { val: 4 };
+    let d = Doubler { val: 3 };
+    process(h) + process(d)
+}
+"#) else { return; };
+    assert_eq!(exit_code, 12); // (4+1) + (3*2+1)
+}
+
+/// Milestone 169: result in arithmetic.
+#[test]
+fn milestone_169_where_proj_result_in_arithmetic() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Source {
+    type Output;
+    fn value(&self) -> i32;
+}
+trait Useful {}
+struct Node { n: i32 }
+impl Source for Node {
+    type Output = i32;
+    fn value(&self) -> i32 { self.n }
+}
+impl Useful for i32 {}
+fn extract<S: Source>(s: S) -> i32 where S::Output: Useful {
+    s.value() * 3
+}
+fn main() -> i32 {
+    let nd = Node { n: 4 };
+    extract(nd)
+}
+"#) else { return; };
+    assert_eq!(exit_code, 12); // 4*3
+}
+
+/// Milestone 169: result used in if expression.
+#[test]
+fn milestone_169_where_proj_result_in_if() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Provider {
+    type Value;
+    fn get(&self) -> i32;
+}
+trait Checkable {}
+struct Sensor { reading: i32 }
+impl Provider for Sensor {
+    type Value = i32;
+    fn get(&self) -> i32 { self.reading }
+}
+impl Checkable for i32 {}
+fn check<P: Provider>(p: P) -> i32 where P::Value: Checkable {
+    if p.get() > 5 { 1 } else { 0 }
+}
+fn main() -> i32 {
+    let hot = Sensor { reading: 10 };
+    let cold = Sensor { reading: 2 };
+    check(hot) + check(cold)
+}
+"#) else { return; };
+    assert_eq!(exit_code, 1); // 1 + 0
+}
+
+/// Milestone 169: on a parameter — function that takes a C parameter.
+#[test]
+fn milestone_169_where_proj_on_parameter() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Measurable {
+    type Unit;
+    fn measure(&self) -> i32;
+}
+trait Displayable {}
+struct Ruler { inches: i32 }
+impl Measurable for Ruler {
+    type Unit = i32;
+    fn measure(&self) -> i32 { self.inches }
+}
+impl Displayable for i32 {}
+fn read<M: Measurable>(m: M) -> i32 where M::Unit: Displayable {
+    m.measure()
+}
+fn double(x: i32) -> i32 { x * 2 }
+fn main() -> i32 {
+    let r = Ruler { inches: 6 };
+    double(read(r))
+}
+"#) else { return; };
+    assert_eq!(exit_code, 12); // 6*2
+}
+
+/// Milestone 169: result passed to another function.
+#[test]
+fn milestone_169_where_proj_result_passed_to_fn() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Factory {
+    type Product;
+    fn produce(&self) -> i32;
+}
+trait Exportable {}
+struct Mill { output: i32 }
+impl Factory for Mill {
+    type Product = i32;
+    fn produce(&self) -> i32 { self.output * 3 }
+}
+impl Exportable for i32 {}
+fn make<F: Factory>(f: F) -> i32 where F::Product: Exportable {
+    f.produce()
+}
+fn add_tax(x: i32) -> i32 { x + 2 }
+fn main() -> i32 {
+    let m = Mill { output: 4 };
+    add_tax(make(m))
+}
+"#) else { return; };
+    assert_eq!(exit_code, 14); // 4*3+2
+}
+
+/// Milestone 169: called twice with the same type.
+#[test]
+fn milestone_169_where_proj_called_twice() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Container {
+    type Item;
+    fn get_val(&self) -> i32;
+}
+trait Valid {}
+struct Box { val: i32 }
+impl Container for Box {
+    type Item = i32;
+    fn get_val(&self) -> i32 { self.val }
+}
+impl Valid for i32 {}
+fn unwrap<C: Container>(c: C) -> i32 where C::Item: Valid {
+    c.get_val() + 1
+}
+fn main() -> i32 {
+    let a = Box { val: 3 };
+    let b = Box { val: 7 };
+    unwrap(a) + unwrap(b)
+}
+"#) else { return; };
+    assert_eq!(exit_code, 12); // (3+1) + (7+1)
+}
+
+/// Milestone 169: combined with associated constant.
+#[test]
+fn milestone_169_where_proj_with_assoc_const() {
+    let Some(exit_code) = compile_and_run(r#"
+trait Scalable {
+    type Value;
+    const SCALE: i32;
+    fn raw(&self) -> i32;
+}
+trait Bounded {}
+struct Meter { val: i32 }
+impl Scalable for Meter {
+    type Value = i32;
+    const SCALE: i32 = 10;
+    fn raw(&self) -> i32 { self.val }
+}
+impl Bounded for i32 {}
+fn scaled<S: Scalable>(s: S) -> i32 where S::Value: Bounded {
+    s.raw() * Meter::SCALE
+}
+fn main() -> i32 {
+    let m = Meter { val: 3 };
+    scaled(m)
+}
+"#) else { return; };
+    assert_eq!(exit_code, 30); // 3*10
+}
+
+// Assembly inspection: `where C::Item: Marker` fn emits runtime bl (not constant-folded).
+//
+// FLS §4.14 / §10.2: where clause predicate does not alter the calling convention.
+// FLS §6.1.2:37–45: Non-const code must emit runtime instructions.
+//
+// Positive: `bl process__Holder` emitted at the call site.
+// Negative: result of `process(Holder { val: 3 })` (= 6 + 2 = 8) NOT folded to `mov x0, #8`.
+#[test]
+fn runtime_where_proj_emits_bl_not_folded() {
+    let asm = compile_to_asm(r#"
+trait Container {
+    type Item;
+    fn get_val(&self) -> i32;
+}
+trait Marker {}
+struct Holder { val: i32 }
+impl Container for Holder {
+    type Item = i32;
+    fn get_val(&self) -> i32 { self.val }
+}
+impl Marker for i32 {}
+fn process<C: Container>(c: C, extra: i32) -> i32 where C::Item: Marker {
+    c.get_val() + extra
+}
+fn main() -> i32 {
+    process(Holder { val: 3 }, 2)
+}
+"#);
+    assert!(
+        asm.contains("process__Holder"),
+        "where-proj fn must emit monomorphized label `process__Holder`; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("bl") && asm.contains("process__Holder"),
+        "call site must dispatch via `bl process__Holder`; got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #5") && !asm.contains("mov x0, #5"),
+        "result must NOT be constant-folded to #5; got:\n{asm}"
+    );
+}
+
+// Assembly inspection: two concrete types both emit monomorphized labels.
+//
+// When `process` is called with both `Holder` and `Counter`, both
+// `process__Holder` and `process__Counter` labels must be emitted.
+// FLS §12.1: Each call site monomorphizes independently.
+#[test]
+fn runtime_where_proj_two_types_both_monomorphized() {
+    let asm = compile_to_asm(r#"
+trait Container {
+    type Item;
+    fn get_val(&self) -> i32;
+}
+trait Marker {}
+struct Holder { val: i32 }
+struct Counter { n: i32 }
+impl Container for Holder {
+    type Item = i32;
+    fn get_val(&self) -> i32 { self.val }
+}
+impl Container for Counter {
+    type Item = i32;
+    fn get_val(&self) -> i32 { self.n * 2 }
+}
+impl Marker for i32 {}
+fn process<C: Container>(c: C, extra: i32) -> i32 where C::Item: Marker {
+    c.get_val() + extra
+}
+fn main() -> i32 {
+    let h = Holder { val: 2 };
+    let c = Counter { n: 3 };
+    process(h, 1) + process(c, 0)
+}
+"#);
+    assert!(
+        asm.contains("process__Holder") && asm.contains("process__Counter"),
+        "both monomorphized labels must be emitted; got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #9") && !asm.contains("mov x0, #9"),
+        "result must NOT be constant-folded to #9; got:\n{asm}"
+    );
+}
