@@ -5214,6 +5214,127 @@ impl<'src> LowerCtx<'src> {
         }
     }
 
+    /// Emit instructions for one alternative inside a `Pat::Or` accumulator.
+    ///
+    /// FLS §5.1.11: OR patterns match if any alternative matches. For each
+    /// alternative we compute a boolean and OR it into `matched_reg`.
+    ///
+    /// Handles scalar equality (literals, enum variants) and range checks
+    /// (inclusive `lo..=hi` and exclusive `lo..hi`). Mixing kinds in the same
+    /// OR pattern is valid FLS (§5.1.11 places no restriction on kinds).
+    ///
+    /// Cache-line note: equality alternative = 4 instructions (ldr + mov + cmp
+    /// + orr); range alternative = 7 instructions (ldr + 2×mov + 2×cmp + and
+    /// + orr). Mixed OR arms fit ~3 per 64-byte instruction cache line.
+    fn accum_or_alt(
+        &mut self,
+        alt: &Pat,
+        scrut_slot: u8,
+        matched_reg: u8,
+    ) -> Result<(), LowerError> {
+        match alt {
+            // Scalar equality: literal integer, negative literal, boolean, enum variant.
+            Pat::LitInt(_) | Pat::NegLitInt(_) | Pat::LitBool(_) | Pat::Path(_) => {
+                let alt_imm = self.pat_scalar_imm(alt)?;
+                let si_reg = self.alloc_reg()?;
+                self.instrs.push(Instr::Load { dst: si_reg, slot: scrut_slot });
+                let alt_reg = self.alloc_reg()?;
+                self.instrs.push(Instr::LoadImm(alt_reg, alt_imm));
+                let eq_reg = self.alloc_reg()?;
+                self.instrs.push(Instr::BinOp {
+                    op: IrBinOp::Eq,
+                    dst: eq_reg,
+                    lhs: si_reg,
+                    rhs: alt_reg,
+                });
+                self.instrs.push(Instr::BinOp {
+                    op: IrBinOp::BitOr,
+                    dst: matched_reg,
+                    lhs: matched_reg,
+                    rhs: eq_reg,
+                });
+            }
+            // Inclusive range: lo..=hi → (scrut >= lo) & (scrut <= hi)
+            Pat::RangeInclusive { lo, hi } => {
+                let s_reg = self.alloc_reg()?;
+                self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                let lo_reg = self.alloc_reg()?;
+                self.instrs.push(Instr::LoadImm(lo_reg, *lo as i32));
+                let cmp1 = self.alloc_reg()?;
+                self.instrs.push(Instr::BinOp {
+                    op: IrBinOp::Ge,
+                    dst: cmp1,
+                    lhs: s_reg,
+                    rhs: lo_reg,
+                });
+                let hi_reg = self.alloc_reg()?;
+                self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
+                let cmp2 = self.alloc_reg()?;
+                self.instrs.push(Instr::BinOp {
+                    op: IrBinOp::Le,
+                    dst: cmp2,
+                    lhs: s_reg,
+                    rhs: hi_reg,
+                });
+                let in_range = self.alloc_reg()?;
+                self.instrs.push(Instr::BinOp {
+                    op: IrBinOp::BitAnd,
+                    dst: in_range,
+                    lhs: cmp1,
+                    rhs: cmp2,
+                });
+                self.instrs.push(Instr::BinOp {
+                    op: IrBinOp::BitOr,
+                    dst: matched_reg,
+                    lhs: matched_reg,
+                    rhs: in_range,
+                });
+            }
+            // Exclusive range: lo..hi → (scrut >= lo) & (scrut < hi)
+            Pat::RangeExclusive { lo, hi } => {
+                let s_reg = self.alloc_reg()?;
+                self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                let lo_reg = self.alloc_reg()?;
+                self.instrs.push(Instr::LoadImm(lo_reg, *lo as i32));
+                let cmp1 = self.alloc_reg()?;
+                self.instrs.push(Instr::BinOp {
+                    op: IrBinOp::Ge,
+                    dst: cmp1,
+                    lhs: s_reg,
+                    rhs: lo_reg,
+                });
+                let hi_reg = self.alloc_reg()?;
+                self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
+                let cmp2 = self.alloc_reg()?;
+                self.instrs.push(Instr::BinOp {
+                    op: IrBinOp::Lt,
+                    dst: cmp2,
+                    lhs: s_reg,
+                    rhs: hi_reg,
+                });
+                let in_range = self.alloc_reg()?;
+                self.instrs.push(Instr::BinOp {
+                    op: IrBinOp::BitAnd,
+                    dst: in_range,
+                    lhs: cmp1,
+                    rhs: cmp2,
+                });
+                self.instrs.push(Instr::BinOp {
+                    op: IrBinOp::BitOr,
+                    dst: matched_reg,
+                    lhs: matched_reg,
+                    rhs: in_range,
+                });
+            }
+            _ => {
+                return Err(LowerError::Unsupported(
+                    "unsupported pattern kind inside OR pattern alternative".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Ensure `val` is in a virtual register. If it's already a register,
     /// return it. If it's a constant, emit a `LoadImm`.
     fn val_to_reg(&mut self, val: IrValue) -> Result<u8, LowerError> {
@@ -6869,27 +6990,7 @@ impl<'src> LowerCtx<'src> {
                                         ));
                                     }
                                     _ => {
-                                        let alt_imm = self.pat_scalar_imm(alt)?;
-                                        let si_reg = self.alloc_reg()?;
-                                        self.instrs.push(Instr::Load {
-                                            dst: si_reg,
-                                            slot: scrut_slot,
-                                        });
-                                        let alt_reg = self.alloc_reg()?;
-                                        self.instrs.push(Instr::LoadImm(alt_reg, alt_imm));
-                                        let eq_reg = self.alloc_reg()?;
-                                        self.instrs.push(Instr::BinOp {
-                                            op: IrBinOp::Eq,
-                                            dst: eq_reg,
-                                            lhs: si_reg,
-                                            rhs: alt_reg,
-                                        });
-                                        self.instrs.push(Instr::BinOp {
-                                            op: IrBinOp::BitOr,
-                                            dst: matched_reg,
-                                            lhs: matched_reg,
-                                            rhs: eq_reg,
-                                        });
+                                        self.accum_or_alt(alt, scrut_slot, matched_reg)?;
                                     }
                                 }
                             }
@@ -9977,7 +10078,9 @@ impl<'src> LowerCtx<'src> {
                     }
                     Pat::Or(alts) => {
                         // FLS §5.1.11: OR pattern in if-let — match if any alternative matches.
-                        // Strategy: accumulate equality into matched_reg (starts at 0).
+                        // FLS §5.1.11: Alternatives may be of different kinds (literal, range, etc.)
+                        // Strategy: accumulate boolean into matched_reg (starts at 0) via
+                        // accum_or_alt which handles equality, inclusive range, and exclusive range.
                         let matched_reg = self.alloc_reg()?;
                         self.instrs.push(Instr::LoadImm(matched_reg, 0));
                         for alt in alts {
@@ -9992,27 +10095,7 @@ impl<'src> LowerCtx<'src> {
                                     ));
                                 }
                                 _ => {
-                                    let alt_imm = self.pat_scalar_imm(alt)?;
-                                    let si_reg = self.alloc_reg()?;
-                                    self.instrs.push(Instr::Load {
-                                        dst: si_reg,
-                                        slot: scrut_slot,
-                                    });
-                                    let alt_reg = self.alloc_reg()?;
-                                    self.instrs.push(Instr::LoadImm(alt_reg, alt_imm));
-                                    let eq_reg = self.alloc_reg()?;
-                                    self.instrs.push(Instr::BinOp {
-                                        op: IrBinOp::Eq,
-                                        dst: eq_reg,
-                                        lhs: si_reg,
-                                        rhs: alt_reg,
-                                    });
-                                    self.instrs.push(Instr::BinOp {
-                                        op: IrBinOp::BitOr,
-                                        dst: matched_reg,
-                                        lhs: matched_reg,
-                                        rhs: eq_reg,
-                                    });
+                                    self.accum_or_alt(alt, scrut_slot, matched_reg)?;
                                 }
                             }
                         }
@@ -10715,27 +10798,7 @@ impl<'src> LowerCtx<'src> {
                                                 ));
                                             }
                                             _ => {
-                                                let alt_imm = self.pat_scalar_imm(alt)?;
-                                                let si_reg = self.alloc_reg()?;
-                                                self.instrs.push(Instr::Load {
-                                                    dst: si_reg,
-                                                    slot: scrut_slot,
-                                                });
-                                                let alt_reg = self.alloc_reg()?;
-                                                self.instrs.push(Instr::LoadImm(alt_reg, alt_imm));
-                                                let eq_reg = self.alloc_reg()?;
-                                                self.instrs.push(Instr::BinOp {
-                                                    op: IrBinOp::Eq,
-                                                    dst: eq_reg,
-                                                    lhs: si_reg,
-                                                    rhs: alt_reg,
-                                                });
-                                                self.instrs.push(Instr::BinOp {
-                                                    op: IrBinOp::BitOr,
-                                                    dst: matched_reg,
-                                                    lhs: matched_reg,
-                                                    rhs: eq_reg,
-                                                });
+                                                self.accum_or_alt(alt, scrut_slot, matched_reg)?;
                                             }
                                         }
                                     }
@@ -11500,6 +11563,7 @@ impl<'src> LowerCtx<'src> {
                                 }
                                 // FLS §5.1.11: OR pattern — same accumulation strategy as
                                 // the I32|Bool branch above, but for unit-result arms.
+                                // Now delegates to accum_or_alt for range support.
                                 Pat::Or(alts) => {
                                     let matched_reg = self.alloc_reg()?;
                                     self.instrs.push(Instr::LoadImm(matched_reg, 0));
@@ -11520,27 +11584,7 @@ impl<'src> LowerCtx<'src> {
                                                 ));
                                             }
                                             _ => {
-                                                let alt_imm = self.pat_scalar_imm(alt)?;
-                                                let si_reg = self.alloc_reg()?;
-                                                self.instrs.push(Instr::Load {
-                                                    dst: si_reg,
-                                                    slot: scrut_slot,
-                                                });
-                                                let alt_reg = self.alloc_reg()?;
-                                                self.instrs.push(Instr::LoadImm(alt_reg, alt_imm));
-                                                let eq_reg = self.alloc_reg()?;
-                                                self.instrs.push(Instr::BinOp {
-                                                    op: IrBinOp::Eq,
-                                                    dst: eq_reg,
-                                                    lhs: si_reg,
-                                                    rhs: alt_reg,
-                                                });
-                                                self.instrs.push(Instr::BinOp {
-                                                    op: IrBinOp::BitOr,
-                                                    dst: matched_reg,
-                                                    lhs: matched_reg,
-                                                    rhs: eq_reg,
-                                                });
+                                                self.accum_or_alt(alt, scrut_slot, matched_reg)?;
                                             }
                                         }
                                     }
@@ -13735,27 +13779,7 @@ impl<'src> LowerCtx<'src> {
                                     ));
                                 }
                                 _ => {
-                                    let alt_imm = self.pat_scalar_imm(alt)?;
-                                    let si_reg = self.alloc_reg()?;
-                                    self.instrs.push(Instr::Load {
-                                        dst: si_reg,
-                                        slot: scrut_slot,
-                                    });
-                                    let alt_reg = self.alloc_reg()?;
-                                    self.instrs.push(Instr::LoadImm(alt_reg, alt_imm));
-                                    let eq_reg = self.alloc_reg()?;
-                                    self.instrs.push(Instr::BinOp {
-                                        op: IrBinOp::Eq,
-                                        dst: eq_reg,
-                                        lhs: si_reg,
-                                        rhs: alt_reg,
-                                    });
-                                    self.instrs.push(Instr::BinOp {
-                                        op: IrBinOp::BitOr,
-                                        dst: matched_reg,
-                                        lhs: matched_reg,
-                                        rhs: eq_reg,
-                                    });
+                                    self.accum_or_alt(alt, scrut_slot, matched_reg)?;
                                 }
                             }
                         }
