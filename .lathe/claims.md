@@ -912,3 +912,55 @@ while violating the runtime-codegen invariant.
 - contains `mov x0, #2` (constant-folded result of `make(1).x`).
 
 **Test**: `cargo test --test e2e -- runtime_struct_return_if_else_not_folded`
+
+---
+
+## Claim 31: dyn Trait method with struct field arithmetic emits runtime add (not folded)
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: When a dyn Trait method accesses struct fields and uses them in arithmetic,
+the computation must execute at runtime via vtable dispatch — not be constant-folded from
+the call site.
+
+```rust
+trait Dist {
+    fn manhattan(&self) -> i32;
+}
+struct Point { x: i32, y: i32 }
+impl Dist for Point {
+    fn manhattan(&self) -> i32 { self.x + self.y }
+}
+fn measure(d: &dyn Dist) -> i32 {
+    d.manhattan()
+}
+fn make_and_measure(a: i32, b: i32) -> i32 {
+    let p = Point { x: a, y: b };
+    measure(&p)
+}
+fn main() -> i32 { make_and_measure(3, 4) }
+```
+
+Must emit `vtable_Dist_Point` (vtable label), `blr` (indirect call), `add` (runtime field sum),
+and must NOT emit `mov x0, #7` (the constant-folded result of `make_and_measure(3, 4)`).
+
+**Why this claim matters**: Claims 16–18 verify vtable label presence, both-vtable emission,
+and vtable offset correctness. None of them verify that field arithmetic inside the method body
+executes at runtime when field values come from function parameters. The
+`milestone_147_dyn_trait_two_field_struct` test is compile-and-run only (no assembly inspection).
+A constant-folding interpreter that evaluates `a + b` at compile time for literal call sites would
+pass all existing dyn Trait tests while violating the runtime-codegen invariant.
+
+**Attack vector**:
+1. Constant-folding `measure(3, 4)` at the call site emits `mov x0, #7` directly.
+2. Treating `a` and `b` as const-context values within `manhattan` folds `self.x + self.y`
+   to `#7` before the vtable dispatch even occurs.
+3. Both violations produce exit code 7 and pass compile-and-run tests.
+
+**Violated if**: `compile_to_asm(...)` for the program above returns assembly that:
+- lacks `vtable_Dist_Point` (vtable label not emitted), OR
+- lacks `blr` (vtable dispatch omitted), OR
+- lacks `add` (`self.x + self.y` was folded), OR
+- contains `mov x0, #7` (constant-folded result of `measure(3, 4)`).
+
+**Test**: `cargo test --test e2e -- runtime_dyn_trait_field_arithmetic_not_folded`

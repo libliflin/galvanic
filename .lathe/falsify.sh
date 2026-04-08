@@ -610,6 +610,26 @@ else
     pass "Claim 30: struct-returning if-else field arithmetic emits runtime add (not folded)"
 fi
 
+# ── Claim 31: dyn Trait method with struct field arithmetic emits runtime add ──
+#
+# A dyn Trait method that sums two struct fields must execute at runtime via
+# vtable dispatch. When the struct is constructed from function parameters,
+# the field values are unknown at compile time and must not be constant-folded.
+#
+# fn measure(d: &dyn Dist) -> i32 { d.manhattan() }
+# fn make_and_measure(a: i32, b: i32) -> i32 { let p = Point { x: a, y: b }; measure(&p) }
+# fn main() -> i32 { make_and_measure(3, 4) }
+#
+# Must emit vtable_Dist_Point, blr, and add — and must NOT emit `mov x0, #7`.
+# References: claims.md Claim 31.
+
+echo "--- Claim 31: dyn Trait field arithmetic not folded ---"
+if cargo test --test e2e --quiet -- runtime_dyn_trait_field_arithmetic_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 31" "runtime_dyn_trait_field_arithmetic_not_folded FAILED — dyn Trait field arithmetic may be constant-folded to #7 instead of emitting runtime add"
+else
+    pass "Claim 31: dyn Trait method field arithmetic emits runtime add (not folded)"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""
