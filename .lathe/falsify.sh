@@ -347,6 +347,49 @@ else
     pass "Claim 18: second dyn Trait method loads fn-ptr at vtable offset #8"
 fi
 
+# ── Claim 19: Exit 0 on valid program implies .s output was written ───────────
+# Tests the structural contract: galvanic exit 0 means compilation succeeded
+# and produced output — not a silent skip due to a lower/codegen failure.
+#
+# Background: in cycle 36, a lower error caused galvanic to `return` (exit 0)
+# without producing any output. compile_and_run then ran qemu on a nonexistent
+# binary and got exit 1, producing a confusing test failure with "expected 10,
+# got 1". The fix: change the lower error handler from `return` to
+# `process::exit(1)`. This test verifies the positive case holds after that fix.
+#
+# We test the positive case: a valid program exits 0 AND writes the .s file.
+# (The negative case — lower error → non-zero exit — is enforced structurally
+# by the main.rs change; no portable way to trigger a lower error in falsify.sh.)
+# References: claims.md Claim 19.
+
+echo "--- Claim 19: exit 0 on valid program implies .s output written ---"
+
+_C19_BINARY="./target/debug/galvanic"
+if ! cargo build --quiet 2>/dev/null; then
+    fail "Claim 19" "cargo build failed — cannot verify output contract"
+else
+    _C19_SRC=$(mktemp /tmp/falsify_c19_XXXXXX.rs)
+    _C19_S="${_C19_SRC%.rs}.s"
+    printf 'fn main() -> i32 { 42 }\n' > "$_C19_SRC"
+
+    set +e
+    "$_C19_BINARY" "$_C19_SRC" > /dev/null 2>&1
+    _C19_EXIT=$?
+    set -e
+
+    rm -f "$_C19_SRC"
+
+    if [ "$_C19_EXIT" -ne 0 ]; then
+        rm -f "$_C19_S"
+        fail "Claim 19" "galvanic exited $_C19_EXIT on 'fn main() -> i32 { 42 }' — expected 0"
+    elif [ ! -f "$_C19_S" ]; then
+        fail "Claim 19" "galvanic exited 0 but did not write the .s output file — exit 0 without output means lower or codegen silently failed"
+    else
+        rm -f "$_C19_S"
+        pass "Claim 19: exit 0 on valid program implies .s output was written"
+    fi
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

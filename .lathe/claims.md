@@ -365,6 +365,35 @@ called with both `Foo` and `Bar` via wrapper functions returns assembly that:
 
 ---
 
+## Claim 19: Galvanic exits non-zero when the lower pass fails
+
+**Stakeholder**: CI / Validation, William (researcher)
+
+**Promise**: When `galvanic::lower::lower` returns an error, galvanic must exit with a
+non-zero exit code. It must NOT silently return 0 while producing no output. A zero exit
+code is a contract: it tells `compile_and_run` that compilation succeeded and that the
+output binary can be run.
+
+**Background**: In cycle 36, the test `milestone_149_fn_mut_with_param` failed on CI with
+"got 1, expected 10." The root cause was that a lower error caused galvanic to print
+"note: skipping codegen" and `return` (exit 0). `compile_and_run` interpreted exit 0 as
+success, then ran qemu against a nonexistent binary, which exited 1. The test saw exit 1
+and produced a confusing failure. The cycle 36 fix repaired the specific lower error, but
+the exit-code contract was still broken — any future lower error would silently produce the
+same class of confusion.
+
+**Violated if**: Running galvanic with `-o output` on a valid program that causes a lower
+error exits with code 0 while `output` does not exist.
+
+**Structural fix**: main.rs `lower` error handler changed from `return` (exit 0) to
+`process::exit(1)` — a lower failure is a hard error, not a skippable warning.
+
+**Test**: `cargo build` followed by running galvanic on a valid program without `-o`;
+exit 0 implies the `.s` file was written (lower and codegen succeeded). Verified in
+falsify.sh Claim 19.
+
+---
+
 ## Not Yet Claims (honest gaps)
 
 These are promises the project will eventually make but cannot yet be falsified:

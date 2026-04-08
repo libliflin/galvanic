@@ -5,27 +5,26 @@
 //! lex and parse them. When codegen exists, they should also compile
 //! and run the output.
 
-use std::process::Command;
-
-/// Run galvanic on a fixture file and assert it exits 0 (successful parse).
+/// Lex and parse a fixture file through the galvanic library and assert no errors.
+///
+/// Tests only the lexer and parser — not lowering or codegen. Some fixture files
+/// contain FLS examples that galvanic can parse but not yet lower; those are still
+/// valid parse-acceptance tests. Use `compile_and_run` in `e2e.rs` for full-pipeline
+/// tests.
 fn assert_galvanic_accepts(fixture: &str) {
     let fixture_path = format!(
         "{}/tests/fixtures/{fixture}",
         env!("CARGO_MANIFEST_DIR")
     );
 
-    let output = Command::new(env!("CARGO_BIN_EXE_galvanic"))
-        .arg(&fixture_path)
-        .output()
-        .expect("failed to run galvanic");
+    let source = std::fs::read_to_string(&fixture_path)
+        .unwrap_or_else(|e| panic!("could not read {fixture}: {e}"));
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let tokens = galvanic::lexer::tokenize(&source)
+        .unwrap_or_else(|e| panic!("galvanic lexer rejected {fixture}: {e}"));
 
-    assert!(
-        output.status.success(),
-        "galvanic rejected {fixture}:\nstdout: {stdout}\nstderr: {stderr}"
-    );
+    galvanic::parser::parse(&tokens, &source)
+        .unwrap_or_else(|e| panic!("galvanic parser rejected {fixture}: {e}"));
 }
 
 #[test]
