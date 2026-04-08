@@ -56,8 +56,8 @@ fn main() {
     let module = match galvanic::lower::lower(&source_file, &source) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("note: skipping codegen ({e})");
-            return;
+            eprintln!("error: lower failed ({e})");
+            process::exit(1);
         }
     };
 

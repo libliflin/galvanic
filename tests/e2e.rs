@@ -22993,3 +22993,271 @@ fn main() -> i32 {
         "FnMut result (6) must NOT be constant-folded:\n{asm}"
     );
 }
+
+// ── Milestone 150: @ binding patterns — bind AND check (FLS §5.1.4) ────────────
+//
+// `name @ subpat` binds the matched value to `name` while also checking `subpat`.
+// The binding is available in the arm body and guard expressions.
+//
+// FLS §5.1.4: "An identifier pattern matches any value and optionally binds it to
+// the identifier." The `@` notation extends this to additionally test the bound
+// value against a sub-pattern.
+//
+// FLS §5.1.4 AMBIGUOUS: The spec does not specify the order of evaluation for
+// @ patterns — whether the binding or the sub-pattern check occurs first.
+// Galvanic emits the sub-pattern check first (no binding on mismatch), then
+// installs the binding if the check passes.
+//
+// FLS §5.1.4 AMBIGUOUS: The spec does not enumerate which sub-pattern kinds are
+// valid after `@`. Galvanic supports literal and range sub-patterns at this milestone.
+//
+// Adversarial test design: The function takes a parameter so the input is
+// unknown at compile time, preventing constant folding. The result must not be
+// a folded constant like `mov x0, #6`.
+
+/// Assembly check: @ binding with inclusive range emits range check AND binding load.
+///
+/// FLS §5.1.4: `n @ 1..=5` must emit:
+/// 1. Range check: lo≤scrut AND scrut≤hi (two comparisons, one AND)
+/// 2. CondBranch to next arm on failure
+/// 3. Binding: load scrutinee into a new slot (ldr + str)
+/// 4. Body: `n * 2` must load from the binding slot (not constant-fold)
+///
+/// Positive assertions: range comparison instructions are emitted.
+/// Negative assertion: result (param*2) must NOT be constant-folded.
+#[test]
+fn runtime_bound_pattern_range_emits_cmp_and_binding() {
+    let src = r#"
+fn classify(x: i32) -> i32 {
+    match x {
+        n @ 1..=5 => n * 2,
+        _ => 0,
+    }
+}
+fn main() -> i32 {
+    classify(3)
+}
+"#;
+    let asm = compile_to_asm(src);
+    // Range check must emit comparisons (ge + le).
+    assert!(
+        asm.contains("cmp"),
+        "@ pattern with range must emit cmp instructions: {asm}"
+    );
+    // Result 3*2=6 must NOT be constant-folded.
+    assert!(
+        !asm.contains("mov     x0, #6"),
+        "@ binding result must NOT be constant-folded to #6: {asm}"
+    );
+}
+
+/// Assembly check: @ binding with literal sub-pattern emits equality check.
+///
+/// FLS §5.1.4: `n @ 42` must emit an equality check, then bind n to the scrutinee.
+/// The body accesses `n` via a load from the binding slot, not from the original slot.
+#[test]
+fn runtime_bound_pattern_literal_emits_eq_check() {
+    let src = r#"
+fn check(x: i32) -> i32 {
+    match x {
+        n @ 42 => n + 1,
+        _ => 0,
+    }
+}
+fn main() -> i32 {
+    check(42)
+}
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("cmp"),
+        "@ pattern with literal must emit cmp: {asm}"
+    );
+    // Result 42+1=43 must NOT be constant-folded.
+    assert!(
+        !asm.contains("mov     x0, #43"),
+        "@ binding literal result must NOT be constant-folded to #43: {asm}"
+    );
+}
+
+/// Milestone 150 compile-and-run: @ binding with inclusive range — match taken.
+///
+/// `n @ 1..=5` when x=3: arm taken, n=3, returns 3*2=6.
+#[test]
+fn milestone_150_bound_range_arm_taken() {
+    let src = r#"
+fn classify(x: i32) -> i32 {
+    match x {
+        n @ 1..=5 => n * 2,
+        _ => 0,
+    }
+}
+fn main() -> i32 {
+    classify(3)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6); // 3 * 2 = 6
+}
+
+/// Milestone 150: @ binding with inclusive range — arm NOT taken (out of range).
+#[test]
+fn milestone_150_bound_range_arm_not_taken() {
+    let src = r#"
+fn classify(x: i32) -> i32 {
+    match x {
+        n @ 1..=5 => n * 2,
+        _ => 0,
+    }
+}
+fn main() -> i32 {
+    classify(10)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0); // 10 out of [1,5] → default arm → 0
+}
+
+/// Milestone 150: @ binding with literal sub-pattern.
+#[test]
+fn milestone_150_bound_literal_match() {
+    let src = r#"
+fn check(x: i32) -> i32 {
+    match x {
+        n @ 42 => n + 1,
+        _ => 0,
+    }
+}
+fn main() -> i32 {
+    check(42)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 43); // 42 + 1 = 43
+}
+
+/// Milestone 150: @ binding not taken when literal doesn't match.
+#[test]
+fn milestone_150_bound_literal_no_match() {
+    let src = r#"
+fn check(x: i32) -> i32 {
+    match x {
+        n @ 42 => n + 1,
+        _ => 0,
+    }
+}
+fn main() -> i32 {
+    check(7)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0);
+}
+
+/// Milestone 150: @ binding used in guard expression.
+///
+/// FLS §6.18: The guard may reference the @ binding name.
+/// `n @ 1..=10 if n > 5 => n` means: match [1,10] AND guard n>5 passes.
+#[test]
+fn milestone_150_bound_pattern_in_guard() {
+    let src = r#"
+fn classify(x: i32) -> i32 {
+    match x {
+        n @ 1..=10 if n > 5 => n,
+        _ => 0,
+    }
+}
+fn main() -> i32 {
+    classify(7)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7);
+}
+
+/// Milestone 150: @ binding guard fails — falls to default arm.
+#[test]
+fn milestone_150_bound_pattern_guard_not_taken() {
+    let src = r#"
+fn classify(x: i32) -> i32 {
+    match x {
+        n @ 1..=10 if n > 5 => n,
+        _ => 0,
+    }
+}
+fn main() -> i32 {
+    classify(3)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0); // n=3 is in [1,10] but 3 > 5 is false → default
+}
+
+/// Milestone 150: @ binding in if-let expression.
+///
+/// FLS §6.17: `if let n @ 1..=5 = x` binds and checks in one expression.
+#[test]
+fn milestone_150_bound_pattern_if_let() {
+    let src = r#"
+fn in_range(x: i32) -> i32 {
+    if let n @ 1..=5 = x { n * 3 } else { 0 }
+}
+fn main() -> i32 {
+    in_range(4)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 12); // 4 * 3 = 12
+}
+
+/// Milestone 150: if-let @ binding — else branch taken.
+#[test]
+fn milestone_150_bound_pattern_if_let_not_taken() {
+    let src = r#"
+fn in_range(x: i32) -> i32 {
+    if let n @ 1..=5 = x { n * 3 } else { 0 }
+}
+fn main() -> i32 {
+    in_range(9)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0);
+}
+
+/// Milestone 150: multiple @ arms in one match — first match wins.
+#[test]
+fn milestone_150_multiple_bound_arms() {
+    let src = r#"
+fn tier(x: i32) -> i32 {
+    match x {
+        n @ 1..=3 => n * 10,
+        n @ 4..=6 => n * 20,
+        _ => 0,
+    }
+}
+fn main() -> i32 {
+    tier(5)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 100); // 5 * 20 = 100
+}
+
+/// Milestone 150: result in arithmetic.
+#[test]
+fn milestone_150_bound_result_in_arithmetic() {
+    let src = r#"
+fn double_if_small(x: i32) -> i32 {
+    match x {
+        n @ 0..=9 => n * 2,
+        _ => x,
+    }
+}
+fn main() -> i32 {
+    double_if_small(4) + double_if_small(15)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 23); // 4*2 + 15 = 8 + 15 = 23
+}

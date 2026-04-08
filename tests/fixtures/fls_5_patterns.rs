@@ -324,7 +324,20 @@ fn main() -> i32 {
     let s1 = sum_array_destruct(1, 2, 3);
     // FLS §5.1.8 + §5.1: wildcard sub-pattern — first_of_three(5) = 5.
     let s2 = first_of_three(5);
+    // FLS §5.1.4: @ binding pattern — bind AND check a sub-pattern.
+    // `n @ 1..=5` binds the value to `n` only when `n` is in [1, 5].
+    // FLS §5.1.4 NOTE: The spec does not provide a concrete code example for
+    // @ patterns; this is derived from the semantic description of IdentifierPattern.
+    let t1 = match 3 {
+        n @ 1..=5 => n * 2,
+        _ => 0,
+    };
+    // FLS §5.1.4: @ with a literal sub-pattern — bind AND check equality.
+    let t2 = match 42 {
+        n @ 42 => n,
+        _ => 0,
+    };
     // a=1, b=2, c=1, d=1, e=1, f=1, g=4, h=2, i=3, j=0, k=2, m=3, n2=1, n3=1, q=7,
-    // r2=12, r3=2, r4=6, r5=6, s1=6, s2=5 → sum=67
-    a + b + c + d + e + f + g + h + i + j + k + m + n2 + n3 + q + r2 + r3 + r4 + r5 + s1 + s2
+    // r2=12, r3=2, r4=6, r5=6, s1=6, s2=5, t1=6, t2=42 → sum=115
+    a + b + c + d + e + f + g + h + i + j + k + m + n2 + n3 + q + r2 + r3 + r4 + r5 + s1 + s2 + t1 + t2
 }

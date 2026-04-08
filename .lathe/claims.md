@@ -365,6 +365,60 @@ called with both `Foo` and `Bar` via wrapper functions returns assembly that:
 
 ---
 
+## Claim 19: Galvanic exits non-zero when the lower pass fails
+
+**Stakeholder**: CI / Validation, William (researcher)
+
+**Promise**: When `galvanic::lower::lower` returns an error, galvanic must exit with a
+non-zero exit code. It must NOT silently return 0 while producing no output. A zero exit
+code is a contract: it tells `compile_and_run` that compilation succeeded and that the
+output binary can be run.
+
+**Background**: In cycle 36, the test `milestone_149_fn_mut_with_param` failed on CI with
+"got 1, expected 10." The root cause was that a lower error caused galvanic to print
+"note: skipping codegen" and `return` (exit 0). `compile_and_run` interpreted exit 0 as
+success, then ran qemu against a nonexistent binary, which exited 1. The test saw exit 1
+and produced a confusing failure. The cycle 36 fix repaired the specific lower error, but
+the exit-code contract was still broken — any future lower error would silently produce the
+same class of confusion.
+
+**Violated if**: Running galvanic with `-o output` on a valid program that causes a lower
+error exits with code 0 while `output` does not exist.
+
+**Structural fix**: main.rs `lower` error handler changed from `return` (exit 0) to
+`process::exit(1)` — a lower failure is a hard error, not a skippable warning.
+
+**Test**: `cargo build` followed by running galvanic on a valid program without `-o`;
+exit 0 implies the `.s` file was written (lower and codegen succeeded). Verified in
+falsify.sh Claim 19.
+
+---
+
+## Claim 20: `@` binding patterns emit runtime sub-pattern checks before binding
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: When a pattern `n @ subpat` is matched (FLS §5.1.4), galvanic must:
+1. Emit a runtime comparison to check `subpat` (e.g., `cmp` for a range or literal check).
+2. Only install the binding `n` if the sub-pattern matches (conditional execution, not always-bind).
+3. NOT constant-fold the body expression that uses `n`: `n @ 1..=5 => n * 2` with `x=3` must emit `mul`, not `mov x0, #6`.
+
+This guards the full `at_bind` code path added in milestone 150 (cycle 39, FLS §5.1.4). The attack vector is:
+- Removing or breaking the `Pat::Bound` lowering → lower error, galvanic exits 1, `compile_and_run` skips (caught by CI e2e).
+- Binding `n` to a wrong value (e.g., always 0) → wrong exit code in compile-and-run tests.
+- Omitting the sub-pattern check → the arm fires even when `x` is out of range → wrong exit code.
+- Constant-folding through the binding → `n * 2` with `n=3` folds to `mov x0, #6` instead of emitting `mul`.
+
+The assembly inspection tests catch the last case without requiring cross tools. They use a function parameter `x` as the scrutinee so that constant folding through the match is impossible even if galvanic tried.
+
+**Violated if**: `compile_to_asm(...)` for `fn classify(x: i32) -> i32 { match x { n @ 1..=5 => n * 2, _ => 0 } }` returns assembly that:
+- does NOT contain `cmp` (sub-pattern check absent), OR
+- contains `mov     x0, #6` (result constant-folded, treating n=3 as compile-time known).
+
+**Test**: `cargo test --test e2e -- runtime_bound_pattern_range_emits_cmp_and_binding runtime_bound_pattern_literal_emits_eq_check`
+
+---
+
 ## Not Yet Claims (honest gaps)
 
 These are promises the project will eventually make but cannot yet be falsified:

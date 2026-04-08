@@ -10027,6 +10027,90 @@ impl<'src> LowerCtx<'src> {
                             "slice/array pattern in if-let not yet supported".into(),
                         ));
                     }
+                    // FLS §5.1.4: @ binding pattern in if-let.
+                    //
+                    // Emit the sub-pattern check (CondBranch to else_label on failure)
+                    // then install the name binding. The binding is valid only inside
+                    // the then block.
+                    Pat::Bound { name, subpat } => {
+                        match subpat.as_ref() {
+                            Pat::LitInt(n) => {
+                                let s_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                                let p_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::LoadImm(p_reg, *n as i32));
+                                let cmp_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::BinOp {
+                                    op: IrBinOp::Eq, dst: cmp_reg, lhs: s_reg, rhs: p_reg,
+                                });
+                                self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: else_label });
+                            }
+                            Pat::NegLitInt(n) => {
+                                let s_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                                let p_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::LoadImm(p_reg, -(*n as i32)));
+                                let cmp_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::BinOp {
+                                    op: IrBinOp::Eq, dst: cmp_reg, lhs: s_reg, rhs: p_reg,
+                                });
+                                self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: else_label });
+                            }
+                            Pat::RangeInclusive { lo, hi } => {
+                                let s_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                                let lo_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::LoadImm(lo_reg, *lo as i32));
+                                let cmp1 = self.alloc_reg()?;
+                                self.instrs.push(Instr::BinOp {
+                                    op: IrBinOp::Ge, dst: cmp1, lhs: s_reg, rhs: lo_reg,
+                                });
+                                let hi_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
+                                let cmp2 = self.alloc_reg()?;
+                                self.instrs.push(Instr::BinOp {
+                                    op: IrBinOp::Le, dst: cmp2, lhs: s_reg, rhs: hi_reg,
+                                });
+                                let matched = self.alloc_reg()?;
+                                self.instrs.push(Instr::BinOp {
+                                    op: IrBinOp::BitAnd, dst: matched, lhs: cmp1, rhs: cmp2,
+                                });
+                                self.instrs.push(Instr::CondBranch { reg: matched, label: else_label });
+                            }
+                            Pat::RangeExclusive { lo, hi } => {
+                                let s_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                                let lo_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::LoadImm(lo_reg, *lo as i32));
+                                let cmp1 = self.alloc_reg()?;
+                                self.instrs.push(Instr::BinOp {
+                                    op: IrBinOp::Ge, dst: cmp1, lhs: s_reg, rhs: lo_reg,
+                                });
+                                let hi_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
+                                let cmp2 = self.alloc_reg()?;
+                                self.instrs.push(Instr::BinOp {
+                                    op: IrBinOp::Lt, dst: cmp2, lhs: s_reg, rhs: hi_reg,
+                                });
+                                let matched = self.alloc_reg()?;
+                                self.instrs.push(Instr::BinOp {
+                                    op: IrBinOp::BitAnd, dst: matched, lhs: cmp1, rhs: cmp2,
+                                });
+                                self.instrs.push(Instr::CondBranch { reg: matched, label: else_label });
+                            }
+                            other => return Err(LowerError::Unsupported(format!(
+                                "@ binding sub-pattern not yet supported in if-let: {other:?}"
+                            ))),
+                        }
+                        // Install the binding (valid in then block only; removed below).
+                        let bind_name = name.text(self.source);
+                        let bind_slot = self.alloc_slot()?;
+                        let bind_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: bind_reg, slot: scrut_slot });
+                        self.instrs.push(Instr::Store { src: bind_reg, slot: bind_slot });
+                        self.locals.insert(bind_name, bind_slot);
+                        bound_names.push(bind_name);
+                    }
                 }
 
                 // Install identifier binding (if any) before the then block.
@@ -10237,6 +10321,8 @@ impl<'src> LowerCtx<'src> {
                         Pat::LitBool(_) => true,
                         // FLS §5.1.11: OR patterns can contain bool literal alternatives.
                         Pat::Or(alts) => alts.iter().any(|p| matches!(p, Pat::LitBool(_))),
+                        // FLS §5.1.4: @ binding pattern — type comes from the sub-pattern.
+                        Pat::Bound { subpat, .. } => matches!(subpat.as_ref(), Pat::LitBool(_)),
                         // FLS §5.1.4: Identifier patterns are type-agnostic; they
                         // don't determine the scrutinee type on their own.
                         _ => false,
@@ -10296,6 +10382,9 @@ impl<'src> LowerCtx<'src> {
 
                         for arm in checked_arms {
                             let next_label = self.alloc_label();
+                            // FLS §5.1.4: Tracks a pending @ binding name.
+                            // Set in the Pat::Bound arm; installed after the pattern check.
+                            let mut at_bind_span: Option<crate::ast::Span> = None;
 
                             match &arm.pat {
                                 Pat::Wildcard => {
@@ -10782,6 +10871,129 @@ impl<'src> LowerCtx<'src> {
                                     self.instrs.push(Instr::Label(next_label));
                                     continue;
                                 }
+                                // FLS §5.1.4: Binding pattern `name @ subpat`.
+                                //
+                                // Strategy: emit the sub-pattern check (CondBranch to next_label
+                                // on failure) and record the name in `at_bind_span`.  After the
+                                // match block, the name is bound to the scrutinee slot value before
+                                // the guard and body execute, and removed after the arm body.
+                                //
+                                // Supported sub-patterns: LitInt, NegLitInt, LitBool,
+                                // RangeInclusive, RangeExclusive.
+                                //
+                                // FLS §6.1.2:37–45: All check and binding instructions are runtime.
+                                // Cache-line note: sub-pattern check (same as bare sub-pattern) +
+                                // 2 instructions for binding (ldr + str = 8 bytes).
+                                Pat::Bound { name, subpat } => {
+                                    at_bind_span = Some(*name);
+                                    match subpat.as_ref() {
+                                        Pat::LitInt(n) => {
+                                            let s_reg = self.alloc_reg()?;
+                                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                                            let p_reg = self.alloc_reg()?;
+                                            self.instrs.push(Instr::LoadImm(p_reg, *n as i32));
+                                            let cmp_reg = self.alloc_reg()?;
+                                            self.instrs.push(Instr::BinOp {
+                                                op: IrBinOp::Eq,
+                                                dst: cmp_reg,
+                                                lhs: s_reg,
+                                                rhs: p_reg,
+                                            });
+                                            self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
+                                        }
+                                        Pat::NegLitInt(n) => {
+                                            let s_reg = self.alloc_reg()?;
+                                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                                            let p_reg = self.alloc_reg()?;
+                                            self.instrs.push(Instr::LoadImm(p_reg, -(*n as i32)));
+                                            let cmp_reg = self.alloc_reg()?;
+                                            self.instrs.push(Instr::BinOp {
+                                                op: IrBinOp::Eq,
+                                                dst: cmp_reg,
+                                                lhs: s_reg,
+                                                rhs: p_reg,
+                                            });
+                                            self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
+                                        }
+                                        Pat::LitBool(b) => {
+                                            let s_reg = self.alloc_reg()?;
+                                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                                            let p_reg = self.alloc_reg()?;
+                                            self.instrs.push(Instr::LoadImm(p_reg, *b as i32));
+                                            let cmp_reg = self.alloc_reg()?;
+                                            self.instrs.push(Instr::BinOp {
+                                                op: IrBinOp::Eq,
+                                                dst: cmp_reg,
+                                                lhs: s_reg,
+                                                rhs: p_reg,
+                                            });
+                                            self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
+                                        }
+                                        Pat::RangeInclusive { lo, hi } => {
+                                            let s_reg = self.alloc_reg()?;
+                                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                                            let lo_reg = self.alloc_reg()?;
+                                            self.instrs.push(Instr::LoadImm(lo_reg, *lo as i32));
+                                            let cmp1 = self.alloc_reg()?;
+                                            self.instrs.push(Instr::BinOp {
+                                                op: IrBinOp::Ge,
+                                                dst: cmp1,
+                                                lhs: s_reg,
+                                                rhs: lo_reg,
+                                            });
+                                            let hi_reg = self.alloc_reg()?;
+                                            self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
+                                            let cmp2 = self.alloc_reg()?;
+                                            self.instrs.push(Instr::BinOp {
+                                                op: IrBinOp::Le,
+                                                dst: cmp2,
+                                                lhs: s_reg,
+                                                rhs: hi_reg,
+                                            });
+                                            let matched = self.alloc_reg()?;
+                                            self.instrs.push(Instr::BinOp {
+                                                op: IrBinOp::BitAnd,
+                                                dst: matched,
+                                                lhs: cmp1,
+                                                rhs: cmp2,
+                                            });
+                                            self.instrs.push(Instr::CondBranch { reg: matched, label: next_label });
+                                        }
+                                        Pat::RangeExclusive { lo, hi } => {
+                                            let s_reg = self.alloc_reg()?;
+                                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                                            let lo_reg = self.alloc_reg()?;
+                                            self.instrs.push(Instr::LoadImm(lo_reg, *lo as i32));
+                                            let cmp1 = self.alloc_reg()?;
+                                            self.instrs.push(Instr::BinOp {
+                                                op: IrBinOp::Ge,
+                                                dst: cmp1,
+                                                lhs: s_reg,
+                                                rhs: lo_reg,
+                                            });
+                                            let hi_reg = self.alloc_reg()?;
+                                            self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
+                                            let cmp2 = self.alloc_reg()?;
+                                            self.instrs.push(Instr::BinOp {
+                                                op: IrBinOp::Lt,
+                                                dst: cmp2,
+                                                lhs: s_reg,
+                                                rhs: hi_reg,
+                                            });
+                                            let matched = self.alloc_reg()?;
+                                            self.instrs.push(Instr::BinOp {
+                                                op: IrBinOp::BitAnd,
+                                                dst: matched,
+                                                lhs: cmp1,
+                                                rhs: cmp2,
+                                            });
+                                            self.instrs.push(Instr::CondBranch { reg: matched, label: next_label });
+                                        }
+                                        other => return Err(LowerError::Unsupported(format!(
+                                            "@ binding sub-pattern not yet supported: {other:?}"
+                                        ))),
+                                    }
+                                }
                                 _ => {
                                     // Single literal pattern: load scrutinee, compare, cbz.
                                     let s_reg = self.alloc_reg()?;
@@ -10812,6 +11024,18 @@ impl<'src> LowerCtx<'src> {
                                 }
                             }
 
+                            // FLS §5.1.4: Install @ binding (if any) before guard and body.
+                            // The sub-pattern check already branched to next_label on failure;
+                            // if we reach here the pattern matched and the binding is valid.
+                            if let Some(span) = at_bind_span {
+                                let bind_name = span.text(self.source);
+                                let bind_slot = self.alloc_slot()?;
+                                let bind_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::Load { dst: bind_reg, slot: scrut_slot });
+                                self.instrs.push(Instr::Store { src: bind_reg, slot: bind_slot });
+                                self.locals.insert(bind_name, bind_slot);
+                            }
+
                             // Guard check (if any): emitted after the pattern check.
                             // The pattern check already branched to next_label on failure;
                             // if we reach here, the pattern matched. Now check the guard.
@@ -10835,6 +11059,11 @@ impl<'src> LowerCtx<'src> {
                             self.instrs.push(Instr::Store { src: body_reg, slot: phi_slot });
                             self.instrs.push(Instr::Branch(exit_label));
 
+                            // Remove @ binding (if any) before the next-arm label.
+                            // FLS §5.1.4: Binding scope ends at the arm boundary.
+                            if let Some(span) = at_bind_span {
+                                self.locals.remove(span.text(self.source));
+                            }
                             self.instrs.push(Instr::Label(next_label));
                         }
 
@@ -10861,6 +11090,21 @@ impl<'src> LowerCtx<'src> {
                                 self.instrs.push(Instr::Store { src: bind_reg, slot: bind_slot });
                                 self.locals.insert(name, bind_slot);
                                 vec![name]
+                            }
+                            // FLS §5.1.4: @ binding pattern in the default arm.
+                            // Unlike checked arms, the default arm never branches away,
+                            // so the sub-pattern check is skipped — only the binding is
+                            // installed. Using `n @ pat` as a default arm is unusual
+                            // (the sub-pattern should be the last resort anyway), but
+                            // it is valid Rust.
+                            Pat::Bound { name, .. } => {
+                                let bind_name = name.text(self.source);
+                                let bind_slot = self.alloc_slot()?;
+                                let bind_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::Load { dst: bind_reg, slot: scrut_slot });
+                                self.instrs.push(Instr::Store { src: bind_reg, slot: bind_slot });
+                                self.locals.insert(bind_name, bind_slot);
+                                vec![bind_name]
                             }
                             Pat::TupleStruct { path: segs, fields } if segs.len() == 2 => {
                                 let enum_name_def = segs[0].text(self.source);
@@ -10984,6 +11228,7 @@ impl<'src> LowerCtx<'src> {
                     IrTy::Unit => {
                         for arm in checked_arms {
                             let next_label = self.alloc_label();
+                            let mut at_bind_span_unit: Option<crate::ast::Span> = None;
 
                             match &arm.pat {
                                 Pat::Wildcard => {
@@ -11382,6 +11627,47 @@ impl<'src> LowerCtx<'src> {
                                     self.instrs.push(Instr::Label(next_label));
                                     continue;
                                 }
+                                // FLS §5.1.4: @ binding pattern (unit-returning match).
+                                Pat::Bound { name, subpat } => {
+                                    at_bind_span_unit = Some(*name);
+                                    match subpat.as_ref() {
+                                        Pat::LitInt(n) => {
+                                            let s_reg = self.alloc_reg()?;
+                                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                                            let p_reg = self.alloc_reg()?;
+                                            self.instrs.push(Instr::LoadImm(p_reg, *n as i32));
+                                            let cmp_reg = self.alloc_reg()?;
+                                            self.instrs.push(Instr::BinOp {
+                                                op: IrBinOp::Eq, dst: cmp_reg, lhs: s_reg, rhs: p_reg,
+                                            });
+                                            self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
+                                        }
+                                        Pat::RangeInclusive { lo, hi } => {
+                                            let s_reg = self.alloc_reg()?;
+                                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                                            let lo_reg = self.alloc_reg()?;
+                                            self.instrs.push(Instr::LoadImm(lo_reg, *lo as i32));
+                                            let cmp1 = self.alloc_reg()?;
+                                            self.instrs.push(Instr::BinOp {
+                                                op: IrBinOp::Ge, dst: cmp1, lhs: s_reg, rhs: lo_reg,
+                                            });
+                                            let hi_reg = self.alloc_reg()?;
+                                            self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
+                                            let cmp2 = self.alloc_reg()?;
+                                            self.instrs.push(Instr::BinOp {
+                                                op: IrBinOp::Le, dst: cmp2, lhs: s_reg, rhs: hi_reg,
+                                            });
+                                            let matched = self.alloc_reg()?;
+                                            self.instrs.push(Instr::BinOp {
+                                                op: IrBinOp::BitAnd, dst: matched, lhs: cmp1, rhs: cmp2,
+                                            });
+                                            self.instrs.push(Instr::CondBranch { reg: matched, label: next_label });
+                                        }
+                                        other => return Err(LowerError::Unsupported(format!(
+                                            "@ binding sub-pattern not yet supported in unit match: {other:?}"
+                                        ))),
+                                    }
+                                }
                                 _ => {
                                     let s_reg = self.alloc_reg()?;
                                     self.instrs
@@ -11408,6 +11694,16 @@ impl<'src> LowerCtx<'src> {
                                 }
                             }
 
+                            // Install @ binding (if any) for unit-returning match.
+                            if let Some(span) = at_bind_span_unit {
+                                let bind_name = span.text(self.source);
+                                let bind_slot = self.alloc_slot()?;
+                                let bind_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::Load { dst: bind_reg, slot: scrut_slot });
+                                self.instrs.push(Instr::Store { src: bind_reg, slot: bind_slot });
+                                self.locals.insert(bind_name, bind_slot);
+                            }
+
                             // Guard check for fall-through patterns (unit result).
                             // FLS §6.18: Guard evaluated after pattern matches.
                             if let Some(guard) = &arm.guard {
@@ -11421,6 +11717,11 @@ impl<'src> LowerCtx<'src> {
 
                             self.lower_expr(&arm.body, &IrTy::Unit)?;
                             self.instrs.push(Instr::Branch(exit_label));
+
+                            // Remove @ binding (if any) before next-arm label.
+                            if let Some(span) = at_bind_span_unit {
+                                self.locals.remove(span.text(self.source));
+                            }
                             self.instrs.push(Instr::Label(next_label));
                         }
 
@@ -11431,7 +11732,7 @@ impl<'src> LowerCtx<'src> {
                             ));
                         }
 
-                        // FLS §5.1.4: If the default arm has an identifier pattern, bind.
+                        // FLS §5.1.4: If the default arm has an identifier or @ binding pattern, bind.
                         // FLS §5.4 + §15: TupleStruct default arm installs field bindings.
                         let default_bindings_unit: Vec<&str> = match &default_arm[0].pat {
                             Pat::Ident(span) => {
@@ -11442,6 +11743,15 @@ impl<'src> LowerCtx<'src> {
                                 self.instrs.push(Instr::Store { src: bind_reg, slot: bind_slot });
                                 self.locals.insert(name, bind_slot);
                                 vec![name]
+                            }
+                            Pat::Bound { name, .. } => {
+                                let bind_name = name.text(self.source);
+                                let bind_slot = self.alloc_slot()?;
+                                let bind_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::Load { dst: bind_reg, slot: scrut_slot });
+                                self.instrs.push(Instr::Store { src: bind_reg, slot: bind_slot });
+                                self.locals.insert(bind_name, bind_slot);
+                                vec![bind_name]
                             }
                             Pat::TupleStruct { path: segs, fields } if segs.len() == 2 => {
                                 let enum_name_def2 = segs[0].text(self.source);
@@ -13478,6 +13788,54 @@ impl<'src> LowerCtx<'src> {
                         return Err(LowerError::Unsupported(
                             "slice/array pattern in while-let not yet supported".into(),
                         ));
+                    }
+                    // FLS §5.1.4: @ binding pattern in while-let.
+                    // Emit the sub-pattern check (exit loop on mismatch) and install binding.
+                    Pat::Bound { name, subpat } => {
+                        match subpat.as_ref() {
+                            Pat::LitInt(n) => {
+                                let s_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                                let p_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::LoadImm(p_reg, *n as i32));
+                                let eq_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::BinOp {
+                                    op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg,
+                                });
+                                self.instrs.push(Instr::CondBranch { reg: eq_reg, label: exit_label });
+                            }
+                            Pat::RangeInclusive { lo, hi } => {
+                                let s_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                                let lo_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::LoadImm(lo_reg, *lo as i32));
+                                let cmp1 = self.alloc_reg()?;
+                                self.instrs.push(Instr::BinOp {
+                                    op: IrBinOp::Ge, dst: cmp1, lhs: s_reg, rhs: lo_reg,
+                                });
+                                let hi_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
+                                let cmp2 = self.alloc_reg()?;
+                                self.instrs.push(Instr::BinOp {
+                                    op: IrBinOp::Le, dst: cmp2, lhs: s_reg, rhs: hi_reg,
+                                });
+                                let matched = self.alloc_reg()?;
+                                self.instrs.push(Instr::BinOp {
+                                    op: IrBinOp::BitAnd, dst: matched, lhs: cmp1, rhs: cmp2,
+                                });
+                                self.instrs.push(Instr::CondBranch { reg: matched, label: exit_label });
+                            }
+                            other => return Err(LowerError::Unsupported(format!(
+                                "@ binding sub-pattern not yet supported in while-let: {other:?}"
+                            ))),
+                        }
+                        let bind_name = name.text(self.source);
+                        let bind_slot = self.alloc_slot()?;
+                        let bind_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: bind_reg, slot: scrut_slot });
+                        self.instrs.push(Instr::Store { src: bind_reg, slot: bind_slot });
+                        self.locals.insert(bind_name, bind_slot);
+                        bound_names.push(bind_name);
                     }
                 }
 

@@ -347,6 +347,66 @@ else
     pass "Claim 18: second dyn Trait method loads fn-ptr at vtable offset #8"
 fi
 
+# ── Claim 19: Exit 0 on valid program implies .s output was written ───────────
+# Tests the structural contract: galvanic exit 0 means compilation succeeded
+# and produced output — not a silent skip due to a lower/codegen failure.
+#
+# Background: in cycle 36, a lower error caused galvanic to `return` (exit 0)
+# without producing any output. compile_and_run then ran qemu on a nonexistent
+# binary and got exit 1, producing a confusing test failure with "expected 10,
+# got 1". The fix: change the lower error handler from `return` to
+# `process::exit(1)`. This test verifies the positive case holds after that fix.
+#
+# We test the positive case: a valid program exits 0 AND writes the .s file.
+# (The negative case — lower error → non-zero exit — is enforced structurally
+# by the main.rs change; no portable way to trigger a lower error in falsify.sh.)
+# References: claims.md Claim 19.
+
+echo "--- Claim 19: exit 0 on valid program implies .s output written ---"
+
+_C19_BINARY="./target/debug/galvanic"
+if ! cargo build --quiet 2>/dev/null; then
+    fail "Claim 19" "cargo build failed — cannot verify output contract"
+else
+    _C19_SRC=$(mktemp /tmp/falsify_c19_XXXXXX.rs)
+    _C19_S="${_C19_SRC%.rs}.s"
+    printf 'fn main() -> i32 { 42 }\n' > "$_C19_SRC"
+
+    set +e
+    "$_C19_BINARY" "$_C19_SRC" > /dev/null 2>&1
+    _C19_EXIT=$?
+    set -e
+
+    rm -f "$_C19_SRC"
+
+    if [ "$_C19_EXIT" -ne 0 ]; then
+        rm -f "$_C19_S"
+        fail "Claim 19" "galvanic exited $_C19_EXIT on 'fn main() -> i32 { 42 }' — expected 0"
+    elif [ ! -f "$_C19_S" ]; then
+        fail "Claim 19" "galvanic exited 0 but did not write the .s output file — exit 0 without output means lower or codegen silently failed"
+    else
+        rm -f "$_C19_S"
+        pass "Claim 19: exit 0 on valid program implies .s output was written"
+    fi
+fi
+
+# ── Claim 20: @ binding patterns emit runtime sub-pattern checks ──────────────
+# Tests that `n @ 1..=5 => n * 2` with a function-parameter scrutinee:
+#   (a) emits `cmp` instructions for the range check (not unconditionally binding)
+#   (b) does NOT fold `n * 2` to `mov x0, #6` (binding value is runtime, not compile-time)
+# And that `n @ 42 => n + 1` emits `cmp` for the literal equality check.
+# Both use a function parameter as the scrutinee — constant folding the result
+# through the match arm is impossible given only compile-time information.
+# Introduced in cycle 40 (red-team, milestone 150, FLS §5.1.4).
+# References: claims.md Claim 20.
+
+echo "--- Claim 20: @ binding patterns emit runtime sub-pattern checks (not folded) ---"
+if cargo test --test e2e --quiet -- runtime_bound_pattern_range_emits_cmp_and_binding runtime_bound_pattern_literal_emits_eq_check 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 20" "runtime_bound_pattern_range_emits_cmp_and_binding or runtime_bound_pattern_literal_emits_eq_check FAILED — @ binding pattern may not be emitting sub-pattern checks or may be constant-folding the bound expression"
+else
+    pass "Claim 20: @ binding patterns emit runtime sub-pattern checks (not folded)"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""
