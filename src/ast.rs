@@ -783,6 +783,26 @@ pub enum TyKind {
         len: usize,
     },
 
+    /// A slice type `[T]` (unsized). FLS §4.9.
+    ///
+    /// FLS §4.9: "A slice is a dynamically sized type that represents a
+    /// sequence of elements of a specific type." Slices are always accessed
+    /// through a reference `&[T]`, which is a fat pointer (data pointer +
+    /// length). Galvanic passes `&[T]` as two registers: a stack address
+    /// and a usize length.
+    ///
+    /// FLS §4.9 AMBIGUOUS: The FLS does not specify the ABI for `&[T]`
+    /// (whether the pointer and length are in separate argument registers or
+    /// packed). Galvanic passes them as two consecutive argument registers.
+    ///
+    /// Cache-line note: each `&[T]` parameter occupies two stack slots
+    /// (address + length = 16 bytes), doubling the footprint of a scalar
+    /// reference. The trade-off is necessary for runtime-determined lengths.
+    Slice {
+        /// Element type.
+        elem: Box<Ty>,
+    },
+
     /// `impl Trait` in argument position. FLS §11, §12.1.
     ///
     /// `impl Trait` in argument position is syntactic sugar for an anonymous

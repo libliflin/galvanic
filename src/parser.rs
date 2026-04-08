@@ -1662,6 +1662,15 @@ impl<'src> Parser<'src> {
             TokenKind::OpenBracket => {
                 self.advance(); // consume `[`
                 let elem = self.parse_ty()?;
+                // Distinguish `[T; N]` (array) from `[T]` (slice).
+                // FLS §4.9: A slice type `[T]` has no length. A following `]` without `;`
+                // means this is a slice type. A following `;` means array type `[T; N]`.
+                if self.peek_kind() == TokenKind::CloseBracket {
+                    // Slice type `[T]` — FLS §4.9.
+                    let end = self.current_span();
+                    self.advance(); // consume `]`
+                    return Ok(Ty { kind: TyKind::Slice { elem: Box::new(elem) }, span: start.to(end) });
+                }
                 self.expect(TokenKind::Semi)?;
                 let len_span = self.current_span();
                 self.expect(TokenKind::LitInteger)?;
