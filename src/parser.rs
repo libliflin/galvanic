@@ -3434,15 +3434,27 @@ impl<'src> Parser<'src> {
                     self.advance(); // consume `)`
                     return Ok(Pat::Tuple(vec![]));
                 }
-                let mut pats = Vec::new();
-                loop {
-                    pats.push(self.parse_single_pattern()?);
-                    if !self.eat(TokenKind::Comma) {
-                        break;
+                // Parse the first pattern inside the parens.
+                let first = self.parse_single_pattern()?;
+                // FLS §5.1.11: `(pat1 | pat2 | ...)` is a grouped OR pattern.
+                // The `|` separator inside parens indicates an OR group, which is
+                // distinct from the top-level OR in a match arm. Used in `@` bindings:
+                // `n @ (1 | 5..=10)` — the parens group the OR sub-pattern.
+                if self.peek_kind() == TokenKind::Or {
+                    let mut alts = vec![first];
+                    while self.eat(TokenKind::Or) {
+                        alts.push(self.parse_single_pattern()?);
                     }
+                    self.expect(TokenKind::CloseParen)?;
+                    return Ok(Pat::Or(alts));
+                }
+                // Otherwise: tuple pattern `(pat,)` or `(pat1, pat2, ...)`.
+                let mut pats = vec![first];
+                while self.eat(TokenKind::Comma) {
                     if self.peek_kind() == TokenKind::CloseParen {
                         break; // trailing comma
                     }
+                    pats.push(self.parse_single_pattern()?);
                 }
                 self.expect(TokenKind::CloseParen)?;
                 Ok(Pat::Tuple(pats))

@@ -531,6 +531,23 @@ else
     pass "Claim 26: let-else @ binding emits runtime cmp+cbz+binding (not folded)"
 fi
 
+# ── Claim 27: @ binding with OR sub-pattern emits orr accumulation ───────────
+#
+# Promise: `let n @ (1 | 5..=10) = x else { return 0 }; n * 2` must emit orr
+# (OR accumulation for the alternatives) and must NOT constant-fold the result.
+# Without the Pat::Or arm in accum_or_alt, the program fails at compile time
+# with "unsupported pattern kind inside OR pattern alternative".
+#
+# Introduced in cycle 63 (FLS §5.1.4 + §5.1.11 — @ binding with OR sub-pat).
+# References: claims.md Claim 27.
+
+echo "--- Claim 27: @ binding pattern with OR sub-pattern emits orr accumulation (not folded) ---"
+if cargo test --test e2e --quiet -- runtime_at_bound_or_subpat_emits_orr_accumulation runtime_at_bound_or_subpat_result_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 27" "runtime_at_bound_or_subpat_emits_orr_accumulation or runtime_at_bound_or_subpat_result_not_folded FAILED — @ binding OR sub-pattern may not emit orr accumulation, or result was constant-folded"
+else
+    pass "Claim 27: @ binding OR sub-pattern emits runtime orr accumulation (not folded)"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

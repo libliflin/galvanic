@@ -25113,3 +25113,164 @@ fn milestone_157_let_else_bound_result_in_arithmetic() {
     };
     assert_eq!(exit_code, 7); // 4 + 3
 }
+
+// ---------------------------------------------------------------------------
+// Milestone 158: @ binding with OR sub-patterns — `n @ (pat1 | pat2)` in all
+// pattern positions (FLS §5.1.4, §5.1.11).
+// ---------------------------------------------------------------------------
+
+/// Assembly inspection: let-else `n @ (1 | 5..=10)` must emit `orr` for the
+/// OR alternative accumulation. The parameter `x` prevents constant folding.
+#[test]
+fn runtime_at_bound_or_subpat_emits_orr_accumulation() {
+    let asm = compile_to_asm(
+        "fn f(x: i32) -> i32 { let n @ (1 | 5..=10) = x else { return 0 }; n * 2 }\n\
+         fn main() -> i32 { f(6) }\n",
+    );
+    assert!(
+        asm.contains("orr"),
+        "expected orr instruction for OR alternative accumulation in @ binding;\n{asm}"
+    );
+}
+
+/// Anti-fold: `n @ (1 | 5..=10) = x` with parameter x — must not emit a
+/// constant result. The computation must happen at runtime.
+#[test]
+fn runtime_at_bound_or_subpat_result_not_folded() {
+    let asm = compile_to_asm(
+        "fn f(x: i32) -> i32 { let n @ (1 | 5..=10) = x else { return 0 }; n * 2 }\n\
+         fn main() -> i32 { f(6) }\n",
+    );
+    assert!(
+        !asm.contains("mov     x0, #12"),
+        "must not constant-fold n*2 where n=6; must emit runtime multiply;\n{asm}"
+    );
+}
+
+#[test]
+fn milestone_158_let_else_or_subpat_first_alt_matches() {
+    let Some(exit_code) = compile_and_run(
+        "fn f(x: i32) -> i32 { let n @ (1 | 5..=10) = x else { return 0 }; n }\n\
+         fn main() -> i32 { f(1) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 1); // 1 matches first alt
+}
+
+#[test]
+fn milestone_158_let_else_or_subpat_range_matches() {
+    let Some(exit_code) = compile_and_run(
+        "fn f(x: i32) -> i32 { let n @ (1 | 5..=10) = x else { return 0 }; n }\n\
+         fn main() -> i32 { f(7) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 7); // 7 ∈ 5..=10 → binding n=7
+}
+
+#[test]
+fn milestone_158_let_else_or_subpat_no_match_else_taken() {
+    let Some(exit_code) = compile_and_run(
+        "fn f(x: i32) -> i32 { let n @ (1 | 5..=10) = x else { return 0 }; n }\n\
+         fn main() -> i32 { f(3) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 0); // 3 ∉ {1} ∪ 5..=10 → else
+}
+
+#[test]
+fn milestone_158_let_else_or_subpat_result_in_arithmetic() {
+    let Some(exit_code) = compile_and_run(
+        "fn f(x: i32) -> i32 { let n @ (1 | 5..=10) = x else { return 0 }; n + 2 }\n\
+         fn main() -> i32 { f(5) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 7); // n=5, 5+2=7
+}
+
+#[test]
+fn milestone_158_if_let_or_subpat_first_alt() {
+    let Some(exit_code) = compile_and_run(
+        "fn f(x: i32) -> i32 { if let n @ (1 | 5..=10) = x { n } else { 0 } }\n\
+         fn main() -> i32 { f(1) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 1);
+}
+
+#[test]
+fn milestone_158_if_let_or_subpat_range_matches() {
+    let Some(exit_code) = compile_and_run(
+        "fn f(x: i32) -> i32 { if let n @ (1 | 5..=10) = x { n } else { 0 } }\n\
+         fn main() -> i32 { f(8) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 8); // 8 ∈ 5..=10
+}
+
+#[test]
+fn milestone_158_if_let_or_subpat_no_match() {
+    let Some(exit_code) = compile_and_run(
+        "fn f(x: i32) -> i32 { if let n @ (1 | 5..=10) = x { n } else { 0 } }\n\
+         fn main() -> i32 { f(3) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 0); // 3 ∉ {1} ∪ 5..=10 → else
+}
+
+#[test]
+fn milestone_158_match_or_subpat_first_alt() {
+    let Some(exit_code) = compile_and_run(
+        "fn f(x: i32) -> i32 { match x { n @ (1 | 5..=10) => n, _ => 0 } }\n\
+         fn main() -> i32 { f(1) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 1);
+}
+
+#[test]
+fn milestone_158_match_or_subpat_range_matches() {
+    let Some(exit_code) = compile_and_run(
+        "fn f(x: i32) -> i32 { match x { n @ (1 | 5..=10) => n, _ => 0 } }\n\
+         fn main() -> i32 { f(6) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 6); // 6 ∈ 5..=10
+}
+
+#[test]
+fn milestone_158_match_or_subpat_wildcard_taken() {
+    let Some(exit_code) = compile_and_run(
+        "fn f(x: i32) -> i32 { match x { n @ (1 | 5..=10) => n, _ => 99 } }\n\
+         fn main() -> i32 { f(3) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 99); // 3 ∉ {1} ∪ 5..=10 → wildcard
+}
+
+#[test]
+fn milestone_158_while_let_or_subpat_counts() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 {\n\
+             let mut x = 0;\n\
+             let mut total = 0;\n\
+             while let n @ (0 | 1 | 2) = x {\n\
+                 total += n;\n\
+                 x += 1;\n\
+             }\n\
+             total\n\
+         }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 3); // 0+1+2=3; exits when x=3 ∉ {0,1,2}
+}

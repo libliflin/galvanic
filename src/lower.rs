@@ -5326,6 +5326,16 @@ impl<'src> LowerCtx<'src> {
                     rhs: in_range,
                 });
             }
+            // FLS §5.1.4 + §5.1.11: Nested OR within an OR alternative.
+            // `n @ (1 | 2..=5)` parses as Bound { subpat: Or([1, 2..=5]) }.
+            // When the Bound handler calls accum_or_alt(Or(...)), we recurse:
+            // each nested alternative is accumulated into matched_reg.
+            // Cache-line note: cost mirrors the sum of each alternative's cost.
+            Pat::Or(alts) => {
+                for alt in alts {
+                    self.accum_or_alt(alt, scrut_slot, matched_reg)?;
+                }
+            }
             _ => {
                 return Err(LowerError::Unsupported(
                     "unsupported pattern kind inside OR pattern alternative".into(),
@@ -10449,6 +10459,18 @@ impl<'src> LowerCtx<'src> {
                                 });
                                 self.instrs.push(Instr::CondBranch { reg: matched, label: else_label });
                             }
+                            // FLS §5.1.4 + §5.1.11: `n @ (pat1 | pat2)` — OR sub-pattern.
+                            // Accumulate alternatives into matched_reg; branch to else_label
+                            // when matched_reg == 0 (no alternative matched).
+                            // Cache-line note: cost mirrors the OR alternative costs.
+                            Pat::Or(alts) => {
+                                let matched_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::LoadImm(matched_reg, 0));
+                                for alt in alts {
+                                    self.accum_or_alt(alt, scrut_slot, matched_reg)?;
+                                }
+                                self.instrs.push(Instr::CondBranch { reg: matched_reg, label: else_label });
+                            }
                             other => return Err(LowerError::Unsupported(format!(
                                 "@ binding sub-pattern not yet supported in if-let: {other:?}"
                             ))),
@@ -11320,6 +11342,17 @@ impl<'src> LowerCtx<'src> {
                                             });
                                             self.instrs.push(Instr::CondBranch { reg: matched, label: next_label });
                                         }
+                                        // FLS §5.1.4 + §5.1.11: `n @ (pat1 | pat2)` — OR sub-pattern.
+                                        // Accumulate alternatives; branch to next_label on no match.
+                                        // Cache-line note: cost mirrors the OR alternative costs.
+                                        Pat::Or(alts) => {
+                                            let matched_reg = self.alloc_reg()?;
+                                            self.instrs.push(Instr::LoadImm(matched_reg, 0));
+                                            for alt in alts {
+                                                self.accum_or_alt(alt, scrut_slot, matched_reg)?;
+                                            }
+                                            self.instrs.push(Instr::CondBranch { reg: matched_reg, label: next_label });
+                                        }
                                         other => return Err(LowerError::Unsupported(format!(
                                             "@ binding sub-pattern not yet supported: {other:?}"
                                         ))),
@@ -11974,6 +12007,16 @@ impl<'src> LowerCtx<'src> {
                                                 op: IrBinOp::BitAnd, dst: matched, lhs: cmp1, rhs: cmp2,
                                             });
                                             self.instrs.push(Instr::CondBranch { reg: matched, label: next_label });
+                                        }
+                                        // FLS §5.1.4 + §5.1.11: `n @ (pat1 | pat2)` — OR sub-pattern.
+                                        // Accumulate alternatives; branch to next_label on no match.
+                                        Pat::Or(alts) => {
+                                            let matched_reg = self.alloc_reg()?;
+                                            self.instrs.push(Instr::LoadImm(matched_reg, 0));
+                                            for alt in alts {
+                                                self.accum_or_alt(alt, scrut_slot, matched_reg)?;
+                                            }
+                                            self.instrs.push(Instr::CondBranch { reg: matched_reg, label: next_label });
                                         }
                                         other => return Err(LowerError::Unsupported(format!(
                                             "@ binding sub-pattern not yet supported in unit match: {other:?}"
@@ -14116,6 +14159,18 @@ impl<'src> LowerCtx<'src> {
                                     op: IrBinOp::BitAnd, dst: matched, lhs: cmp1, rhs: cmp2,
                                 });
                                 self.instrs.push(Instr::CondBranch { reg: matched, label: exit_label });
+                            }
+                            // FLS §5.1.4 + §5.1.11: `n @ (pat1 | pat2)` — OR sub-pattern.
+                            // Accumulate alternatives; branch to exit_label on no match
+                            // (exits the while-let loop when no alternative matches).
+                            // Cache-line note: cost mirrors the OR alternative costs.
+                            Pat::Or(alts) => {
+                                let matched_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::LoadImm(matched_reg, 0));
+                                for alt in alts {
+                                    self.accum_or_alt(alt, scrut_slot, matched_reg)?;
+                                }
+                                self.instrs.push(Instr::CondBranch { reg: matched_reg, label: exit_label });
                             }
                             other => return Err(LowerError::Unsupported(format!(
                                 "@ binding sub-pattern not yet supported in while-let: {other:?}"
