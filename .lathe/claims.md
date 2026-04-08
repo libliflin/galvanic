@@ -2832,3 +2832,24 @@ declared field type — not as a wider i32.
 - the assembly for `Wrap::Val { x: a + b }` lacks `and w_, w_, #255` before the Store
 
 **Tests**: `cargo test --test e2e -- runtime_u8_named_enum_variant_field_construction_applies_trunc runtime_i16_named_enum_variant_field_construction_applies_sxth milestone_185_u8_named_variant_wraps_on_construction milestone_185_u16_named_variant_wraps_on_construction milestone_185_i16_named_variant_wraps_on_construction`
+
+
+---
+
+## Claim 73: Built-in integer type associated constants resolve to correct compile-time immediates
+
+**Promise**: `i32::MAX`, `i32::MIN`, `u8::MAX`, `u8::MIN`, `i8::MAX`, `i8::MIN`, `u16::MAX`, `u16::MIN`, `i16::MAX`, `i16::MIN` are resolved at compile time to the correct values and emitted as `LoadImm` instructions. They are NOT loaded from memory at runtime.
+
+**Why this matters**: These constants appear frequently in real Rust code as boundary values for arithmetic, comparisons, and type casts. If galvanic does not recognise them, programs that use `i32::MAX` as a sentinel or comparison bound would fail to compile. If they were emitted as runtime stack loads instead of immediates, the cache-line and code density advantages of the approach would be lost.
+
+**ARM64 implementation**: Values are pre-seeded into `assoc_const_vals` before the user-defined impl scan. The existing two-segment path lowering (FLS §10.3) emits `LoadImm(r, value)` → 1–3 ARM64 instructions (movz / movz+movk / movz+movk+sxtw depending on magnitude and sign).
+
+**FLS §10.3**: Associated constants are substituted at each use site as compile-time immediates.
+**FLS §4.1 AMBIGUOUS**: The spec specifies value ranges for integer types but does not enumerate `MAX`/`MIN` by name. Galvanic derives these from the range bounds. The exact naming is a language convention, not mandated by the FLS.
+
+**Violated if**:
+- `if i32::MAX > 0 { 1 } else { 0 }` returns 0 instead of 1, OR
+- `if i32::MIN < 0 { 1 } else { 0 }` returns 0 instead of 1, OR
+- The assembly for `i32::MAX` contains `ldr x0, [sp` (stack load) instead of `movz`/`movk`
+
+**Tests**: `cargo test --test e2e -- runtime_i32_max_emits_loadimm milestone_187_i32_max_is_positive milestone_187_i32_min_is_negative milestone_187_u8_max_as_i32 milestone_187_i8_max_as_i32`

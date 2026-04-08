@@ -1341,6 +1341,19 @@ else
     pass "Claim 72: narrow integer named enum variant fields are normalised (truncated/sign-extended) at construction time"
 fi
 
+echo "--- Claim 73: built-in integer type constants resolve to correct compile-time immediates ---"
+if cargo test --test e2e -- \
+    runtime_i32_max_emits_loadimm \
+    milestone_187_i32_max_is_positive \
+    milestone_187_i32_min_is_negative \
+    milestone_187_u8_max_as_i32 \
+    milestone_187_i8_max_as_i32 \
+    2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 73" "built-in integer type constants FAILED — i32::MAX/MIN, u8::MAX, i8::MAX not resolved as compile-time immediates"
+else
+    pass "Claim 73: built-in integer type constants (i32::MAX, i32::MIN, u8::MAX, i8::MAX) resolve to compile-time immediates"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 

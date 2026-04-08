@@ -31477,3 +31477,118 @@ fn milestone_186_i16_compound_mul_wraps_mid_body() {
     };
     assert_eq!(exit, 1, "200_i16 * 200_i16 = 40000 -> wraps to -25536 as i16; -25536 < 0 so must return 1");
 }
+
+// ── Milestone 187: built-in integer type associated constants (FLS §10.3, §4.1) ──
+
+/// Milestone 187: `i32::MAX` is positive — comparison returns 1.
+///
+/// FLS §10.3: Associated constants on primitive types are substituted at use
+/// sites as compile-time immediates. `i32::MAX = 2_147_483_647` is the
+/// largest i32 value, which is strictly positive.
+///
+/// FLS §4.1 AMBIGUOUS: The spec specifies the value range of i32
+/// (`-2^31..=2^31-1`) but does not enumerate `MAX`/`MIN` by name.
+/// Galvanic derives them from the range bounds.
+#[test]
+fn milestone_187_i32_max_is_positive() {
+    let src = "fn main() -> i32 { if i32::MAX > 0 { 1 } else { 0 } }\n";
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 1, "i32::MAX > 0 must hold");
+}
+
+/// Milestone 187: `i32::MIN` is negative.
+///
+/// FLS §4.1: The minimum i32 value is -2_147_483_648, which is negative.
+#[test]
+fn milestone_187_i32_min_is_negative() {
+    let src = "fn main() -> i32 { if i32::MIN < 0 { 1 } else { 0 } }\n";
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 1, "i32::MIN < 0 must hold");
+}
+
+/// Milestone 187: `u8::MAX` as i32 equals 255.
+///
+/// FLS §4.1: u8 range is 0..=255; `u8::MAX = 255`.
+#[test]
+fn milestone_187_u8_max_as_i32() {
+    let src = "fn main() -> i32 { if u8::MAX as i32 == 255 { 1 } else { 0 } }\n";
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 1, "u8::MAX as i32 must equal 255");
+}
+
+/// Milestone 187: `i8::MAX` as i32 equals 127.
+///
+/// FLS §4.1: i8 range is -128..=127; `i8::MAX = 127`.
+#[test]
+fn milestone_187_i8_max_as_i32() {
+    let src = "fn main() -> i32 { if i8::MAX as i32 == 127 { 1 } else { 0 } }\n";
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 1, "i8::MAX as i32 must equal 127");
+}
+
+/// Milestone 187: `i8::MIN` as i32 equals -128.
+///
+/// FLS §4.1: i8 minimum value is -128.
+#[test]
+fn milestone_187_i8_min_as_i32() {
+    let src = "fn main() -> i32 { if i8::MIN as i32 == -128 { 1 } else { 0 } }\n";
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 1, "i8::MIN as i32 must equal -128");
+}
+
+/// Milestone 187: `u16::MAX` as i32 equals 65535.
+///
+/// FLS §4.1: u16 range is 0..=65535; `u16::MAX = 65535`.
+#[test]
+fn milestone_187_u16_max_as_i32() {
+    let src = "fn main() -> i32 { if u16::MAX as i32 == 65535 { 1 } else { 0 } }\n";
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 1, "u16::MAX as i32 must equal 65535");
+}
+
+/// Milestone 187: `i16::MIN` as i32 equals -32768.
+///
+/// FLS §4.1: i16 range is -32768..=32767.
+#[test]
+fn milestone_187_i16_min_as_i32() {
+    let src = "fn main() -> i32 { if i16::MIN as i32 == -32768 { 1 } else { 0 } }\n";
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 1, "i16::MIN as i32 must equal -32768");
+}
+
+/// Milestone 187: `i32::MAX` used as a function parameter comparison bound.
+///
+/// Verifies that `i32::MAX` survives through function calls and comparisons.
+/// Uses a helper function so the constant cannot be folded.
+#[test]
+fn milestone_187_i32_max_passed_to_fn() {
+    let src = r#"
+fn is_max(x: i32) -> i32 { if x == i32::MAX { 1 } else { 0 } }
+fn main() -> i32 { is_max(i32::MAX) }
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 1, "is_max(i32::MAX) must return 1");
+}
+
+/// Assembly inspection: `i32::MAX` emits `LoadImm` with the compile-time value.
+///
+/// FLS §10.3: Built-in associated constants are substituted as compile-time
+/// immediates, not loaded from memory at runtime. The assembly must contain
+/// the immediate value 0x7fff (the high 16 bits of 2_147_483_647 = 0x7FFFFFFF)
+/// produced by the movz+movk sequence.
+///
+/// Negative assertion: the constant must not appear as a runtime stack load
+/// (`ldr x`) that would indicate a variable rather than a constant.
+#[test]
+fn runtime_i32_max_emits_loadimm() {
+    let asm = compile_to_asm("fn main() -> i32 { if i32::MAX > 0 { 1 } else { 0 } }\n");
+    // i32::MAX = 0x7FFFFFFF → movz lo16=0xffff, movk hi16=0x7fff
+    assert!(
+        asm.contains("#0x7fff"),
+        "i32::MAX must emit movk with #0x7fff (hi16 of 0x7FFFFFFF): {asm}"
+    );
+    assert!(
+        !asm.contains("ldr     x0, [sp"),
+        "i32::MAX must not be loaded from stack (must be a LoadImm): {asm}"
+    );
+}

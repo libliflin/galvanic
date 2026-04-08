@@ -1314,6 +1314,34 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     // Cache-line note: this map is built once and shared read-only across all
     // `lower_fn` calls — not on any hot runtime path.
     let mut assoc_const_vals: HashMap<String, i32> = HashMap::new();
+
+    // FLS §10.3, §4.1: Built-in integer type associated constants.
+    //
+    // Primitive integer types expose MAX and MIN as inherent associated constants.
+    // These are seeded before user-defined impl blocks so that user code can
+    // reference them as `i32::MAX`, `u8::MAX`, etc. in runtime expressions.
+    //
+    // FLS §4.1 AMBIGUOUS: The spec does not enumerate the built-in associated
+    // constants by name; it specifies that each integer type has a value range.
+    // Galvanic derives MAX/MIN from the range bounds as compile-time immediates.
+    //
+    // Limitation: u32::MAX (4_294_967_295) and larger unsigned values do not fit
+    // in Galvanic's internal i32 representation and are deferred to a future
+    // milestone when the IR gains wider integer support.
+    //
+    // Cache-line note: emitted as a single LoadImm per use site (1–3 ARM64
+    // instructions depending on value magnitude) — no runtime memory access.
+    assoc_const_vals.insert("i8::MAX".to_owned(), 127_i32);
+    assoc_const_vals.insert("i8::MIN".to_owned(), -128_i32);
+    assoc_const_vals.insert("u8::MAX".to_owned(), 255_i32);
+    assoc_const_vals.insert("u8::MIN".to_owned(), 0_i32);
+    assoc_const_vals.insert("i16::MAX".to_owned(), 32_767_i32);
+    assoc_const_vals.insert("i16::MIN".to_owned(), -32_768_i32);
+    assoc_const_vals.insert("u16::MAX".to_owned(), 65_535_i32);
+    assoc_const_vals.insert("u16::MIN".to_owned(), 0_i32);
+    assoc_const_vals.insert("i32::MAX".to_owned(), 2_147_483_647_i32);
+    assoc_const_vals.insert("i32::MIN".to_owned(), -2_147_483_648_i32);
+
     for item in &src.items {
         if let ItemKind::Impl(impl_def) = &item.kind {
             let type_name = impl_def.ty.text(source);
