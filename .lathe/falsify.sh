@@ -270,6 +270,27 @@ else
     pass "Claim 13: assoc const in runtime computation emits add (not folded)"
 fi
 
+# ── Claim 14: Field method calls emit runtime bl, not folded constants ────────
+# Tests two things:
+#   (a) `c.inner.get()` where `inner: Counter` emits `Counter__get:` label AND `bl Counter__get`
+#       (method body and runtime dispatch both present — not elided by constant folding)
+#   (b) `c.inner.get() * factor` where `factor` is a runtime parameter emits `mul` and
+#       does NOT fold the product (3 * 4 = 12) to a constant `mov x0, #12`
+# This guards the `ExprKind::FieldAccess` receiver arm introduced in milestone 142 (cycle 23).
+# No prior claim covers this path — a regression in `resolve_place` for field access would
+# have been invisible to Claims 6–13.
+# Red-team finding (2026-04-07): the original negative assertion in the sibling test used
+# `!asm.contains("mov x0, #7") || asm.contains("ldr")` — vacuously true (same bug as
+# Claims 7 and 8 before they were fixed). Replaced with real adversarial checks.
+# References: claims.md Claim 14.
+
+echo "--- Claim 14: field method calls emit runtime bl (not folded) ---"
+if cargo test --test e2e --quiet -- runtime_field_method_call_emits_bl_not_folded runtime_field_method_call_result_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 14" "runtime_field_method_call_emits_bl_not_folded or runtime_field_method_call_result_not_folded FAILED — field method call may not be emitting the method body label, runtime dispatch, or may be constant-folding the result"
+else
+    pass "Claim 14: field method calls dispatch at runtime via bl (not folded)"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""
