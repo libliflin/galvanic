@@ -1283,3 +1283,55 @@ correct vtable dispatch via `blr`, not constant folding.
 - lacks `vtable_Shape_Circle` (vtable label not emitted for the concrete type).
 
 **Test**: `cargo test --test e2e -- runtime_dyn_trait_let_binding_not_folded runtime_dyn_trait_let_binding_emits_load_from_slot`
+
+---
+
+## Claim 38: Unsafe block bodies emit runtime instructions (not constant-folded)
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: An `unsafe { ... }` block is NOT a const context (FLS §6.4.4, FLS §6.1.2
+Constraint 1). Code inside an unsafe block in a regular function body must emit runtime
+instructions — not be evaluated at compile time. In particular, `unsafe { n * 3 }` where
+`n` is a function parameter must emit a `mul` instruction at runtime and must NOT fold
+the result to a constant `mov`.
+
+```rust
+fn triple(n: i32) -> i32 {
+    unsafe { n * 3 }
+}
+fn main() -> i32 { triple(4) }
+```
+
+Must emit:
+- `mul` — `n * 3` executes at runtime inside the unsafe block
+- NOT `mov     x0, #12` — must not fold `triple(4)` to the literal result
+
+**Why this claim matters**: Claims 1–37 cover the core runtime-codegen invariant for many
+different code paths. The unsafe block path (FLS §6.4.4) is a distinct code path in the
+lowerer — it is not covered by any existing falsification claim. An unsafe block is
+syntactically a block expression with an `unsafe` keyword; a regression that introduces
+const-evaluation for unsafe blocks (treating `unsafe` as implying "evaluated early") would
+be invisible to all existing claims. The assembly inspection test
+`runtime_unsafe_block_emits_runtime_instructions_not_folded` covers this, but without a
+falsification claim it runs only in `cargo test --test e2e`, not as an adversarial gate.
+
+**Attack vectors**:
+1. Constant-fold the unsafe block body: evaluate `n * 3` at compile time when `n` is
+   known at the call site (`triple(4)` → `12`). Emit `mov x0, #12; ret`.
+   Caught by `!asm.contains("mov     x0, #12")`.
+2. Elide the unsafe block entirely: treat `unsafe { expr }` as just `expr` and then
+   fold that. Same symptom, same catch.
+3. Drop the `mul` instruction and emit the result as a shift or add chain that constant-
+   evaluates to the same value. Caught by `asm.contains("mul")`.
+
+**FLS §6.4.4 note**: The spec defines unsafe blocks as block expressions that enter an
+unsafe context for the purpose of unsafety checks (raw pointers, unsafe fns) — NOT for
+the purpose of const evaluation. FLS §6.4.4 does not say unsafe blocks are const contexts.
+FLS §6.1.2 Constraint 1 applies: only explicit const contexts trigger compile-time eval.
+
+**Violated if**: `compile_to_asm(...)` for the program above returns assembly that:
+- lacks `mul` (runtime multiply not emitted — unsafe block body was constant-folded or elided), OR
+- contains `mov     x0, #12` or `mov x0, #12` (constant-folded result of `triple(4)`).
+
+**Test**: `cargo test --test e2e -- runtime_unsafe_block_emits_runtime_instructions_not_folded`
