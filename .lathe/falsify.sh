@@ -674,6 +674,31 @@ else
     pass "Claim 33: FnOnce capture emits runtime add and blr (not constant-folded)"
 fi
 
+# ── Claim 34: Associated type method results are not constant-folded ───────────
+#
+# A trait method on a type with an associated type (`type Area = i32`) must emit
+# runtime `mul` instructions even when call arguments are literals:
+#
+#   trait Shape { type Area; fn scaled_area(&self, scale: i32) -> i32; }
+#   impl Shape for Square {
+#       type Area = i32;
+#       fn scaled_area(&self, scale: i32) -> i32 { self.side * self.side * scale }
+#   }
+#   fn main() -> i32 { let s = Square { side: 3 }; s.scaled_area(5) }
+#
+# The §10.2 associated type dispatch path is distinct from the generic trait dispatch
+# in Claims 9–12 — it uses direct method dispatch through the concrete type, not
+# vtable or generic-parameter monomorphization. Both must emit runtime instructions.
+#
+# References: claims.md Claim 34.
+
+echo "--- Claim 34: assoc type method emits runtime mul (not folded to constant) ---"
+if cargo test --test e2e --quiet -- runtime_assoc_type_method_emits_mul_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 34" "runtime_assoc_type_method_emits_mul_not_folded FAILED — associated type method may be constant-folding 3*3*5=45 (mov x0, #45) instead of emitting runtime mul"
+else
+    pass "Claim 34: assoc type method result not folded (runtime mul emitted)"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""
