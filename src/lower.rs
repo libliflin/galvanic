@@ -15758,30 +15758,67 @@ impl<'src> LowerCtx<'src> {
                 }
 
                 // Check for an array variable iterator NEXT.
-                // `for x in arr` where `arr` is a local i32 array variable.
-                // The loop desugars to a counted index loop: counter runs 0..arr_len,
-                // binding each element to the loop variable on each iteration.
+                // Handles both:
+                //   `for x in arr`  — direct array consumption (FLS §6.15.1, §6.8)
+                //   `for x in &arr` — inline array borrow as slice (FLS §6.15.1, §4.9, §6.4.4)
+                //
+                // Both forms desugar to the same counted index loop: counter runs 0..arr_len,
+                // binding each element (by copy, since i32: Copy) to the loop variable.
                 //
                 // FLS §6.15.1 AMBIGUOUS: The spec desugars `for x in arr` to
-                // `IntoIterator::into_iter(arr)`, which requires trait dispatch.
+                // `IntoIterator::into_iter(arr)` and `for x in &arr` to
+                // `IntoIterator::into_iter(&arr)`, both requiring trait dispatch.
                 // Galvanic special-cases arrays at the IR level to avoid requiring
                 // a runtime IntoIterator implementation at this milestone.
+                //
+                // FLS §4.9 AMBIGUOUS: `for x in &arr` should yield `&i32` references.
+                // Galvanic yields copies (i32) since i32: Copy — same observable behavior
+                // for Copy element types, but the binding type is technically wrong.
                 //
                 // Cache-line note: the array for loop emits ~9 instructions for the
                 // control flow skeleton (load, loadimm, cmp, cbz, add+ldr, str, body,
                 // load, loadimm, add, str, b) — within two 64-byte cache lines.
-                let array_iter: Option<(u8, usize)> = if let ExprKind::Path(segs) = &iter.kind {
-                    if segs.len() == 1 {
-                        let vname = segs[0].text(self.source);
-                        match self.locals.get(vname).copied() {
-                            Some(base) => self.local_array_lens.get(&base).copied().map(|len| (base, len)),
-                            None => None,
+                let array_iter: Option<(u8, usize)> = {
+                    // Case 1: `for x in arr` — direct path to a local array variable.
+                    let direct = if let ExprKind::Path(segs) = &iter.kind {
+                        if segs.len() == 1 {
+                            let vname = segs[0].text(self.source);
+                            match self.locals.get(vname).copied() {
+                                Some(base) => self.local_array_lens.get(&base).copied().map(|len| (base, len)),
+                                None => None,
+                            }
+                        } else {
+                            None
                         }
                     } else {
                         None
-                    }
-                } else {
-                    None
+                    };
+                    // Case 2: `for x in &arr` — borrow of a local array variable.
+                    // FLS §6.4.4: The `&` operator creates a shared reference.
+                    // FLS §4.9: Borrowing a [T; N] array produces a &[T; N], which
+                    // coerces to &[T]. Galvanic handles this as direct element access.
+                    let borrowed = if direct.is_none() {
+                        if let ExprKind::Unary { op: crate::ast::UnaryOp::Ref, operand: inner } = &iter.kind {
+                            if let ExprKind::Path(segs) = &inner.kind {
+                                if segs.len() == 1 {
+                                    let vname = segs[0].text(self.source);
+                                    match self.locals.get(vname).copied() {
+                                        Some(base) => self.local_array_lens.get(&base).copied().map(|len| (base, len)),
+                                        None => None,
+                                    }
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    direct.or(borrowed)
                 };
 
                 if let Some((arr_base, arr_len)) = array_iter {
