@@ -730,6 +730,13 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     // Cache-line note: struct fields of struct type occupy their nested struct's total
     // slot count instead of a single slot, allowing precise offset computation.
     let mut struct_raw_field_types: HashMap<String, Vec<Option<String>>> = HashMap::new();
+    // FLS §12.1: Per-field generic parameter names for named structs.
+    // `None` = concrete or scalar field; `Some("T")` = field whose declared
+    // type is a generic type parameter. Used by `resolve_place` to recover
+    // the concrete struct type for generic fields (e.g., `val: T` → `Counter`)
+    // by consulting `generic_type_subst` during monomorphized lowering.
+    // Cache-line note: populated once at startup; read-only during lowering.
+    let mut struct_generic_field_types: HashMap<String, Vec<Option<String>>> = HashMap::new();
     // FLS §4.2, §6.11, §6.13: Per-field float type for named structs.
     // `None` = not a float field; `Some(IrTy::F64)` = f64; `Some(IrTy::F32)` = f32.
     // Used to choose StoreF64/LoadF64Slot vs StoreF32/LoadF32Slot vs Store/Load.
@@ -760,6 +767,12 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         // map to `Some(type_name)` and occupy multiple consecutive slots.
                         // FLS §12.1: Fields whose type is a generic type parameter are
                         // treated as scalars (None) — they monomorphize to i32 at this milestone.
+                        // FLS §12.1: For each field, record `Some("T")` in
+                        // `generic_types` when the field's declared type is a
+                        // generic parameter name. This lets `resolve_place`
+                        // substitute the concrete struct type at call sites
+                        // where `T` is bound to a real struct (e.g., `Counter`).
+                        let mut generic_types: Vec<Option<String>> = Vec::new();
                         let field_types: Vec<Option<String>> = fields
                             .iter()
                             .map(|f| match &f.ty.kind {
@@ -767,8 +780,10 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                                     let ty_name = segs[0].text(source);
                                     // Generic type params and primitive scalar types — each one slot.
                                     if generic_param_names.contains(ty_name) {
+                                        generic_types.push(Some(ty_name.to_owned()));
                                         return None;
                                     }
+                                    generic_types.push(None);
                                     match ty_name {
                                         "i8" | "i16" | "i32" | "i64" | "i128"
                                         | "u8" | "u16" | "u32" | "u64" | "u128"
@@ -779,9 +794,10 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                                         other => Some(other.to_owned()),
                                     }
                                 }
-                                _ => None, // reference types, tuple types, etc. — treat as scalar
+                                _ => { generic_types.push(None); None } // reference types, tuple types, etc. — treat as scalar
                             })
                             .collect();
+                        struct_generic_field_types.insert(struct_name.clone(), generic_types);
                         // FLS §4.2: Record which scalar fields are f64 or f32 so struct
                         // literal stores and field-access loads can use the correct register
                         // bank (d-registers for f64, s-registers for f32).
@@ -1723,7 +1739,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                 if !fn_def.generic_params.is_empty() {
                     continue;
                 }
-                let (ir_fn, closure_fns, fn_trampolines, next_label, needed) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &tuple_struct_float_field_types, &enum_defs, &enum_variant_float_field_types, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &const_f64_vals, &const_f32_vals, &assoc_const_vals, &static_names, &static_f64_names, &static_f32_names, &fn_names, &struct_raw_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, &generic_fn_param_counts, &HashMap::new(), &HashMap::new(), None, label_base)?;
+                let (ir_fn, closure_fns, fn_trampolines, next_label, needed) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &tuple_struct_float_field_types, &enum_defs, &enum_variant_float_field_types, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &const_f64_vals, &const_f32_vals, &assoc_const_vals, &static_names, &static_f64_names, &static_f32_names, &fn_names, &struct_raw_field_types, &struct_generic_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, &generic_fn_param_counts, &HashMap::new(), &HashMap::new(), None, label_base)?;
                 label_base = next_label;
                 fns.push(ir_fn);
                 fns.extend(closure_fns);
@@ -1790,6 +1806,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         &static_f32_names,
                         &fn_names,
                         &struct_raw_field_types,
+                        &struct_generic_field_types,
                         &struct_field_offsets,
                         &struct_sizes,
                         &type_alias_irtys,
@@ -1860,6 +1877,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                                 &static_f32_names,
                                 &fn_names,
                                 &struct_raw_field_types,
+                                &struct_generic_field_types,
                                 &struct_field_offsets,
                                 &struct_sizes,
                                 &type_alias_irtys,
@@ -2010,6 +2028,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
             &static_f32_names,
             &fn_names,
             &struct_raw_field_types,
+            &struct_generic_field_types,
             &struct_field_offsets,
             &struct_sizes,
             &type_alias_irtys,
@@ -2132,6 +2151,10 @@ fn lower_fn(
     static_f32_names: &std::collections::HashSet<String>,
     fn_names: &std::collections::HashSet<String>,
     struct_field_types: &HashMap<String, Vec<Option<String>>>,
+    // FLS §12.1: Per-field generic parameter names. `Some("T")` means the field's
+    // declared type is generic param `T`. Used by `resolve_place` to substitute
+    // concrete struct types for generic fields during monomorphized lowering.
+    struct_generic_field_types: &HashMap<String, Vec<Option<String>>>,
     struct_field_offsets: &HashMap<String, Vec<usize>>,
     struct_sizes: &HashMap<String, usize>,
     type_aliases: &HashMap<String, IrTy>,
@@ -2228,7 +2251,7 @@ fn lower_fn(
         Some(block) => block,
     };
 
-    let mut ctx = LowerCtx::new(source, &name, ret_ty, struct_defs, tuple_struct_defs, tuple_struct_float_field_types, enum_defs, enum_variant_float_field_types, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, f64_return_fns, f32_return_fns, const_vals, const_f64_vals, const_f32_vals, assoc_const_vals, static_names, static_f64_names, static_f32_names, fn_names, struct_field_types, struct_field_offsets, struct_sizes, type_aliases, struct_float_field_types, generic_fn_param_counts.clone(), start_label);
+    let mut ctx = LowerCtx::new(source, &name, ret_ty, struct_defs, tuple_struct_defs, tuple_struct_float_field_types, enum_defs, enum_variant_float_field_types, method_self_kinds, mut_self_scalar_return_fns, struct_return_fns, struct_return_free_fns, enum_return_fns, struct_return_methods, tuple_return_free_fns, f64_return_fns, f32_return_fns, const_vals, const_f64_vals, const_f32_vals, assoc_const_vals, static_names, static_f64_names, static_f32_names, fn_names, struct_field_types, struct_generic_field_types, struct_field_offsets, struct_sizes, type_aliases, struct_float_field_types, generic_fn_param_counts.clone(), generic_type_subst, start_label);
 
     // FLS §9: Spill incoming parameters from ARM64 registers x0..x{n-1}
     // to stack slots. Each parameter slot is allocated in parameter order
@@ -2718,6 +2741,26 @@ fn lower_fn(
                 }
                 ctx.locals.insert(param_name, base_slot);
                 ctx.local_struct_types.insert(base_slot, type_name.to_owned());
+                // FLS §12.1: For monomorphized functions, propagate concrete types for
+                // generic fields into slot_generic_type. E.g., if `w: Wrapper<T>` and
+                // `generic_type_subst["T"] = "Counter"`, and `Wrapper.val: T` is at
+                // offset 0, then slot_generic_type[base_slot + 0] = "Counter". This
+                // enables method dispatch (`w.get_val()`) to infer T=Counter without
+                // overwriting local_struct_types at the base slot.
+                if let Some(gf) = struct_generic_field_types.get(type_name) {
+                    let field_offs = struct_field_offsets.get(type_name);
+                    for (fi, param_opt) in gf.iter().enumerate() {
+                        if let Some(param_name_str) = param_opt
+                            && let Some(concrete) = generic_type_subst.get(param_name_str.as_str())
+                        {
+                            let offset = field_offs
+                                .and_then(|o| o.get(fi))
+                                .copied()
+                                .unwrap_or(fi);
+                            ctx.slot_generic_type.insert(base_slot + offset as u8, concrete.clone());
+                        }
+                    }
+                }
                 // Spill each slot register to its stack slot.
                 for fi in 0..n_slots {
                     ctx.instrs.push(Instr::Store {
@@ -3982,6 +4025,25 @@ struct LowerCtx<'src> {
     /// Cache-line note: read-only during lowering; not on any hot path.
     struct_field_types: &'src HashMap<String, Vec<Option<String>>>,
 
+    /// Per-field generic parameter names for named structs.
+    ///
+    /// FLS §12.1: `Some("T")` means the field's declared type is generic param `T`.
+    /// Used by `resolve_place` to substitute the concrete struct type when `T` is
+    /// bound to a real struct (e.g., `Counter`) via `generic_type_subst`.
+    ///
+    /// Cache-line note: read-only during lowering; not on any hot path.
+    struct_generic_field_types: &'src HashMap<String, Vec<Option<String>>>,
+
+    /// Substitution for struct-typed generic params, e.g. `{"T" -> "Counter"}`.
+    ///
+    /// FLS §12.1: Carried into `LowerCtx` from monomorphized `lower_fn` calls.
+    /// Enables `resolve_place` to resolve generic fields (`val: T`) to their
+    /// concrete struct type name for method dispatch (`self.val.get()`).
+    ///
+    /// Empty for non-generic functions and scalar-only monomorphizations.
+    /// Cache-line note: read-only during lowering; not on any hot path.
+    generic_type_subst: &'src HashMap<String, String>,
+
     /// Per-struct field slot offsets.
     ///
     /// FLS §6.13: Chained field access `s.b.x` requires computing the slot
@@ -4061,6 +4123,23 @@ struct LowerCtx<'src> {
     /// Cache-line note: populated at struct literal construction; read at field
     /// access. Not on any critical-path loop.
     slot_float_ty: HashMap<u8, IrTy>,
+
+    /// Maps a field slot to the concrete struct type stored there for a generic field.
+    ///
+    /// FLS §12.1: When a struct with a generic-typed field (e.g., `struct Wrapper<T>
+    /// { val: T }`) is initialized with a concrete struct value (e.g., `Counter`),
+    /// the concrete type is recorded here keyed by the field's slot index.
+    ///
+    /// This is separate from `local_struct_types` (which records the *outer* struct's
+    /// type at the base slot) to avoid collision when the generic field is at offset 0
+    /// and shares the base slot. Without this separation, `local_struct_types[base]`
+    /// would be overwritten from "Wrapper" to "Counter", causing method dispatch on
+    /// `w.get_val()` to resolve `recv_type_name = "Counter"` and emit a call to the
+    /// non-existent `Counter__get_val` instead of `Wrapper__get_val__Counter`.
+    ///
+    /// Cache-line note: populated during struct literal lowering; read during method
+    /// call type inference. Not on a hot path.
+    slot_generic_type: HashMap<u8, String>,
 
     /// Maps generic function name → number of type parameters.
     ///
@@ -4279,11 +4358,13 @@ impl<'src> LowerCtx<'src> {
         static_f32_names: &'src std::collections::HashSet<String>,
         fn_names: &std::collections::HashSet<String>,
         struct_field_types: &'src HashMap<String, Vec<Option<String>>>,
+        struct_generic_field_types: &'src HashMap<String, Vec<Option<String>>>,
         struct_field_offsets: &'src HashMap<String, Vec<usize>>,
         struct_sizes: &'src HashMap<String, usize>,
         type_aliases: &'src HashMap<String, IrTy>,
         struct_float_field_types: &'src HashMap<String, Vec<Option<IrTy>>>,
         generic_fn_param_counts: HashMap<String, usize>,
+        generic_type_subst: &'src HashMap<String, String>,
         start_label: u32,
     ) -> Self {
         LowerCtx {
@@ -4322,6 +4403,7 @@ impl<'src> LowerCtx<'src> {
             static_f32_names,
             fn_names: fn_names.clone(),
             struct_field_types,
+            struct_generic_field_types,
             struct_field_offsets,
             struct_sizes,
             local_struct_types: HashMap::new(),
@@ -4346,8 +4428,10 @@ impl<'src> LowerCtx<'src> {
             type_aliases,
             struct_float_field_types,
             slot_float_ty: HashMap::new(),
+            slot_generic_type: HashMap::new(),
             generic_fn_param_counts,
             needed_monos: Vec::new(),
+            generic_type_subst,
         }
     }
 
@@ -5152,12 +5236,32 @@ impl<'src> LowerCtx<'src> {
                     .unwrap_or(field_idx);
 
                 // Return the type of this field (None if scalar, Some if nested struct).
+                // For concrete-typed fields this comes directly from `struct_field_types`.
                 let field_ty = self
                     .struct_field_types
                     .get(&type_name)
                     .and_then(|t| t.get(field_idx))
                     .cloned()
                     .flatten();
+
+                // FLS §12.1: If `field_ty` is None, the field might be generic-typed
+                // (e.g., `val: T`). Check `struct_generic_field_types` for the param
+                // name, then substitute via `generic_type_subst` to get the concrete
+                // struct type for method dispatch (`self.val.get()`).
+                //
+                // FLS §12.1: AMBIGUOUS — The spec does not define the precise
+                // mechanism for generic field method dispatch. Galvanic resolves it
+                // by substituting the type parameter at monomorphization time.
+                let field_ty = if field_ty.is_none() {
+                    self.struct_generic_field_types
+                        .get(&type_name)
+                        .and_then(|t| t.get(field_idx))
+                        .and_then(|param_name| param_name.as_deref())
+                        .and_then(|param| self.generic_type_subst.get(param))
+                        .cloned()
+                } else {
+                    field_ty
+                };
 
                 Ok((recv_slot + offset as u8, field_ty))
             }
@@ -6643,6 +6747,41 @@ impl<'src> LowerCtx<'src> {
                                         self.slot_float_ty.insert(slot, IrTy::F32);
                                     }
                                     _ => {
+                                        // FLS §12.1: For generic-typed fields, if the
+                                        // value is a struct variable or struct literal,
+                                        // propagate the concrete type to this slot so that
+                                        // method dispatch can infer the concrete type param.
+                                        let gen_param = self.struct_generic_field_types
+                                            .get(struct_name)
+                                            .and_then(|gf| gf.get(fi))
+                                            .and_then(|p| p.as_deref());
+                                        if gen_param.is_some() {
+                                            // Struct variable: propagate type directly.
+                                            if let ExprKind::Path(segs) = &field_init.1.kind
+                                                && segs.len() == 1
+                                            {
+                                                let vname = segs[0].text(self.source);
+                                                if let Some(&vslot) = self.locals.get(vname)
+                                                    && let Some(cty) = self.local_struct_types.get(&vslot).cloned()
+                                                {
+                                                    // Use slot_generic_type to avoid overwriting
+                                                    // local_struct_types at the base slot when
+                                                    // the field is at offset 0 (FLS §12.1).
+                                                    self.slot_generic_type.insert(slot, cty);
+                                                }
+                                            }
+                                            // Struct literal: store into slot and register concrete type.
+                                            if let ExprKind::StructLit { name: iname, .. } = &field_init.1.kind {
+                                                let inner_sname = iname.text(self.source).to_owned();
+                                                if self.struct_defs.contains_key(&inner_sname) {
+                                                    // Use slot_generic_type to avoid overwriting
+                                                    // local_struct_types at the base slot (FLS §12.1).
+                                                    self.slot_generic_type.insert(slot, inner_sname.clone());
+                                                    self.store_nested_struct_lit(&field_init.1, slot, &inner_sname)?;
+                                                    continue;
+                                                }
+                                            }
+                                        }
                                         let val = self.lower_expr(&field_init.1, &IrTy::I32)?;
                                         let src = self.val_to_reg(val)?;
                                         self.instrs.push(Instr::Store { src, slot });
@@ -7212,6 +7351,41 @@ impl<'src> LowerCtx<'src> {
                                             self.slot_float_ty.insert(dst_slot, IrTy::F32);
                                         }
                                         _ => {
+                                            // FLS §12.1: For generic-typed fields, if the
+                                            // value is a struct variable or struct literal,
+                                            // propagate the concrete type to the field slot
+                                            // so that method dispatch can infer type params.
+                                            let gen_param = self.struct_generic_field_types
+                                                .get(struct_name)
+                                                .and_then(|gf| gf.get(field_idx))
+                                                .and_then(|p| p.as_deref());
+                                            if gen_param.is_some() {
+                                                // Struct variable: propagate concrete type.
+                                                if let ExprKind::Path(segs) = &field_init.1.kind
+                                                    && segs.len() == 1
+                                                {
+                                                    let vname = segs[0].text(self.source);
+                                                    if let Some(&vslot) = self.locals.get(vname)
+                                                        && let Some(cty) = self.local_struct_types.get(&vslot).cloned()
+                                                    {
+                                                        // Use slot_generic_type to avoid overwriting
+                                                        // local_struct_types at the base slot when
+                                                        // the field is at offset 0 (FLS §12.1).
+                                                        self.slot_generic_type.insert(dst_slot, cty);
+                                                    }
+                                                }
+                                                // Struct literal: store and register concrete type.
+                                                if let ExprKind::StructLit { name: iname, .. } = &field_init.1.kind {
+                                                    let inner_sname = iname.text(self.source).to_owned();
+                                                    if self.struct_defs.contains_key(&inner_sname) {
+                                                        // Use slot_generic_type to avoid overwriting
+                                                        // local_struct_types at the base slot (FLS §12.1).
+                                                        self.slot_generic_type.insert(dst_slot, inner_sname.clone());
+                                                        self.store_nested_struct_lit(&field_init.1, dst_slot, &inner_sname)?;
+                                                        continue;
+                                                    }
+                                                }
+                                            }
                                             let val = self.lower_expr(&field_init.1, &IrTy::I32)?;
                                             let src = self.val_to_reg(val)?;
                                             self.instrs.push(Instr::Store { src, slot: dst_slot });
@@ -8079,11 +8253,13 @@ impl<'src> LowerCtx<'src> {
                     self.static_f32_names,
                     &self.fn_names,
                     self.struct_field_types,
+                    self.struct_generic_field_types,
                     self.struct_field_offsets,
                     self.struct_sizes,
                     self.type_aliases,
                     self.struct_float_field_types,
                     self.generic_fn_param_counts.clone(),
+                    self.generic_type_subst,
                     inner_start_label,
                 );
 
@@ -14295,16 +14471,20 @@ impl<'src> LowerCtx<'src> {
                     // FLS §6.12.2, §6.13: Method call on a field access expression.
                     //
                     // Supports `c.inner.get()` where `inner` is a concrete struct-typed
-                    // field. The field's base slot and type are resolved by `resolve_place`,
-                    // which handles both single-level (`c.inner`) and chained
-                    // (`c.outer.inner`) field access in a uniform way.
+                    // field, and `w.val.get()` where `val: T` is a generic field and
+                    // `T` is bound to a concrete struct at monomorphization.
+                    //
+                    // `resolve_place` handles single-level (`c.inner`), chained
+                    // (`c.outer.inner`), and generic-typed (`w.val` where `val: T`)
+                    // receivers. For generic fields it substitutes the concrete type
+                    // via `generic_type_subst` (FLS §12.1).
                     //
                     // FLS §6.13: Field access computes a slot address at compile time;
                     // no extra runtime instructions are emitted by receiver resolution.
                     //
-                    // FLS §12.1: AMBIGUOUS — The spec does not specify whether generic-typed
-                    // fields (`val: T`) can be method receivers when `T` has a trait bound.
-                    // Galvanic requires a concrete (non-generic) struct type at this milestone.
+                    // FLS §12.1: AMBIGUOUS — The spec does not specify the precise
+                    // mechanism for generic field method dispatch. Galvanic substitutes
+                    // the type parameter via `generic_type_subst` during monomorphization.
                     //
                     // Cache-line note: `resolve_place` is a pure compile-time slot
                     // computation; zero extra ARM64 instructions compared to a plain
@@ -14313,9 +14493,9 @@ impl<'src> LowerCtx<'src> {
                         let (field_slot, field_ty) = self.resolve_place(receiver)?;
                         let type_name = field_ty.ok_or_else(|| {
                             LowerError::Unsupported(
-                                "method call on scalar or generic-typed field — \
-                                 only concrete struct-typed fields support method calls \
-                                 (FLS §6.12.2, §12.1: AMBIGUOUS for generic fields)"
+                                "method call on scalar field — \
+                                 only struct-typed fields (concrete or generic-bound) \
+                                 support method calls (FLS §6.12.2)"
                                     .into(),
                             )
                         })?;
@@ -14333,16 +14513,69 @@ impl<'src> LowerCtx<'src> {
                 let base_mangled = format!("{recv_type_name}__{method_name}");
 
                 // FLS §12.1: If this is a generic method, mangle the specialization
-                // name to `TypeName__method_name__i32` (one `i32` per type param).
+                // name to `TypeName__method_name__ConcreteType` (one concrete type per
+                // type param). Concrete types are inferred by scanning the receiver's
+                // generic fields via `struct_generic_field_types` and looking up each
+                // field slot in `slot_generic_type` (preferred) or `local_struct_types`
+                // (fallback with disambiguation). Falls back to `i32` when no concrete
+                // type can be recovered. The `slot_generic_type` map avoids a collision
+                // at offset-0 fields where the base slot also records the outer struct type.
                 // Record the base mangled name in `needed_monos` so the outer
                 // monomorphization loop emits the specialised method body.
-                // Generic methods use scalar "i32" types only (struct type dispatch
-                // is handled at the call site for free functions, not methods).
                 let mangled = if let Some(&n_params) =
                     self.generic_fn_param_counts.get(&base_mangled)
                 {
-                    let concrete_types: Vec<String> =
-                        std::iter::repeat_n("i32".to_owned(), n_params).collect();
+                    // Collect unique generic param names in field-declaration order.
+                    let mut param_order: Vec<String> = Vec::new();
+                    if let Some(gf) =
+                        self.struct_generic_field_types.get(recv_type_name.as_str())
+                    {
+                        for param_name in gf.iter().flatten() {
+                            if !param_order.contains(param_name) {
+                                param_order.push(param_name.clone());
+                            }
+                        }
+                    }
+                    // For each param, find the first field carrying it and resolve the
+                    // concrete struct type. Check slot_generic_type first (no disambiguation
+                    // needed — it only contains concrete field types). Fall back to
+                    // local_struct_types with a disambiguation guard that rejects the
+                    // receiver's own type registration at the base slot.
+                    let mut inferred: Vec<String> = Vec::with_capacity(param_order.len());
+                    for param_name in &param_order {
+                        let mut found: Option<String> = None;
+                        if let Some(gf) =
+                            self.struct_generic_field_types.get(recv_type_name.as_str())
+                        {
+                            for (fi, p) in gf.iter().enumerate() {
+                                if p.as_deref() == Some(param_name.as_str()) {
+                                    let slot = recv_base_slot + fi as u8;
+                                    // Prefer slot_generic_type: set at struct-literal and
+                                    // param-spill time without overwriting local_struct_types.
+                                    found = self.slot_generic_type.get(&slot).cloned()
+                                        .or_else(|| {
+                                            // Fallback: local_struct_types with disambiguation.
+                                            // Reject if the candidate equals recv_type_name —
+                                            // that means the slot holds the outer struct's own
+                                            // registration, not a concrete field type.
+                                            let c = self.local_struct_types.get(&slot).cloned();
+                                            if c.as_deref() != Some(recv_type_name.as_str()) {
+                                                c
+                                            } else {
+                                                None
+                                            }
+                                        });
+                                    break;
+                                }
+                            }
+                        }
+                        inferred.push(found.unwrap_or_else(|| "i32".to_owned()));
+                    }
+                    let concrete_types: Vec<String> = if inferred.len() == n_params {
+                        inferred
+                    } else {
+                        std::iter::repeat_n("i32".to_owned(), n_params).collect()
+                    };
                     let suffix = concrete_types.join("_");
                     if !self.needed_monos.iter().any(|(n, c)| n == &base_mangled && c == &concrete_types) {
                         self.needed_monos.push((base_mangled.clone(), concrete_types));
@@ -14762,11 +14995,13 @@ impl<'src> LowerCtx<'src> {
                     self.static_f32_names,
                     &self.fn_names,
                     self.struct_field_types,
+                    self.struct_generic_field_types,
                     self.struct_field_offsets,
                     self.struct_sizes,
                     self.type_aliases,
                     self.struct_float_field_types,
                     self.generic_fn_param_counts.clone(),
+                    self.generic_type_subst,
                     closure_start_label,
                 );
 
