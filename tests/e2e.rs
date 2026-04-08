@@ -508,22 +508,32 @@ fn runtime_fn_call_result_not_folded() {
     );
 }
 
-/// `fn main() -> i32 { if true { 1 } else { 0 } }` must emit `cbz`.
+/// `fn main() -> i32 { if true { 7 } else { 0 } }` must emit `cbz` and not fold.
 ///
 /// FLS §6.17: If expression must branch at runtime via `cbz`.
 /// FLS §6.1.2:37–45: The condition `true` must not be folded; `cbz` must appear.
+/// FLS §6.1.2 Constraint 1: `fn main()` is not a const context — even a statically-known
+/// condition must be evaluated at runtime; the result must not be constant-folded.
+///
+/// Adversarial check: a constant-folding interpreter would see `if true` → return 7
+/// and emit `mov x0, #7`. In correct codegen the result is stored through the phi slot
+/// (str → ldr) so `mov x0, #7` never appears as the return path.
 #[test]
 fn runtime_if_emits_cbz() {
-    let asm = compile_to_asm("fn main() -> i32 { if true { 1 } else { 0 } }\n");
+    let asm = compile_to_asm("fn main() -> i32 { if true { 7 } else { 0 } }\n");
     assert!(
         asm.contains("cbz"),
         "expected `cbz` instruction for if condition, got:\n{asm}"
     );
-    // Must not fold `if true { 1 }` to a constant `mov x0, #1` without branching.
+    // Must not fold `if true { 7 }` to a constant `mov x0, #7` without branching.
     // The then-branch result is stored via str/ldr through the phi slot.
     assert!(
         asm.contains("str") && asm.contains("ldr"),
         "expected `str`/`ldr` for phi slot in if expression:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #7"),
+        "assembly must not fold `if true {{ 7 }}` to constant #7 — condition must be evaluated at runtime:\n{asm}"
     );
 }
 
