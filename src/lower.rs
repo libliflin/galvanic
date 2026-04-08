@@ -3563,6 +3563,44 @@ fn lower_fn(
             continue;
         }
 
+        // FLS §4.9: `&[T]` slice parameter — fat pointer: (data pointer, length).
+        //
+        // A `&[T]` parameter carries two values: the address of the first element
+        // (a stack pointer to the caller's array) and the element count (a usize).
+        // Galvanic passes these as two consecutive ARM64 registers (x{n}, x{n+1}).
+        //
+        // FLS §4.9 AMBIGUOUS: The FLS does not specify the `&[T]` ABI. Galvanic
+        // treats it as two consecutive scalar registers (addr + len), matching the
+        // conceptual fat-pointer layout without LLVM's specific packing.
+        //
+        // The two slots are:
+        //   base_slot     = data pointer (address of caller's arr[0] on the stack)
+        //   base_slot + 1 = length (element count, passed as usize/i64)
+        //
+        // `.len()` loads from `base_slot + 1`.
+        // `s[i]` loads from `*(data_ptr + i * 8)` where data_ptr = load(base_slot).
+        //
+        // Cache-line note: two slots (16 bytes) per slice param vs one slot for a
+        // scalar — necessary cost for runtime-determined element counts.
+        if let TyKind::Ref { inner, .. } = &param.ty.kind
+            && matches!(&inner.kind, TyKind::Slice { .. })
+        {
+            if reg_idx + 2 > 8 {
+                return Err(LowerError::Unsupported(
+                    "&[T] parameter exceeds ARM64 register window (needs 2 registers)".into(),
+                ));
+            }
+            let ptr_slot = ctx.alloc_slot()?;
+            let _len_slot = ctx.alloc_slot()?;
+            // ptr_slot and _len_slot are consecutive (ptr_slot + 1 == _len_slot).
+            ctx.instrs.push(Instr::Store { src: reg_idx as u8, slot: ptr_slot });
+            ctx.instrs.push(Instr::Store { src: (reg_idx + 1) as u8, slot: ptr_slot + 1 });
+            ctx.locals.insert(param_name, ptr_slot);
+            ctx.local_slice_slots.insert(ptr_slot);
+            reg_idx += 2;
+            continue;
+        }
+
         // FLS §9: i32 and bool parameters — one register each.
         if reg_idx >= 8 {
             return Err(LowerError::Unsupported(
@@ -4234,6 +4272,11 @@ fn lower_ty(
         // `lower_ty` for the array case (it returns early on the array literal
         // initializer). Aggregate array parameters are deferred.
         TyKind::Array { elem, .. } => lower_ty(elem, source, type_aliases),
+        // FLS §4.9: Slice types `[T]`. A `&[T]` fat pointer carries a data
+        // pointer (64-bit address) and a usize length. Galvanic represents
+        // the pointer half as I32 (same as any 64-bit integer register).
+        // The parameter spilling path handles `&[T]` specially (two slots).
+        TyKind::Slice { .. } => Ok(IrTy::I32),
         _ => Err(LowerError::Unsupported("complex type".into())),
     }
 }
@@ -4631,6 +4674,22 @@ struct LowerCtx<'src> {
     ///
     /// Cache-line note: same slot footprint as a scalar `i32` — no extra cost.
     local_str_slots: std::collections::HashSet<u8>,
+
+    /// Base stack slots that hold `&[T]` fat pointers (slice parameters).
+    ///
+    /// FLS §4.9: A `&[T]` reference is a fat pointer: (data pointer, length).
+    /// Galvanic passes the pointer in register `base_slot` and the length in
+    /// `base_slot + 1` (two consecutive slots). This set records `base_slot`
+    /// for each `&[T]` parameter so that:
+    ///   - `.len()` loads from `base_slot + 1`
+    ///   - `s[i]` loads from `*(ptr + i * 8)` where `ptr = load(base_slot)`
+    ///
+    /// FLS §4.9 AMBIGUOUS: The FLS does not specify the `&[T]` ABI. Galvanic
+    /// uses two consecutive stack slots (addr + len) as a pragmatic choice.
+    ///
+    /// Cache-line note: two slots (16 bytes) per slice parameter vs one slot
+    /// for a scalar reference — necessary cost for runtime-length slices.
+    local_slice_slots: std::collections::HashSet<u8>,
 
     /// Stack slots within a closure body that hold addresses to outer-scope
     /// mutable captured variables (FnMut semantics, FLS §6.22).
@@ -5381,6 +5440,7 @@ impl<'src> LowerCtx<'src> {
             local_tuple_struct_types: HashMap::new(),
             local_fn_ptr_slots: std::collections::HashSet::new(),
             local_str_slots: std::collections::HashSet::new(),
+            local_slice_slots: std::collections::HashSet::new(),
             ptr_capture_slots: std::collections::HashSet::new(),
             u8_locals: std::collections::HashSet::new(),
             i8_locals: std::collections::HashSet::new(),
@@ -13640,6 +13700,43 @@ impl<'src> LowerCtx<'src> {
                                  `&variable` (concrete borrow) or a `&dyn Trait` local"
                             )));
                     }
+                    // FLS §4.9: `&arr` where `arr` is a local array — emit a slice
+                    // fat pointer (addr + len) for `fn f(s: &[T])` parameters.
+                    //
+                    // When the caller borrows a local array (`&arr`), the callee
+                    // expects two registers: the stack address of `arr[0]` and the
+                    // element count. Galvanic detects this automatically: if the
+                    // borrowee is in `local_array_lens`, this is an array borrow.
+                    //
+                    // FLS §4.9 AMBIGUOUS: The FLS does not mandate two-register
+                    // fat-pointer ABI for `&[T]`. Galvanic's choice: addr in x{n},
+                    // count in x{n+1}, matching the callee's two-slot spill.
+                    //
+                    // FLS §6.1.2:37–45: Both AddrOf and LoadImm are runtime instructions
+                    // (AddrOf forms the address at runtime; LoadImm is a constant but
+                    // it's a runtime instruction per the IR model).
+                    //
+                    // Cache-line note: two instructions (8 bytes) to pass a slice.
+                    if let ExprKind::Unary { op: crate::ast::UnaryOp::Ref, operand: inner } = &arg.kind
+                        && let ExprKind::Path(segs) = &inner.kind
+                        && segs.len() == 1
+                    {
+                        let arr_name = segs[0].text(self.source);
+                        if let Some(&arr_base_slot) = self.locals.get(arr_name)
+                            && let Some(&arr_len) = self.local_array_lens.get(&arr_base_slot)
+                        {
+                            // Emit base pointer (stack address of arr[0]).
+                            let r_addr = self.alloc_reg()?;
+                            self.instrs.push(Instr::AddrOf { dst: r_addr, slot: arr_base_slot });
+                            arg_regs.push(r_addr);
+                            // Emit element count.
+                            let r_len = self.alloc_reg()?;
+                            self.instrs.push(Instr::LoadImm(r_len, arr_len as i32));
+                            arg_regs.push(r_len);
+                            continue;
+                        }
+                    }
+
                     // Check whether this argument is a struct variable.
                     //
                     // For nested structs, use the total slot count from `struct_sizes`
@@ -17017,6 +17114,30 @@ impl<'src> LowerCtx<'src> {
                             return Ok(IrValue::Reg(r));
                         }
                     }
+                    // Case E: `s.len()` where `s` is a known `&[T]` slice parameter.
+                    //
+                    // FLS §4.9: The length of a `&[T]` slice is runtime-determined.
+                    // It is stored in the slot adjacent to the data pointer slot
+                    // (`base_slot + 1`). Emit a runtime `ldr` to load it.
+                    // FLS §6.12.2: Method call expressions.
+                    // FLS §6.1.2:37–45: A runtime load — no constant folding.
+                    //
+                    // Cache-line note: one `ldr` (4 bytes) — same cost as any
+                    // local variable load. The length slot is 8 bytes from the
+                    // pointer slot (consecutive on the stack).
+                    if let ExprKind::Path(segs) = &receiver.kind
+                        && segs.len() == 1
+                    {
+                        let var_name = segs[0].text(self.source);
+                        if let Some(&ptr_slot) = self.locals.get(var_name)
+                            && self.local_slice_slots.contains(&ptr_slot)
+                        {
+                            let r = self.alloc_reg()?;
+                            // Length is stored at ptr_slot + 1 (second fat-pointer word).
+                            self.instrs.push(Instr::Load { dst: r, slot: ptr_slot + 1 });
+                            return Ok(IrValue::Reg(r));
+                        }
+                    }
                 }
 
                 // FLS §4.13: `&dyn Trait` method call — dispatch through vtable.
@@ -17469,6 +17590,61 @@ impl<'src> LowerCtx<'src> {
                         index_reg: linear_reg,
                     });
                     return Ok(IrValue::Reg(dst));
+                }
+
+                // FLS §4.9, §6.9: `s[i]` where `s` is a `&[T]` slice parameter.
+                //
+                // A slice index loads through the fat pointer:
+                //   ptr = load(ptr_slot)       — base address of elements
+                //   off = i * 8                — byte offset (each slot = 8 bytes)
+                //   addr = ptr + off
+                //   dst = *addr                — load 8 bytes from that address
+                //
+                // ARM64: ldr x{ptr}, [sp, #{ptr_slot*8}]; lsl x{off}, x{i}, #3;
+                //        add x{addr}, x{ptr}, x{off}; ldr x{dst}, [x{addr}]
+                //
+                // FLS §4.9 AMBIGUOUS: The FLS does not specify bounds checking.
+                // Galvanic omits bounds checking at this milestone.
+                // FLS §6.1.2:37–45: All four instructions are runtime.
+                //
+                // Cache-line note: 4 instructions (16 bytes) — same cost as 2D
+                // array indexing. The load dereferences the caller's stack frame.
+                if let ExprKind::Path(segs) = &base.kind
+                    && segs.len() == 1
+                {
+                    let var_name = segs[0].text(self.source);
+                    if let Some(&ptr_slot) = self.locals.get(var_name)
+                        && self.local_slice_slots.contains(&ptr_slot)
+                    {
+                        // Load base pointer (address of first element).
+                        let r_ptr = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: r_ptr, slot: ptr_slot });
+                        // Lower the index expression.
+                        let idx_val = self.lower_expr(index, &IrTy::I32)?;
+                        let r_idx = self.val_to_reg(idx_val)?;
+                        // Compute byte offset: index * 8 (shift left 3).
+                        let r_eight = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(r_eight, 8));
+                        let r_off = self.alloc_reg()?;
+                        self.instrs.push(Instr::BinOp {
+                            op: IrBinOp::Mul,
+                            dst: r_off,
+                            lhs: r_idx,
+                            rhs: r_eight,
+                        });
+                        // Compute element address: ptr + offset.
+                        let r_addr = self.alloc_reg()?;
+                        self.instrs.push(Instr::BinOp {
+                            op: IrBinOp::Add,
+                            dst: r_addr,
+                            lhs: r_ptr,
+                            rhs: r_off,
+                        });
+                        // Load element value through the address.
+                        let r_val = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadPtr { dst: r_val, src: r_addr });
+                        return Ok(IrValue::Reg(r_val));
+                    }
                 }
 
                 // Resolve the base to an array variable's stack slot.

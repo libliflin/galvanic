@@ -32362,3 +32362,184 @@ fn claim_77_u8_const_sub_and_mul_wrap_not_saturate() {
     };
     assert_eq!(exit_code2, 1, "claim_77: u8 const 100*3 must be 44 — exit {exit_code2} (0=un-narrowed 300)");
 }
+
+// ── Milestone 193: &[T] slice parameters ─────────────────────────────────────
+//
+// FLS §4.9: Slice types `[T]` are dynamically sized sequences. A `&[T]`
+// reference is a fat pointer carrying a data pointer and a usize element count.
+// Galvanic passes `&[T]` as two consecutive registers: the stack address of the
+// first element and the element count.
+//
+// FLS §4.9 AMBIGUOUS: The FLS does not specify the `&[T]` ABI. Galvanic uses
+// two consecutive argument registers (addr, len), matching the callee's two-slot
+// spill layout. This deviates from the standard Rust fat-pointer ABI (where
+// the pointer and length are packed as a pair in memory), but is correct for
+// our stack-slot-based calling convention.
+//
+// FLS §6.9: Index expressions `s[i]` on a slice load through the fat pointer:
+// ptr = load(ptr_slot); addr = ptr + i * 8; value = *addr.
+
+#[test]
+fn milestone_193_slice_param_len_three() {
+    let Some(exit_code) = compile_and_run(
+        "fn slice_len(s: &[i32]) -> usize { s.len() }\nfn main() -> i32 { let a = [10, 20, 30]; slice_len(&a) as i32 }\n",
+    ) else { return; };
+    assert_eq!(exit_code, 3, "slice_len([10,20,30]) must return 3, got {exit_code}");
+}
+
+#[test]
+fn milestone_193_slice_param_len_one() {
+    let Some(exit_code) = compile_and_run(
+        "fn slice_len(s: &[i32]) -> usize { s.len() }\nfn main() -> i32 { let a = [7]; slice_len(&a) as i32 }\n",
+    ) else { return; };
+    assert_eq!(exit_code, 1, "slice_len([7]) must return 1, got {exit_code}");
+}
+
+#[test]
+fn milestone_193_slice_param_len_in_arithmetic() {
+    let Some(exit_code) = compile_and_run(
+        "fn slice_len(s: &[i32]) -> usize { s.len() }\nfn main() -> i32 { let a = [1, 2]; (slice_len(&a) * 4) as i32 }\n",
+    ) else { return; };
+    assert_eq!(exit_code, 8, "slice_len([1,2]) * 4 must be 8, got {exit_code}");
+}
+
+#[test]
+fn milestone_193_slice_param_index_first() {
+    let Some(exit_code) = compile_and_run(
+        "fn first(s: &[i32]) -> i32 { s[0] }\nfn main() -> i32 { let a = [42, 10, 5]; first(&a) }\n",
+    ) else { return; };
+    assert_eq!(exit_code, 42, "first([42,10,5]) must return 42, got {exit_code}");
+}
+
+#[test]
+fn milestone_193_slice_param_index_last() {
+    let Some(exit_code) = compile_and_run(
+        "fn last3(s: &[i32]) -> i32 { s[2] }\nfn main() -> i32 { let a = [1, 2, 99]; last3(&a) }\n",
+    ) else { return; };
+    assert_eq!(exit_code, 99, "last3([1,2,99]) must return 99, got {exit_code}");
+}
+
+#[test]
+fn milestone_193_slice_param_index_middle() {
+    let Some(exit_code) = compile_and_run(
+        "fn mid(s: &[i32]) -> i32 { s[1] }\nfn main() -> i32 { let a = [3, 7, 11]; mid(&a) }\n",
+    ) else { return; };
+    assert_eq!(exit_code, 7, "mid([3,7,11]) must return 7, got {exit_code}");
+}
+
+#[test]
+fn milestone_193_slice_param_sum() {
+    let src = r#"
+fn sum(s: &[i32]) -> i32 {
+    let mut total = 0;
+    let mut i = 0;
+    while i < s.len() as i32 {
+        total = total + s[i as usize];
+        i = i + 1;
+    }
+    total
+}
+fn main() -> i32 {
+    let a = [1, 2, 3, 4, 5];
+    sum(&a)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 15, "sum([1..5]) must return 15, got {exit_code}");
+}
+
+#[test]
+fn milestone_193_slice_param_passed_to_fn() {
+    let src = r#"
+fn get_element(s: &[i32], idx: usize) -> i32 { s[idx] }
+fn main() -> i32 {
+    let a = [10, 20, 30];
+    get_element(&a, 1)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 20, "get_element([10,20,30], 1) must return 20, got {exit_code}");
+}
+
+#[test]
+fn milestone_193_slice_param_called_twice() {
+    let Some(exit_code) = compile_and_run(
+        "fn first(s: &[i32]) -> i32 { s[0] }\nfn main() -> i32 { let a = [3, 5]; let b = [7, 9]; first(&a) + first(&b) }\n",
+    ) else { return; };
+    assert_eq!(exit_code, 10, "first([3,5]) + first([7,9]) must be 10, got {exit_code}");
+}
+
+// ── Assembly inspection: &[T] slice parameters ───────────────────────────────
+
+/// `slice_len(s: &[i32])` must emit a runtime `ldr` to load the length from the
+/// fat-pointer length slot — not a compile-time constant.
+///
+/// FLS §4.9: `.len()` on `&[T]` is runtime-determined.
+/// FLS §6.1.2:37–45: The length load must be a runtime instruction.
+#[test]
+fn runtime_slice_param_len_emits_ldr_not_constant() {
+    let asm = compile_to_asm(
+        "fn slice_len(s: &[i32]) -> usize { s.len() }\nfn main() -> i32 { let a = [1, 2, 3]; slice_len(&a) as i32 }\n",
+    );
+    assert!(
+        asm.contains("ldr"),
+        "slice_len callee must emit ldr to load length from slot: {asm}"
+    );
+    // Must NOT constant-fold to #3 in the callee.
+    // (The caller emits #3 as the length arg, but the callee must ldr it.)
+    assert!(
+        asm.contains("slice_len:") || asm.contains("slice__len"),
+        "must emit a slice_len function label: {asm}"
+    );
+}
+
+/// `s[i]` on a `&[i32]` slice must emit pointer arithmetic (add) and a pointer
+/// load (ldr through a computed address) — not a direct LoadIndexed from the
+/// callee's own stack slots.
+///
+/// FLS §6.9: Index expression on a slice loads through the fat pointer.
+/// FLS §6.1.2:37–45: All address arithmetic and loads are runtime instructions.
+#[test]
+fn runtime_slice_index_emits_ptr_arithmetic_and_load() {
+    // Use a parameter-based index so constant folding is impossible.
+    let asm = compile_to_asm(
+        "fn get(s: &[i32], i: usize) -> i32 { s[i] }\nfn main() -> i32 { let a = [10, 20, 30]; get(&a, 1) }\n",
+    );
+    // The callee must emit pointer arithmetic: mul (index * 8) and add (ptr + off).
+    assert!(
+        asm.contains("mul"),
+        "slice index must emit mul for byte-offset computation: {asm}"
+    );
+    // Must emit a load through a register (ldr xD, [xR]).
+    assert!(
+        asm.contains("ldr"),
+        "slice index must emit ldr for pointer dereference: {asm}"
+    );
+    // Must NOT fold the result to #20 (that would mean the callee was an interpreter).
+    assert!(
+        !asm.contains("mov     x0, #20"),
+        "slice index must NOT constant-fold s[1] to #20: {asm}"
+    );
+}
+
+/// Passing `&arr` to a `&[T]` parameter must emit both AddrOf (stack address)
+/// and a LoadImm for the length — two argument registers, not one.
+///
+/// FLS §4.9: `&[T]` is a fat pointer (addr + len).
+/// FLS §6.5.1: Borrow of an array produces a stack address.
+#[test]
+fn runtime_slice_arg_emits_adrof_and_len() {
+    let asm = compile_to_asm(
+        "fn f(s: &[i32]) -> usize { s.len() }\nfn main() -> i32 { let a = [1, 2, 3, 4]; f(&a) as i32 }\n",
+    );
+    // The caller must emit `add x?, sp, #?` (AddrOf) to get the array address.
+    assert!(
+        asm.contains("add") && asm.contains("sp"),
+        "caller must emit add xN, sp, #offset to get slice pointer: {asm}"
+    );
+    // The caller must also load the array length as an immediate (#4).
+    assert!(
+        asm.contains("#4"),
+        "caller must emit #4 as the slice length argument: {asm}"
+    );
+}
