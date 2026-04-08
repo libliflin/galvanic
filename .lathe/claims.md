@@ -746,3 +746,42 @@ catch-all (or that constant-folds the range check) would go undetected.
 - contains `mov     x0, #6` (result constant-folded).
 
 **Test**: `cargo test --test e2e -- runtime_let_else_bound_pattern_emits_cmp_and_binding_not_folded`
+
+---
+
+## Claim 27: @ binding with OR sub-pattern emits orr accumulation (not folded)
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: `n @ (pat1 | pat2)` in any pattern position (let-else, if-let, while-let, match)
+must emit `orr` for the OR alternative accumulation and must not constant-fold the binding.
+
+For example:
+```rust
+fn f(x: i32) -> i32 {
+    let n @ (1 | 5..=10) = x else { return 0 };
+    n * 2
+}
+fn main() -> i32 { f(6) }
+```
+
+`f(6)` must emit OR-alternative checks (equality check for `1`, range check for `5..=10`),
+accumulate results via `orr`, branch to else on no match, bind `n = 6`, then emit runtime
+multiply. An interpreter would emit `mov x0, #12` directly.
+
+**Why this claim matters**: Cycle 63 extends the `Pat::Bound` lowering to accept `Pat::Or`
+as the sub-pattern (via `accum_or_alt`). Without this, `n @ (1 | 5..=10)` emits
+`Unsupported` at compile time. Without this claim, a regression that removes the `Pat::Or`
+arm from `accum_or_alt` (or that constant-folds the OR check) would go undetected.
+
+**Attack vector**:
+1. Removing the `Pat::Or` arm from `accum_or_alt` causes any `n @ (pat1 | pat2)` program
+   to fail with "unsupported pattern kind inside OR pattern alternative".
+2. Constant-folding `f(6)` emits `mov x0, #12` — assembly contains the literal result.
+3. Skipping `orr` means only one alternative is checked (the other is silently ignored).
+
+**Violated if**: `compile_to_asm(...)` for `fn f(x: i32) -> i32 { let n @ (1 | 5..=10) = x else { return 0 }; n * 2 }` returns assembly that:
+- lacks `orr` (OR accumulation not emitted), OR
+- contains `mov     x0, #12` (result constant-folded).
+
+**Test**: `cargo test --test e2e -- runtime_at_bound_or_subpat_emits_orr_accumulation runtime_at_bound_or_subpat_result_not_folded`
