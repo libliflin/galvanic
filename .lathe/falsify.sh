@@ -957,6 +957,30 @@ else
     pass "Claim 46: supertrait method dispatch emits runtime add (not constant-folded)"
 fi
 
+# ── Claim 47: Default methods calling supertrait methods emit runtime bl (not folded) ─
+#
+# Promise: A default method that calls a supertrait abstract method must dispatch via
+# `bl` to the concrete monomorphized label. Chained default methods must each emit a
+# separate `bl` — the chain must not be constant-folded.
+#
+# Pattern 1: default calling supertrait abstract — must emit bl Foo__base_val + add, not fold #10
+# Pattern 2: chained defaults — must emit bl Foo__doubled + bl Foo__value, not fold #12
+#
+# FLS §4.14: Supertrait bounds — supertrait methods must be accessible from default bodies.
+# FLS §10.1.1: Default method bodies are emitted per concrete type at runtime.
+# FLS §10.1.1 AMBIGUOUS: Spec does not specify inlining vs. bl for supertrait calls in defaults.
+# FLS §6.1.2 Constraint 1: fn main() is not a const context.
+#
+# Introduced in cycle 88 (M165 default-calls-supertrait falsification).
+# References: claims.md Claim 47.
+
+echo "--- Claim 47: default method calling supertrait emits runtime bl (not constant-folded) ---"
+if cargo test --test e2e --quiet -- runtime_supertrait_default_call_emits_bl_not_folded runtime_supertrait_default_chain_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 47" "runtime_supertrait_default_call_emits_bl_not_folded or runtime_supertrait_default_chain_not_folded FAILED — default method supertrait call or chain may be constant-folded"
+else
+    pass "Claim 47: default method calling supertrait emits runtime bl (not constant-folded)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 

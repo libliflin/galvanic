@@ -1748,3 +1748,87 @@ bodies must execute at runtime.
 - contains `mov     x0, #9` (sum of both method results folded for x=4)
 
 **Tests**: `cargo test --test e2e -- runtime_supertrait_call_emits_bl_not_folded runtime_supertrait_both_methods_not_folded`
+
+---
+
+## Claim 47: Default methods calling supertrait methods emit runtime bl (not constant-folded) and chained defaults emit separate runtime bl dispatches
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: A default method that calls a supertrait abstract method must dispatch via
+`bl` to the concrete monomorphized label at runtime. Chained default methods (default
+calling default) must each emit a separate `bl` dispatch — the chain must not be
+constant-folded to a single immediate.
+
+```rust
+// Pattern 1: default method calls supertrait abstract method
+trait Base { fn base_val(&self) -> i32; }
+trait Derived: Base {
+    fn combined(&self) -> i32 { self.base_val() + 1 }
+}
+struct Foo { x: i32 }
+impl Base for Foo { fn base_val(&self) -> i32 { self.x } }
+impl Derived for Foo {}
+fn make_foo(n: i32) -> Foo { Foo { x: n } }
+// main: make_foo(9).combined() → 10
+
+// Pattern 2: chained default methods
+trait Scalable {
+    fn value(&self) -> i32;
+    fn doubled(&self) -> i32 { self.value() * 2 }
+    fn quadrupled(&self) -> i32 { self.doubled() * 2 }
+}
+struct Foo { x: i32 }
+impl Scalable for Foo { fn value(&self) -> i32 { self.x } }
+fn make_foo(n: i32) -> Foo { Foo { x: n } }
+// main: make_foo(3).quadrupled() → 12
+```
+
+Must emit (Pattern 1):
+- `bl      Foo__base_val` — default method calls supertrait abstract via bl
+- `add` — the `+1` in the default body must be a runtime add
+- NOT `mov x0, #10` — result for `n=9` must not be folded
+
+Must emit (Pattern 2):
+- `bl      Foo__doubled` — quadrupled calls doubled at runtime
+- `bl      Foo__value` — doubled calls value at runtime
+- NOT `mov x0, #12` — result for `n=3` must not be folded
+
+**Why this claim matters**: Milestone 165 added default methods that call supertrait
+abstract methods. Without this claim, a regression that constant-folds the call chain
+(e.g., inlines `value` into `doubled` into `quadrupled` and emits `mov x0, #12`) would
+pass all exit-code tests invisibly. The chain must execute at runtime.
+
+**Attack vectors**:
+1. Constant-fold `make_foo(9).combined()` to `mov x0, #10` — exit code correct, folded.
+   Caught by `!asm.contains("mov     x0, #10")`.
+2. Fail to emit `bl Foo__base_val` in the default method body (inlined instead).
+   Caught by `asm.contains("bl      Foo__base_val")`.
+3. Constant-fold `make_foo(3).quadrupled()` to `mov x0, #12` — exit code correct, folded.
+   Caught by `!asm.contains("mov     x0, #12")`.
+4. Inline `doubled` into `quadrupled`, dropping `bl Foo__doubled`.
+   Caught by `asm.contains("bl      Foo__doubled")`.
+5. Inline `value` into `doubled`, dropping `bl Foo__value`.
+   Caught by `asm.contains("bl      Foo__value")`.
+
+**FLS §4.14**: Supertrait bounds — calling a supertrait method from a default body requires
+traversing the supertrait relationship at monomorphization time.
+**FLS §10.1.1**: Default method bodies are emitted per concrete type. The body must execute
+at runtime, not at compile time.
+**FLS §10.1.1 AMBIGUOUS**: The spec does not specify whether a default method body that
+calls supertrait methods should inline those calls or dispatch via `bl`. Galvanic uses `bl`
+(no inlining), consistent with the general no-constant-folding constraint.
+**FLS §6.1.2 Constraint 1**: `fn main()` is not a const context — default method chains
+must execute at runtime.
+
+**Violated if**: `compile_to_asm(DEFAULT_SUPERTRAIT_CALL)` returns assembly that:
+- lacks `bl      Foo__base_val` (supertrait call was inlined/folded), OR
+- lacks `add` (default body arithmetic was constant-folded), OR
+- contains `mov     x0, #10` (result for n=9 was folded)
+
+**Violated if**: `compile_to_asm(DEFAULT_CHAIN)` returns assembly that:
+- lacks `bl      Foo__doubled` (quadrupled inlined doubled), OR
+- lacks `bl      Foo__value` (doubled inlined value), OR
+- contains `mov     x0, #12` (chain result for n=3 was folded)
+
+**Tests**: `cargo test --test e2e -- runtime_supertrait_default_call_emits_bl_not_folded runtime_supertrait_default_chain_not_folded`
