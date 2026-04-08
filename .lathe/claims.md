@@ -330,6 +330,41 @@ a positive assertion that `Counter__get:` label is emitted, and added the advers
 
 ---
 
+## Claim 15: Multiple trait bounds monomorphize ALL methods for ALL concrete types
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: When a generic function with multiple bounds (`<T: Trait1 + Trait2>`) is
+instantiated with TWO different concrete types, galvanic must monomorphize all bound
+methods for EVERY concrete type — not just the first one.
+
+Specifically: if `apply_both<T: Adder + Doubler>` is called with both `Foo` and `Bar`,
+the emitted assembly must contain:
+1. `Foo__add_one:` and `Foo__double:` — both of Foo's monomorphized method bodies.
+2. `Bar__add_one:` and `Bar__double:` — both of Bar's monomorphized method bodies.
+3. No constant-folding of either wrapper's result.
+
+**Attack vector**: Galvanic's `pending_monos` accumulator could correctly handle the first
+concrete type seen at a call site but fail to register all bound methods for a subsequent
+type. The compile-and-run test would still produce the correct exit code if the omitted
+label happened to be inlined elsewhere, but the assembly would be missing a function body —
+a correctness hole for any call from a different context.
+
+This is distinct from Claim 12 (single-type, single-bound trait dispatch) and from the
+existing `runtime_multiple_bounds_emits_both_trait_calls` test (which only checks one
+concrete type). The two-type case exercises a different code path in the
+`pending_monos` accumulation loop.
+
+**Violated if**: `compile_to_asm(...)` for `fn apply_both<T: Adder + Doubler>(x: T)`
+called with both `Foo` and `Bar` via wrapper functions returns assembly that:
+- lacks `Bar__add_one:` or `Bar__double:` (second type's methods not monomorphized), OR
+- lacks `Foo__add_one:` or `Foo__double:` (first type's methods not monomorphized), OR
+- contains `mov x0, #7` or `mov x0, #14` (wrapper results constant-folded).
+
+**Test**: `cargo test --test e2e -- runtime_multiple_bounds_two_types_both_monomorphized`
+
+---
+
 ## Not Yet Claims (honest gaps)
 
 These are promises the project will eventually make but cannot yet be falsified:

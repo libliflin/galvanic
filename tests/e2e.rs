@@ -21446,3 +21446,70 @@ fn main() -> i32 {
         "run(Num{{val:3}}) must not fold apply_both to constant 10: {asm}"
     );
 }
+
+// ── Assembly inspection: milestone 144, two-type monomorphization ─────────────
+
+/// When TWO different concrete types are both passed to a multi-bound generic,
+/// galvanic must monomorphize ALL bound methods for ALL concrete types.
+///
+/// The attack vector: galvanic might correctly handle the FIRST concrete type
+/// but silently drop a method for the SECOND type, producing no label for e.g.
+/// `Bar__double` while `Foo__double` is correctly emitted. The compile-and-run
+/// test would still exit 0 if Bar's computation happened to be folded correctly,
+/// but the method body would be absent from the assembly.
+///
+/// FLS §12.1: Each concrete instantiation of a generic is a separate code path.
+/// FLS §4.14: Multiple bounds on `T` require all bound methods to be dispatchable.
+#[test]
+fn runtime_multiple_bounds_two_types_both_monomorphized() {
+    let src = r#"
+trait Adder { fn add_one(&self) -> i32; }
+trait Doubler { fn double(&self) -> i32; }
+struct Foo { val: i32 }
+struct Bar { val: i32 }
+impl Adder for Foo { fn add_one(&self) -> i32 { self.val + 1 } }
+impl Doubler for Foo { fn double(&self) -> i32 { self.val * 2 } }
+impl Adder for Bar { fn add_one(&self) -> i32 { self.val + 10 } }
+impl Doubler for Bar { fn double(&self) -> i32 { self.val * 3 } }
+fn apply_both<T: Adder + Doubler>(x: T) -> i32 { x.add_one() + x.double() }
+fn use_foo(f: Foo) -> i32 { apply_both(f) }
+fn use_bar(b: Bar) -> i32 { apply_both(b) }
+fn main() -> i32 {
+    let f = Foo { val: 2 };
+    let b = Bar { val: 1 };
+    use_foo(f) + use_bar(b) - 21
+}
+"#;
+    // use_foo(Foo{2}) = (2+1)+(2*2) = 3+4 = 7
+    // use_bar(Bar{1}) = (1+10)+(1*3) = 11+3 = 14
+    // 7+14-21 = 0
+    let asm = compile_to_asm(src);
+    // Foo's both methods must be monomorphized as separate labels.
+    assert!(
+        asm.contains("Foo__add_one:"),
+        "Foo__add_one method body must be emitted for Foo monomorphization: {asm}"
+    );
+    assert!(
+        asm.contains("Foo__double:"),
+        "Foo__double method body must be emitted for Foo monomorphization: {asm}"
+    );
+    // Bar's both methods must ALSO be monomorphized — this is the critical check.
+    // A regression would emit Foo's methods but drop one of Bar's.
+    assert!(
+        asm.contains("Bar__add_one:"),
+        "Bar__add_one method body must be emitted for Bar monomorphization: {asm}"
+    );
+    assert!(
+        asm.contains("Bar__double:"),
+        "Bar__double method body must be emitted for Bar monomorphization: {asm}"
+    );
+    // Neither wrapper's result may be constant-folded (wrappers prevent this).
+    assert!(
+        !asm.contains("mov     x0, #7") && !asm.contains("mov x0, #7"),
+        "use_foo(Foo{{val:2}}) result must not be folded to constant 7: {asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #14") && !asm.contains("mov x0, #14"),
+        "use_bar(Bar{{val:1}}) result must not be folded to constant 14: {asm}"
+    );
+}
