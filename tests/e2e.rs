@@ -30351,15 +30351,17 @@ fn runtime_cast_to_i16_emits_sxth() {
 }
 
 /// Runtime: `x as u16` truncates to low 16 bits. 70000 mod 65536 = 4464.
+/// Comparison returns 44 to keep exit code ≤ 255 (Linux exit codes are 8-bit).
 #[test]
 fn milestone_180_cast_u16_truncates_70000_to_4464() {
-    // 70000 = 65536 + 4464, so 70000 as u16 = 4464
+    // 70000 = 65536 + 4464, so 70000 as u16 = 4464.
+    // Return 44 if correct (exit code fits in 8 bits), 0 if truncation failed.
     let Some(exit) = compile_and_run(
-        "fn f(x: i32) -> i32 { (x as u16) as i32 }\nfn main() -> i32 { f(70000) }\n",
+        "fn f(x: i32) -> i32 { if (x as u16) as i32 == 4464 { 44 } else { 0 } }\nfn main() -> i32 { f(70000) }\n",
     ) else {
         return;
     };
-    assert_eq!(exit, 4464, "70000 as u16 = 4464 (70000 mod 65536)");
+    assert_eq!(exit, 44, "70000 as u16 = 4464; indirect check returns 44");
 }
 
 /// Runtime: `x as u16` truncates 65536 to 0.
@@ -30385,38 +30387,44 @@ fn milestone_180_cast_i16_sign_extends_40000_to_negative() {
     assert_eq!(exit, 1, "40000 as i16 is negative (sign bit set)");
 }
 
-/// Runtime: `x as i16` preserves values in range. 1000 stays 1000.
+/// Runtime: `x as i16` preserves values in range. 1000 as i16 = 1000.
+/// Uses subtraction to keep exit code ≤ 255 (Linux exit codes are 8-bit).
 #[test]
 fn milestone_180_cast_i16_1000_stays_positive() {
+    // 1000 is within i16 range (-32768..=32767), so (1000 as i16) as i32 == 1000.
+    // Subtract 900 to produce an exit-code-safe result (100 ≤ 255).
     let Some(exit) = compile_and_run(
-        "fn f(x: i32) -> i32 { (x as i16) as i32 }\nfn main() -> i32 { f(1000) }\n",
+        "fn f(x: i32) -> i32 { (x as i16) as i32 - 900 }\nfn main() -> i32 { f(1000) }\n",
     ) else {
         return;
     };
-    assert_eq!(exit, 1000, "1000 as i16 = 1000 (within range)");
+    assert_eq!(exit, 100, "1000 as i16 = 1000; 1000 - 900 = 100");
 }
 
 /// Runtime: `x as u16` result used in arithmetic.
+/// Uses input 65636 (= 65536+100) so that as u16 = 100; 100 + 100 = 200 (≤ 255).
 #[test]
 fn milestone_180_cast_u16_result_in_arithmetic() {
-    // f(x) = (x as u16) as i32 + 100; f(70000) = 4464 + 100 = 4564
+    // 65636 = 65536 + 100, so 65636 as u16 = 100; 100 + 100 = 200 (fits in 8-bit exit code).
     let Some(exit) = compile_and_run(
-        "fn f(x: i32) -> i32 { (x as u16) as i32 + 100 }\nfn main() -> i32 { f(70000) }\n",
+        "fn f(x: i32) -> i32 { (x as u16) as i32 + 100 }\nfn main() -> i32 { f(65636) }\n",
     ) else {
         return;
     };
-    assert_eq!(exit, 4564, "70000 as u16 = 4464; 4464 + 100 = 4564");
+    assert_eq!(exit, 200, "65636 as u16 = 100; 100 + 100 = 200");
 }
 
 /// Runtime: `x as u16` passed to function.
+/// Uses input 65580 (= 65536+44) so that as u16 = 44 (≤ 255, fits in 8-bit exit code).
 #[test]
 fn milestone_180_cast_u16_passed_to_fn() {
+    // 65580 = 65536 + 44, so 65580 as u16 = 44.
     let Some(exit) = compile_and_run(
-        "fn id(x: i32) -> i32 { x }\nfn f(x: i32) -> i32 { id((x as u16) as i32) }\nfn main() -> i32 { f(70000) }\n",
+        "fn id(x: i32) -> i32 { x }\nfn f(x: i32) -> i32 { id((x as u16) as i32) }\nfn main() -> i32 { f(65580) }\n",
     ) else {
         return;
     };
-    assert_eq!(exit, 4464, "70000 as u16 = 4464, passed through id()");
+    assert_eq!(exit, 44, "65580 as u16 = 44, passed through id()");
 }
 
 /// Runtime: `x as i16` used in arithmetic with the sign-extended value.
