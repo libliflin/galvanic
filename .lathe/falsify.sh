@@ -1137,6 +1137,24 @@ else
     pass "Claim 56: unsafe impl<T: Bound> emits runtime bl and mul (not constant-folded)"
 fi
 
+# References: claims.md Claim 57.
+
+echo "--- Claim 57: large-value integer arithmetic emits runtime add/mul (not constant-folded) ---"
+if cargo test --test e2e --quiet -- runtime_large_int_add_emits_add_not_folded runtime_large_int_mul_emits_mul_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 57" "runtime_large_int_add_emits_add_not_folded or runtime_large_int_mul_emits_mul_not_folded FAILED — large-value arithmetic may be constant-folded or add/mul instruction missing"
+else
+    pass "Claim 57: large-value integer arithmetic emits runtime add/mul (not constant-folded)"
+fi
+
+# References: claims.md Claim 58.
+
+echo "--- Claim 58: large-value integer sub/div emit runtime sub/sdiv (not constant-folded) ---"
+if cargo test --test e2e --quiet -- runtime_large_int_sub_emits_sub_not_folded runtime_large_int_div_emits_sdiv_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 58" "runtime_large_int_sub_emits_sub_not_folded or runtime_large_int_div_emits_sdiv_not_folded FAILED — large-value sub/div may be constant-folded or sub/sdiv instruction missing"
+else
+    pass "Claim 58: large-value integer sub/div emit runtime sub/sdiv (not constant-folded)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 
