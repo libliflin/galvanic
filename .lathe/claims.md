@@ -1999,3 +1999,92 @@ with `T::AssocType` return types must execute at runtime.
 - contains `mov     x0, #5` (two-type sum was constant-folded)
 
 **Tests**: `cargo test --test e2e -- runtime_proj_return_emits_bl_not_folded runtime_proj_two_types_both_monomorphized`
+
+---
+
+## Claim 50: T::AssocType in generic function parameter position emits monomorphized dispatch (not constant-folded)
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: When a generic free function uses `T::AssocType` as a **parameter** type
+(e.g., `fn add_extra<C: Container>(c: C, extra: C::Item) -> i32`), the emitted assembly must:
+1. Emit a monomorphized label per concrete type (e.g., `add_extra__Counter`).
+2. Dispatch to the concrete method via `bl` at runtime.
+3. Emit an `add` instruction for the runtime arithmetic.
+4. Not constant-fold the result.
+
+Both the single-type and two-type (both concrete types) cases are guarded.
+
+```rust
+// Pattern 1: C::Item as extra parameter type
+trait Container {
+    type Item;
+    fn get(&self) -> Self::Item;
+}
+struct Counter { val: i32 }
+impl Container for Counter {
+    type Item = i32;
+    fn get(&self) -> Self::Item { self.val }
+}
+fn add_extra<C: Container>(c: C, extra: C::Item) -> i32 { c.get() + extra }
+fn make_and_call(n: i32) -> i32 { let c = Counter { val: n }; add_extra(c, n) }
+// main: make_and_call(4) → 8
+
+// Pattern 2: two concrete types, both monomorphized
+trait Measure {
+    type Unit;
+    fn measure(&self) -> Self::Unit;
+}
+struct Meters { val: i32 }
+struct Feet { val: i32 }
+impl Measure for Meters { type Unit = i32; fn measure(&self) -> Self::Unit { self.val } }
+impl Measure for Feet   { type Unit = i32; fn measure(&self) -> Self::Unit { self.val * 3 } }
+fn with_offset<M: Measure>(m: M, offset: M::Unit) -> i32 { m.measure() + offset }
+// main: with_offset(Meters{val:2}, 1) + with_offset(Feet{val:1}, 0) → 6
+```
+
+Must emit (Pattern 1):
+- `add_extra__Counter` — monomorphized label for the concrete instantiation
+- `bl      Counter__get` — runtime dispatch to the trait method
+- `add` — runtime arithmetic on the projected parameter
+- NOT `mov     x0, #8` — result must not be folded to a constant
+
+Must emit (Pattern 2):
+- Both `with_offset__Meters` and `with_offset__Feet` labels in the assembly
+- NOT `mov     x0, #6` — result must not be constant-folded to 6
+
+**Why this claim matters**: Milestone 168 added `T::AssocType` in generic function
+parameter position. Without this claim, a regression that folds `add_extra__Counter`
+to a constant return would pass all exit-code tests. The generic function must spill
+the `C::Item` parameter to a stack slot and use it in runtime arithmetic.
+
+**Attack vectors**:
+1. Constant-fold `add_extra__Counter` to `mov x0, #8; ret` — exit code correct, folded.
+   Caught by `!asm.contains("mov     x0, #8")` and absence of `add`.
+2. Fail to emit `add_extra__Counter` monomorphized label (generic fn not instantiated).
+   Caught by `asm.contains("add_extra__Counter")`.
+3. Fold two-type case to `mov x0, #6` — both concrete results summed at compile time.
+   Caught by `!asm.contains("mov     x0, #6")`.
+4. Emit only one concrete type's label (second instantiation missing).
+   Caught by checking both `Meters` and `Feet` labels present.
+
+**FLS §10.2**: Associated type projections `T::X` resolve to the concrete type
+bound by `T`'s impl of the trait that declares `type X`.
+**FLS §12.1 / §10.2 AMBIGUOUS**: The FLS does not specify how `T::X` in parameter
+position resolves during monomorphization. Galvanic extends the per-monomorphization
+alias map so `C::Item → IrTy::I32` is available when lowering parameter types. The
+spec is silent on the mechanism.
+**FLS §6.1.2 Constraint 1**: `fn main()` is not a const context — generic calls
+with `T::AssocType` parameter types must execute at runtime.
+
+**Violated if**: `compile_to_asm(PARAM_PROJ)` returns assembly that:
+- lacks `add_extra__Counter` (monomorphization missing), OR
+- lacks `bl      Counter__get` (runtime dispatch missing), OR
+- lacks `add` (runtime arithmetic skipped), OR
+- contains `mov     x0, #8` (result constant-folded)
+
+**Violated if**: `compile_to_asm(PARAM_PROJ_TWO_TYPES)` returns assembly that:
+- lacks both `with_offset__Meters` and `with_offset__Feet` (instantiation missing), OR
+- contains `mov     x0, #6` (two-type sum was constant-folded)
+
+**Tests**: `cargo test --test e2e -- runtime_param_proj_emits_add_not_folded runtime_param_proj_two_types_both_monomorphized`

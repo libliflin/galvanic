@@ -1030,6 +1030,32 @@ else
     pass "Claim 49: T::AssocType in generic fn return emits monomorphized dispatch (not constant-folded)"
 fi
 
+# ── Claim 50: T::AssocType in generic function parameter position emits monomorphized dispatch (not folded) ─
+#
+# Promise: A generic free function `fn add_extra<C: Container>(c: C, extra: C::Item) -> i32`
+# must:
+# 1. Emit a monomorphized label per concrete type (e.g., add_extra__Counter).
+# 2. Dispatch to the concrete method via bl at runtime.
+# 3. Emit an add instruction for the runtime arithmetic.
+# 4. Not constant-fold the result.
+#
+# Pattern 1: add_extra__Counter label present, bl Counter__get present, add present, mov x0,#8 absent
+# Pattern 2: both with_offset__Meters and with_offset__Feet labels present, mov x0,#6 absent
+#
+# FLS §10.2: Associated type projections resolve per-impl at monomorphization.
+# FLS §12.1 / §10.2 AMBIGUOUS: Spec does not specify how T::X in parameter position resolves.
+# FLS §6.1.2 Constraint 1: fn main() is not a const context.
+#
+# Introduced in cycle 96 (M168 T::AssocType parameter position falsification).
+# References: claims.md Claim 50.
+
+echo "--- Claim 50: T::AssocType in generic function parameter position emits monomorphized dispatch (not folded) ---"
+if cargo test --test e2e --quiet -- runtime_param_proj_emits_add_not_folded runtime_param_proj_two_types_both_monomorphized 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 50" "runtime_param_proj_emits_add_not_folded or runtime_param_proj_two_types_both_monomorphized FAILED — T::AssocType generic parameter may be constant-folded or monomorphized label missing"
+else
+    pass "Claim 50: T::AssocType in generic fn parameter emits monomorphized dispatch (not constant-folded)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 
