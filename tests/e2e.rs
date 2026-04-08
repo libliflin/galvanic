@@ -20896,16 +20896,58 @@ fn run(c: Container) -> i32 { c.inner.get() }
 fn main() -> i32 { run(Container { inner: Counter { x: 7 } }) }
 "#;
     let asm = compile_to_asm(src);
-    // Runtime dispatch: must emit bl Counter__get.
+    // Positive: runtime dispatch must emit bl Counter__get.
     assert!(
         asm.contains("bl      Counter__get") || asm.contains("bl Counter__get"),
         "field method call must emit bl Counter__get: {asm}"
     );
-    // Must not bypass runtime dispatch — if `run` were folded, there would be no ldr.
-    // The `mov x0, #7` in main is the literal argument to run(), which is expected.
-    // The critical check is that `run` emits `bl Counter__get`, not a direct return.
+    // Positive: the method body must be emitted as a callable function label.
+    // A constant-folding interpreter would elide the label entirely.
     assert!(
-        !asm.contains("mov     x0, #7") || asm.contains("ldr"),
-        "field method call result must not be constant-folded (must emit ldr): {asm}"
+        asm.contains("Counter__get:"),
+        "Counter__get method body must be emitted as a label: {asm}"
+    );
+}
+
+// Adversarial companion: field method call result combined with a runtime parameter
+// must not be constant-folded.
+//
+// `scale(c: Container, factor: i32)` multiplies `c.inner.get()` by `factor`.
+// Since `factor` is a runtime parameter, the multiplication cannot be folded.
+// A compiler that folds `c.inner.get()` to `3` and then folds `3 * 4 = 12`
+// would fail this test. Only a compiler that emits runtime `bl Counter__get`
+// AND a runtime `mul` for the multiplication passes.
+//
+// Red-team (Claim 14, 2026-04-07): the original negative assertion in the sibling
+// test used `!asm.contains("mov x0, #7") || asm.contains("ldr")` — vacuously true
+// since any ARM64 struct program uses `ldr`. This test replaces it with a real
+// adversarial check: the product 12 must NOT appear as a constant.
+//
+// FLS §6.12.2: Method call expressions. FLS §6.1.2:37–45: non-const code.
+#[test]
+fn runtime_field_method_call_result_not_folded() {
+    let src = r#"
+trait Getter { fn get(&self) -> i32; }
+struct Counter { x: i32 }
+impl Getter for Counter { fn get(&self) -> i32 { self.x } }
+struct Container { inner: Counter }
+fn scale(c: Container, factor: i32) -> i32 { c.inner.get() * factor }
+fn main() -> i32 { scale(Container { inner: Counter { x: 3 } }, 4) }
+"#;
+    let asm = compile_to_asm(src);
+    // Positive: must dispatch to the field's method at runtime.
+    assert!(
+        asm.contains("bl      Counter__get") || asm.contains("bl Counter__get"),
+        "field method call must emit bl Counter__get: {asm}"
+    );
+    // Positive: must multiply at runtime (factor is unknown).
+    assert!(
+        asm.contains("mul"),
+        "field method call combined with runtime factor must emit mul: {asm}"
+    );
+    // Negative: must NOT fold 3 * 4 = 12 to a constant.
+    assert!(
+        !asm.contains("mov     x0, #12") && !asm.contains("mov x0, #12"),
+        "field method call result must not be constant-folded to #12: {asm}"
     );
 }

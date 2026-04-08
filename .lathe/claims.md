@@ -292,6 +292,44 @@ called from `main` as `compute(5)` returns assembly that:
 
 ---
 
+## Claim 14: Field method calls on struct fields emit runtime `bl` to the concrete type's method
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: When a method is called on a field of a struct — `c.inner.get()` where
+`inner: Counter` — galvanic must:
+1. Emit a callable function body label (`Counter__get:`) for the concrete type's method.
+2. Dispatch to it at runtime via `bl Counter__get`, not fold the result.
+3. When the result is combined with a runtime parameter (`c.inner.get() * factor`), emit
+   a runtime `mul` instruction and NOT fold the product to a constant.
+
+This guards the `ExprKind::FieldAccess` arm in the method call receiver resolution added
+in milestone 142 (cycle 23). Before this cycle, no falsification claim covered the field
+access receiver path (`resolve_place` → field slot → concrete struct type → method dispatch).
+A regression in `resolve_place` or the `FieldAccess` arm would not be caught by Claims 6–13.
+
+This is distinct from all prior claims:
+- Claim 7: generic function calls (data-only type param)
+- Claim 9: generic trait impl (impl<T> for Type<T>)
+- Claim 10: default trait methods
+- Claim 12: trait-bound generic functions
+None of these test the `receiver = field access` code path.
+
+**Violated if**: `compile_to_asm(...)` for `fn run(c: Container) -> i32 { c.inner.get() }` fails
+to contain `Counter__get:` (method body absent) or `bl Counter__get` (runtime dispatch absent);
+OR for `fn scale(c: Container, factor: i32) -> i32 { c.inner.get() * factor }` returns assembly
+that contains `mov x0, #12` (product 3*4 constant-folded) or lacks `mul`.
+
+**Red-team finding (2026-04-07)**: The original negative assertion in `runtime_field_method_call_emits_bl_not_folded`
+was `!asm.contains("mov x0, #7") || asm.contains("ldr")` — vacuously true since any ARM64 struct
+program uses `ldr`. This is the same class of bug found in Claims 7 and 8. Fixed: replaced with
+a positive assertion that `Counter__get:` label is emitted, and added the adversarial companion
+`runtime_field_method_call_result_not_folded` that checks the combined-with-runtime-param path.
+
+**Test**: `cargo test --test e2e -- runtime_field_method_call_emits_bl_not_folded runtime_field_method_call_result_not_folded`
+
+---
+
 ## Not Yet Claims (honest gaps)
 
 These are promises the project will eventually make but cannot yet be falsified:
