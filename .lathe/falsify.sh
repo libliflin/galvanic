@@ -1472,6 +1472,18 @@ else
     pass "Claim 83: for x in arr consuming iteration emits runtime indexed loads (not constant-folded)"
 fi
 
+echo "--- Claim 84: for x in &mut slice emits runtime pointer arithmetic and stores (not constant-folded) ---"
+if cargo test --test e2e -- \
+    runtime_for_mut_slice_emits_mul_and_store_not_folded \
+    runtime_for_mut_slice_called_twice_not_folded \
+    milestone_197_for_mut_slice_double_in_place \
+    milestone_197_for_mut_slice_param \
+    2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 84" "for-mut-slice iteration runtime codegen FAILED — loop may not emit pointer arithmetic (mul) or write-back (str), or result may be constant-folded; mutations must happen at runtime through the slice fat pointer"
+else
+    pass "Claim 84: for x in &mut slice emits runtime mul+str and result not constant-folded"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 
