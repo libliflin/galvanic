@@ -29952,3 +29952,141 @@ fn runtime_u8_trunc_not_emitted_for_i32_return() {
         "i32-returning function must NOT emit u8 truncation; got:\n{asm}"
     );
 }
+
+// ── Milestone 177: i8 arithmetic with sign-extending wrapping ─────────────────
+// FLS §4.1, §6.23: The i8 type wraps at 128/-128. Galvanic emits `sxtb w{r},
+// w{r}` (SextI8) at function return boundaries so that 100_i8 + 50_i8 = -106.
+
+#[test]
+fn milestone_177_i8_identity() {
+    let Some(exit) = compile_and_run(
+        "fn id_i8(a: i8) -> i8 { a }\nfn main() -> i32 { if id_i8(42) as i32 == 42 { 1 } else { 0 } }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "i8 identity should return 42");
+}
+
+#[test]
+fn milestone_177_i8_add_no_wrap() {
+    let Some(exit) = compile_and_run(
+        "fn add_i8(a: i8, b: i8) -> i8 { a + b }\nfn main() -> i32 { add_i8(10, 20) as i32 }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 30, "10_i8 + 20_i8 should be 30 (no wrap)");
+}
+
+/// Adversarial: 100_i8 + 50_i8 = 150, which overflows i8. The result must be
+/// -106 (= 150 - 256). Without SextI8, the function would return 150 (wrong).
+#[test]
+fn milestone_177_i8_add_wraps() {
+    let Some(exit) = compile_and_run(
+        "fn add_i8(a: i8, b: i8) -> i8 { a + b }\nfn main() -> i32 { if add_i8(100, 50) as i32 == -106 { 1 } else { 0 } }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "100_i8 + 50_i8 should wrap to -106 (150 - 256)");
+}
+
+/// Adversarial: i8 subtraction wrapping. 0_i8 - 1_i8 = -1 (sign-extended correctly).
+#[test]
+fn milestone_177_i8_sub_wraps() {
+    let Some(exit) = compile_and_run(
+        "fn sub_i8(a: i8, b: i8) -> i8 { a - b }\nfn main() -> i32 { if sub_i8(0, 1) as i32 == -1 { 1 } else { 0 } }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "0_i8 - 1_i8 should be -1");
+}
+
+#[test]
+fn milestone_177_i8_passed_to_fn() {
+    let Some(exit) = compile_and_run(
+        "fn add_i8(a: i8, b: i8) -> i8 { a + b }\nfn use_it(x: i8) -> i32 { x as i32 }\nfn main() -> i32 { use_it(add_i8(10, 5)) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 15, "i8 result passed to another function");
+}
+
+#[test]
+fn milestone_177_i8_in_arithmetic() {
+    let Some(exit) = compile_and_run(
+        "fn add_i8(a: i8, b: i8) -> i8 { a + b }\nfn main() -> i32 { add_i8(10, 5) as i32 + 1 }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 16, "i8 result used in i32 arithmetic");
+}
+
+#[test]
+fn milestone_177_i8_result_in_if() {
+    let Some(exit) = compile_and_run(
+        "fn add_i8(a: i8, b: i8) -> i8 { a + b }\nfn main() -> i32 { if add_i8(10, 5) as i32 > 10 { 1 } else { 0 } }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "i8 result should compare correctly in if");
+}
+
+#[test]
+fn milestone_177_i8_called_twice() {
+    let Some(exit) = compile_and_run(
+        "fn add_i8(a: i8, b: i8) -> i8 { a + b }\nfn main() -> i32 { add_i8(10, 5) as i32 + add_i8(3, 2) as i32 }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 20, "two i8 calls: 15 + 5 = 20");
+}
+
+#[test]
+fn milestone_177_i8_captures_parameter() {
+    let Some(exit) = compile_and_run(
+        "fn double_i8(a: i8) -> i8 { a + a }\nfn main() -> i32 { double_i8(20) as i32 }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 40, "double_i8(20) = 40");
+}
+
+/// Assembly inspection: i8 add emits `add` + `sxtb` at return (not constant-folded).
+///
+/// Claim 65: i8 arithmetic emits runtime add and sxtb sign-extension —
+/// not a constant-folded result and not without sign-extension.
+#[test]
+fn runtime_i8_add_emits_sxtb_sign_extension() {
+    let asm = compile_to_asm(
+        "fn add_i8(a: i8, b: i8) -> i8 { a + b }\nfn main() -> i32 { add_i8(100, 50) as i32 }\n",
+    );
+    assert!(
+        asm.contains("add"),
+        "i8 add must emit an add instruction; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("sxtb"),
+        "i8 return must emit `sxtb` for sign-extension (SextI8); got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #150"),
+        "result must NOT be constant-folded to mov x0, #150; got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #-106"),
+        "result must NOT be constant-folded to -106; got:\n{asm}"
+    );
+}
+
+/// Assembly inspection: i8 sign-extension is not emitted for i32-returning functions.
+///
+/// Ensures `sxtb` is only emitted when needed (i8 return type), not for every function.
+#[test]
+fn runtime_i8_sext_not_emitted_for_i32_return() {
+    let asm = compile_to_asm(
+        "fn add_i32(a: i32, b: i32) -> i32 { a + b }\nfn main() -> i32 { add_i32(1, 2) }\n",
+    );
+    assert!(
+        !asm.contains("sxtb"),
+        "i32-returning function must NOT emit i8 sign-extension; got:\n{asm}"
+    );
+}

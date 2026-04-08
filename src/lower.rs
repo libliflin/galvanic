@@ -3348,7 +3348,7 @@ fn lower_fn(
         // FLS §4.1: i32 parameters occupy one 64-bit register (x0–x7).
         // FLS §4.1: All primitive integer types and bool are supported as
         // parameters. Each uses one 64-bit ARM64 register (x0–x7).
-        if !matches!(param_ty, IrTy::I32 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::FnPtr) {
+        if !matches!(param_ty, IrTy::I32 | IrTy::I8 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::FnPtr) {
             return Err(LowerError::Unsupported(
                 "parameter type other than i32/bool/u32/i64/u64/usize/isize/i8/i16/u8/u16/fn ptr/f64/f32".into(),
             ));
@@ -3890,10 +3890,13 @@ fn lower_ty(
         }
         TyKind::Path(segments) if segments.len() == 1 => {
             match segments[0].text(source) {
-                // FLS §4.1: Signed integer types. i8/i16/i64/isize all use
-                // signed 64-bit registers on ARM64. Width truncation for
-                // narrower types is deferred (FLS §4.1 AMBIGUOUS on ABI layout).
-                "i32" | "i8" | "i16" | "i64" | "isize" => Ok(IrTy::I32),
+                // FLS §4.1: Signed integer types. i16/i64/isize use signed 64-bit
+                // registers on ARM64 (width narrowing is deferred for i16/i64/isize).
+                "i32" | "i16" | "i64" | "isize" => Ok(IrTy::I32),
+                // FLS §4.1: The i8 type. Arithmetic uses the same signed ops as
+                // I32 (sdiv, asr). At return boundaries, SextI8 sign-extends
+                // the result to 8 bits for correct FLS §6.23 wrapping semantics.
+                "i8" => Ok(IrTy::I8),
                 // FLS §4.3: bool is a distinct type in the IR so that `!` can
                 // emit logical NOT (eor, XOR with 1) rather than bitwise NOT (mvn).
                 // On ARM64, bool and i32 share the same register layout (0/1 as i64),
@@ -6075,12 +6078,15 @@ impl<'src> LowerCtx<'src> {
     /// FLS §6.1.2:37–45: Non-const function bodies must emit runtime code.
     fn lower_block(&mut self, block: &Block, ret_ty: &IrTy) -> Result<(), LowerError> {
         let ret_val = self.lower_block_to_value(block, ret_ty)?;
-        // FLS §4.1, §6.23: u8 arithmetic wraps at 256. Mask the tail return
-        // value to 8 bits so that e.g. 200_u8 + 100_u8 yields 44, not 300.
+        // FLS §4.1, §6.23: narrow integer types need boundary normalization.
+        // u8: mask to 8 bits (and #255). i8: sign-extend from 8 bits (sxtb).
         // Early `return` expressions are handled in ExprKind::Return.
-        if *ret_ty == IrTy::U8
-            && let IrValue::Reg(r) = ret_val {
-                self.instrs.push(Instr::TruncU8 { dst: r, src: r });
+        if let IrValue::Reg(r) = ret_val {
+            match ret_ty {
+                IrTy::U8 => self.instrs.push(Instr::TruncU8 { dst: r, src: r }),
+                IrTy::I8 => self.instrs.push(Instr::SextI8 { dst: r, src: r }),
+                _ => {}
+            }
         }
         self.instrs.push(Instr::Ret(ret_val));
         Ok(())
@@ -9648,6 +9654,20 @@ impl<'src> LowerCtx<'src> {
                         self.instrs.push(Instr::LoadImm(r, *n as i32));
                         Ok(IrValue::Reg(r))
                     }
+                    // FLS §4.1: i8 literal. Positive values 0..=127 fit in a LoadImm.
+                    // Values > 127 are a compile-time error (FLS §6.23: overflow
+                    // in const context is an error). Negative i8 values arrive as
+                    // Unary(Neg, LitInt(n)) — the literal node itself is always >= 0.
+                    IrTy::I8 => {
+                        if *n > 127 {
+                            return Err(LowerError::Unsupported(format!(
+                                "i8 literal {n} out of range 0..=127 (negative values via unary negation)"
+                            )));
+                        }
+                        let r = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(r, *n as i32));
+                        Ok(IrValue::Reg(r))
+                    }
                     _ => Err(LowerError::Unsupported("integer literal with non-integer type".into())),
                 }
             }
@@ -10005,7 +10025,9 @@ impl<'src> LowerCtx<'src> {
                 spine.reverse(); // now in left-to-right evaluation order
 
                 match ret_ty {
-                    IrTy::I32 => {
+                    // FLS §4.1: i8 uses the same signed arithmetic as i32.
+                    // SextI8 is emitted at return boundaries, not per-operation.
+                    IrTy::I32 | IrTy::I8 => {
                         // Lower the leftmost leaf (not a binary arithmetic node).
                         let mut acc_val = self.lower_expr(leftmost, ret_ty)?;
 
@@ -10249,7 +10271,7 @@ impl<'src> LowerCtx<'src> {
                     //
                     // Cache-line note: the phi slot is one 8-byte stack entry;
                     // read exactly once after the if expression completes.
-                    IrTy::I32 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::FnPtr => {
+                    IrTy::I32 | IrTy::I8 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::FnPtr => {
                         let else_label = self.alloc_label();
                         let end_label = self.alloc_label();
 
@@ -11034,7 +11056,7 @@ impl<'src> LowerCtx<'src> {
                 }
 
                 match ret_ty {
-                    IrTy::I32 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::FnPtr => {
+                    IrTy::I32 | IrTy::I8 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::FnPtr => {
                         let phi_slot = self.alloc_slot()?;
 
                         // Then branch.
@@ -11283,7 +11305,7 @@ impl<'src> LowerCtx<'src> {
                 let exit_label = self.alloc_label();
 
                 match ret_ty {
-                    IrTy::I32 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::FnPtr => {
+                    IrTy::I32 | IrTy::I8 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::FnPtr => {
                         let phi_slot = self.alloc_slot()?;
 
                         for arm in checked_arms {
@@ -15518,10 +15540,11 @@ impl<'src> LowerCtx<'src> {
                     Some(val) => {
                         let v = self.lower_expr(val, &fn_ret_ty)?;
                         let r = self.val_to_reg(v)?;
-                        // FLS §4.1, §6.23: u8 return values must be masked to
-                        // 8 bits for correct overflow wrapping semantics.
-                        if fn_ret_ty == IrTy::U8 {
-                            self.instrs.push(Instr::TruncU8 { dst: r, src: r });
+                        // FLS §4.1, §6.23: narrow integer returns need boundary normalization.
+                        match fn_ret_ty {
+                            IrTy::U8 => self.instrs.push(Instr::TruncU8 { dst: r, src: r }),
+                            IrTy::I8 => self.instrs.push(Instr::SextI8 { dst: r, src: r }),
+                            _ => {}
                         }
                         IrValue::Reg(r)
                     }

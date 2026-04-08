@@ -708,6 +708,18 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
             )?;
         }
 
+        // FLS §4.1, §6.23: Sign-extend from 8 signed bits for i8 return values.
+        // ARM64: `sxtb w{dst}, w{src}` sign-extends the low 8 bits to 32 bits.
+        // If bit 7 of src is 1, the upper bits are filled with 1s; otherwise 0s.
+        // This gives two's complement wrapping: 150 (0x96) → -106 (0xFFFFFF96).
+        // Cache-line note: one 4-byte instruction.
+        Instr::SextI8 { dst, src } => {
+            writeln!(
+                out,
+                "    sxtb    w{dst}, w{src}                  // FLS §6.23: sign-extend i8 (wrap at 128/-128)"
+            )?;
+        }
+
         // FLS §8.1: Store a virtual register to a stack slot.
         // ARM64: `str x{src}, [sp, #{offset}]` — offset = slot * 8.
         // Cache-line note: 8-byte slots keep stores naturally aligned;

@@ -2620,3 +2620,33 @@ must be emitted at runtime even though the values happen to be known at the call
 - contains `mov x0, #44` (constant-folded — `15 * 20 = 300 mod 256 = 44`)
 
 **Tests**: `cargo test --test e2e -- runtime_u8_add_emits_and_truncation runtime_u8_mul_emits_and_truncation milestone_176_u8_add_wraps milestone_176_u8_mul_wraps`
+
+---
+
+## Claim 65: i8 arithmetic emits runtime instructions and `sxtb` sign-extension (not constant-folded)
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: The `i8` type wraps at -128/127 per FLS §6.23. When a function returns
+`i8`, galvanic must emit both:
+1. The arithmetic instruction (`add`, `sub`, `mul`, etc.) at runtime — proving this is
+   a compiler, not an interpreter, and
+2. A `sxtb w{r}, w{r}` instruction (SextI8) at the return boundary — proving the
+   overflow wrapping semantics are correctly implemented for signed 8-bit arithmetic.
+
+Without SextI8, `100_i8 + 50_i8` would return 150 instead of -106. The falsification
+suite tests both the assembly inspection (SextI8 present) and the runtime correctness
+(wrapping result matches the expected value).
+
+**FLS §4.1**: "The signed integer types have a range of [-2^(N-1), 2^(N-1)-1]."
+**FLS §6.23**: At runtime, integer arithmetic wraps in two's complement. For i8, the
+range is -128..=127.
+**FLS §6.1.2 Constraint 1**: Function parameters are not const contexts; the arithmetic
+must be emitted at runtime even though the values happen to be known at the call site.
+
+**Violated if** `compile_to_asm("fn add_i8(a: i8, b: i8) -> i8 { a + b } ...")`:
+- lacks `add` in the function body (no arithmetic emitted), OR
+- lacks `sxtb` (no sign-extension, wrapping semantics broken), OR
+- contains `mov x0, #150` or `mov x0, #-106` (constant-folded without runtime code)
+
+**Tests**: `cargo test --test e2e -- runtime_i8_add_emits_sxtb_sign_extension milestone_177_i8_add_wraps milestone_177_i8_sub_wraps`

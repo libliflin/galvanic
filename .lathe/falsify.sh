@@ -1209,6 +1209,15 @@ else
     pass "Claim 64: u8 arithmetic emits runtime add and and-truncation (not constant-folded)"
 fi
 
+# References: claims.md Claim 65.
+
+echo "--- Claim 65: i8 arithmetic emits runtime add and sxtb sign-extension (not constant-folded) ---"
+if cargo test --test e2e --quiet -- runtime_i8_add_emits_sxtb_sign_extension milestone_177_i8_add_wraps milestone_177_i8_sub_wraps 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 65" "i8 assembly inspection or wrapping test FAILED — i8 arithmetic may be constant-folded or missing SextI8"
+else
+    pass "Claim 65: i8 arithmetic emits runtime add and sxtb sign-extension (not constant-folded)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 

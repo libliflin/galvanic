@@ -582,6 +582,28 @@ pub enum Instr {
         src: u8,
     },
 
+    /// Sign-extend a register from 8 signed bits. Milestone 177.
+    ///
+    /// `SextI8 { dst, src }` → `sxtb w{dst}, w{src}` on ARM64.
+    ///
+    /// Implements the FLS §6.23 wrapping semantics for `i8`: after arithmetic
+    /// the result is sign-extended from 8 bits so that, e.g., 100_i8 + 50_i8
+    /// yields -106 (= 150 - 256) rather than 150.
+    ///
+    /// Emitted at every i8 function return and explicit `return` expression.
+    /// Intermediate i8 values within a function are not sign-extended (deferred).
+    ///
+    /// FLS §4.1: "The signed integer types have a range of [-2^(N-1), 2^(N-1)-1]."
+    /// FLS §6.23: Runtime wrapping semantics for non-const integer arithmetic.
+    ///
+    /// Cache-line note: one 4-byte ARM64 `sxtb` instruction per sign-extension.
+    SextI8 {
+        /// Destination register (receives sign-extended low 8 bits of src).
+        dst: u8,
+        /// Source register (holds the value to sign-extend).
+        src: u8,
+    },
+
     /// Call a named function with arguments; result goes into a virtual register.
     ///
     /// `Call { dst, name, args, float_args }` emits (for each arg[i] ≠ i):
@@ -1555,6 +1577,22 @@ pub enum IrTy {
     /// Cache-line note: same register width as `IrTy::U32`; one extra
     /// `and` instruction at return boundaries.
     U8,
+
+    /// The 8-bit signed integer type `i8`. FLS §4.1. Milestone 177.
+    ///
+    /// Arithmetic uses the same instructions as `IrTy::I32` (signed division,
+    /// arithmetic shift right). The key difference: at function return and on
+    /// explicit `return` expressions, a `SextI8` instruction sign-extends the
+    /// result from 8 bits (`sxtb w{r}, w{r}`), implementing the FLS §6.23
+    /// wrapping semantics for i8.
+    ///
+    /// FLS §4.1: "The signed integer types have a range of [-2^(N-1), 2^(N-1)-1]."
+    /// FLS §6.23: At runtime without overflow checks, integer arithmetic wraps
+    /// in two's complement. For i8, the range is -128..=127.
+    ///
+    /// Cache-line note: same register width as `IrTy::I32`; one extra
+    /// `sxtb` instruction at return boundaries.
+    I8,
 
     /// A function pointer type `fn(T1, ...) -> R`. FLS §4.9.
     ///
