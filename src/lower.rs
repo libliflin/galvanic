@@ -11621,8 +11621,11 @@ impl<'src> LowerCtx<'src> {
                             all_regs.push(r);
                         }
                         // Lower explicit arguments left-to-right (FLS §6.4:14).
+                        // Use IrTy::I32 as the type hint (not ret_ty) so that integer
+                        // literal arguments (e.g., `add(3)` as a statement) are lowered
+                        // correctly when ret_ty is IrTy::Unit.
                         for arg in args {
-                            let v = self.lower_expr(arg, ret_ty)?;
+                            let v = self.lower_expr(arg, &IrTy::I32)?;
                             let r = self.val_to_reg(v)?;
                             all_regs.push(r);
                         }
