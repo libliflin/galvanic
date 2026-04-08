@@ -702,3 +702,47 @@ Alternatively, if `accum_or_alt` is not called for the range alternative in let-
 - contains `mov     x0, #1\n\tret` (result constant-folded).
 
 **Test**: `cargo test --test e2e -- runtime_let_else_or_mixed_emits_orr_accumulation`
+
+---
+
+## Claim 26: `@` binding patterns in let-else emit runtime sub-pattern check and binding
+
+**Stakeholder**: William (researcher), FLS / Ferrocene Ecosystem
+
+**Promise**: When a `let-else` statement uses an `@` binding pattern (e.g., `let n @ 1..=5 = x else { return 0 }`),
+galvanic emits:
+- A runtime sub-pattern check (range check: `cmp` instructions) — not constant-folded
+- A runtime conditional branch (`cbz`) to the else block on mismatch
+- A runtime binding of the scrutinee value to `n` (ldr + str)
+- A runtime use of `n` in subsequent expressions (e.g., `n * 2` emits `mul`/`add`, NOT `mov x0, #6`)
+
+For example:
+```rust
+fn f(x: i32) -> i32 {
+    let n @ 1..=5 = x else { return 0 };
+    n * 2
+}
+fn main() -> i32 { f(3) }
+```
+
+`f(3)` must emit a range check for `1..=5`, bind `x` (= 3) to `n`, then multiply `n * 2`.
+Result is 6 at runtime. An interpreter would emit `mov x0, #6` directly.
+
+**Why this claim matters**: Cycle 61 unified `parse_let_pattern` into `parse_single_pattern`,
+which as a side-effect enabled `@` patterns to parse in `let-else` position. Cycle 62 implements
+the lowering path. Without the lowering, parsed programs would fail at runtime with an
+`Unsupported` error. Without this claim, a regression that re-introduces the `Unsupported`
+catch-all (or that constant-folds the range check) would go undetected.
+
+**Attack vector**:
+1. Restoring the `_ => Unsupported` catch-all before `Pat::Bound` causes any `let n @ pat = x else` program to fail at compile time with "let-else only supports TupleStruct or OR patterns".
+2. Constant-folding `f(3)` emits `mov x0, #6` — assembly contains the literal result with no runtime check.
+3. Skipping the `CondBranch` means `else` is never taken even on a mismatch (out-of-range values are bound instead of diverging).
+
+**Violated if**: `compile_to_asm(...)` for `fn f(x: i32) -> i32 { let n @ 1..=5 = x else { return 0 }; n * 2 }` returns assembly that:
+- lacks `cmp` (range check not emitted), OR
+- lacks `cbz` (else-branch not emitted), OR
+- lacks `mul`/`add` (binding result not used at runtime), OR
+- contains `mov     x0, #6` (result constant-folded).
+
+**Test**: `cargo test --test e2e -- runtime_let_else_bound_pattern_emits_cmp_and_binding_not_folded`

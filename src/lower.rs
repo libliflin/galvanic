@@ -7001,10 +7001,49 @@ impl<'src> LowerCtx<'src> {
                             });
                             // No bindings: OR scalar/enum-unit patterns bind nothing.
                         }
+                        // FLS §5.1.4 + §8.1: `@` binding pattern in let-else.
+                        // `let n @ 1..=5 = x else { <diverge> };`
+                        //
+                        // Strategy:
+                        //   1. matched_reg = 0
+                        //   2. accum_or_alt(subpat, scrut_slot, matched_reg) checks if the
+                        //      scrutinee satisfies the sub-pattern and ORs the result in.
+                        //   3. CondBranch(matched_reg, else_label) → else if no match.
+                        //   4. Load scrutinee, store to a fresh binding slot, insert name.
+                        //
+                        // FLS §5.1.4: The `@` pattern first checks the sub-pattern, then
+                        // binds the matched value to the identifier.
+                        // FLS §5.1.4 AMBIGUOUS: The spec does not specify the order of
+                        // evaluation for `@` — galvanic checks sub-pattern first (no
+                        // binding on mismatch), matching the behaviour documented in ast.rs.
+                        //
+                        // Cache-line note: sub-pattern check cost mirrors the sub-pattern
+                        // type (range ~7 instr, literal ~5 instr) plus 2 instructions for
+                        // the binding (ldr scrut + str binding).
+                        Pat::Bound { name, subpat } => {
+                            // Step 1: sub-pattern match check via OR-accumulation helper.
+                            let matched_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::LoadImm(matched_reg, 0));
+                            self.accum_or_alt(subpat, scrut_slot, matched_reg)?;
+
+                            // Step 2: Branch to else on mismatch (matched_reg == 0).
+                            self.instrs.push(Instr::CondBranch {
+                                reg: matched_reg,
+                                label: else_label,
+                            });
+
+                            // Step 3: Match succeeded — bind scrutinee value to name.
+                            let binding_slot = self.alloc_slot()?;
+                            let bind_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst: bind_reg, slot: scrut_slot });
+                            self.instrs.push(Instr::Store { src: bind_reg, slot: binding_slot });
+                            let bname = name.text(self.source);
+                            self.locals.insert(bname, binding_slot);
+                        }
                         _ => {
                             return Err(LowerError::Unsupported(
-                                "let-else only supports TupleStruct (Enum::Variant(..)) \
-                                 or OR patterns at this milestone"
+                                "let-else only supports TupleStruct (Enum::Variant(..)), \
+                                 OR patterns, or @ binding patterns at this milestone"
                                     .into(),
                             ));
                         }
