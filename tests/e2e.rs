@@ -30658,6 +30658,28 @@ fn milestone_181_u16_mul_wraps() {
 // sum exceeds 65535 must compare as < 65535 after construction, not > 65535.
 
 #[test]
+fn runtime_i16_struct_field_construction_applies_sxth() {
+    // FLS §4.1, §6.23: When a struct with an i16 field is constructed from an
+    // overflowing arithmetic expression, SextI16 (sxth x{r}, w{r}) must be
+    // emitted before the Store instruction so the field holds the sign-extended
+    // wrapped value, not the raw i32 sum.
+    // Adversarial: uses parameters so the sum cannot be constant-folded.
+    let asm = compile_to_asm(
+        "struct Narrow { val: i16 }\n\
+         fn build(a: i16, b: i16) -> Narrow { Narrow { val: a + b } }\n\
+         fn main() -> i32 { 0 }\n",
+    );
+    assert!(
+        asm.contains("sxth"),
+        "expected SextI16 (sxth) for i16 struct field construction; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("add"),
+        "expected runtime add for i16 field initializer `a + b` (not constant-folded); got:\n{asm}"
+    );
+}
+
+#[test]
 fn runtime_u16_struct_field_construction_applies_trunc() {
     // FLS §4.1, §6.23: When a struct with a u16 field is constructed from an
     // overflowing arithmetic expression, TruncU16 (and w{r}, #65535) must be
@@ -30729,15 +30751,19 @@ fn milestone_182_u16_struct_field_in_arithmetic() {
 #[test]
 fn milestone_182_i16_struct_field_wraps_on_construction() {
     // FLS §4.1, §6.23: i16 struct field stores the sign-extended wrapped value.
-    // 30000 + 5000 = 35000; 35000 - 32768 = 2232 BUT actually i16 wraps to
-    // (35000 as i16): 35000 > 32767 so as i16 = 35000 - 65536 = -30536.
-    // The comparison -30536 < 0 must be true (exit 1).
+    // 30000 + 5000 = 35000; as i16 = 35000 - 65536 = -30536 (bit 15 set).
+    // -30536 < 0 must be true (exit 1).
+    //
+    // Note: the cast `n.val as i32` is assigned to a let-binding first to avoid
+    // the parse_ty `i32 < N` ambiguity (parse_ty greedily treats `<` after a
+    // type name as a generic argument list).
     let Some(exit) = compile_and_run(
         "struct Narrow { val: i16 }\n\
          fn build(a: i16, b: i16) -> Narrow { Narrow { val: a + b } }\n\
          fn main() -> i32 {\n\
              let n = build(30000, 5000);\n\
-             if n.val as i32 < 0 { 1 } else { 0 }\n\
+             let v: i32 = n.val as i32;\n\
+             if v < 0 { 1 } else { 0 }\n\
          }\n",
     ) else {
         return;
@@ -30806,3 +30832,4 @@ fn milestone_182_u16_struct_two_narrow_fields() {
     // p.a = 60000 (no overflow), p.b = 10000 + 60000 = 70000 wraps to 4464 < 5000
     assert_eq!(exit, 1, "p.a = 60000; p.b = 70000 wraps to 4464 < 5000");
 }
+

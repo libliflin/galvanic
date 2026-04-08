@@ -1,48 +1,54 @@
-# Changelog — Cycle 119
+# Changelog — Cycle 122
 
 ## Who This Helps
-- **CI / Validation Infrastructure**: 4 tests were falsely failing on CI due to
-  an incorrect assumption about process exit codes. Linux exit codes are 8-bit
-  (0-255); tests asserting 4464, 1000, 4564 would get those values truncated
-  to 112, 232, 212 respectively. CI now passes cleanly.
-- **William (researcher)**: The u16/i16 narrowing cast implementation from
-  cycle 118 was correct; the tests were wrong. The fix confirms the
-  implementation is sound and CI is now a reliable signal again.
+- **William (researcher)**: CI is broken on PR #211. The failing test
+  `milestone_182_i16_struct_field_wraps_on_construction` triggered a pre-existing
+  parser ambiguity (`parse_ty` greedily consuming `< 0 { … }` as a generic
+  argument list when `as i32 < N` appears in an if-condition). Fixed by
+  restructuring the test source to separate the cast from the comparison.
+- **CI / validation infrastructure**: The e2e job now passes, unblocking the merge.
 
 ## Observed
-- CI job `e2e` failed on PR #209 with 4 failures:
-  - `milestone_180_cast_u16_truncates_70000_to_4464` (expected 4464, got 112)
-  - `milestone_180_cast_u16_passed_to_fn` (expected 4464, got 112)
-  - `milestone_180_cast_u16_result_in_arithmetic` (expected 4564, got 212)
-  - `milestone_180_cast_i16_1000_stays_positive` (expected 1000, got 232)
-- Root cause: Linux `waitpid()` returns only the low 8 bits of the exit status.
-  All other passing tests use values ≤ 255. The u16 tests were the first to
-  introduce expected values above 255.
-- The assembly inspection tests (`runtime_cast_to_u16_emits_and_truncation`,
-  `runtime_cast_to_i16_emits_sxth`) passed on CI because they don't run the
-  binary; they verify emitted assembly only.
+- CI e2e job: `milestone_182_i16_struct_field_wraps_on_construction` FAILED.
+- CI log: `error: parse error at byte 174: expected OpenBrace, found Eof`
+- Root cause: `parse_ty()` (lines 1706–1716 of `src/parser.rs`) greedily treats
+  `<` immediately after a type name as the start of a generic argument list.
+  In the test source `if n.val as i32 < 0 { 1 } else { 0 }`, after parsing `i32`
+  the parser sees `<` and enters a depth-counting loop that consumes
+  `0 { 1 } else { 0 } }` without finding a matching `>`, reaching EOF, then
+  returning the `i32` type successfully. The if-expression's condition becomes
+  just `n.val as i32` (without the `< 0`), and `parse_block()` immediately finds
+  EOF where it expected `{`.
+- Assembly inspection tests confirmed `sxth` IS emitted for i16 struct fields.
+  The underlying implementation is correct; only the test syntax was broken.
 
 ## Applied
-- **`tests/e2e.rs`**: Redesigned the 4 failing tests to produce results ≤ 255
-  while still exercising u16/i16 truncation:
-  - `milestone_180_cast_u16_truncates_70000_to_4464`: uses `if (x as u16) as i32 == 4464 { 44 } else { 0 }`; expects 44. Identity pass-through (no truncation) would give 0.
-  - `milestone_180_cast_i16_1000_stays_positive`: uses `(x as i16) as i32 - 900`; expects 100. Sign-wrap would give a different value.
-  - `milestone_180_cast_u16_result_in_arithmetic`: uses input 65636 (= 65536+100 → as u16 = 100; 100+100=200); expects 200.
-  - `milestone_180_cast_u16_passed_to_fn`: uses input 65580 (= 65536+44 → as u16 = 44); expects 44.
+- **`tests/e2e.rs`**:
+  - Fixed `milestone_182_i16_struct_field_wraps_on_construction`: replaced
+    `if n.val as i32 < 0 { 1 } else { 0 }` with `let v: i32 = n.val as i32;`
+    followed by `if v < 0 { 1 } else { 0 }`. The `as i32 ;` ends with `;`
+    instead of `<`, bypassing the `parse_ty` ambiguity entirely.
+  - Added `runtime_i16_struct_field_construction_applies_sxth`: assembly inspection
+    test verifying `sxth` is emitted (positive) and `add` is present (not folded)
+    when constructing a struct with an i16 field from parameters.
+    This is the missing inspection test for the i16 case (u16 already had one).
 
 ## Validated
-- `cargo test --test e2e milestone_180` — 7 passed; 0 failed
-- `cargo test` — 1788 passed; 0 failed (all suites)
+- `cargo build` — clean
+- `cargo test` — 1572 e2e + 211 unit + 30 fixture + 1 smoke = all passed (0 failed)
 - `cargo clippy -- -D warnings` — clean
 
 ## FLS Notes
-- No new FLS ambiguities this cycle. This was a test infrastructure fix.
+- **FLS §12.1 / parse_ty ambiguity**: `parse_ty()` uses a greedy `<` heuristic
+  for generic type arguments. This is documented as AMBIGUOUS in the comment
+  (line ~1702: "FLS §12.1 AMBIGUOUS — the FLS does not specify the disambiguation
+  rule for `<` in type position"). The ambiguity manifests when `as T < N` appears
+  in a comparison: `T < N` is parsed as `T<N>` (incomplete generic). This is a
+  known limitation; test sources must avoid `as T < expr` patterns.
+  The correct long-term fix is a proper disambiguation rule (e.g. require `>` to
+  close generics, or use parser lookahead), but that is a separate change.
 
 ## Next
-- With CI now clean, the next work should implement the first untouched FLS
-  section beyond milestone 180. The narrowing cast story for 16-bit types is
-  now complete at the cast boundary. The next natural step is either:
-  1. u16/i16 as native IR types (IrTy::U16, IrTy::I16) for correct overflow
-     at arithmetic boundaries — similar to IrTy::U8/I8.
-  2. A new FLS section not yet covered (check §6.5 for remaining operators,
-     §6.16 range expressions as values, etc.).
+- Check tuple struct fields with narrow types for the same wrapping gap.
+- Check enum tuple variant fields with narrow types.
+- Or: advance to the next untouched FLS section.
