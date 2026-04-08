@@ -21819,3 +21819,308 @@ fn main() -> i32 {
         "use_high must call get_score__High via bl (runtime dispatch): {asm}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Milestone 146: multiple impl Trait params compile to runtime ARM64
+// FLS §11 (Implementations), §12.1 (Generic Parameters)
+// ---------------------------------------------------------------------------
+//
+// A function `fn f(a: impl A, b: impl B)` has two anonymous type parameters.
+// Each is monomorphized independently at the call site. The mangled name
+// encodes both concrete types: `f__TypeA_TypeB`. This tests that galvanic
+// correctly infers both concrete types from call-site arguments and emits
+// two independent monomorphized method calls in the body.
+
+const MULTI_IMPL_TRAIT_BASIC: &str = "
+trait Adder {
+    fn add(&self) -> i32;
+}
+trait Doubler {
+    fn double(&self) -> i32;
+}
+struct Foo { val: i32 }
+struct Bar { val: i32 }
+impl Adder for Foo {
+    fn add(&self) -> i32 { self.val + 1 }
+}
+impl Doubler for Bar {
+    fn double(&self) -> i32 { self.val * 2 }
+}
+fn combine(a: impl Adder, b: impl Doubler) -> i32 {
+    a.add() + b.double()
+}
+fn main() -> i32 {
+    let f = Foo { val: 3 };
+    let b = Bar { val: 4 };
+    combine(f, b)
+}
+";
+
+#[test]
+fn milestone_146_multi_impl_trait_basic() {
+    // combine(Foo{3}, Bar{4}) = (3+1) + (4*2) = 4 + 8 = 12
+    let Some(exit_code) = compile_and_run(MULTI_IMPL_TRAIT_BASIC) else { return };
+    assert_eq!(exit_code, 12);
+}
+
+#[test]
+fn milestone_146_multi_impl_trait_result_in_arithmetic() {
+    let src = "
+trait Adder {
+    fn add(&self) -> i32;
+}
+trait Doubler {
+    fn double(&self) -> i32;
+}
+struct Foo { val: i32 }
+struct Bar { val: i32 }
+impl Adder for Foo {
+    fn add(&self) -> i32 { self.val + 1 }
+}
+impl Doubler for Bar {
+    fn double(&self) -> i32 { self.val * 2 }
+}
+fn combine(a: impl Adder, b: impl Doubler) -> i32 {
+    a.add() + b.double()
+}
+fn main() -> i32 {
+    let f = Foo { val: 2 };
+    let b = Bar { val: 3 };
+    combine(f, b) + 1
+}
+";
+    // combine(Foo{2}, Bar{3}) = (2+1) + (3*2) = 3 + 6 = 9, +1 = 10
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 10);
+}
+
+#[test]
+fn milestone_146_multi_impl_trait_result_passed_to_fn() {
+    let src = "
+trait Adder {
+    fn add(&self) -> i32;
+}
+trait Doubler {
+    fn double(&self) -> i32;
+}
+struct Foo { val: i32 }
+struct Bar { val: i32 }
+impl Adder for Foo {
+    fn add(&self) -> i32 { self.val + 1 }
+}
+impl Doubler for Bar {
+    fn double(&self) -> i32 { self.val * 2 }
+}
+fn combine(a: impl Adder, b: impl Doubler) -> i32 {
+    a.add() + b.double()
+}
+fn identity(x: i32) -> i32 { x }
+fn main() -> i32 {
+    let f = Foo { val: 5 };
+    let b = Bar { val: 2 };
+    identity(combine(f, b))
+}
+";
+    // combine(Foo{5}, Bar{2}) = (5+1) + (2*2) = 6 + 4 = 10
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 10);
+}
+
+#[test]
+fn milestone_146_multi_impl_trait_called_twice() {
+    let src = "
+trait Adder {
+    fn add(&self) -> i32;
+}
+trait Doubler {
+    fn double(&self) -> i32;
+}
+struct Foo { val: i32 }
+struct Bar { val: i32 }
+impl Adder for Foo {
+    fn add(&self) -> i32 { self.val + 1 }
+}
+impl Doubler for Bar {
+    fn double(&self) -> i32 { self.val * 2 }
+}
+fn combine(a: impl Adder, b: impl Doubler) -> i32 {
+    a.add() + b.double()
+}
+fn main() -> i32 {
+    let f = Foo { val: 1 };
+    let b = Bar { val: 3 };
+    let first = combine(f, b);
+    let f2 = Foo { val: 2 };
+    let b2 = Bar { val: 1 };
+    let second = combine(f2, b2);
+    first + second
+}
+";
+    // first = (1+1)+(3*2) = 2+6 = 8; second = (2+1)+(1*2) = 3+2 = 5; total = 13
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 13);
+}
+
+#[test]
+fn milestone_146_multi_impl_trait_result_in_if() {
+    let src = "
+trait Adder {
+    fn add(&self) -> i32;
+}
+trait Doubler {
+    fn double(&self) -> i32;
+}
+struct Foo { val: i32 }
+struct Bar { val: i32 }
+impl Adder for Foo {
+    fn add(&self) -> i32 { self.val + 1 }
+}
+impl Doubler for Bar {
+    fn double(&self) -> i32 { self.val * 2 }
+}
+fn combine(a: impl Adder, b: impl Doubler) -> i32 {
+    a.add() + b.double()
+}
+fn main() -> i32 {
+    let f = Foo { val: 4 };
+    let b = Bar { val: 3 };
+    let result = combine(f, b);
+    if result > 10 { 1 } else { 0 }
+}
+";
+    // combine(Foo{4}, Bar{3}) = (4+1)+(3*2) = 5+6 = 11 > 10 → 1
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 1);
+}
+
+#[test]
+fn milestone_146_multi_impl_trait_on_parameter() {
+    // Both impl Trait args are passed as function parameters — prevents constant folding
+    let src = "
+trait Adder {
+    fn add(&self) -> i32;
+}
+trait Doubler {
+    fn double(&self) -> i32;
+}
+struct Foo { val: i32 }
+struct Bar { val: i32 }
+impl Adder for Foo {
+    fn add(&self) -> i32 { self.val + 1 }
+}
+impl Doubler for Bar {
+    fn double(&self) -> i32 { self.val * 2 }
+}
+fn combine(a: impl Adder, b: impl Doubler) -> i32 {
+    a.add() + b.double()
+}
+fn run(f: Foo, b: Bar) -> i32 {
+    combine(f, b)
+}
+fn main() -> i32 {
+    let f = Foo { val: 3 };
+    let b = Bar { val: 4 };
+    run(f, b)
+}
+";
+    // run(Foo{3}, Bar{4}) → combine → (3+1)+(4*2) = 4+8 = 12
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 12);
+}
+
+#[test]
+fn milestone_146_multi_impl_trait_three_params() {
+    let src = "
+trait A { fn a(&self) -> i32; }
+trait B { fn b(&self) -> i32; }
+trait C { fn c(&self) -> i32; }
+struct X { val: i32 }
+struct Y { val: i32 }
+struct Z { val: i32 }
+impl A for X { fn a(&self) -> i32 { self.val } }
+impl B for Y { fn b(&self) -> i32 { self.val + 1 } }
+impl C for Z { fn c(&self) -> i32 { self.val * 2 } }
+fn triple(a: impl A, b: impl B, c: impl C) -> i32 {
+    a.a() + b.b() + c.c()
+}
+fn main() -> i32 {
+    let x = X { val: 2 };
+    let y = Y { val: 3 };
+    let z = Z { val: 4 };
+    triple(x, y, z)
+}
+";
+    // triple(X{2}, Y{3}, Z{4}) = 2 + (3+1) + (4*2) = 2 + 4 + 8 = 14
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 14);
+}
+
+#[test]
+fn milestone_146_multi_impl_trait_same_trait_different_types() {
+    // Two params both impl the same trait but different concrete types
+    let src = "
+trait Value { fn get(&self) -> i32; }
+struct Low { val: i32 }
+struct High { val: i32 }
+impl Value for Low { fn get(&self) -> i32 { self.val } }
+impl Value for High { fn get(&self) -> i32 { self.val + 10 } }
+fn sum_values(a: impl Value, b: impl Value) -> i32 {
+    a.get() + b.get()
+}
+fn main() -> i32 {
+    let lo = Low { val: 3 };
+    let hi = High { val: 5 };
+    sum_values(lo, hi)
+}
+";
+    // sum_values(Low{3}, High{5}) = 3 + (5+10) = 3 + 15 = 18
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 18);
+}
+
+// Assembly inspection: multiple impl Trait params must produce a combined mangled label.
+#[test]
+fn runtime_multi_impl_trait_emits_combined_mangled_label() {
+    // `combine(a: impl Adder, b: impl Doubler)` with Foo + Bar concrete types
+    // must produce a function labeled `combine__Foo_Bar:` in the assembly.
+    // This verifies the two-param monomorphization is encoded in the symbol name.
+    let asm = compile_to_asm(MULTI_IMPL_TRAIT_BASIC);
+    assert!(
+        asm.contains("combine__Foo_Bar:"),
+        "multi-impl-Trait fn must emit `combine__Foo_Bar:` label; got: {asm}"
+    );
+    // The call site must emit `bl combine__Foo_Bar`, not fold the result.
+    assert!(
+        asm.contains("bl") && asm.contains("combine__Foo_Bar"),
+        "call site must dispatch via bl combine__Foo_Bar (not folded): {asm}"
+    );
+    // Result must not be the constant 12 folded into a mov.
+    assert!(
+        !asm.contains("mov     x0, #12"),
+        "result must not be constant-folded to #12: {asm}"
+    );
+}
+
+#[test]
+fn runtime_multi_impl_trait_both_methods_emitted() {
+    // Inside `combine__Foo_Bar`, both `Foo__add` and `Bar__double` must be called.
+    // This verifies that each impl Trait param dispatches to its own trait method,
+    // not to a single shared method.
+    let asm = compile_to_asm(MULTI_IMPL_TRAIT_BASIC);
+    assert!(
+        asm.contains("Foo__add:"),
+        "Adder impl for Foo must emit `Foo__add:` label: {asm}"
+    );
+    assert!(
+        asm.contains("Bar__double:"),
+        "Doubler impl for Bar must emit `Bar__double:` label: {asm}"
+    );
+    assert!(
+        asm.contains("bl") && asm.contains("Foo__add"),
+        "combine must call Foo__add via bl: {asm}"
+    );
+    assert!(
+        asm.contains("bl") && asm.contains("Bar__double"),
+        "combine must call Bar__double via bl: {asm}"
+    );
+}
