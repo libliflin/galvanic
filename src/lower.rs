@@ -9863,18 +9863,22 @@ impl<'src> LowerCtx<'src> {
             // FLS §10.3: Associated constant `TypeName::CONST_NAME`.
             // Check associated consts before enum variant discriminants —
             // both use two-segment paths, but consts take priority.
+            // FLS §12.1: When `TypeName` is a generic type parameter, resolve
+            // it through `generic_type_subst` to the concrete type.
             ExprKind::Path(segments)
                 if segments.len() == 2
                     && {
                         let type_name = segments[0].text(self.source);
                         let const_name = segments[1].text(self.source);
+                        let concrete = self.generic_type_subst.get(type_name).map(String::as_str).unwrap_or(type_name);
                         self.assoc_const_vals
-                            .contains_key(&format!("{type_name}::{const_name}"))
+                            .contains_key(&format!("{concrete}::{const_name}"))
                     } =>
             {
                 let type_name = segments[0].text(self.source);
                 let const_name = segments[1].text(self.source);
-                let key = format!("{type_name}::{const_name}");
+                let concrete = self.generic_type_subst.get(type_name).map(String::as_str).unwrap_or(type_name);
+                let key = format!("{concrete}::{const_name}");
                 let val = *self.assoc_const_vals.get(&key).unwrap();
                 let r = self.alloc_reg()?;
                 self.instrs.push(Instr::LoadImm(r, val));
