@@ -935,6 +935,28 @@ else
     pass "Claim 45: impl Trait return emits static bl (not blr) and runtime add (not folded)"
 fi
 
+# ── Claim 46: Supertrait method dispatch emits runtime bl (not constant-folded) ─
+#
+# Promise: Calling a supertrait method (`t.base_val()`) from a generic function
+# where `T: Derived` and `Derived: Base` must emit `add` for the method body and
+# must NOT fold the result to an immediate.
+# Likewise, calling both supertrait and subtrait methods and summing the results
+# must not be folded to the combined constant.
+#
+# FLS §4.14: Supertrait bounds — T: Derived implies T: Base.
+# FLS §4.14 AMBIGUOUS: Spec does not specify supertrait method resolution at generic call sites.
+# FLS §6.1.2 Constraint 1: fn main() is not a const context.
+#
+# Introduced in cycle 86 (supertrait bounds falsification, FLS §4.14, Milestone 164).
+# References: claims.md Claim 46.
+
+echo "--- Claim 46: supertrait method dispatch emits runtime bl (not constant-folded) ---"
+if cargo test --test e2e --quiet -- runtime_supertrait_call_emits_bl_not_folded runtime_supertrait_both_methods_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 46" "runtime_supertrait_call_emits_bl_not_folded or runtime_supertrait_both_methods_not_folded FAILED — supertrait method body may be folded to constant or add instruction missing"
+else
+    pass "Claim 46: supertrait method dispatch emits runtime add (not constant-folded)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 
