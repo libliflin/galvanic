@@ -15758,33 +15758,40 @@ impl<'src> LowerCtx<'src> {
                 }
 
                 // Check for an array variable iterator NEXT.
-                // Handles both:
-                //   `for x in arr`  — direct array consumption (FLS §6.15.1, §6.8)
-                //   `for x in &arr` — inline array borrow as slice (FLS §6.15.1, §4.9, §6.4.4)
+                // Handles three forms:
+                //   `for x in arr`      — direct array consumption (FLS §6.15.1, §6.8)
+                //   `for x in &arr`     — immutable borrow, yields copies (FLS §6.15.1, §4.9)
+                //   `for x in &mut arr` — mutable borrow, yields element addresses (FLS §6.15.1, §4.9)
                 //
-                // Both forms desugar to the same counted index loop: counter runs 0..arr_len,
-                // binding each element (by copy, since i32: Copy) to the loop variable.
+                // For `arr` and `&arr`: counter runs 0..arr_len, loading each element value
+                // into the loop variable slot (copy semantics, since i32: Copy).
                 //
-                // FLS §6.15.1 AMBIGUOUS: The spec desugars `for x in arr` to
-                // `IntoIterator::into_iter(arr)` and `for x in &arr` to
-                // `IntoIterator::into_iter(&arr)`, both requiring trait dispatch.
-                // Galvanic special-cases arrays at the IR level to avoid requiring
-                // a runtime IntoIterator implementation at this milestone.
+                // For `&mut arr`: counter runs 0..arr_len, computing the address of each
+                // element and storing that address in the loop variable slot. The body can
+                // then write `*x = val` to mutate elements in-place via `StorePtr`.
+                //
+                // FLS §6.15.1 AMBIGUOUS: The spec desugars all three forms via `IntoIterator`,
+                // requiring trait dispatch. Galvanic special-cases arrays at the IR level.
                 //
                 // FLS §4.9 AMBIGUOUS: `for x in &arr` should yield `&i32` references.
                 // Galvanic yields copies (i32) since i32: Copy — same observable behavior
                 // for Copy element types, but the binding type is technically wrong.
+                // `for x in &mut arr` correctly yields `&mut i32` pointers (addresses).
                 //
                 // Cache-line note: the array for loop emits ~9 instructions for the
                 // control flow skeleton (load, loadimm, cmp, cbz, add+ldr, str, body,
                 // load, loadimm, add, str, b) — within two 64-byte cache lines.
-                let array_iter: Option<(u8, usize)> = {
+                // `&mut arr` replaces `LoadIndexed` (2 instr) with `AddrOfIndexed` (2 instr)
+                // — identical instruction count.
+                //
+                // is_mut: true for `&mut arr`, false for `arr` / `&arr`.
+                let array_iter: Option<(u8, usize, bool)> = {
                     // Case 1: `for x in arr` — direct path to a local array variable.
                     let direct = if let ExprKind::Path(segs) = &iter.kind {
                         if segs.len() == 1 {
                             let vname = segs[0].text(self.source);
                             match self.locals.get(vname).copied() {
-                                Some(base) => self.local_array_lens.get(&base).copied().map(|len| (base, len)),
+                                Some(base) => self.local_array_lens.get(&base).copied().map(|len| (base, len, false)),
                                 None => None,
                             }
                         } else {
@@ -15793,17 +15800,17 @@ impl<'src> LowerCtx<'src> {
                     } else {
                         None
                     };
-                    // Case 2: `for x in &arr` — borrow of a local array variable.
+                    // Case 2: `for x in &arr` — shared borrow of a local array variable.
                     // FLS §6.4.4: The `&` operator creates a shared reference.
                     // FLS §4.9: Borrowing a [T; N] array produces a &[T; N], which
-                    // coerces to &[T]. Galvanic handles this as direct element access.
+                    // coerces to &[T]. Galvanic handles this as direct element access (copy).
                     let borrowed = if direct.is_none() {
                         if let ExprKind::Unary { op: crate::ast::UnaryOp::Ref, operand: inner } = &iter.kind {
                             if let ExprKind::Path(segs) = &inner.kind {
                                 if segs.len() == 1 {
                                     let vname = segs[0].text(self.source);
                                     match self.locals.get(vname).copied() {
-                                        Some(base) => self.local_array_lens.get(&base).copied().map(|len| (base, len)),
+                                        Some(base) => self.local_array_lens.get(&base).copied().map(|len| (base, len, false)),
                                         None => None,
                                     }
                                 } else {
@@ -15818,10 +15825,39 @@ impl<'src> LowerCtx<'src> {
                     } else {
                         None
                     };
-                    direct.or(borrowed)
+                    // Case 3: `for x in &mut arr` — mutable borrow of a local array.
+                    // FLS §6.4.4: `&mut` creates a mutable reference.
+                    // FLS §4.9: Borrowing [T; N] mutably yields `&mut [T; N]`.
+                    // The loop variable `x: &mut i32` holds the element's address.
+                    // The body uses `*x = val` (StorePtr) to mutate elements in-place.
+                    //
+                    // FLS §6.15.1 AMBIGUOUS: The spec requires IntoIterator dispatch.
+                    // Galvanic special-cases `&mut arr` at the IR level.
+                    let borrowed_mut = if direct.is_none() && borrowed.is_none() {
+                        if let ExprKind::Unary { op: crate::ast::UnaryOp::RefMut, operand: inner } = &iter.kind {
+                            if let ExprKind::Path(segs) = &inner.kind {
+                                if segs.len() == 1 {
+                                    let vname = segs[0].text(self.source);
+                                    match self.locals.get(vname).copied() {
+                                        Some(base) => self.local_array_lens.get(&base).copied().map(|len| (base, len, true)),
+                                        None => None,
+                                    }
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    direct.or(borrowed).or(borrowed_mut)
                 };
 
-                if let Some((arr_base, arr_len)) = array_iter {
+                if let Some((arr_base, arr_len, is_mut_borrow)) = array_iter {
                     let pat_name = pat.text(self.source);
 
                     // Allocate a hidden counter slot (0-based element index) and an
@@ -15870,7 +15906,15 @@ impl<'src> LowerCtx<'src> {
                     // Bind the loop variable so the body can load it via Path.
                     // FLS §4.2: f64/f32 loop variables use float_locals so path
                     // expressions emit LoadF64Slot / LoadF32Slot instead of Load.
-                    if is_f64_arr_loop {
+                    //
+                    // For `&mut arr`: the loop variable holds a pointer (i64 address),
+                    // not the element value. Always bind in `locals` (not float_locals)
+                    // so that Path resolution emits a plain `Load` (loads the pointer),
+                    // and `*x` dereferences it via `LoadPtr`. This is consistent with
+                    // how `&mut T` parameters are represented.
+                    if is_mut_borrow {
+                        self.locals.insert(pat_name, elem_slot);
+                    } else if is_f64_arr_loop {
                         self.float_locals.insert(pat_name, elem_slot);
                     } else if is_f32_arr_loop {
                         self.float32_locals.insert(pat_name, elem_slot);
@@ -15889,12 +15933,34 @@ impl<'src> LowerCtx<'src> {
                     self.instrs.push(Instr::BinOp { op: IrBinOp::Lt, dst: cmp_reg, lhs: counter_reg, rhs: len_reg });
                     self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: exit_label });
 
-                    // ── Bind element: elem_slot = arr[counter] ────────────────────────
-                    // FLS §6.9: Array indexing. The element at index `counter` is loaded
-                    // from the consecutive stack slots of the array.
-                    // FLS §4.2: Float arrays use d/s-registers for element loads.
+                    // ── Bind element ──────────────────────────────────────────────────
+                    // For `arr` / `&arr`: load the element value into elem_slot.
+                    //   FLS §6.9: Array indexing. The element at index `counter` is loaded
+                    //   from the consecutive stack slots of the array.
+                    //   FLS §4.2: Float arrays use d/s-registers for element loads.
+                    //
+                    // For `&mut arr`: compute the element's address and store it in elem_slot.
+                    //   FLS §6.5.1: `&mut arr[counter]` yields a mutable reference (pointer).
+                    //   FLS §4.9: The loop variable `x: &mut i32` holds the element address.
+                    //   The body uses `*x = val` (StorePtr) to mutate elements in-place.
+                    //   elem_slot holds the address, not the value — consistent with how
+                    //   `&mut T` parameters are represented (slot holds pointer).
+                    //
+                    //   Cache-line note: AddrOfIndexed emits 2 instructions (same as
+                    //   LoadIndexed) — no increase in loop body instruction count.
                     let elem_reg = self.alloc_reg()?;
-                    if is_f64_arr_loop {
+                    if is_mut_borrow {
+                        // Compute address of arr[counter]; store address in elem_slot.
+                        // FLS §6.5.1: AddrOfIndexed: sp + base_slot*8 + counter*8.
+                        let scratch_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::AddrOfIndexed {
+                            dst: elem_reg,
+                            base_slot: arr_base,
+                            index_reg: counter_reg,
+                            scratch: scratch_reg,
+                        });
+                        self.instrs.push(Instr::Store { src: elem_reg, slot: elem_slot });
+                    } else if is_f64_arr_loop {
                         // FLS §4.5: `[f64; N]` element — load into d-register, store as f64.
                         self.instrs.push(Instr::LoadIndexedF64 {
                             dst: elem_reg,

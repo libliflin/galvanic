@@ -1189,6 +1189,28 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
             )?;
         }
 
+        // FLS §6.5.1, §6.9: Address of an array element.
+        //
+        // Computes `sp + base_slot*8 + index_reg*8` — the address of arr[index].
+        // Two-instruction sequence: base address then scaled index add.
+        //
+        // Used by `for x in &mut arr` to bind each element's address to the
+        // loop variable, enabling `*x = val` to mutate elements in-place.
+        //
+        // Cache-line note: two 4-byte instructions (8 bytes). Pairs with
+        // `LoadIndexed` (also 2 instructions) — same footprint, different result.
+        Instr::AddrOfIndexed { dst, base_slot, index_reg, scratch } => {
+            let base_offset = *base_slot as u32 * 8;
+            writeln!(
+                out,
+                "    add     x{scratch}, sp, #{base_offset:<15} // FLS §6.5.1: address of arr[0]"
+            )?;
+            writeln!(
+                out,
+                "    add     x{dst}, x{scratch}, x{index_reg}, lsl #3  // FLS §6.9: address of arr[index]"
+            )?;
+        }
+
         // FLS §6.5.2: Dereference expression `*expr`.
         //
         // Loads the value at the memory address held in register `src`.

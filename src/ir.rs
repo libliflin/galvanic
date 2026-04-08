@@ -1107,6 +1107,32 @@ pub enum Instr {
         slot: u8,
     },
 
+    /// Compute the address of an array element: `dst = &arr[index]`.
+    ///
+    /// `AddrOfIndexed { dst, base_slot, index_reg, scratch }` emits:
+    ///   `add x{scratch}, sp, #{base_slot*8}`                   // base address of arr[0]
+    ///   `add x{dst}, x{scratch}, x{index_reg}, lsl #3`         // address of arr[index]
+    ///
+    /// FLS §6.5.1: Borrow expressions. FLS §6.9: Indexing expressions.
+    /// FLS §4.9: `&mut [T; N]` borrows produce a mutable reference to the element.
+    /// FLS §6.15.1: Used in `for x in &mut arr` to bind each element address.
+    ///
+    /// ARM64: Two-instruction sequence — `add` for base then `add` with `lsl #3`
+    /// scales the index by 8 (bytes per slot) to reach `arr[index]`.
+    ///
+    /// Cache-line note: two 4-byte instructions (8 bytes). The result pointer
+    /// occupies one 8-byte register slot — identical footprint to any i32 value.
+    AddrOfIndexed {
+        /// Destination register — receives the address of `arr[index]`.
+        dst: u8,
+        /// Stack slot index of the first array element (arr[0]).
+        base_slot: u8,
+        /// Register holding the runtime array index (0-based).
+        index_reg: u8,
+        /// Scratch register for base address computation (must not alias dst or index_reg).
+        scratch: u8,
+    },
+
     /// Load through a pointer: `dst = *src` (load 8 bytes at address in src).
     ///
     /// `LoadPtr { dst, src }` → `ldr x{dst}, [x{src}]` on ARM64.
