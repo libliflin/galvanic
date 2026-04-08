@@ -23959,3 +23959,255 @@ fn main() -> i32 { compute(Opt::Some(3), 4) }
         "let-else must emit cbz for discriminant check even when binding is used in arithmetic: {asm}"
     );
 }
+
+// ── Milestone 154: OR patterns in if-let and while-let ────────────────────────
+//
+// FLS §5.1.11: An OR pattern `p0 | p1 | ...` matches if any alternative matches.
+// FLS §6.17: if-let expressions accept refutable patterns including OR patterns.
+// FLS §6.15.4: while-let expressions accept refutable patterns including OR patterns.
+//
+// OR patterns in if-let were implemented alongside milestone 32 (match OR patterns)
+// but had no dedicated tests. This milestone validates that code path with
+// assembly inspection and compile-and-run tests.
+//
+// Lowering strategy (if-let OR):
+//   1. Evaluate scrutinee to scrut_slot.
+//   2. Initialise matched_reg = 0.
+//   3. For each alternative: load scrutinee, compare to pattern immediate,
+//      OR-accumulate the equality result into matched_reg.
+//   4. CondBranch matched_reg → else_label (branches when matched_reg == 0 = no match).
+//
+// Lowering strategy (while-let OR):
+//   Same as if-let but branches to exit_label on no-match, back-edge on match.
+//
+// FLS §6.1.2:37–45: All comparisons and branches are runtime instructions —
+// the answer cannot be known at compile time when the scrutinee is a parameter.
+// Cache-line note: 3 instructions per alternative (ldr + mov + cmeq), plus one
+// orr per additional alternative, plus 1 cbz = ~4 + 3×N instructions total.
+
+/// Milestone 154: basic OR pattern in if-let — first alternative matches.
+///
+/// `if let 0 | 1 | 2 = x { 1 } else { 0 }` — x=1 matches second alternative.
+/// FLS §5.1.11 + §6.17.
+#[test]
+fn milestone_154_if_let_or_first_alt_matches() {
+    let src = "fn main() -> i32 { let x = 0; if let 0 | 1 = x { 1 } else { 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected 1 when x=0 matches first OR alternative, got {exit_code}");
+}
+
+/// Milestone 154: OR pattern in if-let — second alternative matches.
+#[test]
+fn milestone_154_if_let_or_second_alt_matches() {
+    let src = "fn main() -> i32 { let x = 1; if let 0 | 1 = x { 1 } else { 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected 1 when x=1 matches second OR alternative, got {exit_code}");
+}
+
+/// Milestone 154: OR pattern in if-let — no alternative matches, else taken.
+#[test]
+fn milestone_154_if_let_or_no_match_else_taken() {
+    let src = "fn main() -> i32 { let x = 5; if let 0 | 1 = x { 1 } else { 0 } }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected 0 when x=5 matches no OR alternative, got {exit_code}");
+}
+
+/// Milestone 154: OR pattern in if-let on a function parameter.
+///
+/// The parameter prevents constant-folding — the branch must be emitted at runtime.
+/// FLS §6.1.2 Constraint 1: non-const code must emit runtime instructions.
+#[test]
+fn milestone_154_if_let_or_on_parameter() {
+    let src = r#"
+fn classify(x: i32) -> i32 {
+    if let 1 | 2 | 3 = x { 1 } else { 0 }
+}
+fn main() -> i32 { classify(2) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected 1 when parameter x=2 matches OR alternative, got {exit_code}");
+}
+
+/// Milestone 154: OR pattern in if-let on parameter — else branch taken.
+#[test]
+fn milestone_154_if_let_or_on_parameter_else() {
+    let src = r#"
+fn classify(x: i32) -> i32 {
+    if let 1 | 2 | 3 = x { 1 } else { 0 }
+}
+fn main() -> i32 { classify(7) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected 0 when parameter x=7 matches no OR alternative, got {exit_code}");
+}
+
+/// Milestone 154: OR pattern in if-let with enum unit variants.
+///
+/// `if let Status::Active | Status::Pending = s { 1 } else { 0 }` —
+/// variants are matched by discriminant value.
+/// FLS §5.5 + §5.1.11.
+#[test]
+fn milestone_154_if_let_or_enum_variants_first() {
+    let src = r#"
+enum Status { Active, Pending, Closed }
+fn check(s: Status) -> i32 {
+    if let Status::Active | Status::Pending = s { 1 } else { 0 }
+}
+fn main() -> i32 { check(Status::Active) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected 1 for Active matching OR pattern, got {exit_code}");
+}
+
+/// Milestone 154: OR pattern in if-let with enum unit variants — second variant.
+#[test]
+fn milestone_154_if_let_or_enum_variants_second() {
+    let src = r#"
+enum Status { Active, Pending, Closed }
+fn check(s: Status) -> i32 {
+    if let Status::Active | Status::Pending = s { 1 } else { 0 }
+}
+fn main() -> i32 { check(Status::Pending) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1, "expected 1 for Pending matching OR pattern, got {exit_code}");
+}
+
+/// Milestone 154: OR pattern in if-let with enum unit variants — else taken.
+#[test]
+fn milestone_154_if_let_or_enum_variants_else() {
+    let src = r#"
+enum Status { Active, Pending, Closed }
+fn check(s: Status) -> i32 {
+    if let Status::Active | Status::Pending = s { 1 } else { 0 }
+}
+fn main() -> i32 { check(Status::Closed) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected 0 for Closed not matching OR pattern, got {exit_code}");
+}
+
+/// Milestone 154: OR pattern in if-let result used in arithmetic.
+#[test]
+fn milestone_154_if_let_or_result_in_arithmetic() {
+    let src = r#"
+fn score(x: i32) -> i32 {
+    let base = if let 0 | 1 | 2 = x { 10 } else { 0 };
+    base + x
+}
+fn main() -> i32 { score(2) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 12, "expected 12 (base=10 + x=2), got {exit_code}");
+}
+
+/// Milestone 154: while-let with OR pattern — loop continues while value in set.
+///
+/// Counts from 1 upward; the while-let continues while value is 1, 2, or 3.
+/// FLS §6.15.4 + §5.1.11.
+#[test]
+fn milestone_154_while_let_or_counts_while_in_set() {
+    let src = r#"
+fn count_while_in_set(start: i32) -> i32 {
+    let mut x = start;
+    let mut n = 0;
+    while let 1 | 2 | 3 = x {
+        n = n + 1;
+        x = x + 1;
+    }
+    n
+}
+fn main() -> i32 { count_while_in_set(1) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 3, "expected 3 iterations (x=1,2,3), got {exit_code}");
+}
+
+/// Milestone 154: while-let with OR pattern — no match initially, loop doesn't execute.
+#[test]
+fn milestone_154_while_let_or_no_initial_match() {
+    let src = r#"
+fn count_while_in_set(start: i32) -> i32 {
+    let mut x = start;
+    let mut n = 0;
+    while let 1 | 2 | 3 = x {
+        n = n + 1;
+        x = x + 1;
+    }
+    n
+}
+fn main() -> i32 { count_while_in_set(5) }
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0, "expected 0 iterations when start=5 not in set, got {exit_code}");
+}
+
+// ── Assembly inspection: OR patterns in if-let ────────────────────────────────
+
+/// Assembly check: OR pattern in if-let emits orr accumulation and cbz.
+///
+/// The pattern `if let 1 | 2 = x { ... }` must emit:
+///   - orr to accumulate equality results across alternatives (not constant-folded)
+///   - cbz to branch on the accumulated match flag
+///
+/// FLS §5.1.11 + §6.17: OR pattern check is runtime when scrutinee is a parameter.
+/// FLS §6.1.2 Constraint 1: non-const code emits runtime instructions.
+#[test]
+fn runtime_if_let_or_emits_orr_accumulation() {
+    let src = r#"
+fn classify(x: i32) -> i32 {
+    if let 1 | 2 = x { 1 } else { 0 }
+}
+fn main() -> i32 { classify(1) }
+"#;
+    let asm = compile_to_asm(src);
+    // OR accumulation must emit `orr` to combine equality results.
+    assert!(asm.contains("orr"), "OR pattern in if-let must emit orr for accumulation: {asm}");
+    // Must emit a conditional branch based on the accumulated flag.
+    assert!(asm.contains("cbz"), "OR pattern in if-let must emit cbz for branch: {asm}");
+}
+
+/// Assembly check: OR pattern in if-let with enum variants emits orr and cbz.
+///
+/// Verifies the enum-variant OR path through `pat_scalar_imm`, which resolves
+/// each variant to its discriminant integer.
+/// FLS §5.5 + §5.1.11 + §6.17.
+#[test]
+fn runtime_if_let_or_enum_emits_orr_accumulation() {
+    let src = r#"
+enum Status { Active, Pending, Closed }
+fn check(s: Status) -> i32 {
+    if let Status::Active | Status::Pending = s { 1 } else { 0 }
+}
+fn main() -> i32 { check(Status::Active) }
+"#;
+    let asm = compile_to_asm(src);
+    assert!(asm.contains("orr"), "OR pattern with enum variants must emit orr: {asm}");
+    assert!(asm.contains("cbz"), "OR pattern with enum variants must emit cbz: {asm}");
+    // Must NOT constant-fold Status::Active (discriminant 0) check.
+    assert!(
+        !asm.contains("mov     x0, #1\n\tret"),
+        "OR pattern in if-let must not constant-fold result to #1: {asm}"
+    );
+}
+
+/// Assembly check: OR pattern result in if-let not folded when scrutinee is parameter.
+///
+/// `classify(x)` must emit runtime orr+cbz — cannot fold when `x` is unknown.
+/// FLS §6.1.2 Constraint 1.
+#[test]
+fn runtime_if_let_or_result_not_folded() {
+    let src = r#"
+fn classify(x: i32) -> i32 {
+    if let 1 | 2 | 3 = x { 10 } else { 0 }
+}
+fn main() -> i32 { classify(2) }
+"#;
+    let asm = compile_to_asm(src);
+    assert!(asm.contains("orr"), "OR pattern must emit runtime orr for accumulation: {asm}");
+    // Must NOT fold to `mov x0, #10` — result depends on runtime parameter x.
+    assert!(
+        !asm.contains("mov     x0, #10"),
+        "OR pattern in if-let must not constant-fold result to #10: {asm}"
+    );
+}
