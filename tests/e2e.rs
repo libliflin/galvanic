@@ -32817,3 +32817,119 @@ fn main() -> i32 {
         "main result must not be constant-folded to #36: {asm}"
     );
 }
+
+/// Claim 79 adversarial test — assembly inspection half.
+///
+/// When `apply(f, s)` calls `f(s)` where `f: fn(&[i32]) -> i32` and
+/// `s: &[i32]`, the `apply` function must:
+/// 1. Use `blr` for the indirect call (not a direct `bl`).
+/// 2. Load BOTH fat-pointer components (data pointer + length) from the
+///    slice's stack slots before the `blr` — at least two `ldr` instructions.
+///
+/// Before the Cycle 142 fix, `CallIndirect` only emitted one load (the data
+/// pointer), passing garbage in x1 as the length. The callee would then
+/// segfault or loop for the wrong number of iterations.
+///
+/// FLS §4.9: `&[T]` is a fat pointer (data pointer + element count).
+/// FLS §6.1.2:37–45: Non-const function bodies must emit runtime instructions.
+/// FLS §4.9 AMBIGUOUS: Fat-pointer ABI not specified; galvanic uses two
+/// consecutive registers (data ptr in xN, length in xN+1).
+#[test]
+fn runtime_fn_ptr_slice_arg_emits_two_loads() {
+    let src = r#"
+fn sum_vals(s: &[i32]) -> i32 {
+    let mut t = 0;
+    for x in s { t = t + x; }
+    t
+}
+fn apply(f: fn(&[i32]) -> i32, s: &[i32]) -> i32 { f(s) }
+fn main() -> i32 {
+    let a = [2, 3, 5];
+    apply(sum_vals, &a)
+}
+"#;
+    let asm = compile_to_asm(src);
+
+    // Scope to the `apply` function (between `apply:` and `main:`).
+    let in_apply: Vec<&str> = asm
+        .lines()
+        .skip_while(|l| !l.starts_with("apply:"))
+        .take_while(|l| !l.starts_with("main:"))
+        .collect();
+
+    // apply must use blr for the indirect call (not direct bl sum_vals).
+    let has_blr = in_apply.iter().any(|l| l.trim_start().starts_with("blr"));
+    assert!(
+        has_blr,
+        "apply must use blr for indirect call through fn ptr: {}",
+        in_apply.join("\n")
+    );
+
+    // apply must emit at least 2 ldr instructions before the blr — one for
+    // the fat-pointer data component and one for the length component.
+    // A callee that only loads the data pointer (and passes garbage as length)
+    // would have exactly 1 ldr for the fat-pointer arguments.
+    let ldr_count = in_apply.iter().filter(|l| l.trim_start().starts_with("ldr")).count();
+    assert!(
+        ldr_count >= 2,
+        "apply must emit >=2 ldr instructions to pass both fat-pointer components \
+         (data ptr + length) — got {ldr_count}: {}",
+        in_apply.join("\n")
+    );
+
+    // Must not fold sum([2,3,5]) = 10 to a compile-time constant.
+    assert!(
+        !asm.contains("mov     x0, #10"),
+        "result must not be constant-folded to #10: {asm}"
+    );
+}
+
+/// Claim 79 adversarial test — two slices of different lengths through a fn ptr.
+///
+/// Calls the same function via a function pointer with slices of length 3 and 2.
+/// Before the fix, both calls would pass only the data pointer (x0); the callee
+/// would read garbage from x1 as the length. An interpreter that folds to the
+/// first call's length would return #3 for both. A correct compiler passes the
+/// runtime length each time, so the assembly must not constant-fold either result.
+///
+/// FLS §4.9: Fat-pointer length is determined at the call site and passed to
+/// the callee as a runtime argument.
+/// FLS §6.1.2:37–45: Non-const function bodies emit runtime instructions.
+#[test]
+fn claim_79_fn_ptr_slice_arg_passes_len_not_just_ptr() {
+    let asm = compile_to_asm(
+        "fn slice_len(s: &[i32]) -> usize { s.len() }\n\
+fn apply_len(f: fn(&[i32]) -> usize, s: &[i32]) -> usize { f(s) }\n\
+fn main() -> i32 {\n\
+    let a = [1, 2, 3];\n\
+    let b = [10, 20];\n\
+    (apply_len(slice_len, &a) + apply_len(slice_len, &b)) as i32\n\
+}\n",
+    );
+    // Must not fold either call's result to a compile-time constant length.
+    assert!(
+        !asm.contains("mov     x0, #3"),
+        "slice_len via fn ptr must not constant-fold to length #3: {asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #2"),
+        "slice_len via fn ptr must not constant-fold to length #2: {asm}"
+    );
+    // Must not fold the combined result.
+    assert!(
+        !asm.contains("mov     x0, #5"),
+        "combined result must not be constant-folded to #5: {asm}"
+    );
+    // apply_len must use blr (indirect dispatch, not direct bl).
+    let in_apply: Vec<&str> = asm
+        .lines()
+        .skip_while(|l| !l.starts_with("apply_len:"))
+        .take_while(|l| !l.starts_with("main:"))
+        .collect();
+    let has_blr = in_apply.iter().any(|l| l.trim_start().starts_with("blr"));
+    assert!(
+        has_blr,
+        "apply_len must use blr for indirect call: {}",
+        in_apply.join("\n")
+    );
+}
