@@ -658,3 +658,47 @@ The negative assertion (`!asm.contains("mov     x0, #17")`) directly catches thi
 - contains `mov     x0, #17` (guard result constant-folded to the literal call-site value).
 
 **Test**: `cargo test --test e2e -- runtime_match_guard_with_param_emits_runtime_comparison`
+
+---
+
+## Claim 25: let-else with mixed-kind OR alternatives emits runtime check for all alternatives
+
+**Stakeholder**: William (researcher), FLS / Ferrocene Ecosystem
+
+**Promise**: When a `let-else` statement has an OR pattern mixing kinds (literal `|` range),
+both alternatives are evaluated at runtime via OR accumulation. For example:
+
+```rust
+fn classify(n: i32) -> i32 {
+    let 1 | 10..=20 = n else { return 0 };
+    1
+}
+```
+
+The pattern `1 | 10..=20` must emit:
+- A literal equality check (n == 1)
+- A range check (10 ≤ n ≤ 20)
+- An `orr` to accumulate both results
+- A `cbz` to branch to the else block if neither matched
+
+**Why this claim matters**: Cycle 59 added `accum_or_alt` to the let-else lowering path,
+but tests covered only scalar-literal OR and enum-variant OR in let-else — NOT mixed kinds.
+The parser's `parse_let_pattern` function had a separate `LitInteger` branch that did NOT
+check for `..=`/`..` after the literal, silently returning `Pat::LitInt(10)` and leaving
+`..=20` as the next token (causing "expected Semi, found DotDotEq").
+
+This cycle fixed the parser bug and registered the claim so any regression
+(in parser or lowerer) is caught adversarially.
+
+**Attack vector**: Reverting the parser fix causes `let 1 | 10..=20 = n else { ... }` to
+fail at parse time with a confusing "expected Semi" error — valid Rust rejected by galvanic.
+Alternatively, if `accum_or_alt` is not called for the range alternative in let-else,
+`classify(15)` would exit 0 (range check skipped, only literal checked, 15 ≠ 1 → else taken).
+
+**Violated if**: `compile_to_asm(...)` for `fn classify(n: i32) -> i32 { let 1 | 10..=20 = n else { return 0 }; 1 }` called with `classify(15)` returns assembly that:
+- causes a parse failure (parser bug not fixed), OR
+- lacks `orr` (range alternative not OR-accumulated), OR
+- lacks `cbz` (no else-branch on no-match), OR
+- contains `mov     x0, #1\n\tret` (result constant-folded).
+
+**Test**: `cargo test --test e2e -- runtime_let_else_or_mixed_emits_orr_accumulation`
