@@ -388,7 +388,35 @@ impl<'src> Parser<'src> {
         let start = self.current_span();
         self.expect(TokenKind::KwImpl)?;
 
-        // After `impl`, we expect an identifier. It is either:
+        // FLS §12.1: `impl` may be followed by a generic parameter list:
+        //   `impl<T> Type<T> { ... }` or `impl<T> Trait<T> for Type<T> { ... }`.
+        // FLS §12.1 AMBIGUOUS: The FLS does not specify the disambiguation rule
+        // for `<` immediately after `impl` (generic params vs. less-than). In
+        // practice, `<` after `impl` always starts a generic parameter list.
+        let mut generic_params = Vec::new();
+        if self.peek_kind() == TokenKind::Lt {
+            self.advance(); // eat `<`
+            loop {
+                if self.peek_kind() == TokenKind::Gt {
+                    self.advance(); // eat `>`
+                    break;
+                }
+                if self.peek_kind() != TokenKind::Ident {
+                    return Err(self.error(format!(
+                        "expected type parameter name or `>` in impl generic params, found {:?}",
+                        self.peek_kind()
+                    )));
+                }
+                generic_params.push(self.current_span());
+                self.advance();
+                if !self.eat(TokenKind::Comma) {
+                    self.expect(TokenKind::Gt)?;
+                    break;
+                }
+            }
+        }
+
+        // After `impl` (and optional `<T>`), we expect an identifier. It is either:
         //   (a) `impl TypeName {`            — inherent impl: trait_name = None
         //   (b) `impl TraitName for TypeName {` — trait impl: trait_name = Some(…)
         //
@@ -403,6 +431,21 @@ impl<'src> Parser<'src> {
         let first_ident = self.current_span();
         self.advance();
 
+        // FLS §12.1: After the type/trait name, there may be angle-bracket type
+        // arguments: `Pair<T>` or `Iterator<Item = i32>`. Consume and discard them
+        // — for monomorphization at this milestone, all type args resolve to i32.
+        if self.peek_kind() == TokenKind::Lt {
+            self.advance(); // eat `<`
+            let mut depth = 1usize;
+            while depth > 0 && self.peek_kind() != TokenKind::Eof {
+                match self.peek_kind() {
+                    TokenKind::Lt => { self.advance(); depth += 1; }
+                    TokenKind::Gt => { self.advance(); depth -= 1; }
+                    _ => { self.advance(); }
+                }
+            }
+        }
+
         // Disambiguate: if the next token is `for`, `first_ident` is the trait name.
         let (trait_name, ty) = if self.peek_kind() == TokenKind::KwFor {
             self.advance(); // eat `for`
@@ -414,6 +457,18 @@ impl<'src> Parser<'src> {
             }
             let struct_ty = self.current_span();
             self.advance();
+            // FLS §12.1: Skip angle-bracket type args on the impl target type too.
+            if self.peek_kind() == TokenKind::Lt {
+                self.advance(); // eat `<`
+                let mut depth = 1usize;
+                while depth > 0 && self.peek_kind() != TokenKind::Eof {
+                    match self.peek_kind() {
+                        TokenKind::Lt => { self.advance(); depth += 1; }
+                        TokenKind::Gt => { self.advance(); depth -= 1; }
+                        _ => { self.advance(); }
+                    }
+                }
+            }
             (Some(first_ident), struct_ty)
         } else {
             (None, first_ident)
@@ -464,7 +519,7 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::CloseBrace)?;
         let span = start.to(end);
 
-        Ok(ImplDef { ty, trait_name, methods, assoc_consts, assoc_types, span })
+        Ok(ImplDef { ty, generic_params, trait_name, methods, assoc_consts, assoc_types, span })
     }
 
     /// Parse a trait definition.
@@ -1325,6 +1380,27 @@ impl<'src> Parser<'src> {
                         self.advance();
                     } else {
                         return Err(self.error("expected identifier after `::`"));
+                    }
+                }
+
+                // FLS §12.1: A generic type in type position may have angle-bracket
+                // type arguments, e.g. `Pair<i32>` or `Vec<T>`. Consume and discard
+                // them — galvanic monomorphizes generic types to i32 and does not
+                // carry type arguments through the IR.
+                //
+                // FLS §12.1: AMBIGUOUS — the FLS does not specify the disambiguation
+                // rule for `<` in type position (generic type args vs. less-than).
+                // Galvanic uses a greedy depth-counting strategy: if `<` immediately
+                // follows a type name, it is treated as a type argument list.
+                if self.peek_kind() == TokenKind::Lt {
+                    self.advance(); // consume `<`
+                    let mut depth = 1usize;
+                    while depth > 0 && self.peek_kind() != TokenKind::Eof {
+                        match self.peek_kind() {
+                            TokenKind::Lt => { self.advance(); depth += 1; }
+                            TokenKind::Gt => { self.advance(); depth -= 1; }
+                            _ => { self.advance(); }
+                        }
                     }
                 }
 

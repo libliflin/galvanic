@@ -19408,3 +19408,183 @@ fn main() -> i32 { use_wrapper(7) }
         "generic struct result must not be constant-folded to 14: {asm}"
     );
 }
+
+// ── Milestone 136: Generic impl blocks (FLS §12.1) ────────────────────────────
+
+/// Milestone 136: basic generic impl — `impl<T> Pair<T> { fn get_first(&self) -> T }`.
+///
+/// FLS §12.1: A generic impl block may declare type parameters that are used in
+/// method signatures and bodies. Each call site monomorphizes to a concrete type.
+#[test]
+fn milestone_136_generic_impl_get_first() {
+    let src = r#"
+struct Pair<T> { first: T, second: T }
+impl<T> Pair<T> {
+    fn get_first(&self) -> T { self.first }
+}
+fn main() -> i32 {
+    let p = Pair { first: 3, second: 7 };
+    p.get_first()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 3);
+}
+
+/// Milestone 136: second field accessor via generic impl.
+#[test]
+fn milestone_136_generic_impl_get_second() {
+    let src = r#"
+struct Pair<T> { first: T, second: T }
+impl<T> Pair<T> {
+    fn get_second(&self) -> T { self.second }
+}
+fn main() -> i32 {
+    let p = Pair { first: 3, second: 7 };
+    p.get_second()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 7);
+}
+
+/// Milestone 136: method body uses impl type param in arithmetic.
+#[test]
+fn milestone_136_generic_impl_arithmetic() {
+    let src = r#"
+struct Pair<T> { first: T, second: T }
+impl<T> Pair<T> {
+    fn sum(&self) -> i32 { self.first + self.second }
+}
+fn main() -> i32 {
+    let p = Pair { first: 4, second: 5 };
+    p.sum()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 9);
+}
+
+/// Milestone 136: generic impl method called on a parameter.
+#[test]
+fn milestone_136_generic_impl_on_parameter() {
+    let src = r#"
+struct Pair<T> { first: T, second: T }
+impl<T> Pair<T> {
+    fn get_first(&self) -> T { self.first }
+}
+fn use_pair(p: Pair<i32>) -> i32 { p.get_first() }
+fn main() -> i32 {
+    let p = Pair { first: 11, second: 22 };
+    use_pair(p)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 11);
+}
+
+/// Milestone 136: generic impl method result used in arithmetic.
+#[test]
+fn milestone_136_generic_impl_result_in_arithmetic() {
+    let src = r#"
+struct Pair<T> { first: T, second: T }
+impl<T> Pair<T> {
+    fn get_first(&self) -> T { self.first }
+}
+fn main() -> i32 {
+    let p = Pair { first: 3, second: 0 };
+    p.get_first() * 4
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 12);
+}
+
+/// Milestone 136: multiple generic impl methods, both accessible.
+#[test]
+fn milestone_136_two_generic_impl_methods() {
+    let src = r#"
+struct Pair<T> { first: T, second: T }
+impl<T> Pair<T> {
+    fn get_first(&self) -> T { self.first }
+    fn get_second(&self) -> T { self.second }
+}
+fn main() -> i32 {
+    let p = Pair { first: 6, second: 4 };
+    p.get_first() - p.get_second()
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 2);
+}
+
+/// Milestone 136: generic impl method passed to a function.
+#[test]
+fn milestone_136_generic_impl_result_passed_to_fn() {
+    let src = r#"
+struct Pair<T> { first: T, second: T }
+impl<T> Pair<T> {
+    fn get_second(&self) -> T { self.second }
+}
+fn double(x: i32) -> i32 { x * 2 }
+fn main() -> i32 {
+    let p = Pair { first: 0, second: 5 };
+    double(p.get_second())
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 10);
+}
+
+/// Milestone 136: generic impl with extra scalar parameter.
+#[test]
+fn milestone_136_generic_impl_with_extra_param() {
+    let src = r#"
+struct Pair<T> { first: T, second: T }
+impl<T> Pair<T> {
+    fn scaled_first(&self, scale: i32) -> i32 { self.first * scale }
+}
+fn main() -> i32 {
+    let p = Pair { first: 3, second: 0 };
+    p.scaled_first(5)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 15);
+}
+
+/// Assembly inspection: generic impl method emits a mangled label and bl call.
+///
+/// FLS §12.1: Methods in a generic impl block are monomorphized to a concrete
+/// label. `get_first` in `impl<T> Pair<T>` must emit as `Pair__get_first__i32`.
+#[test]
+fn runtime_generic_impl_emits_mangled_label() {
+    let src = r#"
+struct Pair<T> { first: T, second: T }
+impl<T> Pair<T> {
+    fn get_first(&self) -> T { self.first }
+}
+fn use_pair(n: i32) -> i32 {
+    let p = Pair { first: n, second: 0 };
+    p.get_first()
+}
+fn main() -> i32 { use_pair(7) }
+"#;
+    let asm = compile_to_asm(src);
+    // The monomorphized method label must appear in the assembly.
+    assert!(
+        asm.contains("Pair__get_first__i32"),
+        "generic impl method must emit mangled label Pair__get_first__i32: {asm}"
+    );
+    // Must emit `bl use_pair` — the outer call must not be folded away.
+    // If galvanic folded use_pair(7) = 7 by constant propagation, the `bl` would be absent.
+    assert!(
+        asm.contains("bl      use_pair") || asm.contains("bl use_pair"),
+        "call use_pair(7) must emit bl use_pair — must not be folded: {asm}"
+    );
+    // Must not fold to the constant 7.
+    assert!(
+        !asm.contains("mov     x0, #7") || asm.contains("ldr"),
+        "result must not be constant-folded to #7 without a load: {asm}"
+    );
+}
