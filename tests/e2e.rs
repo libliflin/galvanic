@@ -32543,3 +32543,48 @@ fn runtime_slice_arg_emits_adrof_and_len() {
         "caller must emit #4 as the slice length argument: {asm}"
     );
 }
+
+/// Claim 78 adversarial test: `&[T]` slice parameter `.len()` is a runtime load from
+/// the fat-pointer length slot — never a compile-time constant inlined from the call site.
+///
+/// Adversarial design: the same `slice_len` function is called with slices of two
+/// *different* lengths (3 and 2). If the callee constant-folds to the first array's
+/// length (#3), the second call would produce the wrong result. An interpreter would
+/// return #3 for both calls; a correct compiler emits `ldr` to load from the slot.
+///
+/// FLS §4.9: `&[T]` is a fat pointer; `.len()` reads the runtime length field.
+/// FLS §6.1.2:37–45: Non-const function bodies must emit runtime instructions.
+#[test]
+fn claim_78_slice_param_len_is_runtime_load_not_folded() {
+    // Two slices of different lengths passed to the same function.
+    // Expected combined length: 3 + 2 = 5.
+    let asm = compile_to_asm(
+        "fn slice_len(s: &[i32]) -> usize { s.len() }\
+\nfn main() -> i32 {\
+\n    let a = [1, 2, 3];\
+\n    let b = [10, 20];\
+\n    (slice_len(&a) + slice_len(&b)) as i32\
+\n}\n",
+    );
+    // The callee must emit ldr to load the length from its parameter slot.
+    assert!(
+        asm.contains("ldr"),
+        "slice_len must emit ldr to load length parameter: {asm}"
+    );
+    // The callee must NOT return a compile-time constant matching either array size.
+    // If folded to #3 (first call's length), the second call returns 3 instead of 2 —
+    // a correct compiler emits ldr so the same function handles any length.
+    assert!(
+        !asm.contains("mov     x0, #3"),
+        "slice_len must not constant-fold return to #3 (first array length): {asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #2"),
+        "slice_len must not constant-fold return to #2 (second array length): {asm}"
+    );
+    // The combined result (5) must not be folded either.
+    assert!(
+        !asm.contains("mov     x0, #5"),
+        "main must not constant-fold combined slice length to #5: {asm}"
+    );
+}

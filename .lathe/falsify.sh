@@ -1406,6 +1406,18 @@ else
     pass "Claim 77: narrow integer const items wrap for subtraction (underflow) and multiplication (not just addition)"
 fi
 
+echo "--- Claim 78: &[T] slice parameter fat-pointer length is a runtime load, not a compile-time constant ---"
+if cargo test --test e2e -- \
+    claim_78_slice_param_len_is_runtime_load_not_folded \
+    runtime_slice_param_len_emits_ldr_not_constant \
+    runtime_slice_index_emits_ptr_arithmetic_and_load \
+    runtime_slice_arg_emits_adrof_and_len \
+    2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 78" "&[T] slice fat-pointer FAILED — callee may be constant-folding .len() from call-site info, or slice indexing skipping pointer arithmetic (mul+add+ldr)"
+else
+    pass "Claim 78: &[T] slice parameter fat-pointer length is a runtime load and indexing uses pointer arithmetic (not constant-folded)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 
