@@ -19956,3 +19956,232 @@ fn main() -> i32 { use_wrapper(Wrapper { inner: 7 }) }
         "use_wrapper must call Wrapper__get__i32 via bl — not inline/fold: {asm}"
     );
 }
+
+// ── Milestone 139: Generic trait bounds compile to runtime ARM64 (FLS §12.1 + §4.14) ─
+//
+// A generic function with a trait bound (`fn apply<T: Scalable>(t: T, n: i32) -> i32`)
+// can call trait methods on its type-parameter'd argument. Galvanic monomorphizes
+// the function for each concrete struct type used at call sites, producing a label
+// `apply_scale__Foo` that dispatches through `Foo__scale` at runtime.
+//
+// FLS §12.1: "A generic function may declare one or more type parameters."
+// FLS §4.14: "A trait bound restricts the set of types that can be used."
+// FLS §12.1: AMBIGUOUS — The FLS does not specify how trait bounds interact with
+// monomorphization beyond the requirement that all type constraints be satisfied.
+// Galvanic infers the concrete type from the call-site argument type.
+
+#[test]
+fn milestone_139_trait_bound_basic() {
+    let src = r#"
+trait Scalable { fn scale(&self, factor: i32) -> i32; }
+struct Foo { val: i32 }
+impl Scalable for Foo {
+    fn scale(&self, factor: i32) -> i32 { self.val * factor }
+}
+fn apply_scale<T: Scalable>(t: T, n: i32) -> i32 { t.scale(n) }
+fn main() -> i32 {
+    let f = Foo { val: 3 };
+    apply_scale(f, 4)
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 12);
+}
+
+#[test]
+fn milestone_139_trait_bound_identity() {
+    let src = r#"
+trait Getter { fn get(&self) -> i32; }
+struct Box { inner: i32 }
+impl Getter for Box {
+    fn get(&self) -> i32 { self.inner }
+}
+fn extract<T: Getter>(t: T) -> i32 { t.get() }
+fn main() -> i32 {
+    let b = Box { inner: 7 };
+    extract(b)
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 7);
+}
+
+#[test]
+fn milestone_139_trait_bound_in_arithmetic() {
+    let src = r#"
+trait Scalable { fn scale(&self, factor: i32) -> i32; }
+struct Foo { val: i32 }
+impl Scalable for Foo {
+    fn scale(&self, factor: i32) -> i32 { self.val * factor }
+}
+fn apply_scale<T: Scalable>(t: T, n: i32) -> i32 { t.scale(n) }
+fn main() -> i32 {
+    let f = Foo { val: 2 };
+    apply_scale(f, 5) + 1
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 11);
+}
+
+#[test]
+fn milestone_139_trait_bound_result_passed_to_fn() {
+    let src = r#"
+trait Scalable { fn scale(&self, factor: i32) -> i32; }
+struct Foo { val: i32 }
+impl Scalable for Foo {
+    fn scale(&self, factor: i32) -> i32 { self.val * factor }
+}
+fn apply_scale<T: Scalable>(t: T, n: i32) -> i32 { t.scale(n) }
+fn double(x: i32) -> i32 { x * 2 }
+fn main() -> i32 {
+    let f = Foo { val: 3 };
+    double(apply_scale(f, 4))
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 24);
+}
+
+#[test]
+fn milestone_139_trait_bound_two_types() {
+    let src = r#"
+trait Value { fn val(&self) -> i32; }
+struct A { x: i32 }
+struct B { y: i32 }
+impl Value for A { fn val(&self) -> i32 { self.x } }
+impl Value for B { fn val(&self) -> i32 { self.y + 1 } }
+fn get_val<T: Value>(t: T) -> i32 { t.val() }
+fn main() -> i32 {
+    let a = A { x: 5 };
+    let b = B { y: 6 };
+    get_val(a) + get_val(b)
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 12);
+}
+
+#[test]
+fn milestone_139_trait_bound_called_from_non_generic() {
+    let src = r#"
+trait Scalable { fn scale(&self, factor: i32) -> i32; }
+struct Foo { val: i32 }
+impl Scalable for Foo {
+    fn scale(&self, factor: i32) -> i32 { self.val * factor }
+}
+fn apply_scale<T: Scalable>(t: T, n: i32) -> i32 { t.scale(n) }
+fn run() -> i32 {
+    let f = Foo { val: 4 };
+    apply_scale(f, 3)
+}
+fn main() -> i32 { run() }
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 12);
+}
+
+#[test]
+fn milestone_139_trait_bound_called_twice() {
+    let src = r#"
+trait Scalable { fn scale(&self, factor: i32) -> i32; }
+struct Foo { val: i32 }
+impl Scalable for Foo {
+    fn scale(&self, factor: i32) -> i32 { self.val * factor }
+}
+fn apply_scale<T: Scalable>(t: T, n: i32) -> i32 { t.scale(n) }
+fn main() -> i32 {
+    let f1 = Foo { val: 2 };
+    let f2 = Foo { val: 3 };
+    apply_scale(f1, 4) + apply_scale(f2, 2)
+}
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 14);
+}
+
+#[test]
+fn milestone_139_trait_bound_on_parameter() {
+    let src = r#"
+trait Scalable { fn scale(&self, factor: i32) -> i32; }
+struct Foo { val: i32 }
+impl Scalable for Foo {
+    fn scale(&self, factor: i32) -> i32 { self.val * factor }
+}
+fn apply_scale<T: Scalable>(t: T, n: i32) -> i32 { t.scale(n) }
+fn run(n: i32) -> i32 {
+    let f = Foo { val: 3 };
+    apply_scale(f, n)
+}
+fn main() -> i32 { run(5) }
+"#;
+    let Some(exit) = compile_and_run(src) else { return; };
+    assert_eq!(exit, 15);
+}
+
+// Assembly inspection tests: verify monomorphization emits runtime code, not constant-fold
+#[test]
+fn runtime_trait_bound_emits_monomorphized_label() {
+    let src = r#"
+trait Scalable { fn scale(&self, factor: i32) -> i32; }
+struct Foo { val: i32 }
+impl Scalable for Foo {
+    fn scale(&self, factor: i32) -> i32 { self.val * factor }
+}
+fn apply_scale<T: Scalable>(t: T, n: i32) -> i32 { t.scale(n) }
+fn main() -> i32 {
+    let f = Foo { val: 3 };
+    apply_scale(f, 4)
+}
+"#;
+    let asm = compile_to_asm(src);
+    // The monomorphized function label must exist: apply_scale__Foo.
+    assert!(
+        asm.contains("apply_scale__Foo:"),
+        "generic fn with trait bound must emit monomorphized label apply_scale__Foo: {asm}"
+    );
+    // Inside apply_scale__Foo, the call to Foo__scale must appear.
+    assert!(
+        asm.contains("bl      Foo__scale") || asm.contains("bl Foo__scale"),
+        "monomorphized body must call Foo__scale via bl: {asm}"
+    );
+    // Must NOT constant-fold to the answer 12.
+    assert!(
+        !asm.contains("mov     x0, #12"),
+        "result must not be constant-folded to mov x0, #12: {asm}"
+    );
+}
+
+#[test]
+fn runtime_trait_bound_result_not_folded() {
+    // Verify with a runtime parameter that the dispatch cannot be constant-folded.
+    let src = r#"
+trait Scalable { fn scale(&self, factor: i32) -> i32; }
+struct Foo { val: i32 }
+impl Scalable for Foo {
+    fn scale(&self, factor: i32) -> i32 { self.val * factor }
+}
+fn apply_scale<T: Scalable>(t: T, n: i32) -> i32 { t.scale(n) }
+fn run(n: i32) -> i32 {
+    let f = Foo { val: 3 };
+    apply_scale(f, n)
+}
+fn main() -> i32 { run(4) }
+"#;
+    let asm = compile_to_asm(src);
+    // The monomorphized label must appear.
+    assert!(
+        asm.contains("apply_scale__Foo:"),
+        "trait-bound generic must emit monomorphized label: {asm}"
+    );
+    // Must NOT fold to a constant (n is runtime).
+    assert!(
+        !asm.contains("mov     x0, #12"),
+        "result must not be constant-folded when input is runtime: {asm}"
+    );
+    // The trait method call must be emitted at runtime.
+    assert!(
+        asm.contains("bl      Foo__scale") || asm.contains("bl Foo__scale"),
+        "trait method must dispatch via bl Foo__scale: {asm}"
+    );
+}

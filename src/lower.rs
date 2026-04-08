@@ -1708,10 +1708,11 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     let mut trampolines: Vec<crate::ir::ClosureTrampoline> = Vec::new();
     let mut label_base: u32 = 0;
     // FLS §12.1: Accumulated monomorphization requests from call sites.
-    // Each entry is a base function name (e.g. "identity"). After the main
-    // second pass, each unique name is instantiated with T = i32 and appended
-    // to `fns` under the mangled label (e.g. "identity__i32").
-    let mut pending_monos: Vec<String> = Vec::new();
+    // Each entry is `(base_name, concrete_types)` where `concrete_types` lists
+    // the concrete type for each type parameter (e.g., `"Foo"` for a struct
+    // type parameter, `"i32"` for a scalar). The mangled name is built by
+    // joining concrete_types with `_`: `apply__Foo` or `identity__i32`.
+    let mut pending_monos: Vec<(String, Vec<String>)> = Vec::new();
     // Track which mangled names have already been generated to avoid duplicates.
     let mut seen_mono_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     for item in &src.items {
@@ -1722,7 +1723,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                 if !fn_def.generic_params.is_empty() {
                     continue;
                 }
-                let (ir_fn, closure_fns, fn_trampolines, next_label, needed) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &tuple_struct_float_field_types, &enum_defs, &enum_variant_float_field_types, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &const_f64_vals, &const_f32_vals, &assoc_const_vals, &static_names, &static_f64_names, &static_f32_names, &fn_names, &struct_raw_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, &generic_fn_param_counts, &HashMap::new(), None, label_base)?;
+                let (ir_fn, closure_fns, fn_trampolines, next_label, needed) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &tuple_struct_float_field_types, &enum_defs, &enum_variant_float_field_types, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &const_f64_vals, &const_f32_vals, &assoc_const_vals, &static_names, &static_f64_names, &static_f32_names, &fn_names, &struct_raw_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, &generic_fn_param_counts, &HashMap::new(), &HashMap::new(), None, label_base)?;
                 label_base = next_label;
                 fns.push(ir_fn);
                 fns.extend(closure_fns);
@@ -1795,6 +1796,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         &struct_float_field_types,
                         &generic_fn_param_counts,
                         &HashMap::new(),
+                        &HashMap::new(),
                         mctx,
                         label_base,
                     )?;
@@ -1864,6 +1866,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                                 &struct_float_field_types,
                                 &generic_fn_param_counts,
                                 &HashMap::new(),
+                                &HashMap::new(),
                                 mctx,
                                 label_base,
                             )?;
@@ -1903,10 +1906,10 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     // to generic free functions are supported.
     let mut mono_idx = 0;
     while mono_idx < pending_monos.len() {
-        let base_name = pending_monos[mono_idx].clone();
+        let (base_name, concrete_types) = pending_monos[mono_idx].clone();
         mono_idx += 1;
 
-        // Build the substitution: all type params → IrTy::I32.
+        // Build the substitution: each type param → concrete type.
         //
         // FLS §12.1: Check both generic free functions and generic methods.
         // `base_name` is either a free function name ("identity") or a
@@ -1927,20 +1930,48 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
         // For `impl<T> Pair<T> { fn get(&self) -> T }`, the method has 0 own params
         // but the impl contributes `T`.
         let n_params = fn_def.generic_params.len() + impl_params.len();
-        let suffix = std::iter::repeat_n("i32", n_params).collect::<Vec<_>>().join("_");
+
+        // Use concrete_types if provided (may include struct type names like "Foo"),
+        // otherwise fall back to "i32" for all params. Concrete types come from the
+        // call site's argument type inference (FLS §12.1: monomorphization).
+        let effective_concrete: Vec<String> = if concrete_types.len() == n_params {
+            concrete_types.clone()
+        } else {
+            std::iter::repeat_n("i32".to_owned(), n_params).collect()
+        };
+        let suffix = effective_concrete.join("_");
         let mangled = format!("{base_name}__{suffix}");
 
         if !seen_mono_names.insert(mangled.clone()) {
             continue; // already generated
         }
 
-        // Build the generic substitution: each type param name → IrTy::I32.
-        // FLS §12.1: all type parameters are substituted with their concrete type.
-        // At this milestone, all scalar type params default to i32.
-        // Include both the method's own type params and the impl block's type params.
+        // Build the IR type substitution: each type param name → IrTy::I32.
+        // FLS §12.1: all type parameters substitute to their IR type.
+        // Struct-typed params still use IrTy::I32 for arithmetic; the struct
+        // type name is tracked separately in `generic_type_subst` below.
         let mut generic_subst: HashMap<String, IrTy> = HashMap::new();
         for param_span in fn_def.generic_params.iter().chain(impl_params.iter()) {
             generic_subst.insert(param_span.text(source).to_owned(), IrTy::I32);
+        }
+
+        // Build the struct-type substitution: type param name → concrete struct name.
+        // FLS §12.1: When T is bound to a struct type, carry the type name into
+        // `lower_fn` so that params of type T are registered in `local_struct_types`.
+        // This enables method calls on T-typed params to dispatch correctly.
+        let mut generic_type_subst: HashMap<String, String> = HashMap::new();
+        for (i, param_span) in fn_def.generic_params.iter()
+            .chain(impl_params.iter())
+            .enumerate()
+        {
+            let concrete = effective_concrete.get(i).map(|s| s.as_str()).unwrap_or("i32");
+            if concrete != "i32" {
+                // Only non-scalar (struct/enum) types go into generic_type_subst.
+                generic_type_subst.insert(
+                    param_span.text(source).to_owned(),
+                    concrete.to_owned(),
+                );
+            }
         }
 
         // Create a MethodCtx with the mangled name (override_name) to emit
@@ -1985,6 +2016,7 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
             &struct_float_field_types,
             &generic_fn_param_counts,
             &generic_subst,
+            &generic_type_subst,
             mctx,
             label_base,
         )?;
@@ -2069,7 +2101,7 @@ fn collect_tuple_param_leaves(pats: &[Pat]) -> Result<Vec<Option<&crate::ast::Sp
 /// functions it generated, the next fresh label counter, and the list of
 /// generic base names that were called and need monomorphization.
 type LowerFnResult = Result<
-    (IrFn, Vec<IrFn>, Vec<crate::ir::ClosureTrampoline>, u32, Vec<String>),
+    (IrFn, Vec<IrFn>, Vec<crate::ir::ClosureTrampoline>, u32, Vec<(String, Vec<String>)>),
     LowerError,
 >;
 
@@ -2109,6 +2141,12 @@ fn lower_fn(
     // FLS §12.1: Each call to `lower_fn` for a monomorphized generic function
     // supplies the concrete types here. Empty for non-generic functions.
     generic_subst: &HashMap<String, IrTy>,
+    // Substitution for struct-typed generic params, e.g. `{"T" -> "Foo"}`.
+    // FLS §12.1: When a type parameter is bound to a struct type (not a scalar),
+    // this carries the concrete struct name so that method calls on parameters
+    // of that type dispatch through the existing struct method mechanism.
+    // Empty for non-generic functions and scalar-only monomorphizations.
+    generic_type_subst: &HashMap<String, String>,
     method: Option<MethodCtx<'_>>,
     start_label: u32,
 ) -> LowerFnResult {
@@ -2632,6 +2670,23 @@ fn lower_fn(
             && segs.len() == 1
         {
             let type_name = segs[0].text(source);
+
+            // FLS §12.1: If this parameter's declared type is a generic type
+            // parameter (e.g., `T`) and `generic_type_subst` maps it to a
+            // concrete struct name (e.g., `"Foo"`), treat the param as a `Foo`
+            // struct for the purposes of register spilling and method dispatch.
+            //
+            // This enables trait-bounded generic functions (`fn apply<T: Scalable>`)
+            // to call trait methods on their type-param'd parameters.
+            //
+            // FLS §12.1: AMBIGUOUS — The FLS specifies that type params are
+            // substituted with concrete types at monomorphization, but does not
+            // mandate the calling convention for struct-typed type params. Galvanic
+            // uses the same multi-register convention as named struct parameters.
+            let type_name: &str = generic_type_subst
+                .get(type_name)
+                .map(|s| s.as_str())
+                .unwrap_or(type_name);
 
             // FLS §11 / §6.12.2: Struct parameter — pass each field as a
             // separate register, matching the method self-parameter convention.
@@ -4016,15 +4071,16 @@ struct LowerCtx<'src> {
     /// Cache-line note: read-only during lowering; not on any hot path.
     generic_fn_param_counts: HashMap<String, usize>,
 
-    /// Names of generic base functions whose monomorphizations are needed.
+    /// Generic base functions whose monomorphizations are needed, with concrete types.
     ///
     /// FLS §12.1: Collected at call sites during lowering of a function body.
-    /// Each entry is the original (non-mangled) name of a generic function that
-    /// was called and needs to be instantiated. Propagated back through
-    /// `lower_fn`'s return value to the outer monomorphization loop.
+    /// Each entry is `(base_name, concrete_types)` where `concrete_types` lists
+    /// the concrete type for each type parameter (in declaration order). For
+    /// scalar parameters the concrete type is `"i32"`; for struct parameters
+    /// the concrete type is the struct name (e.g., `"Foo"`).
     ///
     /// Cache-line note: typically empty or very small. Not on a hot path.
-    needed_monos: Vec<String>,
+    needed_monos: Vec<(String, Vec<String>)>,
 }
 
 /// Collect all free variables in `expr` that are present in `outer_locals`
@@ -11031,19 +11087,46 @@ impl<'src> LowerCtx<'src> {
                 };
 
                 // FLS §12.1: If calling a generic function, remap the base name to
-                // the mangled specialisation name (`identity` → `identity__i32`)
-                // and record it so the outer monomorphisation loop can emit the
-                // specialised function body.  All type parameters default to i32
-                // because galvanic has no type checker yet.
+                // the mangled specialisation name (`identity` → `identity__i32` or
+                // `apply__Foo` for a struct-typed type parameter) and record it so
+                // the outer monomorphisation loop can emit the specialised function
+                // body.
+                //
+                // Concrete type inference: scan args (without evaluating them) to
+                // find struct-typed variables. For each type param, use the first
+                // struct-typed arg's type (if available), otherwise "i32".
+                //
+                // FLS §12.1: AMBIGUOUS — The FLS does not specify type inference
+                // for generic calls. Galvanic uses call-site argument types.
                 let fn_name = if let Some(&n_params) =
                     self.generic_fn_param_counts.get(&fn_name)
                 {
-                    let suffix = std::iter::repeat_n("i32", n_params)
-                        .collect::<Vec<_>>()
-                        .join("_");
+                    // Pre-scan args to collect struct type names in order of appearance.
+                    let mut struct_arg_types: Vec<String> = Vec::new();
+                    for arg in args {
+                        if let ExprKind::Path(segs) = &arg.kind
+                            && segs.len() == 1
+                        {
+                            let var_name = segs[0].text(self.source);
+                            if let Some(&slot) = self.locals.get(var_name)
+                                && let Some(st) = self.local_struct_types.get(&slot)
+                            {
+                                struct_arg_types.push(st.clone());
+                                continue;
+                            }
+                        }
+                        struct_arg_types.push("i32".to_owned());
+                    }
+                    // Build concrete_types: first n_params entries (scalar or struct).
+                    // If more type params than detected types, pad with "i32".
+                    let concrete_types: Vec<String> = (0..n_params)
+                        .map(|i| struct_arg_types.get(i).cloned().unwrap_or_else(|| "i32".to_owned()))
+                        .collect();
+                    let suffix = concrete_types.join("_");
                     let mangled = format!("{fn_name}__{suffix}");
-                    if !self.needed_monos.contains(&fn_name) {
-                        self.needed_monos.push(fn_name.clone());
+                    // Record the base name with concrete types for the mono loop.
+                    if !self.needed_monos.iter().any(|(n, _)| n == &fn_name) {
+                        self.needed_monos.push((fn_name.clone(), concrete_types));
                     }
                     mangled
                 } else {
@@ -14220,14 +14303,16 @@ impl<'src> LowerCtx<'src> {
                 // name to `TypeName__method_name__i32` (one `i32` per type param).
                 // Record the base mangled name in `needed_monos` so the outer
                 // monomorphization loop emits the specialised method body.
+                // Generic methods use scalar "i32" types only (struct type dispatch
+                // is handled at the call site for free functions, not methods).
                 let mangled = if let Some(&n_params) =
                     self.generic_fn_param_counts.get(&base_mangled)
                 {
-                    let suffix = std::iter::repeat_n("i32", n_params)
-                        .collect::<Vec<_>>()
-                        .join("_");
-                    if !self.needed_monos.contains(&base_mangled) {
-                        self.needed_monos.push(base_mangled.clone());
+                    let concrete_types: Vec<String> =
+                        std::iter::repeat_n("i32".to_owned(), n_params).collect();
+                    let suffix = concrete_types.join("_");
+                    if !self.needed_monos.iter().any(|(n, _)| n == &base_mangled) {
+                        self.needed_monos.push((base_mangled.clone(), concrete_types));
                     }
                     format!("{base_mangled}__{suffix}")
                 } else {

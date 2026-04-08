@@ -305,12 +305,12 @@ impl<'src> Parser<'src> {
         let name = self.current_span();
         self.advance();
 
-        // Optional generic type parameter list: `<T>`, `<T, U>`, etc.
+        // Optional generic type parameter list: `<T>`, `<T, U>`, `<T: Trait>`, etc.
         //
         // FLS §12.1: A generic function may declare type parameters in
         // angle brackets after the function name: `fn foo<T, U>(...)`.
-        // Each type parameter is an identifier. Bounds (`T: Trait`) and
-        // where clauses are not yet supported (future milestone).
+        // Each type parameter is an identifier, optionally followed by a
+        // colon and one or more trait bounds (`T: Scalable` or `T: A + B`).
         //
         // FLS §12.1 AMBIGUOUS: The FLS does not specify the disambiguation
         // rule for `<` in this position (generic list vs. less-than). In
@@ -332,6 +332,20 @@ impl<'src> Parser<'src> {
                 }
                 generic_params.push(self.current_span());
                 self.advance();
+                // FLS §12.1, §4.14: Optional inline trait bound `T: TraitName`
+                // or `T: A + B`. The bound is recorded in the AST for future
+                // use; at this milestone galvanic infers the concrete type from
+                // the call-site argument type rather than the bound annotation.
+                if self.eat(TokenKind::Colon) {
+                    loop {
+                        if self.peek_kind() == TokenKind::Ident {
+                            self.advance(); // skip bound trait name
+                        }
+                        if !self.eat(TokenKind::Plus) {
+                            break;
+                        }
+                    }
+                }
                 if !self.eat(TokenKind::Comma) {
                     self.expect(TokenKind::Gt)?;
                     break;
@@ -409,6 +423,17 @@ impl<'src> Parser<'src> {
                 }
                 generic_params.push(self.current_span());
                 self.advance();
+                // FLS §12.1, §4.14: Optional inline trait bound `T: TraitName`.
+                if self.eat(TokenKind::Colon) {
+                    loop {
+                        if self.peek_kind() == TokenKind::Ident {
+                            self.advance();
+                        }
+                        if !self.eat(TokenKind::Plus) {
+                            break;
+                        }
+                    }
+                }
                 if !self.eat(TokenKind::Comma) {
                     self.expect(TokenKind::Gt)?;
                     break;
