@@ -881,6 +881,33 @@ else
     pass "Claim 43: if expression emits runtime cbz and result not folded to #7"
 fi
 
+# ── Claim 44: &dyn Trait-returning function emits runtime bl + vtable blr ────
+#
+# Promise: a function returning `&dyn Trait` must emit:
+#   (a) `bl forward` — runtime call to the dyn-returning function (not inlined/folded)
+#   (b) `blr` — vtable indirect dispatch on the returned fat pointer (not devirtualized)
+#   (c) `ldr x0` / `ldr x1` — fat pointer halves loaded at callee return (RetFields)
+#   (d) `str x0` / `str x1` — fat pointer halves stored at call site (CallRetFatPtr)
+#   (e) NOT `mov x0, #7` — result must not be constant-folded
+#
+# Attack vectors:
+#   1. Constant-fold the entire pipeline (mov x0, #7) — exit code still correct.
+#   2. Devirtualize the returned trait object (bl Dog__sound instead of blr).
+#   3. Drop the fat pointer ABI (treat &dyn Trait return as scalar pointer).
+#
+# FLS §4.13 + §6.1.2 Constraint 1: fat pointer return requires both halves;
+# fn main() is not a const context — dispatch must happen at runtime.
+#
+# Introduced in cycle 82 (dyn return falsification, FLS §4.13, Milestone 162).
+# References: claims.md Claim 44.
+
+echo "--- Claim 44: &dyn Trait-returning function emits runtime bl + vtable blr (not constant-folded) ---"
+if cargo test --test e2e --quiet -- runtime_dyn_return_emits_fat_ptr_loads_and_stores runtime_dyn_return_not_folded 2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 44" "runtime_dyn_return_emits_fat_ptr_loads_and_stores or runtime_dyn_return_not_folded FAILED — dyn-returning fn may be missing fat ptr ABI (ldr/str x0/x1), bl forward, blr dispatch, or result was constant-folded to #7"
+else
+    pass "Claim 44: dyn-returning fn emits bl forward + fat ptr ldr/str + blr dispatch (not folded to #7)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 
