@@ -26004,3 +26004,254 @@ fn runtime_dyn_trait_rebind_not_folded() {
         "dyn Trait re-bind must NOT constant-fold area to 12; got:\n{asm}"
     );
 }
+
+// ── Milestone 161: Chained &dyn Trait re-binds (FLS §4.13) ───────────────────
+//
+// M160 covered single re-bind: `let y = x` where `x` is `&dyn Trait`.
+// M161 covers chained re-binds: `let y = x; let z = y;` and deeper chains.
+//
+// Each re-bind copies the fat pointer (data_ptr, vtable_ptr) to new stack slots
+// and registers the new name in `local_dyn_types`. A chained re-bind (`let z = y`)
+// follows the same path because `y` was registered in `local_dyn_types` during
+// the first re-bind.
+//
+// FLS §4.13: AMBIGUOUS — The spec does not specify how fat pointer type
+// information propagates through multiple levels of let bindings. Galvanic
+// propagates `local_dyn_types` at each re-bind level.
+
+const DYN_TRAIT_CHAINED_REBIND_BASIC: &str = "
+trait Shape {
+    fn area(&self) -> i32;
+}
+struct Rect { w: i32, h: i32 }
+impl Shape for Rect {
+    fn area(&self) -> i32 { self.w * self.h }
+}
+fn use_shape(s: &dyn Shape) -> i32 { s.area() }
+fn main() -> i32 {
+    let r = Rect { w: 3, h: 4 };
+    let x: &dyn Shape = &r;
+    let y = x;
+    let z = y;
+    use_shape(z)
+}
+";
+
+#[test]
+fn milestone_161_chained_rebind_basic() {
+    // Two-level re-bind: x → y → z, pass z to fn(&dyn Trait).
+    let Some(exit_code) = compile_and_run(DYN_TRAIT_CHAINED_REBIND_BASIC) else {
+        return;
+    };
+    assert_eq!(exit_code, 12); // 3 * 4 = 12
+}
+
+#[test]
+fn milestone_161_chained_rebind_method_call() {
+    // Call method directly on doubly-re-bound variable.
+    let src = "
+trait Shape {
+    fn area(&self) -> i32;
+}
+struct Square { side: i32 }
+impl Shape for Square {
+    fn area(&self) -> i32 { self.side * self.side }
+}
+fn main() -> i32 {
+    let sq = Square { side: 5 };
+    let x: &dyn Shape = &sq;
+    let y = x;
+    let z = y;
+    z.area()
+}
+";
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 25); // 5 * 5 = 25
+}
+
+#[test]
+fn milestone_161_chained_rebind_three_levels() {
+    // Three-level re-bind: x → y → z → w.
+    let src = "
+trait Val {
+    fn get(&self) -> i32;
+}
+struct Wrap { v: i32 }
+impl Val for Wrap {
+    fn get(&self) -> i32 { self.v + 1 }
+}
+fn fetch(v: &dyn Val) -> i32 { v.get() }
+fn main() -> i32 {
+    let w = Wrap { v: 6 };
+    let a: &dyn Val = &w;
+    let b = a;
+    let c = b;
+    let d = c;
+    fetch(d)
+}
+";
+    // 6 + 1 = 7
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 7);
+}
+
+#[test]
+fn milestone_161_chained_rebind_two_types() {
+    // Two concrete types, each chained through two re-binds.
+    let src = "
+trait Compute {
+    fn value(&self) -> i32;
+}
+struct A { n: i32 }
+struct B { n: i32 }
+impl Compute for A {
+    fn value(&self) -> i32 { self.n + 1 }
+}
+impl Compute for B {
+    fn value(&self) -> i32 { self.n * 2 }
+}
+fn run(c: &dyn Compute) -> i32 { c.value() }
+fn main() -> i32 {
+    let a = A { n: 3 };
+    let b = B { n: 5 };
+    let ca: &dyn Compute = &a;
+    let cb: &dyn Compute = &b;
+    let ra = ca;
+    let ra2 = ra;
+    let rb = cb;
+    let rb2 = rb;
+    run(ra2) + run(rb2)
+}
+";
+    // (3+1) + (5*2) = 4 + 10 = 14
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 14);
+}
+
+#[test]
+fn milestone_161_chained_rebind_result_in_arithmetic() {
+    let src = "
+trait Num {
+    fn get(&self) -> i32;
+}
+struct N { v: i32 }
+impl Num for N {
+    fn get(&self) -> i32 { self.v * 3 }
+}
+fn fetch(n: &dyn Num) -> i32 { n.get() }
+fn main() -> i32 {
+    let n = N { v: 4 };
+    let a: &dyn Num = &n;
+    let b = a;
+    let c = b;
+    fetch(c) + 2
+}
+";
+    // 4*3 + 2 = 14
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 14);
+}
+
+#[test]
+fn milestone_161_chained_rebind_result_in_if() {
+    let src = "
+trait Flag {
+    fn val(&self) -> i32;
+}
+struct Toggle { on: i32 }
+impl Flag for Toggle {
+    fn val(&self) -> i32 { self.on }
+}
+fn check(f: &dyn Flag) -> i32 { f.val() }
+fn main() -> i32 {
+    let t = Toggle { on: 1 };
+    let a: &dyn Flag = &t;
+    let b = a;
+    let c = b;
+    if check(c) > 0 { 42 } else { 0 }
+}
+";
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 42);
+}
+
+#[test]
+fn milestone_161_chained_rebind_on_parameter() {
+    let src = "
+trait Measure {
+    fn size(&self) -> i32;
+}
+struct Box1 { w: i32 }
+impl Measure for Box1 {
+    fn size(&self) -> i32 { self.w * 2 }
+}
+fn wrap(b: Box1) -> i32 {
+    let dm: &dyn Measure = &b;
+    let dm2 = dm;
+    let dm3 = dm2;
+    dm3.size()
+}
+fn main() -> i32 { wrap(Box1 { w: 6 }) }
+";
+    // 6 * 2 = 12
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 12);
+}
+
+#[test]
+fn milestone_161_chained_rebind_called_twice() {
+    let src = "
+trait Counter {
+    fn count(&self) -> i32;
+}
+struct Num { n: i32 }
+impl Counter for Num {
+    fn count(&self) -> i32 { self.n }
+}
+fn sum_twice(c: &dyn Counter) -> i32 { c.count() + c.count() }
+fn main() -> i32 {
+    let x = Num { n: 7 };
+    let dc: &dyn Counter = &x;
+    let dc2 = dc;
+    let dc3 = dc2;
+    sum_twice(dc3)
+}
+";
+    // 7 + 7 = 14
+    let Some(exit_code) = compile_and_run(src) else { return };
+    assert_eq!(exit_code, 14);
+}
+
+// Assembly inspection: chained fat pointer re-bind must emit ldr/str pairs for
+// each level and vtable dispatch via blr — NOT fold the result.
+//
+// Adversarial assertion: even though the concrete type's area(Rect{w:3,h:4})=12
+// is statically known, the result must not be folded to `mov x0, #12`.
+
+#[test]
+fn runtime_dyn_trait_chained_rebind_emits_loads() {
+    // Each level of re-bind must emit ldr to copy fat pointer slots.
+    let asm = compile_to_asm(DYN_TRAIT_CHAINED_REBIND_BASIC);
+    assert!(
+        asm.contains("ldr"),
+        "chained fat pointer re-bind must emit ldr; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("blr"),
+        "chained dyn Trait dispatch must emit blr; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("vtable_Shape_Rect"),
+        "vtable label `vtable_Shape_Rect` must be present; got:\n{asm}"
+    );
+}
+
+#[test]
+fn runtime_dyn_trait_chained_rebind_not_folded() {
+    // The result (3*4=12) must NOT be constant-folded through any level of re-bind.
+    let asm = compile_to_asm(DYN_TRAIT_CHAINED_REBIND_BASIC);
+    assert!(
+        !asm.contains("mov     x0, #12"),
+        "chained dyn Trait re-bind must NOT fold area to 12; got:\n{asm}"
+    );
+}
