@@ -33719,3 +33719,128 @@ fn main() -> i32 {\
         "for-mut-slice loop must emit mul for element pointer arithmetic: {asm}"
     );
 }
+
+// ── Claim 85: for x in &[T] slice iteration emits runtime fat-pointer loads ──
+// FLS §6.15.1, §4.9
+//
+// Registers the existing assembly inspection tests for `for x in s` where
+// `s: &[i32]` as a named claim in the falsification suite. The two load-bearing
+// tests (`runtime_for_slice_emits_ldr_and_ptr_arithmetic` and
+// `runtime_for_slice_called_twice_not_folded`) already exist and pass; this
+// entry ensures they are checked every cycle.
+//
+// Registered in .lathe/claims.md (Claim 85) and .lathe/falsify.sh.
+
+// ── Claim 86: closure trampoline correctly shifts &mut [T] fat-pointer args ──
+// FLS §4.9, §6.22, §4.13
+
+/// Assembly inspection: capturing closure with `&mut [T]` explicit parameter.
+///
+/// A capturing `move` closure with a `&mut [T]` explicit parameter, passed to
+/// an `impl Fn(&mut [T])` callee, generates a trampoline. That trampoline must
+/// shift BOTH fat-pointer registers (data pointer AND length) to make room for
+/// the captured value — exactly as for `&[T]` (Claim 80). The fat-pointer ABI
+/// does not change because the reference is mutable.
+///
+/// The fix in `lower.rs` counts register slots via `TyKind::Ref { inner, .. }`
+/// with `..` ignoring `mutable`, so both `&[T]` and `&mut [T]` are counted as
+/// 2 register slots. This test confirms that `&mut [T]` is handled identically.
+///
+/// FLS §4.9: `&mut [T]` is a fat pointer (data pointer + length). Mutability
+/// does not change the ABI — both are two consecutive ARM64 registers.
+/// FLS §6.22, §4.13: Trampoline shifts explicit arguments by `n_caps` positions.
+/// A fat-pointer explicit arg occupies 2 slots, so n_explicit_regs = 2.
+/// FLS §6.1.2:37–45: Non-const function bodies emit runtime instructions.
+/// FLS §4.9 AMBIGUOUS: Fat-pointer ABI not specified; galvanic uses two
+/// consecutive ARM64 registers (data ptr in xN, length in xN+1).
+#[test]
+fn runtime_closure_trampoline_shifts_fat_ptr_mut_slice_param() {
+    let src = r#"
+fn slice_len(s: &mut [i32]) -> usize { s.len() }
+fn apply_len(f: impl Fn(&mut [i32]) -> usize, s: &mut [i32]) -> usize { f(s) }
+fn main() -> i32 {
+    let cap: i32 = 10;
+    let mut arr: [i32; 3] = [1, 2, 3];
+    apply_len(move |s: &mut [i32]| slice_len(s) + cap as usize, &mut arr) as i32
+}
+"#;
+    let asm = compile_to_asm(src);
+
+    // The trampoline must shift BOTH fat-pointer registers:
+    // - mov x2, x1  (shift len from position 1 to position 2)
+    // - mov x1, x0  (shift ptr from position 0 to position 1)
+    // - mov x0, x27 (cap from callee-saved into position 0)
+    let trampoline_section: Vec<&str> = asm
+        .lines()
+        .skip_while(|l| !l.contains("_trampoline:"))
+        .take_while(|l| !l.trim_start().starts_with("//") || l.contains("_trampoline"))
+        .collect();
+
+    let shifts_len = trampoline_section
+        .iter()
+        .any(|l| l.contains("mov") && l.contains("x2") && l.contains("x1"));
+    assert!(
+        shifts_len,
+        "trampoline must shift len register (x1→x2) to make room for cap: {}",
+        asm
+    );
+
+    let shifts_ptr = trampoline_section
+        .iter()
+        .any(|l| l.contains("mov") && l.contains("x1") && l.contains("x0"));
+    assert!(
+        shifts_ptr,
+        "trampoline must shift ptr register (x0→x1) to make room for cap: {}",
+        asm
+    );
+
+    // Result must not be constant-folded (3 + 10 = 13).
+    assert!(
+        !asm.contains("mov     x0, #13"),
+        "result must not be constant-folded to #13: {asm}"
+    );
+}
+
+/// Claim 86 adversarial: two `&mut [T]` slices of different lengths through a
+/// capturing closure. If the trampoline only shifted 1 register instead of 2,
+/// the length register would be clobbered with the data pointer, producing the
+/// same wrong (large) length for both calls — proving the bug.
+///
+/// A correct trampoline produces different lengths for slices of length 3 and 2.
+///
+/// FLS §4.9, §6.22, §4.13 — see above.
+#[test]
+fn claim_86_closure_trampoline_mut_slice_param_passes_len_not_just_ptr() {
+    let asm = compile_to_asm(
+        "fn slice_len(s: &mut [i32]) -> usize { s.len() }\n\
+fn apply_len(f: impl Fn(&mut [i32]) -> usize, s: &mut [i32]) -> usize { f(s) }\n\
+fn main() -> i32 {\n\
+    let cap: i32 = 0;\n\
+    let mut a: [i32; 3] = [1, 2, 3];\n\
+    let mut b: [i32; 2] = [10, 20];\n\
+    (apply_len(move |s: &mut [i32]| slice_len(s) + cap as usize, &mut a)\n\
+     + apply_len(move |s: &mut [i32]| slice_len(s) + cap as usize, &mut b)) as i32\n\
+}\n",
+    );
+    assert!(
+        !asm.contains("mov     x0, #3"),
+        "slice length 3 must not be constant-folded: {asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #2"),
+        "slice length 2 must not be constant-folded: {asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #5"),
+        "combined result must not be constant-folded to #5: {asm}"
+    );
+    // Both closures' trampolines must shift the len register (x1→x2).
+    let shifts_len_count = asm
+        .lines()
+        .filter(|l| l.contains("// shift explicit arg 1 to position 2"))
+        .count();
+    assert!(
+        shifts_len_count >= 2,
+        "both trampolines must shift len register (x1→x2) — found {shifts_len_count}: {asm}"
+    );
+}

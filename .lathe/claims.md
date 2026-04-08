@@ -3121,3 +3121,52 @@ The `lsl #3` is the distinguishing signature of element address computation (vs 
 - Runtime check: `double_all(&mut [1,2,3])` modifies the slice incorrectly
 
 **Tests**: `cargo test --test e2e -- runtime_for_mut_slice_emits_mul_and_store_not_folded runtime_for_mut_slice_called_twice_not_folded milestone_197_for_mut_slice_double_in_place milestone_197_for_mut_slice_param`
+
+---
+
+## Claim 85: `for x in s` where `s: &[T]` emits runtime fat-pointer loads (not constant-folded)
+
+**Stakeholder**: William (researcher), CI / Validation Infrastructure
+
+**Promise**: When a function takes an immutable `&[i32]` parameter and iterates it with `for x in s`, the loop must emit runtime `ldr` instructions using pointer arithmetic — never constant-folded from any specific element values. The fat-pointer length must be loaded from the parameter slot at runtime, not inlined as a compile-time constant.
+
+**Why this is load-bearing**: Milestone 194 added `for x in s` iteration over `&[T]` slice parameters. The assembly inspection tests exist (`runtime_for_slice_emits_ldr_and_ptr_arithmetic` and `runtime_for_slice_called_twice_not_folded`) but were not registered as a named claim. Without this claim, a regression where galvanic folds the fat-pointer length to a compile-time constant would not be caught by the falsification suite.
+
+**ARM64 implementation**: In `lower.rs`, `for x in s` where `s: &[T]` loads the fat-pointer data-ptr and length from consecutive slots, then iterates using a counted index. The assembly must contain `ldr` (length load), pointer arithmetic, a back-edge branch, and must NOT contain any constant representing the sum.
+
+**FLS §6.15.1**: For loop body executes at runtime; iteration variable is bound to each element.
+**FLS §4.9**: `&[T]` is a fat pointer (data pointer + length); the length is a runtime value.
+**FLS §6.1.2:37–45**: Non-const function bodies emit runtime instructions.
+**FLS §6.15.1 AMBIGUOUS**: Should desugar via `IntoIterator::into_iter(s)`. Galvanic special-cases `&[T]` at the IR level.
+
+**Violated if**:
+- Assembly for `sum_slice(s: &[i32])` does NOT contain `ldr` (element load absent), OR
+- Assembly contains `mov     x0, #6` or `mov     x0, #30` (sum constant-folded), OR
+- The fat-pointer length is not loaded from the parameter slot at runtime
+
+**Tests**: `cargo test --test e2e -- runtime_for_slice_emits_ldr_and_ptr_arithmetic runtime_for_slice_called_twice_not_folded milestone_194_for_slice_sum milestone_194_for_slice_len_one`
+
+---
+
+## Claim 86: closure trampoline correctly shifts `&mut [T]` fat-pointer explicit arguments
+
+**Stakeholder**: William (researcher), CI / Validation Infrastructure
+
+**Promise**: A capturing `move` closure with a `&mut [T]` explicit parameter, passed to an `impl Fn(&mut [T])` callee, generates a trampoline that shifts BOTH fat-pointer registers (data pointer AND length) to make room for the captured value — exactly as for `&[T]` (Claim 80). Mutability does not change the two-register fat-pointer ABI.
+
+**Why this is load-bearing**: The fat-pointer register-slot counting fix in `lower.rs` (which introduced Claim 80 for `&[T]`) uses `TyKind::Ref { inner, .. }` with `..` ignoring the `mutable` field, so `&mut [T]` is also counted as 2 register slots. Without this test, a future "simplification" that adds an explicit `mutable: false` check could silently break `&mut [T]` trampolines — the trampoline would only shift 1 register, clobbering the length with the data pointer, causing slice operations to use a stack address as the length.
+
+**ARM64 implementation**: In `lower.rs`, the `n_explicit_regs` computation matches `TyKind::Ref { inner: Slice, .. }` regardless of mutability, producing `n_explicit_regs = 2` for both `&[T]` and `&mut [T]`. The trampoline emits two `mov` shifts before the tail-call.
+
+**FLS §4.9**: `&mut [T]` is a fat pointer (data pointer + length). Mutability does not change the register layout.
+**FLS §6.22, §4.13**: The trampoline shifts explicit arguments by `n_caps` positions. A fat-pointer explicit arg occupies 2 slots.
+**FLS §6.1.2:37–45**: Non-const function bodies emit runtime instructions.
+**FLS §4.9 AMBIGUOUS**: Fat-pointer ABI not specified; galvanic uses two consecutive ARM64 registers.
+
+**Violated if**:
+- The trampoline for a `move |s: &mut [i32]| ...` closure does NOT emit `mov x2, x1` (len shift absent), OR
+- The trampoline does NOT emit `mov x1, x0` (ptr shift absent), OR
+- Two calls with `&mut [i32; 3]` and `&mut [i32; 2]` produce the same result (length clobbered by ptr), OR
+- Result is constant-folded
+
+**Tests**: `cargo test --test e2e -- runtime_closure_trampoline_shifts_fat_ptr_mut_slice_param claim_86_closure_trampoline_mut_slice_param_passes_len_not_just_ptr`

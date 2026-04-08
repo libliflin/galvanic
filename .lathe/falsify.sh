@@ -1484,6 +1484,28 @@ else
     pass "Claim 84: for x in &mut slice emits runtime mul+str and result not constant-folded"
 fi
 
+echo "--- Claim 85: for x in &[T] slice iteration emits runtime fat-pointer loads (not constant-folded) ---"
+if cargo test --test e2e -- \
+    runtime_for_slice_emits_ldr_and_ptr_arithmetic \
+    runtime_for_slice_called_twice_not_folded \
+    milestone_194_for_slice_sum \
+    milestone_194_for_slice_len_one \
+    2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 85" "for-slice immutable iteration runtime codegen FAILED — fat-pointer length may be constant-folded or element loads missing"
+else
+    pass "Claim 85: for x in &[T] slice iteration emits runtime fat-pointer length load and element ldr (not constant-folded)"
+fi
+
+echo "--- Claim 86: closure trampoline correctly shifts &mut [T] fat-pointer explicit arguments ---"
+if cargo test --test e2e -- \
+    runtime_closure_trampoline_shifts_fat_ptr_mut_slice_param \
+    claim_86_closure_trampoline_mut_slice_param_passes_len_not_just_ptr \
+    2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 86" "closure trampoline &mut [T] fat-pointer shift FAILED — trampoline may only shift 1 register instead of 2, clobbering the length with the data pointer"
+else
+    pass "Claim 86: closure trampoline correctly shifts both &mut [T] fat-pointer registers (data ptr + length) to make room for captures"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 
