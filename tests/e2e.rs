@@ -31334,3 +31334,146 @@ fn milestone_185_u16_named_variant_two_narrow_fields() {
     // a = 60000 (no overflow), b = 10000 + 60000 = 70000 wraps to 4464 < 5000
     assert_eq!(exit, 1, "a = 60000; b = 70000 wraps to 4464 < 5000");
 }
+
+// ── Milestone 186: compound-mul wrapping for narrow integer types (FLS §6.23) ──
+//
+// Claim 66 covers compound `+=` for u8/i8 and u16/i16. Compound `*=` goes through
+// the same TruncU8/SextI8/TruncU16/SextI16 normalisation path (lower.rs §14527–14539),
+// but was previously untested. These tests close the gap.
+//
+// Without these tests, a future refactor that removes the normalisation from the mul
+// case of the `CompoundAssign` lowering would pass all existing tests undetected.
+
+/// Assembly inspection: u8 compound `*=` emits TruncU8 (`and #255`) before the store.
+///
+/// Claim 66 (extended): compound mul on a u8 local must normalise the product to
+/// the 8-bit range before writing back.
+#[test]
+fn runtime_u8_compound_mul_emits_trunc_u8() {
+    let asm = compile_to_asm(
+        "fn compound_u8_mul(a: u8, b: u8) -> i32 { let mut x: u8 = a; x *= b; x as i32 }\nfn main() -> i32 { 0 }\n",
+    );
+    assert!(
+        asm.contains("and") && asm.contains("#255"),
+        "u8 compound `*=` must emit `and #255` (TruncU8); got:\n{asm}"
+    );
+    assert!(
+        asm.contains("mul"),
+        "u8 compound `*=` must emit runtime `mul` instruction; got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #44"),
+        "result must NOT be constant-folded to mov x0, #44; got:\n{asm}"
+    );
+}
+
+/// Assembly inspection: i8 compound `*=` emits SextI8 (`sxtb`) before the store.
+///
+/// Claim 66 (extended): compound mul on an i8 local must sign-extend the product
+/// from 8 bits after the binary operation.
+#[test]
+fn runtime_i8_compound_mul_emits_sext_i8() {
+    let asm = compile_to_asm(
+        "fn compound_i8_mul(a: i8, b: i8) -> i32 { let mut x: i8 = a; x *= b; x as i32 }\nfn main() -> i32 { 0 }\n",
+    );
+    assert!(
+        asm.contains("sxtb"),
+        "i8 compound `*=` must emit `sxtb` (SextI8) before the store-back; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("mul"),
+        "i8 compound `*=` must emit runtime `mul` instruction; got:\n{asm}"
+    );
+}
+
+/// Compile-and-run: u8 `*=` wraps mid-body, so subsequent comparison sees wrapped value.
+///
+/// 15_u8 * 20_u8 = 300, which overflows u8 → wraps to 44 (300 & 255).
+/// If wrapping occurs: x = 44 < 50 → return 1.
+/// Without wrapping: x = 300 >= 50 → return 0 (wrong).
+#[test]
+fn milestone_186_u8_compound_mul_wraps_mid_body() {
+    let Some(exit) = compile_and_run(
+        "fn test(a: u8, b: u8) -> i32 { let mut x: u8 = a; x *= b; if x < 50 { 1 } else { 0 } }\nfn main() -> i32 { test(15, 20) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "15_u8 * 20_u8 = 300 -> wraps to 44; 44 < 50 so must return 1");
+}
+
+/// Compile-and-run: i8 `*=` wraps mid-body to negative, subsequent comparison sees negative.
+///
+/// 12_i8 * 15_i8 = 180. As i8: sxtb(0xB4) = -76 (sign bit set).
+/// If wrapping occurs: x = -76 < 0 → return 1.
+/// Without wrapping: x = 180 >= 0 → return 0 (wrong).
+#[test]
+fn milestone_186_i8_compound_mul_wraps_mid_body() {
+    let Some(exit) = compile_and_run(
+        "fn test(a: i8, b: i8) -> i32 { let mut x: i8 = a; x *= b; if x < 0 { 1 } else { 0 } }\nfn main() -> i32 { test(12, 15) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "12_i8 * 15_i8 = 180 -> wraps to -76 as i8; -76 < 0 so must return 1");
+}
+
+/// Assembly inspection: u16 compound `*=` emits TruncU16 (`and #65535`) before the store.
+#[test]
+fn runtime_u16_compound_mul_emits_trunc_u16() {
+    let asm = compile_to_asm(
+        "fn compound_u16_mul(a: u16, b: u16) -> i32 { let mut x: u16 = a; x *= b; x as i32 }\nfn main() -> i32 { 0 }\n",
+    );
+    assert!(
+        asm.contains("and") && asm.contains("#65535"),
+        "u16 compound `*=` must emit `and #65535` (TruncU16); got:\n{asm}"
+    );
+    assert!(
+        asm.contains("mul"),
+        "u16 compound `*=` must emit runtime `mul` instruction; got:\n{asm}"
+    );
+}
+
+/// Assembly inspection: i16 compound `*=` emits SextI16 (`sxth`) before the store.
+#[test]
+fn runtime_i16_compound_mul_emits_sext_i16() {
+    let asm = compile_to_asm(
+        "fn compound_i16_mul(a: i16, b: i16) -> i32 { let mut x: i16 = a; x *= b; x as i32 }\nfn main() -> i32 { 0 }\n",
+    );
+    assert!(
+        asm.contains("sxth"),
+        "i16 compound `*=` must emit `sxth` (SextI16) before the store-back; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("mul"),
+        "i16 compound `*=` must emit runtime `mul` instruction; got:\n{asm}"
+    );
+}
+
+/// Compile-and-run: u16 `*=` wraps mid-body.
+///
+/// 300_u16 * 300_u16 = 90000 → wraps to 24464 (90000 & 65535).
+/// If wrapping occurs: x = 24464 < 30000 → return 1.
+/// Without wrapping: x = 90000 >= 30000 → return 0 (wrong).
+#[test]
+fn milestone_186_u16_compound_mul_wraps_mid_body() {
+    let Some(exit) = compile_and_run(
+        "fn test(a: u16, b: u16) -> i32 { let mut x: u16 = a; x *= b; if x < 30000 { 1 } else { 0 } }\nfn main() -> i32 { test(300, 300) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "300_u16 * 300_u16 = 90000 -> wraps to 24464; 24464 < 30000 so must return 1");
+}
+
+/// Compile-and-run: i16 `*=` wraps mid-body to negative.
+///
+/// 200_i16 * 200_i16 = 40000. As i16: sxth(40000) = 40000 - 65536 = -25536 (sign bit set).
+/// If wrapping occurs: x = -25536 < 0 → return 1.
+/// Without wrapping: x = 40000 >= 0 → return 0 (wrong).
+#[test]
+fn milestone_186_i16_compound_mul_wraps_mid_body() {
+    let Some(exit) = compile_and_run(
+        "fn test(a: i16, b: i16) -> i32 { let mut x: i16 = a; x *= b; if x < 0 { 1 } else { 0 } }\nfn main() -> i32 { test(200, 200) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit, 1, "200_i16 * 200_i16 = 40000 -> wraps to -25536 as i16; -25536 < 0 so must return 1");
+}
