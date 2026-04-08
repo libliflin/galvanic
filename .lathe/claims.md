@@ -2542,3 +2542,45 @@ function parameters are not statically known at compile time.
 - contains `mov x0, #6` (constant-folded result of 5 ^ 3)
 
 **Tests**: `cargo test --test e2e -- runtime_and_emits_and_not_folded runtime_or_emits_orr_not_folded runtime_xor_emits_eor_not_folded`
+
+## Claim 63: Unary operators emit runtime `neg`/`mvn`/`eor` instructions with function parameters (not constant-folded)
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: The unary negation (`-`), bitwise NOT (`!` on integers), and logical
+NOT (`!` on bool) operators must emit ARM64 `neg`, `mvn`, and `eor` instructions
+at runtime when the operand is a function parameter (unknown at compile time).
+The call site must emit `bl`. The results must not be constant-folded into immediates.
+
+The existing `runtime_neg_emits_neg_instruction` used a function parameter but lacked
+a negative assertion for the call site and no Claim entry. The existing
+`runtime_not_emits_mvn_instruction` used `fn main() -> i32 { !5 }` — an inline
+literal in main, not a function parameter. The existing
+`runtime_bool_not_emits_eor_instruction` used a parameter and had a partial negative
+assertion (`!mvn`) but no call-site `bl` check and no Claim entry.
+
+Claim 63 adds parameter-based tests with complete positive assertions (`neg`/`mvn`/`eor`),
+call-site assertions (`bl neg_i32` / `bl bitwise_not` / `bl bool_not`), and negative
+assertions confirming the folded constants are absent.
+
+**FLS §6.5.4**: Negation operator expressions. Unary `-` on integers emits `neg`.
+Bitwise `!` on integers emits `mvn`. Logical `!` on bool emits `eor x{dst}, x{src}, #1`.
+**FLS §6.1.2 Constraint 1**: Function bodies are not const contexts; operands from
+function parameters are not statically known at compile time.
+
+**Violated if** `compile_to_asm("fn neg_i32(x: i32) -> i32 { -x } ...")`:
+- lacks `neg` in the function body, OR
+- lacks `bl neg_i32` at the call site, OR
+- contains `mov x0, #-5` (constant-folded result of neg_i32(5))
+
+**Violated if** `compile_to_asm("fn bitwise_not(x: i32) -> i32 { !x } ...")`:
+- lacks `mvn` in the function body, OR
+- lacks `bl bitwise_not` at the call site, OR
+- contains `mov x0, #-6` (constant-folded result of bitwise_not(5))
+
+**Violated if** `compile_to_asm("fn bool_not(b: bool) -> bool { !b } ...")`:
+- lacks `eor` and `#1` in the function body, OR
+- lacks `bl bool_not` at the call site, OR
+- contains `mvn` (wrong instruction for bool NOT)
+
+**Tests**: `cargo test --test e2e -- runtime_neg_emits_neg_not_folded runtime_not_emits_mvn_not_folded runtime_bool_not_emits_eor_not_folded`
