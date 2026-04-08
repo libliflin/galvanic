@@ -1449,6 +1449,18 @@ else
     pass "Claim 81: for x in &arr with array parameter emits runtime indexed loads (not constant-folded)"
 fi
 
+echo "--- Claim 82: for x in &mut arr emits element address computation and stores through pointer (not constant-folded) ---"
+if cargo test --test e2e -- \
+    runtime_for_arr_mut_borrow_emits_addr_of_indexed \
+    runtime_for_arr_mut_borrow_param_not_folded \
+    milestone_196_for_arr_mut_borrow_param \
+    milestone_196_for_arr_mut_borrow_double_in_place \
+    2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 82" "for-arr-mut-borrow runtime codegen FAILED — loop may be constant-folding mutations instead of emitting AddrOfIndexed (add lsl #3) + StorePtr; negate_all([1,2,3]) must give -6 via runtime stores, not a compile-time constant"
+else
+    pass "Claim 82: for x in &mut arr emits element address computation at runtime and stores through pointer (not constant-folded)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 

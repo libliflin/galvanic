@@ -33281,3 +33281,185 @@ fn main() -> i32 { sum_arr([1, 2, 3]) + sum_arr([10, 20, 30]) }\n",
         "combined result must not be constant-folded to #66: {asm}"
     );
 }
+
+// ── Milestone 196: for x in &mut arr (mutable borrow iteration) ─────────────
+//
+// Milestone 196 implements `for x in &mut arr` where the loop variable `x`
+// is a `&mut i32` pointer to the current array element. The body uses `*x`
+// to read and `*x = val` to mutate elements in-place.
+//
+// Implementation: galvanic computes the element address via `AddrOfIndexed`
+// (two ARM64 instructions) and stores it in the loop variable slot. The body's
+// `*x` and `*x = val` use the existing `LoadPtr` / `StorePtr` paths.
+//
+// FLS §6.15.1: For loop expressions.
+// FLS §4.9: Mutable borrow of `[T; N]` yields `&mut [T; N]`.
+// FLS §6.5.1: Mutable borrow expressions.
+// FLS §6.5.10: Assignment through mutable references.
+//
+// FLS §6.15.1 AMBIGUOUS: The spec desugars `for x in &mut arr` via
+// `IntoIterator::into_iter(&mut arr)`, requiring trait dispatch.
+// Galvanic special-cases the &mut [T; N] form at the IR level.
+
+/// Milestone 196: double elements in-place via `for x in &mut arr`.
+///
+/// FLS §6.15.1, §4.9, §6.5.1, §6.5.10.
+#[test]
+fn milestone_196_for_arr_mut_borrow_double_in_place() {
+    let Some(exit_code) = compile_and_run(
+        "fn double_in_place(mut a: [i32; 3]) -> i32 {\
+ for x in &mut a { *x = *x * 2; } a[0] + a[1] + a[2] }\n\
+fn main() -> i32 { double_in_place([1, 2, 3]) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 12, "expected 12 (sum of doubled [1,2,3]), got {exit_code}");
+}
+
+/// Milestone 196: increment each element by 1.
+#[test]
+fn milestone_196_for_arr_mut_borrow_increment() {
+    let Some(exit_code) = compile_and_run(
+        "fn inc_all(mut a: [i32; 3]) -> i32 {\
+ for x in &mut a { *x = *x + 1; } a[0] + a[1] + a[2] }\n\
+fn main() -> i32 { inc_all([10, 20, 30]) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 63, "expected 63 (11+21+31), got {exit_code}");
+}
+
+/// Milestone 196: set all elements to a fixed value.
+#[test]
+fn milestone_196_for_arr_mut_borrow_set_all() {
+    let Some(exit_code) = compile_and_run(
+        "fn fill(mut a: [i32; 4]) -> i32 {\
+ for x in &mut a { *x = 7; } a[0] + a[1] + a[2] + a[3] }\n\
+fn main() -> i32 { fill([1, 2, 3, 4]) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 28, "expected 28 (7*4), got {exit_code}");
+}
+
+/// Milestone 196: single-element array mutation.
+#[test]
+fn milestone_196_for_arr_mut_borrow_single_element() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 { let mut a = [21]; for x in &mut a { *x = *x * 2; } a[0] }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 42, "expected 42, got {exit_code}");
+}
+
+/// Milestone 196: mutation via function parameter (adversarial — not constant-foldable).
+///
+/// The parameter `a: [i32; 3]` has values unknown at compile time (from caller).
+/// The loop must emit runtime address computation and stores.
+#[test]
+fn milestone_196_for_arr_mut_borrow_param() {
+    let Some(exit_code) = compile_and_run(
+        "fn negate_all(mut a: [i32; 3]) -> i32 {\
+ for x in &mut a { *x = 0 - *x; } a[0] + a[1] + a[2] }\n\
+fn main() -> i32 { negate_all([1, 2, 3]) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, -6, "expected -6 (sum of negated [1,2,3]), got {exit_code}");
+}
+
+/// Milestone 196: mutation result used in arithmetic.
+#[test]
+fn milestone_196_for_arr_mut_borrow_result_in_arithmetic() {
+    let Some(exit_code) = compile_and_run(
+        "fn double_sum(mut a: [i32; 3]) -> i32 {\
+ for x in &mut a { *x = *x * 2; } a[0] + a[1] + a[2] }\n\
+fn main() -> i32 { double_sum([5, 5, 5]) + 1 }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 31, "expected 31 (30+1), got {exit_code}");
+}
+
+/// Milestone 196: called twice with different arrays.
+#[test]
+fn milestone_196_for_arr_mut_borrow_called_twice() {
+    let Some(exit_code) = compile_and_run(
+        "fn triple_first(mut a: [i32; 2]) -> i32 {\
+ for x in &mut a { *x = *x * 3; } a[0] }\n\
+fn main() -> i32 { triple_first([4, 5]) + triple_first([6, 7]) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 30, "expected 30 (12+18), got {exit_code}");
+}
+
+/// Milestone 196: loop with continue (skip negatives during mutation).
+#[test]
+fn milestone_196_for_arr_mut_borrow_continue() {
+    let Some(exit_code) = compile_and_run(
+        "fn double_positives(mut a: [i32; 4]) -> i32 {\
+ for x in &mut a { if *x < 0 { continue; } *x = *x * 2; }\
+ a[0] + a[1] + a[2] + a[3] }\n\
+fn main() -> i32 { double_positives([1, -1, 3, -3]) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 4, "expected 4 (2 + -1 + 6 + -3), got {exit_code}");
+}
+
+/// Assembly inspection: `for x in &mut arr` emits AddrOfIndexed (two `add` instructions
+/// for element address computation) and `str` through the pointer — not a constant-folded value.
+///
+/// The two-instruction address computation:
+///   add x{scratch}, sp, #{base*8}       // base address of arr[0]
+///   add x{dst}, x{scratch}, x{i}, lsl #3  // address of arr[i]
+/// is the distinguishing signature of `AddrOfIndexed` vs `LoadIndexed`.
+///
+/// FLS §6.5.1, §6.9, §6.15.1.
+#[test]
+fn runtime_for_arr_mut_borrow_emits_addr_of_indexed() {
+    let asm = compile_to_asm(
+        "fn double_in_place(mut a: [i32; 3]) -> i32 {\
+ for x in &mut a { *x = *x * 2; } a[0] + a[1] + a[2] }\n\
+fn main() -> i32 { double_in_place([1, 2, 3]) }\n",
+    );
+    // The AddrOfIndexed instruction emits `add x{dst}, x{scratch}, x{i}, lsl #3`.
+    assert!(
+        asm.contains("lsl #3"),
+        "expected lsl #3 for element address computation: {asm}"
+    );
+    // The store-through-pointer instruction: `str x{val}, [x{addr}]`
+    assert!(
+        asm.contains("str     x") && !asm.contains("], lsl #3"),
+        "expected str through pointer for mutation: {asm}"
+    );
+    // Must not constant-fold the result (1*2 + 2*2 + 3*2 = 12).
+    assert!(
+        !asm.contains("mov     x0, #12"),
+        "result must not be constant-folded to #12: {asm}"
+    );
+}
+
+/// Assembly inspection: `for x in &mut arr` with a function parameter (adversarial).
+/// Values are unknown at compile time — rules out any constant-folding shortcut.
+///
+/// FLS §6.1.2:37–45: All instructions are runtime.
+#[test]
+fn runtime_for_arr_mut_borrow_param_not_folded() {
+    let asm = compile_to_asm(
+        "fn negate_all(mut a: [i32; 3]) -> i32 {\
+ for x in &mut a { *x = 0 - *x; } a[0] + a[1] + a[2] }\n\
+fn main() -> i32 { negate_all([1, 2, 3]) }\n",
+    );
+    assert!(
+        asm.contains("lsl #3"),
+        "expected lsl #3 for element address computation: {asm}"
+    );
+    // negated [1,2,3] sums to -6; must not be folded.
+    assert!(
+        !asm.contains("mov     x0, #-6") && !asm.contains("mov     x0, #0xffff"),
+        "result must not be constant-folded to -6: {asm}"
+    );
+}

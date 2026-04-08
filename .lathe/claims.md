@@ -3041,3 +3041,32 @@ declared field type — not as a wider i32.
 - Assembly contains `mov     x0, #66` (combined result was folded)
 
 **Tests**: `cargo test --test e2e -- claim_81_for_arr_borrow_param_emits_indexed_load_not_folded runtime_for_arr_borrow_emits_indexed_load runtime_for_arr_borrow_two_arrays_not_folded`
+
+---
+
+## Claim 82: `for x in &mut arr` emits element address computation and stores through pointer (not constant-folded)
+
+**Stakeholder**: William (researcher), CI / Validation Infrastructure
+
+**Promise**: When `for x in &mut arr` iterates an array, the loop must compute each element's address at runtime (`AddrOfIndexed`: two ARM64 `add` instructions), bind it to `x`, and store mutated values through the pointer (`str [x{addr}]`). The result must NOT be constant-folded — an interpreter that evaluates the loop body at compile time and emits `mov x0, #N` violates this claim.
+
+**Why this is load-bearing**: Milestone 196 (Cycle 147) added `for x in &mut arr` by detecting `Unary { op: RefMut, operand: Path(arr) }` and emitting `Instr::AddrOfIndexed` to store the element address (not value) in the loop variable slot. The risk is that galvanic could interpret the mutation by tracking the array's value at compile time. A function parameter `a: [i32; 3]` has values unknown inside the function body — any constant-folded result is a compiler-not-interpreter violation.
+
+**ARM64 implementation**: `AddrOfIndexed { dst, base_slot, index_reg, scratch }` emits:
+  `add x{scratch}, sp, #{base_slot*8}` — base address of arr[0]
+  `add x{dst}, x{scratch}, x{index_reg}, lsl #3` — address of arr[index]
+The `lsl #3` is the distinguishing signature of element address computation (vs `ldr` for element load in the immutable case). The body's `*x = val` emits `StorePtr` (str through pointer).
+
+**FLS §6.15.1**: For loop body executes at runtime.
+**FLS §4.9**: `&mut [T; N]` coerces to `&mut [T]`; element access uses runtime pointer arithmetic.
+**FLS §6.5.1**: Mutable borrow expressions yield the element address.
+**FLS §6.5.10**: Assignment through mutable reference (`*x = val`) stores at runtime.
+**FLS §6.1.2:37–45**: All instructions are runtime — no compile-time evaluation.
+**FLS §6.15.1 AMBIGUOUS**: Should desugar via `IntoIterator::into_iter(&mut arr)`. Galvanic bypasses this at the IR level.
+
+**Violated if**:
+- Assembly for `negate_all(a: [i32; 3])` does NOT contain `lsl #3` (AddrOfIndexed address computation absent), OR
+- Assembly contains `mov     x0, #-6` or similar (result constant-folded to the negated sum), OR
+- The loop fails to actually mutate elements (runtime check: `double_in_place([1,2,3])` ≠ 12)
+
+**Tests**: `cargo test --test e2e -- runtime_for_arr_mut_borrow_emits_addr_of_indexed runtime_for_arr_mut_borrow_param_not_folded milestone_196_for_arr_mut_borrow_param milestone_196_for_arr_mut_borrow_double_in_place`
