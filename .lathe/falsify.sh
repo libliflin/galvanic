@@ -1484,6 +1484,18 @@ else
     pass "Claim 84: for x in &mut slice emits runtime mul+str and result not constant-folded"
 fi
 
+echo "--- Claim 85: for x in s where s: &[T] emits runtime fat-pointer length load and element ldr (not constant-folded) ---"
+if cargo test --test e2e -- \
+    runtime_for_slice_emits_ldr_and_ptr_arithmetic \
+    runtime_for_slice_called_twice_not_folded \
+    milestone_194_for_slice_sum \
+    milestone_194_for_slice_len_one \
+    2>&1 | grep -q "FAILED\|error\["; then
+    fail "Claim 85" "for-slice immutable iteration runtime codegen FAILED — loop may be constant-folding the fat-pointer length or element loads; sum(s: &[i32]) must use runtime ldr for length and elements, never fold sum([1,2,3])=#6 or sum([10,20])=#30"
+else
+    pass "Claim 85: for x in s (&[T] slice param) emits runtime fat-pointer ldr and element ldr (not constant-folded)"
+fi
+
 echo ""
 echo "Falsification result: $PASS passed, $FAIL failed"
 

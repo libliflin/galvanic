@@ -3121,3 +3121,34 @@ The `lsl #3` is the distinguishing signature of element address computation (vs 
 - Runtime check: `double_all(&mut [1,2,3])` modifies the slice incorrectly
 
 **Tests**: `cargo test --test e2e -- runtime_for_mut_slice_emits_mul_and_store_not_folded runtime_for_mut_slice_called_twice_not_folded milestone_197_for_mut_slice_double_in_place milestone_197_for_mut_slice_param`
+
+---
+
+## Claim 85: `for x in s` where `s: &[T]` (immutable slice parameter) emits runtime fat-pointer length load and element ldr (not constant-folded)
+
+**Stakeholder**: William (researcher), CI / Validation Infrastructure
+
+**Promise**: When a function takes a `&[i32]` parameter and iterates it with `for x in s`, the loop must:
+1. Load the length from the fat pointer's length slot at runtime (an `ldr` in the callee — not a compile-time constant).
+2. Emit runtime element loads (`ldr`) using pointer arithmetic for each iteration — not compile-time indexed array accesses.
+3. Emit a back-edge branch (`cbz` or `cbnz`) for loop termination — not an unrolled or constant-folded loop body.
+4. NOT fold the result: a function that sums two slices of different lengths must not return a constant sum.
+
+**Why this is load-bearing**: Milestone 194 added `for x in s` over `&[T]` slice parameters. The implementation relies on the fat-pointer length field being loaded at runtime (via `ldr` from the slice's second register, or from a spilled length slot). The adversarial risk is that galvanic sees `sum(&a)` where `a = [1,2,3]` (length 3 known at the call site) and replaces the fat-pointer length load with the compile-time constant 3. If so, `sum(&b)` where `b = [10, 20]` would still loop 3 times (accessing out-of-bounds memory), and the length of any slice would appear to galvanic as whatever the first call's array provided — a severe compiler-not-interpreter violation.
+
+A second risk: if the loop variable `x` is loaded by constant-folding the element from the known initializer rather than emitting a runtime `ldr`, the body would not reflect mutations to the underlying slice that could have happened before the call. (Currently galvanic does not implement mutation, so this is a forward-looking guard.)
+
+**ARM64 implementation**: In `lower.rs`, the `for x in s` path for `&[T]` uses `Instr::LoadPtr` to load each element via `r_ptr + counter * 8`. The length comes from the fat-pointer's second register (the len slot), spilled to a local at function entry. The assembly must contain `ldr` (length and element loads), `mul` (pointer offset computation), `cbz`/`cbnz` (loop termination), and must NOT contain any compile-time constant representing the summed result.
+
+**FLS §6.15.1**: For loop body executes at runtime; iteration variable is bound to each element in sequence.
+**FLS §4.9**: `&[T]` is a fat pointer (data ptr + length); both are runtime values from the caller's perspective.
+**FLS §6.1.2:37–45**: Non-const function bodies emit runtime instructions.
+**FLS §6.15.1 AMBIGUOUS**: `for x in s` should desugar to `IntoIterator::into_iter(s)`, requiring the standard library `IntoIterator` impl for `&[T]`. Galvanic special-cases `&[T]` at the IR level.
+
+**Violated if**:
+- Assembly for `sum(s: &[i32])` does NOT contain `ldr` (element load or length load constant-folded), OR
+- Assembly does NOT contain `mul` (pointer arithmetic absent — loop may be unrolled or constant), OR
+- Assembly does NOT contain `cbz` or `cbnz` (loop termination must be runtime), OR
+- Assembly for two calls `sum(&[1,2,3]) + sum(&[10,20])` contains `mov     x0, #6` or `mov     x0, #30` or `mov     x0, #36` (any sum is constant-folded)
+
+**Tests**: `cargo test --test e2e -- runtime_for_slice_emits_ldr_and_ptr_arithmetic runtime_for_slice_called_twice_not_folded milestone_194_for_slice_sum milestone_194_for_slice_len_one`
