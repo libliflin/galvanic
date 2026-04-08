@@ -10690,6 +10690,55 @@ fn main() -> i32 { make(1).a }
     );
 }
 
+/// Assembly check: struct-returning if-else with parameter-dependent fields must
+/// not constant-fold arithmetic even when called with a literal argument.
+///
+/// The litmus test: `n + 1` with `n` from a parameter cannot be folded to
+/// `#2` at compile time. The compiler must emit `add` at runtime.
+///
+/// This closes the gap left by `runtime_struct_return_if_else_emits_cbz`, which
+/// only checks that a branch exists but does not assert the arithmetic is runtime.
+///
+/// FLS §6.17: if-else executes at runtime; the condition emits `cbz`.
+/// FLS §6.1.2:37–45: `n + 1` is not a const context — runtime `add` required.
+/// FLS §9: Function parameters are runtime values, not compile-time constants.
+#[test]
+fn runtime_struct_return_if_else_not_folded() {
+    let src = r#"
+struct Point { x: i32, y: i32 }
+fn make(n: i32) -> Point {
+    if n > 0 { Point { x: n + 1, y: n * 2 } } else { Point { x: 0, y: 0 } }
+}
+fn main() -> i32 { make(1).x }
+"#;
+    let asm = compile_to_asm(src);
+    // The if-else must emit a runtime conditional branch.
+    let in_make: Vec<&str> = asm
+        .lines()
+        .skip_while(|l| !l.starts_with("make:"))
+        .take_while(|l| !l.starts_with("main:"))
+        .collect();
+    let has_branch = in_make
+        .iter()
+        .any(|l| l.trim_start().starts_with("cbz") || l.trim_start().starts_with("b."));
+    assert!(
+        has_branch,
+        "expected conditional branch in if-else make:\n{}",
+        in_make.join("\n")
+    );
+    // `n + 1` must emit a runtime add instruction, not fold to a constant.
+    assert!(
+        asm.contains("add"),
+        "expected add instruction for n + 1 in struct-returning if-else:\n{asm}"
+    );
+    // A constant-folding interpreter would evaluate make(1) → Point { x: 2, y: 2 }
+    // and emit `mov x0, #2` without executing the if-else at runtime.
+    assert!(
+        !asm.contains("mov     x0, #2") && !asm.contains("mov x0, #2"),
+        "must not fold make(1).x to constant 2 — if-else body must execute at runtime:\n{asm}"
+    );
+}
+
 /// Assembly check: struct-returning free function used directly as argument.
 ///
 /// `sum(make(1))` must NOT capture only x0 after `bl make` — it must store

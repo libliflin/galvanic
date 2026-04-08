@@ -832,3 +832,83 @@ and would only surface on CI.
 - contains `mov     x0, #12` (result constant-folded for `n*2` with `n=6`).
 
 **Test**: `cargo test --test e2e -- runtime_at_bound_or_subpat_if_let_emits_orr_not_folded runtime_at_bound_or_subpat_match_emits_orr_not_folded`
+
+---
+
+## Claim 29: Struct-returning match with parameter-dependent fields emits runtime add (not folded)
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: A struct-returning function whose match arm computes fields from a parameter
+(`n + 10`, `n * 3`) must emit a runtime `add` instruction and must NOT constant-fold the
+result to a `mov #N` immediate, even when the caller passes a literal argument.
+
+```rust
+struct Pair { a: i32, b: i32 }
+fn make(n: i32) -> Pair {
+    match n {
+        1 => Pair { a: n + 10, b: n * 3 },
+        _ => Pair { a: 0, b: 0 },
+    }
+}
+fn main() -> i32 { make(1).a }
+```
+
+Must emit `cmp` (runtime match scrutinee comparison), `add` (runtime `n + 10`), and must NOT
+emit `mov x0, #11` (the constant-folded value of `make(1).a`).
+
+**Why this claim matters**: Struct-returning match is a compound codegen path: match lowering,
+struct field storage, and function return convention all interact. A regression that folds any
+one of these to compile-time constants produces the correct exit code while violating the
+runtime-codegen invariant.
+
+**Attack vector**:
+1. Constant-folding `make(1)` at the call site emits `mov x0, #11` (the `.a` field) directly.
+2. Treating `n` as a const-context value within the match arm folds `n + 10` to `#11`.
+3. Dropping the match scrutinee comparison means the wrong arm body is executed silently.
+
+**Violated if**: `compile_to_asm(...)` for the program above returns assembly that:
+- lacks `cmp` (match scrutinee comparison dropped), OR
+- lacks `add` (`n + 10` was folded), OR
+- contains `mov x0, #11` (constant-folded result of `make(1).a`).
+
+**Test**: `cargo test --test e2e -- runtime_struct_match_field_not_folded`
+
+---
+
+## Claim 30: Struct-returning if-else with parameter-dependent fields emits runtime add (not folded)
+
+**Stakeholder**: William (researcher), Compiler Researchers
+
+**Promise**: A struct-returning function whose if-else branch computes fields from a parameter
+(`n + 1`, `n * 2`) must emit a runtime conditional branch and `add` instruction, and must NOT
+constant-fold the result to a `mov #N` immediate.
+
+```rust
+struct Point { x: i32, y: i32 }
+fn make(n: i32) -> Point {
+    if n > 0 { Point { x: n + 1, y: n * 2 } } else { Point { x: 0, y: 0 } }
+}
+fn main() -> i32 { make(1).x }
+```
+
+Must emit `cbz` or `b.` (runtime if branch), `add` (runtime `n + 1`), and must NOT emit
+`mov x0, #2` (the constant-folded value of `make(1).x`).
+
+**Why this claim matters**: Complements Claim 29 for the if-else path. The existing
+`runtime_struct_return_if_else_emits_cbz` test only verifies that a branch instruction is
+present — it does not assert that field arithmetic executes at runtime. A compiler that folds
+`n + 1` to `#2` but still emits the branch for the if-else condition would pass the old test
+while violating the runtime-codegen invariant.
+
+**Attack vector**:
+1. Constant-folding `make(1)` at the call site emits `mov x0, #2` (the `.x` field) directly.
+2. Treating `n` as a const-context value within the if branch folds `n + 1` to `#2`.
+3. Both violations produce the correct exit code (2) but bypass runtime computation.
+
+**Violated if**: `compile_to_asm(...)` for the program above returns assembly that:
+- lacks a conditional branch in `make` (`cbz` or `b.`), OR
+- lacks `add` (`n + 1` was folded), OR
+- contains `mov x0, #2` (constant-folded result of `make(1).x`).
+
+**Test**: `cargo test --test e2e -- runtime_struct_return_if_else_not_folded`
