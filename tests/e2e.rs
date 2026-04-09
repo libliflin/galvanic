@@ -34203,6 +34203,161 @@ fn milestone_199_inline_f32_array_for_sum() {
     assert_eq!(exit_code, 6, "1+2+3=6, got {exit_code}");
 }
 
+// ── Milestone 200: for (a, b) in [(e0, e1), …] — tuple pattern in for loop ──
+//
+// FLS §6.15.1: "The pattern in a for loop expression may be any irrefutable
+// pattern." §5.10.3: Tuple patterns bind multiple bindings simultaneously.
+// FLS §6.1.2:37–45: Each field load is a runtime instruction (no const-fold).
+
+/// Milestone 200: basic sum of first fields.
+///
+/// FLS §6.15.1: tuple pattern `(a, b)` binds both fields of each element.
+/// FLS §5.10.3: Tuple pattern in for loop position is an irrefutable pattern.
+#[test]
+fn milestone_200_tuple_pat_sum_first_fields() {
+    let src = "fn main() -> i32 {\n\
+    let mut s = 0;\n\
+    for (a, b) in [(1, 10), (2, 20), (3, 30)] { s += a; }\n\
+    s\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "1+2+3=6, got {exit_code}");
+}
+
+/// Milestone 200: basic sum of second fields.
+///
+/// FLS §6.15.1: second binding `b` is independent from `a`.
+#[test]
+fn milestone_200_tuple_pat_sum_second_fields() {
+    let src = "fn main() -> i32 {\n\
+    let mut s = 0;\n\
+    for (a, b) in [(1, 10), (2, 20), (3, 30)] { s += b; }\n\
+    s\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 60, "10+20+30=60, got {exit_code}");
+}
+
+/// Milestone 200: sum both fields.
+///
+/// FLS §6.15.1: both bindings are live in the loop body simultaneously.
+#[test]
+fn milestone_200_tuple_pat_sum_both_fields() {
+    let src = "fn main() -> i32 {\n\
+    let mut s = 0;\n\
+    for (a, b) in [(1, 2), (3, 4), (5, 6)] { s += a + b; }\n\
+    s\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 21, "1+2+3+4+5+6=21, got {exit_code}");
+}
+
+/// Milestone 200: single element.
+///
+/// FLS §6.15.1: one-element array executes body exactly once.
+#[test]
+fn milestone_200_tuple_pat_single_element() {
+    let src = "fn main() -> i32 {\n\
+    for (a, b) in [(7, 3)] {\n\
+        return a + b;\n\
+    }\n\
+    0\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "7+3=10, got {exit_code}");
+}
+
+/// Milestone 200: first field used in arithmetic.
+///
+/// FLS §6.15.1: bound variable `a` is usable in arbitrary expressions.
+#[test]
+fn milestone_200_tuple_pat_arithmetic_on_field() {
+    let src = "fn main() -> i32 {\n\
+    let mut s = 0;\n\
+    for (a, b) in [(2, 1), (4, 2), (6, 3)] { s += a * b; }\n\
+    s\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 28, "2*1+4*2+6*3=2+8+18=28, got {exit_code}");
+}
+
+/// Milestone 200: passed to function.
+///
+/// FLS §6.15.1: bound variables can be passed to function calls.
+#[test]
+fn milestone_200_tuple_pat_element_to_fn() {
+    let src = "fn add(x: i32, y: i32) -> i32 { x + y }\n\
+fn main() -> i32 {\n\
+    let mut s = 0;\n\
+    for (a, b) in [(1, 4), (2, 5), (3, 6)] { s += add(a, b); }\n\
+    s\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 21, "5+7+9=21, got {exit_code}");
+}
+
+/// Milestone 200: wildcard in tuple pattern (`(a, _)` discards second field).
+///
+/// FLS §5.1: Wildcard pattern matches any value without binding.
+/// FLS §6.15.1: irrefutable patterns including `_` sub-patterns are valid.
+#[test]
+fn milestone_200_tuple_pat_wildcard_field() {
+    let src = "fn main() -> i32 {\n\
+    let mut s = 0;\n\
+    for (a, _) in [(1, 99), (2, 99), (3, 99)] { s += a; }\n\
+    s\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "1+2+3=6, got {exit_code}");
+}
+
+/// Milestone 200: called twice — second call sees fresh bindings.
+///
+/// FLS §6.15.1: each invocation of the for loop iterates independently.
+#[test]
+fn milestone_200_tuple_pat_called_twice() {
+    let src = "fn f(pairs: i32) -> i32 { pairs }\n\
+fn main() -> i32 {\n\
+    let mut s1 = 0;\n\
+    for (a, b) in [(1, 2), (3, 4)] { s1 += a; }\n\
+    let mut s2 = 0;\n\
+    for (a, b) in [(10, 20), (30, 40)] { s2 += b; }\n\
+    s1 + s2\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 64, "s1=1+3=4, s2=20+40=60, 4+60=64, got {exit_code}");
+}
+
+/// Milestone 200: assembly inspection — tuple for-loop emits two independent
+/// `LoadIndexed` instructions (one per field column), not constant-folded.
+///
+/// FLS §6.1.2:37–45: Each indexed load is a runtime instruction.
+/// FLS §5.10.3: Column-wise storage enables reuse of the stride-1 LoadIndexed.
+#[test]
+fn runtime_tuple_for_loop_emits_two_indexed_loads_not_folded() {
+    let asm = compile_to_asm(
+        "fn main() -> i32 {\n\
+    let mut s = 0;\n\
+    for (a, b) in [(1, 2), (3, 4), (5, 6)] { s += a + b; }\n\
+    s\n\
+}\n",
+    );
+    // Two distinct indexed-load instructions should appear (one per field column).
+    let indexed_loads: Vec<&str> = asm
+        .lines()
+        .filter(|l| l.trim_start().starts_with("ldr") && l.contains("lsl #3"))
+        .collect();
+    assert!(
+        indexed_loads.len() >= 2,
+        "expected at least 2 `ldr ... lsl #3` instructions for 2-field tuple, got:\n{asm}"
+    );
+    // Result 21 must not be constant-folded.
+    assert!(
+        !asm.contains("mov     x0, #21"),
+        "must not const-fold tuple for-loop sum to #21:\n{asm}"
+    );
+}
+
 /// Milestone 199: assembly inspection — f64 inline array for-loop emits
 /// float indexed load (`ldr d`) and float add (`fadd`), not constant-folded.
 ///
