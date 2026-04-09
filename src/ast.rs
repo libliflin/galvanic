@@ -1216,14 +1216,14 @@ pub enum ExprKind {
     /// FLS §6.15.1: A for loop expression iterates over the values produced by
     /// an [`IntoIterator`]. The loop evaluates to `()`.
     ///
-    /// FLS §6.15.1 NOTE: The pattern may be any irrefutable pattern. This
-    /// implementation restricts the loop variable to a simple identifier;
-    /// destructuring patterns in `for` position are future work.
+    /// FLS §6.15.1: The pattern may be any irrefutable pattern — identifier,
+    /// wildcard `_`, or tuple `(a, b)`. Complex patterns (struct, slice) are
+    /// future work.
     For {
         /// Optional loop label. FLS §6.15.6.
         label: Option<String>,
-        /// The loop variable (simple identifier pattern).
-        pat: Span,
+        /// The loop variable pattern (irrefutable). FLS §5.1.4, §5.10.3.
+        pat: Pat,
         /// The iterator expression.
         iter: Box<Expr>,
         /// The loop body.

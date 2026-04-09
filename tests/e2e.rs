@@ -34070,3 +34070,324 @@ fn runtime_inline_array_for_two_loops_not_folded() {
         "both inline-array loops must emit lsl #3 for element loading — found {lsl_count}: {asm}"
     );
 }
+
+// ── Milestone 199: for x in [f64/f32 literals] — float inline array for-loop ──
+//
+// FLS §6.15.1: A for loop may iterate over any expression that implements
+// IntoIterator. Galvanic special-cases inline array literals at the IR level.
+// FLS §4.2: Float elements use d-registers (f64) or s-registers (f32).
+// FLS §6.8: Array expressions with float elements follow the same left-to-right
+// evaluation order as integer arrays (FLS §6.4:14).
+// FLS §6.1.2:37–45: All element stores and loop loads are runtime instructions —
+// the loop body must not be constant-folded even when all literals are known.
+
+/// Milestone 199: for loop over inline f64 array literal — basic sum.
+///
+/// FLS §6.15.1: Each element is loaded at runtime (not folded).
+/// FLS §4.2: Loop variable `x` lives in a d-register slot.
+#[test]
+fn milestone_199_inline_f64_array_for_sum() {
+    let src = "fn main() -> i32 {\n\
+    let mut sum: f64 = 0.0;\n\
+    for x in [1.0, 2.0, 3.0] { sum += x; }\n\
+    sum as i32\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "1.0+2.0+3.0=6.0→6, got {exit_code}");
+}
+
+/// Milestone 199: for loop over inline f64 array — single element.
+///
+/// FLS §6.15.1: A one-element array executes the body exactly once.
+#[test]
+fn milestone_199_inline_f64_array_for_single_element() {
+    let src = "fn main() -> i32 {\n\
+    let mut acc: f64 = 0.0;\n\
+    for x in [7.0] { acc += x; }\n\
+    acc as i32\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "arr=[7.0], acc=7.0→7, got {exit_code}");
+}
+
+/// Milestone 199: for loop over inline f64 array — element used in arithmetic.
+///
+/// FLS §6.15.1: Loop variable accessible in body for use in expressions.
+/// FLS §4.2: f64 loop variable participates in float arithmetic.
+#[test]
+fn milestone_199_inline_f64_array_for_arithmetic_on_element() {
+    let src = "fn main() -> i32 {\n\
+    let mut total: f64 = 0.0;\n\
+    for x in [2.0, 4.0, 6.0] { total += x * 2.0; }\n\
+    total as i32\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 24, "2.0*2+4.0*2+6.0*2=24.0→24, got {exit_code}");
+}
+
+/// Milestone 199: for loop over inline f64 array — element passed to function.
+///
+/// FLS §6.15.1: Loop variable may be passed to other functions.
+/// FLS §4.2: f64 value passes through d0 register in function call ABI.
+#[test]
+fn milestone_199_inline_f64_array_for_element_to_fn() {
+    let src = "fn double(v: f64) -> i32 { (v * 2.0) as i32 }\n\
+fn main() -> i32 {\n\
+    let mut total = 0;\n\
+    for x in [1.0, 2.0, 3.0] { total += double(x); }\n\
+    total\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 12, "double(1)+double(2)+double(3)=2+4+6=12, got {exit_code}");
+}
+
+/// Milestone 199: for loop over inline f64 array — result in arithmetic.
+///
+/// FLS §6.15.1: The for-loop itself has unit type; the accumulator holds the result.
+#[test]
+fn milestone_199_inline_f64_array_for_result_in_arithmetic() {
+    let src = "fn main() -> i32 {\n\
+    let mut sum: f64 = 0.0;\n\
+    for x in [10.0, 20.0] { sum += x; }\n\
+    (sum + 5.0) as i32\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 35, "10+20+5=35, got {exit_code}");
+}
+
+/// Milestone 199: for loop over inline f64 array — called twice, not folded.
+///
+/// FLS §6.1.2:37–45: The loop must execute at runtime even when called multiple
+/// times with the same literal array. Verifies no cross-call constant folding.
+#[test]
+fn milestone_199_inline_f64_array_for_called_twice() {
+    let src = "fn sum_floats() -> i32 {\n\
+    let mut s: f64 = 0.0;\n\
+    for x in [1.0, 2.0, 3.0] { s += x; }\n\
+    s as i32\n\
+}\n\
+fn main() -> i32 { sum_floats() + sum_floats() }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 12, "6+6=12, got {exit_code}");
+}
+
+/// Milestone 199: for loop over inline f64 array — continue skips remaining body.
+///
+/// FLS §6.15.7: `continue` advances to the next element; elements after the
+/// continue target are skipped for that iteration.
+#[test]
+fn milestone_199_inline_f64_array_for_continue() {
+    let src = "fn main() -> i32 {\n\
+    let mut count = 0;\n\
+    for x in [1.0, 2.0, 3.0, 4.0] {\n\
+        if (x as i32) % 2 == 0 { continue; }\n\
+        count += 1;\n\
+    }\n\
+    count\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2, "1.0 and 3.0 are odd → count=2, got {exit_code}");
+}
+
+/// Milestone 199: for loop over inline f32 array literal — basic sum.
+///
+/// FLS §4.2: f32 elements use s-registers. FLS §6.15.1: same iteration semantics.
+#[test]
+fn milestone_199_inline_f32_array_for_sum() {
+    let src = "fn main() -> i32 {\n\
+    let mut sum: f32 = 0.0_f32;\n\
+    for x in [1.0_f32, 2.0_f32, 3.0_f32] { sum += x; }\n\
+    sum as i32\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "1+2+3=6, got {exit_code}");
+}
+
+// ── Milestone 200: for (a, b) in [(e0, e1), …] — tuple pattern in for loop ──
+//
+// FLS §6.15.1: "The pattern in a for loop expression may be any irrefutable
+// pattern." §5.10.3: Tuple patterns bind multiple bindings simultaneously.
+// FLS §6.1.2:37–45: Each field load is a runtime instruction (no const-fold).
+
+/// Milestone 200: basic sum of first fields.
+///
+/// FLS §6.15.1: tuple pattern `(a, b)` binds both fields of each element.
+/// FLS §5.10.3: Tuple pattern in for loop position is an irrefutable pattern.
+#[test]
+fn milestone_200_tuple_pat_sum_first_fields() {
+    let src = "fn main() -> i32 {\n\
+    let mut s = 0;\n\
+    for (a, b) in [(1, 10), (2, 20), (3, 30)] { s += a; }\n\
+    s\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "1+2+3=6, got {exit_code}");
+}
+
+/// Milestone 200: basic sum of second fields.
+///
+/// FLS §6.15.1: second binding `b` is independent from `a`.
+#[test]
+fn milestone_200_tuple_pat_sum_second_fields() {
+    let src = "fn main() -> i32 {\n\
+    let mut s = 0;\n\
+    for (a, b) in [(1, 10), (2, 20), (3, 30)] { s += b; }\n\
+    s\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 60, "10+20+30=60, got {exit_code}");
+}
+
+/// Milestone 200: sum both fields.
+///
+/// FLS §6.15.1: both bindings are live in the loop body simultaneously.
+#[test]
+fn milestone_200_tuple_pat_sum_both_fields() {
+    let src = "fn main() -> i32 {\n\
+    let mut s = 0;\n\
+    for (a, b) in [(1, 2), (3, 4), (5, 6)] { s += a + b; }\n\
+    s\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 21, "1+2+3+4+5+6=21, got {exit_code}");
+}
+
+/// Milestone 200: single element.
+///
+/// FLS §6.15.1: one-element array executes body exactly once.
+#[test]
+fn milestone_200_tuple_pat_single_element() {
+    let src = "fn main() -> i32 {\n\
+    for (a, b) in [(7, 3)] {\n\
+        return a + b;\n\
+    }\n\
+    0\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10, "7+3=10, got {exit_code}");
+}
+
+/// Milestone 200: first field used in arithmetic.
+///
+/// FLS §6.15.1: bound variable `a` is usable in arbitrary expressions.
+#[test]
+fn milestone_200_tuple_pat_arithmetic_on_field() {
+    let src = "fn main() -> i32 {\n\
+    let mut s = 0;\n\
+    for (a, b) in [(2, 1), (4, 2), (6, 3)] { s += a * b; }\n\
+    s\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 28, "2*1+4*2+6*3=2+8+18=28, got {exit_code}");
+}
+
+/// Milestone 200: passed to function.
+///
+/// FLS §6.15.1: bound variables can be passed to function calls.
+#[test]
+fn milestone_200_tuple_pat_element_to_fn() {
+    let src = "fn add(x: i32, y: i32) -> i32 { x + y }\n\
+fn main() -> i32 {\n\
+    let mut s = 0;\n\
+    for (a, b) in [(1, 4), (2, 5), (3, 6)] { s += add(a, b); }\n\
+    s\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 21, "5+7+9=21, got {exit_code}");
+}
+
+/// Milestone 200: wildcard in tuple pattern (`(a, _)` discards second field).
+///
+/// FLS §5.1: Wildcard pattern matches any value without binding.
+/// FLS §6.15.1: irrefutable patterns including `_` sub-patterns are valid.
+#[test]
+fn milestone_200_tuple_pat_wildcard_field() {
+    let src = "fn main() -> i32 {\n\
+    let mut s = 0;\n\
+    for (a, _) in [(1, 99), (2, 99), (3, 99)] { s += a; }\n\
+    s\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "1+2+3=6, got {exit_code}");
+}
+
+/// Milestone 200: called twice — second call sees fresh bindings.
+///
+/// FLS §6.15.1: each invocation of the for loop iterates independently.
+#[test]
+fn milestone_200_tuple_pat_called_twice() {
+    let src = "fn f(pairs: i32) -> i32 { pairs }\n\
+fn main() -> i32 {\n\
+    let mut s1 = 0;\n\
+    for (a, b) in [(1, 2), (3, 4)] { s1 += a; }\n\
+    let mut s2 = 0;\n\
+    for (a, b) in [(10, 20), (30, 40)] { s2 += b; }\n\
+    s1 + s2\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 64, "s1=1+3=4, s2=20+40=60, 4+60=64, got {exit_code}");
+}
+
+/// Milestone 200: assembly inspection — tuple for-loop emits two independent
+/// `LoadIndexed` instructions (one per field column), not constant-folded.
+///
+/// FLS §6.1.2:37–45: Each indexed load is a runtime instruction.
+/// FLS §5.10.3: Column-wise storage enables reuse of the stride-1 LoadIndexed.
+#[test]
+fn runtime_tuple_for_loop_emits_two_indexed_loads_not_folded() {
+    let asm = compile_to_asm(
+        "fn main() -> i32 {\n\
+    let mut s = 0;\n\
+    for (a, b) in [(1, 2), (3, 4), (5, 6)] { s += a + b; }\n\
+    s\n\
+}\n",
+    );
+    // Two distinct indexed-load instructions should appear (one per field column).
+    let indexed_loads: Vec<&str> = asm
+        .lines()
+        .filter(|l| l.trim_start().starts_with("ldr") && l.contains("lsl #3"))
+        .collect();
+    assert!(
+        indexed_loads.len() >= 2,
+        "expected at least 2 `ldr ... lsl #3` instructions for 2-field tuple, got:\n{asm}"
+    );
+    // Result 21 must not be constant-folded.
+    assert!(
+        !asm.contains("mov     x0, #21"),
+        "must not const-fold tuple for-loop sum to #21:\n{asm}"
+    );
+}
+
+/// Milestone 199: assembly inspection — f64 inline array for-loop emits
+/// float indexed load (`ldr d`) and float add (`fadd`), not constant-folded.
+///
+/// FLS §6.1.2:37–45: Runtime float iteration must emit real float instructions.
+/// FLS §4.2: d-registers carry f64 values; `fadd` is the float add instruction.
+#[test]
+fn runtime_inline_f64_array_for_emits_ldr_dreg_not_folded() {
+    let asm = compile_to_asm(
+        "fn main() -> i32 {\n\
+    let mut sum: f64 = 0.0;\n\
+    for x in [1.0, 2.0, 3.0] { sum += x; }\n\
+    sum as i32\n\
+}\n",
+    );
+    // Float indexed load must be emitted (ldr d<n>, [<reg>, <idx>, lsl #3]).
+    assert!(
+        asm.lines().any(|l| {
+            let t = l.trim_start();
+            t.starts_with("ldr") && t.contains("d") && t.contains("lsl #3")
+        }),
+        "expected float indexed load `ldr d<n>, [..., lsl #3]` in assembly:\n{asm}"
+    );
+    // Float add must be emitted (fadd).
+    assert!(
+        asm.contains("fadd"),
+        "expected `fadd` instruction in float array for-loop:\n{asm}"
+    );
+    // The sum 6.0 cast to i32 must not be constant-folded as `mov x0, #6`.
+    assert!(
+        !asm.contains("mov     x0, #6"),
+        "loop body must not be constant-folded to #6:\n{asm}"
+    );
+}

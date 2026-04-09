@@ -2514,7 +2514,17 @@ impl<'src> Parser<'src> {
         loop {
             match self.peek_kind() {
                 // Call expression: `expr(args)` — FLS §6.3.1
+                //
+                // FLS §6.21 / Rust grammar: Block-like expressions (`for`, `while`,
+                // `loop`, `if`, etc.) do not accept a `(` postfix as a call.
+                // `for x in arr {}(args)` would be misidentified as calling the
+                // for-loop result; break the postfix loop instead.
+                // A grouped expression `(for x in arr {})` is always the caller's
+                // responsibility. See also `is_expr_with_block` in `parse_stmt_or_tail`.
                 TokenKind::OpenParen => {
+                    if Self::is_expr_with_block(&expr) {
+                        break;
+                    }
                     expr = self.parse_call(expr)?;
                 }
 
@@ -3723,15 +3733,10 @@ impl<'src> Parser<'src> {
         let start = self.current_span();
         self.expect(TokenKind::KwFor)?;
 
-        // Pattern: identifier only for now (future: full irrefutable patterns).
-        if self.peek_kind() != TokenKind::Ident {
-            return Err(self.error(format!(
-                "expected loop variable (identifier) after `for`, found {:?}",
-                self.peek_kind()
-            )));
-        }
-        let pat = self.current_span();
-        self.advance();
+        // Pattern: any irrefutable pattern — identifier, wildcard, or tuple.
+        // FLS §6.15.1: "The pattern in a for loop may be any irrefutable pattern."
+        // FLS §5.1.4, §5.10.3: Identifiers and tuple patterns are irrefutable.
+        let pat = self.parse_pattern()?;
 
         self.expect(TokenKind::KwIn)?;
         // Restrict struct literals in the iterable expression to avoid
@@ -5644,7 +5649,8 @@ mod tests {
         let ExprKind::For { ref pat, ref iter, ref body, .. } = tail.kind else {
             panic!("expected For, got {:?}", tail.kind);
         };
-        assert_eq!(pat.text(src), "x");
+        let crate::ast::Pat::Ident(ref pat_span) = *pat else { panic!("expected Ident pat") };
+        assert_eq!(pat_span.text(src), "x");
         assert!(matches!(iter.kind, ExprKind::Path(_)));
         assert!(body.stmts.is_empty());
     }
@@ -5660,7 +5666,8 @@ mod tests {
         let ExprKind::For { ref pat, ref body, .. } = tail.kind else {
             panic!("expected For");
         };
-        assert_eq!(pat.text(src), "item");
+        let crate::ast::Pat::Ident(ref pat_span) = *pat else { panic!("expected Ident pat") };
+        assert_eq!(pat_span.text(src), "item");
         assert_eq!(body.stmts.len(), 1);
         let StmtKind::Expr(ref call) = body.stmts[0].kind else {
             panic!("expected expr stmt in for body");

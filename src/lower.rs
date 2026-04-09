@@ -15707,7 +15707,15 @@ impl<'src> LowerCtx<'src> {
                 };
 
                 if let Some((ptr_slot, is_mut_slice)) = slice_iter {
-                    let pat_name = pat.text(self.source);
+                    // FLS §6.15.1: Pat may be Ident (bind) or Wildcard (discard).
+                    // Tuple patterns over slice iterators are not yet supported.
+                    let pat_name = match pat {
+                        Pat::Ident(span) => Some(span.text(self.source)),
+                        Pat::Wildcard => None,
+                        _ => return Err(LowerError::Unsupported(
+                            "only identifier or wildcard patterns are supported for slice for-loops".into(),
+                        )),
+                    };
 
                     // Allocate counter and element slots.
                     let counter_slot = self.alloc_slot()?;
@@ -15743,7 +15751,10 @@ impl<'src> LowerCtx<'src> {
                     });
 
                     // Bind the loop variable so the body can load it via Path.
-                    self.locals.insert(pat_name, elem_slot);
+                    // FLS §6.15.1: Wildcard pattern `_` produces no binding.
+                    if let Some(name) = pat_name {
+                        self.locals.insert(name, elem_slot);
+                    }
 
                     // ── Condition: counter < length ───────────────────────────────────
                     // FLS §4.9: Length lives at ptr_slot + 1 (runtime load).
@@ -15915,7 +15926,14 @@ impl<'src> LowerCtx<'src> {
                 };
 
                 if let Some((arr_base, arr_len, is_mut_borrow)) = array_iter {
-                    let pat_name = pat.text(self.source);
+                    // FLS §6.15.1: Pat may be Ident (bind) or Wildcard (discard).
+                    let pat_name = match pat {
+                        Pat::Ident(span) => Some(span.text(self.source)),
+                        Pat::Wildcard => None,
+                        _ => return Err(LowerError::Unsupported(
+                            "only identifier or wildcard patterns are supported for array for-loops".into(),
+                        )),
+                    };
 
                     // Allocate a hidden counter slot (0-based element index) and an
                     // element slot that holds the loop variable on each iteration.
@@ -15969,14 +15987,17 @@ impl<'src> LowerCtx<'src> {
                     // so that Path resolution emits a plain `Load` (loads the pointer),
                     // and `*x` dereferences it via `LoadPtr`. This is consistent with
                     // how `&mut T` parameters are represented.
-                    if is_mut_borrow {
-                        self.locals.insert(pat_name, elem_slot);
-                    } else if is_f64_arr_loop {
-                        self.float_locals.insert(pat_name, elem_slot);
-                    } else if is_f32_arr_loop {
-                        self.float32_locals.insert(pat_name, elem_slot);
-                    } else {
-                        self.locals.insert(pat_name, elem_slot);
+                    // FLS §6.15.1: Wildcard pattern `_` produces no binding.
+                    if let Some(name) = pat_name {
+                        if is_mut_borrow {
+                            self.locals.insert(name, elem_slot);
+                        } else if is_f64_arr_loop {
+                            self.float_locals.insert(name, elem_slot);
+                        } else if is_f32_arr_loop {
+                            self.float32_locals.insert(name, elem_slot);
+                        } else {
+                            self.locals.insert(name, elem_slot);
+                        }
                     }
 
                     // ── Condition: counter < arr_len ──────────────────────────────────
@@ -16100,13 +16121,173 @@ impl<'src> LowerCtx<'src> {
                 // roughly one 64-byte cache line; the full loop spans 2–3 lines.
                 if let ExprKind::Array(elems) = &iter.kind {
                     let n = elems.len();
-                    let pat_name = pat.text(self.source);
 
                     if n == 0 {
                         // An empty array literal produces zero iterations.
                         // FLS §6.15.1: The loop body is never entered.
                         return Ok(IrValue::Unit);
                     }
+
+                    // FLS §5.10.3: Detect a tuple destructuring pattern — `for (a, b) in [...]`.
+                    // FLS §6.15.1: The loop pattern may be any irrefutable pattern.
+                    if let Pat::Tuple(field_pats) = pat {
+                        // ── Tuple-element path ──────────────────────────────────────────
+                        // Each element of the iterator array is a tuple.  The pattern
+                        // `(p0, p1, …)` binds each field separately.
+                        //
+                        // Storage layout (column-wise): field `f` of all `n` elements
+                        // occupies consecutive slots starting at `base_slot + f * n`.
+                        //
+                        //   slot[base + 0*n + i] = elem[i].field[0]   (i = 0..n-1)
+                        //   slot[base + 1*n + i] = elem[i].field[1]   (i = 0..n-1)
+                        //   ...
+                        //
+                        // This lets each field column be addressed with a plain
+                        // `LoadIndexed { base_slot: base + f*n, index_reg: counter }`,
+                        // reusing the existing stride-1 indexed-load instruction.
+                        //
+                        // FLS §6.1.2:37–45: All stores and loads are runtime instructions.
+                        // FLS §5.10.3: Only Pat::Ident and Pat::Wildcard sub-patterns
+                        // are supported at this milestone.
+                        let arity = field_pats.len();
+                        if arity == 0 {
+                            return Err(LowerError::Unsupported(
+                                "for-loop tuple pattern must have at least one field".into(),
+                            ));
+                        }
+
+                        // Validate sub-patterns: only Ident/Wildcard for now.
+                        for fp in field_pats.iter() {
+                            if !matches!(fp, Pat::Ident(_) | Pat::Wildcard) {
+                                return Err(LowerError::Unsupported(
+                                    "nested patterns inside for-loop tuple pattern are not yet supported".into(),
+                                ));
+                            }
+                        }
+
+                        // Allocate n*arity slots for the column-wise array storage.
+                        // FLS §6.8: Array element storage uses the stack frame.
+                        let base_slot = self.alloc_slot()?;
+                        for _ in 1..(n * arity) {
+                            self.alloc_slot()?;
+                        }
+
+                        // Allocate one element slot per field (updated each iteration).
+                        let counter_slot = self.alloc_slot()?;
+                        let mut field_slots = Vec::with_capacity(arity);
+                        for _ in 0..arity {
+                            field_slots.push(self.alloc_slot()?);
+                        }
+
+                        let reg_mark = self.next_reg;
+
+                        // ── Store elements column-wise ─────────────────────────────────
+                        // FLS §6.4:14: Evaluate elements left-to-right.
+                        // FLS §6.1.2:37–45: Each store is a runtime instruction.
+                        for (elem_idx, elem_expr) in elems.iter().enumerate() {
+                            let ExprKind::Tuple(field_exprs) = &elem_expr.kind else {
+                                return Err(LowerError::Unsupported(
+                                    "for-loop tuple pattern requires tuple literal elements".into(),
+                                ));
+                            };
+                            if field_exprs.len() != arity {
+                                return Err(LowerError::Unsupported(
+                                    "all elements must have the same tuple arity as the pattern".into(),
+                                ));
+                            }
+                            for (field_idx, field_expr) in field_exprs.iter().enumerate() {
+                                let val = self.lower_expr(field_expr, &IrTy::I32)?;
+                                let src = self.val_to_reg(val)?;
+                                // slot index: base + field_idx*n + elem_idx
+                                let slot = base_slot + (field_idx * n + elem_idx) as u8;
+                                self.instrs.push(Instr::Store { src, slot });
+                            }
+                        }
+
+                        // Initialise counter to 0.
+                        let r_zero = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(r_zero, 0));
+                        self.instrs.push(Instr::Store { src: r_zero, slot: counter_slot });
+
+                        let cond_label = self.alloc_label();
+                        let incr_label = self.alloc_label();
+                        let exit_label = self.alloc_label();
+
+                        self.loop_stack.push(LoopCtx {
+                            label: label.clone(),
+                            header_label: incr_label,
+                            exit_label,
+                            break_slot: None,
+                            break_ret_ty: IrTy::Unit,
+                            is_named_block: false,
+                        });
+
+                        // Bind each field name to its dedicated element slot.
+                        // FLS §6.15.1: Wildcard sub-patterns `_` produce no binding.
+                        for (fp, &fs) in field_pats.iter().zip(field_slots.iter()) {
+                            if let Pat::Ident(span) = fp {
+                                self.locals.insert(span.text(self.source), fs);
+                            }
+                        }
+
+                        // ── Condition: counter < N ─────────────────────────────────────
+                        self.instrs.push(Instr::Label(cond_label));
+                        let r_counter = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: r_counter, slot: counter_slot });
+                        let r_len = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(r_len, n as i32));
+                        let r_cmp = self.alloc_reg()?;
+                        self.instrs.push(Instr::BinOp { op: IrBinOp::Lt, dst: r_cmp, lhs: r_counter, rhs: r_len });
+                        self.instrs.push(Instr::CondBranch { reg: r_cmp, label: exit_label });
+
+                        // ── Load each field column at index `counter` ──────────────────
+                        // FLS §6.9: Each column is a separate LoadIndexed at stride 1.
+                        // FLS §6.1.2:37–45: These are runtime instructions.
+                        let r_cnt = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: r_cnt, slot: counter_slot });
+                        for (field_idx, &fs) in field_slots.iter().enumerate() {
+                            let col_base = base_slot + (field_idx * n) as u8;
+                            let r_fld = self.alloc_reg()?;
+                            self.instrs.push(Instr::LoadIndexed { dst: r_fld, base_slot: col_base, index_reg: r_cnt });
+                            self.instrs.push(Instr::Store { src: r_fld, slot: fs });
+                        }
+
+                        // ── Body ──────────────────────────────────────────────────────
+                        self.lower_block_to_value(body, &IrTy::Unit)?;
+
+                        // ── Increment: counter += 1 ────────────────────────────────────
+                        self.instrs.push(Instr::Label(incr_label));
+                        let r_cnt2 = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: r_cnt2, slot: counter_slot });
+                        let r_one = self.alloc_reg()?;
+                        self.instrs.push(Instr::LoadImm(r_one, 1));
+                        let r_next = self.alloc_reg()?;
+                        self.instrs.push(Instr::BinOp { op: IrBinOp::Add, dst: r_next, lhs: r_cnt2, rhs: r_one });
+                        self.instrs.push(Instr::Store { src: r_next, slot: counter_slot });
+                        self.instrs.push(Instr::Branch(cond_label));
+
+                        // Exit.
+                        self.instrs.push(Instr::Label(exit_label));
+                        self.loop_stack.pop();
+                        self.next_reg = reg_mark;
+                        return Ok(IrValue::Unit);
+                    }
+
+                    // ── Scalar (Ident / Wildcard) path ────────────────────────────────
+                    // FLS §6.15.1: Ident pattern binds element; Wildcard discards it.
+                    let pat_name = match pat {
+                        Pat::Ident(span) => Some(span.text(self.source)),
+                        Pat::Wildcard => None,
+                        _ => return Err(LowerError::Unsupported(
+                            "only identifier, wildcard, or tuple patterns are supported for inline-array for-loops".into(),
+                        )),
+                    };
+
+                    // FLS §2.4.4.2, §4.2: Detect element type from the first element.
+                    // Float literals without _f32 suffix are f64; with _f32 are f32.
+                    // This mirrors the named-array path (see `local_f64_array_slots`).
+                    let is_f64_elems = self.is_f64_expr(&elems[0]);
+                    let is_f32_elems = !is_f64_elems && self.is_f32_expr(&elems[0]);
 
                     // Allocate N consecutive stack slots for the temporary array.
                     let base_slot = self.alloc_slot()?;
@@ -16122,10 +16303,37 @@ impl<'src> LowerCtx<'src> {
                     // Evaluate all element expressions left-to-right and store.
                     // FLS §6.8, §6.4:14: Elements are evaluated in source order.
                     // FLS §6.1.2:37–45: Each store is a runtime instruction.
-                    for (i, elem_expr) in elems.iter().enumerate() {
-                        let val = self.lower_expr(elem_expr, &IrTy::I32)?;
-                        let src = self.val_to_reg(val)?;
-                        self.instrs.push(Instr::Store { src, slot: base_slot + i as u8 });
+                    // FLS §4.2: f64/f32 elements use float registers and float stores.
+                    if is_f64_elems {
+                        self.local_f64_array_slots.insert(base_slot);
+                        for (i, elem_expr) in elems.iter().enumerate() {
+                            let val = self.lower_expr(elem_expr, &IrTy::F64)?;
+                            let src = match val {
+                                IrValue::FReg(r) => r,
+                                _ => return Err(LowerError::Unsupported(
+                                    "f64 inline array element did not produce a float value".into(),
+                                )),
+                            };
+                            self.instrs.push(Instr::StoreF64 { src, slot: base_slot + i as u8 });
+                        }
+                    } else if is_f32_elems {
+                        self.local_f32_array_slots.insert(base_slot);
+                        for (i, elem_expr) in elems.iter().enumerate() {
+                            let val = self.lower_expr(elem_expr, &IrTy::F32)?;
+                            let src = match val {
+                                IrValue::F32Reg(r) => r,
+                                _ => return Err(LowerError::Unsupported(
+                                    "f32 inline array element did not produce a float value".into(),
+                                )),
+                            };
+                            self.instrs.push(Instr::StoreF32 { src, slot: base_slot + i as u8 });
+                        }
+                    } else {
+                        for (i, elem_expr) in elems.iter().enumerate() {
+                            let val = self.lower_expr(elem_expr, &IrTy::I32)?;
+                            let src = self.val_to_reg(val)?;
+                            self.instrs.push(Instr::Store { src, slot: base_slot + i as u8 });
+                        }
                     }
 
                     // Initialise counter to 0.
@@ -16147,7 +16355,18 @@ impl<'src> LowerCtx<'src> {
                     });
 
                     // Bind the loop variable so the body can load it via Path.
-                    self.locals.insert(pat_name, elem_slot);
+                    // FLS §4.2: f64/f32 loop variables use float_locals / float32_locals
+                    // so path expressions emit LoadF64Slot / LoadF32Slot instead of Load.
+                    // FLS §6.15.1: Wildcard pattern `_` produces no binding.
+                    if let Some(name) = pat_name {
+                        if is_f64_elems {
+                            self.float_locals.insert(name, elem_slot);
+                        } else if is_f32_elems {
+                            self.float32_locals.insert(name, elem_slot);
+                        } else {
+                            self.locals.insert(name, elem_slot);
+                        }
+                    }
 
                     // ── Condition: counter < N ─────────────────────────────────────────
                     // FLS §6.15.1: Loop terminates when all elements have been visited.
@@ -16163,14 +16382,30 @@ impl<'src> LowerCtx<'src> {
 
                     // ── Load element: elem_slot ← arr[counter] ───────────────────────
                     // FLS §6.9: Element at index `counter` is loaded from the temporary
-                    // array at base_slot + counter. `LoadIndexed` emits an `add` (base
-                    // address) + `ldr` (indexed load) pair — both runtime instructions.
+                    // array at base_slot + counter.
+                    // FLS §4.2: Float elements use float-register load/store instructions.
                     // FLS §6.1.2:37–45: The load is a runtime instruction.
                     let r_cnt = self.alloc_reg()?;
                     self.instrs.push(Instr::Load { dst: r_cnt, slot: counter_slot });
                     let r_elem = self.alloc_reg()?;
-                    self.instrs.push(Instr::LoadIndexed { dst: r_elem, base_slot, index_reg: r_cnt });
-                    self.instrs.push(Instr::Store { src: r_elem, slot: elem_slot });
+                    if is_f64_elems {
+                        self.instrs.push(Instr::LoadIndexedF64 {
+                            dst: r_elem,
+                            base_slot,
+                            index_reg: r_cnt,
+                        });
+                        self.instrs.push(Instr::StoreF64 { src: r_elem, slot: elem_slot });
+                    } else if is_f32_elems {
+                        self.instrs.push(Instr::LoadIndexedF32 {
+                            dst: r_elem,
+                            base_slot,
+                            index_reg: r_cnt,
+                        });
+                        self.instrs.push(Instr::StoreF32 { src: r_elem, slot: elem_slot });
+                    } else {
+                        self.instrs.push(Instr::LoadIndexed { dst: r_elem, base_slot, index_reg: r_cnt });
+                        self.instrs.push(Instr::Store { src: r_elem, slot: elem_slot });
+                    }
 
                     // ── Body ──────────────────────────────────────────────────────────
                     self.lower_block_to_value(body, &IrTy::Unit)?;
@@ -16207,8 +16442,15 @@ impl<'src> LowerCtx<'src> {
                 };
 
                 // Allocate the loop variable slot and record the name.
+                // FLS §6.15.1: Pat may be Ident (bind) or Wildcard (discard).
                 let i_slot = self.alloc_slot()?;
-                let pat_name = pat.text(self.source);
+                let pat_name = match pat {
+                    Pat::Ident(span) => Some(span.text(self.source)),
+                    Pat::Wildcard => None,
+                    _ => return Err(LowerError::Unsupported(
+                        "only identifier or wildcard patterns are supported for range for-loops".into(),
+                    )),
+                };
 
                 // Allocate a slot for the end bound (evaluated once before the loop).
                 // FLS §6.16: The range bounds are evaluated once, not on each iteration.
@@ -16243,7 +16485,10 @@ impl<'src> LowerCtx<'src> {
                 self.loop_stack.push(LoopCtx { label: label.clone(), header_label: incr_label, exit_label, break_slot: None, break_ret_ty: IrTy::Unit, is_named_block: false });
 
                 // Bind the loop variable name so body can load it via Path.
-                self.locals.insert(pat_name, i_slot);
+                // FLS §6.15.1: Wildcard pattern `_` produces no binding.
+                if let Some(name) = pat_name {
+                    self.locals.insert(name, i_slot);
+                }
 
                 // Condition check: load loop var and end bound, compare.
                 self.instrs.push(Instr::Label(cond_label));
