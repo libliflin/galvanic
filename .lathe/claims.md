@@ -62,6 +62,16 @@ Claims are the load-bearing promises galvanic makes to its stakeholders. The fal
 
 ---
 
+### Claim 7: Block/paren disambiguation (FLS §6.21)
+
+**Stakeholders:** FLS conformance researcher, CI/validation infrastructure  
+**Promise:** A block-like expression (`for`, `while`, `loop`, `if`, `match`) followed by `(` is parsed as two separate expressions, not as a call. `for x in arr {} (s + 1)` emits an `add`, not a `blr` (call).  
+**Why it's load-bearing:** This parser invariant was silently regressed in the re-init commits (9866afd). The compile_and_run tests self-skip on macOS, so the regression was invisible until a `compile_to_asm` inspection test caught it. Without this claim in `falsify.sh`, the same regression could recur silently in any future re-init or merge.  
+**How it's checked:** `falsify.sh` runs `cargo test --test e2e -- --exact runtime_for_block_then_paren_emits_add_not_blr`. This test uses `compile_to_asm` (no ARM64 tools required) and asserts: `add` appears in output, `blr` does not, result is not constant-folded to `#4`.  
+**Structural, not documentary:** This claim fails if the parser regresses to treating `(` after a block-like expression as a call postfix — regardless of what comments say.
+
+---
+
 ## Retired Claims
 
 *(None yet. Claims are retired here when they no longer fit the project, with the date and reasoning.)*

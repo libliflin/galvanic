@@ -151,6 +151,20 @@ print('}')
 fi
 echo ""
 
+# ── Claim 7: Block/paren disambiguation (FLS §6.21) ──────────────────────────
+#
+# A `(` following a block-like expression (for, while, loop, if, match) must
+# be parsed as a new parenthesized expression, not a call postfix. This was
+# silently regressed in the re-init commits and only caught by compile_to_asm.
+# No ARM64 tools or QEMU required — compile_to_asm is pure in-process codegen.
+echo "--- Claim 7: Block/paren disambiguation (FLS §6.21) ---"
+if cargo test --test e2e -- --exact runtime_for_block_then_paren_emits_add_not_blr 2>&1; then
+    ok "for {} (expr) emits add not blr"
+else
+    fail "block/paren parser regression: for {} (expr) may be parsed as a call"
+fi
+echo ""
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo "=== Summary === passed: $PASS  failed: $FAIL"
 echo ""
