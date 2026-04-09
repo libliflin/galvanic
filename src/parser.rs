@@ -2514,7 +2514,17 @@ impl<'src> Parser<'src> {
         loop {
             match self.peek_kind() {
                 // Call expression: `expr(args)` — FLS §6.3.1
+                //
+                // FLS §6.21 / Rust grammar: Block-like expressions (`for`, `while`,
+                // `loop`, `if`, etc.) do not accept a `(` postfix as a call.
+                // `for x in arr {}(args)` would be misidentified as calling the
+                // for-loop result; break the postfix loop instead.
+                // A grouped expression `(for x in arr {})` is always the caller's
+                // responsibility. See also `is_expr_with_block` in `parse_stmt_or_tail`.
                 TokenKind::OpenParen => {
+                    if Self::is_expr_with_block(&expr) {
+                        break;
+                    }
                     expr = self.parse_call(expr)?;
                 }
 
