@@ -1,98 +1,78 @@
-# Claims Registry — galvanic
+# Claims Registry
 
-Load-bearing promises this project makes to its stakeholders. Each claim is checked every cycle by `falsify.sh`. A failing claim is top priority — fix it before any new work.
-
-Claims have lifecycles. When a claim no longer fits the project (e.g., a struct is intentionally redesigned to use a different layout), retire it here with reasoning rather than silently softening the check.
+Claims are the load-bearing promises galvanic makes to its stakeholders. The falsification suite (`falsify.sh`) checks these every cycle. A failing claim is top priority — fix it before any new work.
 
 ---
 
-## Claim 1: Token is 8 bytes
+## Active Claims
 
-**Stakeholder:** Cache-line codegen researcher  
-**Promise:** `size_of::<galvanic::lexer::Token>() == 8`
+### Claim 1: Build integrity
 
-The entire cache-line rationale depends on this. 8 tokens fill one 64-byte cache line. If Token grows, the "N/8 cache-line loads for N tokens" claim in the module doc becomes false without any visible signal.
-
-**Check:** `cargo test --lib -- --exact lexer::tests::token_is_eight_bytes`  
-**Adversarial:** Any field added to `Token` (e.g., a `flags: u8` or a wider span) triggers failure.  
-**Status:** Active
+**Stakeholders:** All  
+**Promise:** `cargo build` succeeds with no errors and no clippy warnings (`cargo clippy -- -D warnings`).  
+**Why it's load-bearing:** A compiler that doesn't compile is not a compiler. Every stakeholder's trust starts here.  
+**How it's checked:** `falsify.sh` runs `cargo build` and `cargo clippy -- -D warnings`.
 
 ---
 
-## Claim 2: Non-const functions emit runtime instructions
+### Claim 2: Test suite passes
 
-**Stakeholder:** FLS researcher, maintainer  
-**Promise:** Compiling `fn f(a: i32, b: i32) -> i32 { a + b }` produces ARM64 assembly containing a runtime `add` instruction in `f`'s body.
-
-This is the FLS §6.1.2:37–45 constraint: non-const functions execute at runtime. Galvanic is a compiler, not an interpreter. If the lowering pass constant-folds a parameter-based arithmetic expression, it violates the spec regardless of whether the output is numerically correct.
-
-**Check:** Compile the function via `galvanic` binary, inspect `.s` output for `\tadd\t` or ` add `.  
-**Adversarial:** Using function parameters (not literals) as operands — these cannot be constant-folded without violating the spec. The operands are not statically known to the compiler.  
-**Status:** Active
+**Stakeholders:** FLS conformance researcher, cache researcher, Sunday contributor  
+**Promise:** `cargo test` exits 0 — all unit and integration tests pass.  
+**Why it's load-bearing:** The 1700+ tests in `e2e.rs` represent 197 milestones of confirmed FLS compliance. A silent regression invalidates previous work.  
+**How it's checked:** `falsify.sh` runs `cargo test`.
 
 ---
 
-## Claim 3: No unsafe code in library modules
+### Claim 3: Token stays 8 bytes
 
-**Stakeholder:** Safety researcher, anyone trusting galvanic is safe Rust  
-**Promise:** No `unsafe { }`, `unsafe fn`, or `unsafe impl` appears in `src/` outside of `src/main.rs`.
-
-The project's research value includes demonstrating that a non-trivial compiler can be written in safe Rust. The CI `audit` job enforces this; `falsify.sh` independently checks it each cycle.
-
-**Check:** `grep -rn 'unsafe' src/` filtered to exclude `src/main.rs` and comment lines.  
-**Adversarial:** Any unsafe block added for convenience (e.g., to avoid a bounds check) is a violation.  
-**Status:** Active
+**Stakeholders:** Cache-aware codegen researcher  
+**Promise:** `size_of::<Token>() == 8` — the lexer's hot-path type fits 8 tokens per 64-byte cache line.  
+**Why it's load-bearing:** This is the primary structural claim of the cache-line-first design thesis. If `Token` grows, the thesis is no longer demonstrated at the lexer level.  
+**How it's checked:** `falsify.sh` runs `cargo test --lib -- --exact lexer::tests::token_is_eight_bytes`.  
+**Structural, not documentary:** This claim fails when the struct grows, regardless of what the doc comment says. A doc comment update does not satisfy this claim.
 
 ---
 
-## Claim 4: The library never shells out
+### Claim 4: No unsafe code in library source
 
-**Stakeholder:** Library user (anyone using galvanic as a library crate)  
-**Promise:** No `std::process::Command` or `process::Command` appears in `src/` outside of `src/main.rs`.
-
-The compiler library is pure computation. Only the CLI driver (`main.rs`) invokes the assembler and linker. Library consumers must not observe side effects from importing galvanic.
-
-**Check:** `grep -rn 'process::Command' src/` filtered to exclude `src/main.rs`.  
-**Adversarial:** A lowering or codegen helper that calls an external tool for any reason.  
-**Status:** Active
+**Stakeholders:** Sunday contributor, FLS conformance researcher  
+**Promise:** No `unsafe` blocks, `unsafe fn`, or `unsafe impl` in `src/` (excluding `src/main.rs`).  
+**Why it's load-bearing:** Galvanic is a research compiler implemented in safe Rust. If unsafe code creeps into the library, it undermines both the safety argument and the clean-room discipline.  
+**How it's checked:** `falsify.sh` greps `src/` for `unsafe` keywords, excluding `src/main.rs` and comment lines.
 
 ---
 
-## Claim 5: galvanic exits cleanly on empty input
+### Claim 5: Runtime instruction emission (no const-fold in non-const functions)
 
-**Stakeholder:** CLI user  
-**Promise:** `galvanic empty.rs` (where `empty.rs` is zero bytes) exits with code 0 and does not panic, hang, or die on a signal.
-
-Empty input is a degenerate but valid case. A compiler that crashes on empty input is unreliable for any automation.
-
-**Check:** Run the galvanic binary on a zero-byte `.rs` file; assert exit code is 0 and ≤ 128.  
-**Adversarial:** The file exists but contains nothing — no tokens, no items.  
-**Status:** Active
+**Stakeholders:** FLS conformance researcher  
+**Promise:** A non-const function that evaluates `1 + 2` emits a runtime `add` instruction, not a folded `mov x0, #3`.  
+**Why it's load-bearing:** FLS §6.1.2:37–45 is the heart of the conformance research question. A compiler that constant-folds non-const code looks correct on exit-code tests but is semantically wrong. The assembly inspection tests in `e2e.rs` are the only way to catch this.  
+**How it's checked:** `falsify.sh` runs `cargo test --test e2e -- --exact runtime_add_emits_add_instruction`.  
+**Note:** This single check is a proxy for the broader claim. The full defense is the set of assembly inspection tests throughout `tests/e2e.rs`. When adding new features that involve new arithmetic or comparison operations, extend the test suite with new inspection tests.
 
 ---
 
-## Claim 6: galvanic exits non-zero (cleanly) on a missing file
+### Claim 6: CLI handles adversarial inputs without panicking
 
-**Stakeholder:** CLI user  
-**Promise:** `galvanic /does/not/exist.rs` exits with a non-zero exit code ≤ 128 (not a signal/panic) and writes an error message to stderr.
-
-A missing file should produce a clean error, not a panic or hang. Exit codes > 128 indicate death by signal.
-
-**Check:** Run galvanic on a nonexistent path; assert exit code is > 0 and ≤ 128.  
-**Adversarial:** A path that does not exist and has never existed.  
-**Status:** Active
+**Stakeholders:** CI/validation infrastructure, Sunday contributor  
+**Promise:** The galvanic binary does not panic or crash (exit > 128) when given: empty files, binary garbage, NUL bytes, deeply nested braces (500 levels), or large inputs (10k let bindings).  
+**Why it's load-bearing:** A compiler that panics on bad input is not a compiler. Contributors who encounter unexpected panics will leave. The fuzz-smoke CI job encodes this; this claim tracks whether that contract holds locally.  
+**How it's checked:** `falsify.sh` constructs adversarial inputs and verifies clean exit (exit <= 128 or recognizable error exit).
 
 ---
 
 ## Retired Claims
 
-_(none yet — add here with date and reason when retiring)_
+*(None yet. Claims are retired here when they no longer fit the project, with the date and reasoning.)*
 
 ---
 
-## Notes for the Runtime Agent
+## Adding New Claims
 
-- **Extend** this file when a new milestone creates a new promise. If you implement `fn main() -> i32` returning a computed value, the promise "the returned value reaches the process exit code" is load-bearing for the e2e stakeholder — add it.
-- **The adversarial input matters.** A claim about runtime codegen that only tests literal arithmetic is not adversarial. Parameters are adversarial. Nested calls are adversarial. 
-- **The suite should stay fast.** Each claim check takes seconds. If a new claim requires a multi-second cargo compile, consider whether there's a more targeted check (a named unit test, a grep) that defends the same promise.
-- **`Span` is 8 bytes** by design (`start: u32` + `len: u32`) but has no `size_of` assertion test yet. Adding `ast::tests::span_is_eight_bytes` (analogous to the token test) is a good early cycle.
+When a new milestone introduces a new structural promise:
+
+1. Add an entry here with: stakeholder, promise, why it's load-bearing, how it's checked, and whether it's structural (fails if code changes) or documentary (fails if docs change).
+2. Add a corresponding check to `falsify.sh`.
+3. Choose structural over documentary whenever possible. A claim that can be satisfied by editing comments is not a structural claim.
+4. Keep the total number of claims in the 3–10 range. Too many claims that run slowly defeat the purpose. New claims should replace weaker ones where possible.

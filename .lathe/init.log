@@ -1,0 +1,25 @@
+`falsify.sh` needs to be made executable before the engine can use it. Two things to do before starting cycles:
+
+```bash
+cd /Users/williamlaffin/code/galvanic
+chmod +x .lathe/falsify.sh
+bash .lathe/falsify.sh
+```
+
+Confirm the last line of output is `=== Summary === passed: N  failed: M`. If it dies before that, check the alignment summary's "What Could Be Wrong" section.
+
+Here's what was written and why:
+
+---
+
+**`.lathe/agent.md`** — The runtime agent's brain. Four stakeholders: William as FLS conformance researcher, William as cache researcher, the Sunday contributor, and the CI infrastructure. Two real tensions: parser coverage vs. codegen coverage (codegen wins), FLS fidelity vs. convenience (fidelity always wins). No numbered priority ladder — the falsification suite is the floor, then stakeholder impact above it.
+
+**`.lathe/skills/architecture.md`** — The pipeline, the flat-register ABI (critical for understanding struct/closure/vtable codegen), the IR design, and a precise description of the three testing layers.
+
+**`.lathe/skills/testing.md`** — How the three test layers differ and when to use each. The most important non-obvious thing: assembly inspection tests (`compile_to_asm`) must accompany every new arithmetic/branch feature — exit codes alone can't distinguish "compiled correctly" from "constant-folded."
+
+**`.lathe/claims.md`** — Six claims. The most important: Claim 5 (runtime instruction emission) is the proxy for FLS §6.1.2:37–45, the heart of the conformance research question. Claim 3 (Token is 8 bytes) is the only structural cache-line claim that's currently enforced.
+
+**`.lathe/falsify.sh`** — Claim 4 (no unsafe) via grep, Claim 1 (build/clippy) via cargo, Claim 3 (token size) via one `--lib` test, Claim 5 (runtime codegen) via one `--test e2e` assembly inspection, Claim 6 (adversarial CLI) via constructed inputs. Skips Claim 2 (full test suite) since snapshot.sh already runs it and it would double the cycle time.
+
+**`.lathe/alignment-summary.md`** — Honest about the fact that falsify.sh couldn't be verified to run to completion due to sandbox restrictions, and lists branch protection + repo visibility as unverified.

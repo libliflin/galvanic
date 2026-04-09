@@ -1,124 +1,151 @@
-# Testing — galvanic
+# Testing
 
-This file answers: "How does galvanic test things, what conventions do existing tests follow, and what should a new test look like?" Read this before writing any test.
+*Why this exists: galvanic has three distinct test layers with different purposes and different tooling requirements. Mixing them up is the most common contributor mistake. This explains what each layer is for and how to add tests to each.*
 
 ---
 
-## Test Layers
+## The Three Layers
 
-### Layer 1: Unit tests (inside `src/`)
+### Layer 1: `tests/smoke.rs` — CLI Smoke Tests
 
-In-module tests (`#[cfg(test)] mod tests { ... }`) for specific behaviors. Currently:
-- `lexer::tests` — tokenization behavior, keyword recognition, layout assertions (`token_is_eight_bytes`)
-- Others as needed
+Tests the binary as a black box. Uses `std::process::Command` to run `galvanic` binary, checks exit codes and stdout text.
 
-**Convention:** Test the public API of the module. Name tests after what they verify, not how they verify it.
+**When to add here:** When testing CLI behavior — usage errors, file-not-found, the "galvanic: compiling" output, basic CLI flag parsing.
 
-### Layer 2: Parse-acceptance tests (`tests/fls_fixtures.rs`)
-
-Each test in this file calls `assert_galvanic_accepts(fixture_name)`, which:
-1. Reads `tests/fixtures/{fixture_name}` from disk
-2. Runs `galvanic::lexer::tokenize(&source)` — asserts no error
-3. Runs `galvanic::parser::parse(&tokens, &source)` — asserts no error
-
-These tests do NOT run lowering or codegen. They verify the lexer and parser accept valid FLS programs. Some fixture programs use features galvanic can parse but not yet lower — that's fine here.
-
-**When to add a new parse-acceptance test:** Every time a new `tests/fixtures/fls_*.rs` file is created, a matching `#[test] fn fls_X_Y_name() { assert_galvanic_accepts("fls_X_Y_name.rs"); }` goes in `tests/fls_fixtures.rs`.
-
-### Layer 3: Full-pipeline tests (`tests/e2e.rs`)
-
-Two helpers drive e2e tests:
-
-**`compile_to_asm(source: &str) -> String`** — runs lex → parse → lower → codegen, returns assembly text. Used to inspect whether specific instructions appear (e.g., `assert!(asm.contains("add"))`). This is the adversarial tool for verifying runtime codegen: if the assembly lacks a runtime instruction that should be there, const-folding has occurred.
-
-**`compile_and_run(source: &str) -> Option<i32>`** — runs the full pipeline including assemble + link + qemu-run, returns the exit code. Returns `None` when the aarch64 cross tools or qemu are not available (tests skip gracefully, not fail). On CI, the `e2e` job installs them explicitly.
-
-**When to add e2e tests:** Every new milestone that changes codegen should have at least one e2e test. Prefer `compile_to_asm` when you want to verify a specific instruction is emitted. Use `compile_and_run` when you want to verify runtime behavior (exit code, side effects).
-
-**Skipping gracefully:** `compile_and_run` returns `None` if tools are absent. Write tests as:
+**Pattern:**
 ```rust
-if let Some(exit_code) = compile_and_run(source) {
-    assert_eq!(exit_code, 42);
+#[test]
+fn empty_file_exits_zero() {
+    let empty = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_galvanic"))
+        .arg(empty.path())
+        .output()
+        .expect("failed to run galvanic");
+    assert!(output.status.success());
 }
 ```
-Not as `unwrap()` — that would fail on macOS where cross tools aren't installed.
 
-### Layer 4: Smoke test (`tests/smoke.rs`)
+### Layer 2: `tests/fls_fixtures.rs` — Parse Acceptance Tests
 
-One test: `empty_file_exits_zero`. Verifies the CLI binary (not the library) accepts an empty `.rs` file without error. Uses `env!("CARGO_BIN_EXE_galvanic")` to locate the binary. This test runs in CI's standard `cargo test`.
+Tests that galvanic can lex and parse a fixture file. No lowering, no codegen. A passing test here means: "galvanic correctly accepts this FLS construct at the parse level."
 
-### Layer 5: Benchmarks (`benches/throughput.rs`)
+**When to add here:** When adding a new `.rs` fixture file in `tests/fixtures/` for a FLS construct that requires only parse coverage. Useful for FLS features that the codegen doesn't yet support.
 
-Criterion benchmarks. CI runs them with short measurement time (`--warm-up-time 2 --measurement-time 3`) just to ensure they don't panic — not to enforce performance budgets. The `bench` CI job also runs the `token_is_eight_bytes` size check.
-
----
-
-## Fixture File Conventions (`tests/fixtures/`)
-
-Each fixture file:
-- Is named `fls_{section}_{brief_description}.rs`
-- Contains a real Rust program derived from FLS examples (not invented)
-- Has a comment at the top identifying the FLS section
-- Does NOT need a `fn main()` unless it's testing a runnable program
-- May contain features galvanic can't yet lower — the parse-acceptance test still passes
-
-**Example fixture naming:**
-- `fls_6_expressions.rs` → FLS §6 expression forms
-- `fls_6_15_1_for_loop.rs` → FLS §6.15.1 specifically
-- `fls_4_9_slices.rs` → FLS §4.9 slice types
-
-When the spec doesn't provide an example, note that in the fixture comment:
+**Pattern:** Add a `fls_X_Y_description.rs` file to `tests/fixtures/`, then add:
 ```rust
-// FLS §X.Y has no explicit example. This program is derived from the
-// normative text at §X.Y:N.
+#[test]
+fn fls_X_Y_description() {
+    assert_galvanic_accepts("fls_X_Y_description.rs");
+}
 ```
 
----
+**Important:** A passing `fls_fixtures` test does NOT mean the feature compiles. It only means it parses. Do not cite a `fls_fixtures` test as evidence that a FLS feature is implemented.
 
-## What "Milestone N" Means in Tests
+### Layer 3: `tests/e2e.rs` — Full Pipeline Tests
 
-Each milestone commit adds:
-1. A fixture file in `tests/fixtures/` with a program exercising the new feature
-2. A parse-acceptance test in `tests/fls_fixtures.rs`
-3. An e2e test in `tests/e2e.rs` verifying the compiled output (exit code or assembly)
+The main test suite. Over 1700 tests. Two sub-patterns within this file:
 
-If a milestone only has steps 1 and 2, step 3 is missing and is the highest-value next change for that feature.
+#### 3a. Assembly Inspection (no external tools required)
 
----
+Uses `compile_to_asm(source)` which runs lex → parse → lower → codegen and returns the GAS text. Works on macOS and Linux. Does NOT require ARM64 cross tools or QEMU.
 
-## The Compile-Time vs. Runtime Test Trap
+**Purpose:** Verify that galvanic emits the correct ARM64 instruction for a given construct. Critical for proving FLS §6.1.2:37–45 compliance (no const-folding of runtime code).
 
-**The most important testing rule in this codebase:**
+**When to add:** For every new arithmetic, comparison, bitwise, or branch-emitting feature. Always add alongside an exit-code test. An exit-code test alone cannot distinguish "compiled correctly" from "constant-folded."
 
-A test that only checks an exit code does not prove correct codegen. If galvanic constant-folds `fn main() -> i32 { 1 + 2 }` to `mov x0, #3; ret`, the exit code is 3 regardless of whether the `add` instruction was emitted. The test passes; the spec violation goes undetected.
-
-The fix: use `compile_to_asm` and assert the presence of the specific runtime instruction:
+**Pattern:**
 ```rust
-let asm = compile_to_asm("fn add(a: i32, b: i32) -> i32 { a + b }\nfn main() -> i32 { add(3, 4) }");
-// The `add` function must emit a runtime add instruction, not a constant.
-assert!(asm.contains("\tadd\t") || asm.contains(" add "),
-    "expected runtime `add` instruction, got:\n{asm}");
+#[test]
+fn runtime_FEATURE_emits_INSTRUCTION() {
+    let asm = compile_to_asm("fn main() -> i32 { EXPR }\n");
+    assert!(
+        asm.contains("INSTRUCTION"),
+        "expected `INSTRUCTION` in assembly, got:\n{asm}"
+    );
+    // For arithmetic: also assert the constant-folded result is absent
+    assert!(
+        !asm.contains("mov     x0, #RESULT"),
+        "must not const-fold at compile time:\n{asm}"
+    );
+}
 ```
 
-When adding a new arithmetic or control-flow feature, always add a `compile_to_asm` assertion alongside any `compile_and_run` check.
+#### 3b. Compile-and-Run (requires ARM64 cross tools + QEMU)
+
+Uses `compile_and_run(source)` which assembles, links, and runs the binary. Requires `aarch64-linux-gnu-as`, `aarch64-linux-gnu-ld`, and either native ARM64 or `qemu-aarch64`. Tests self-skip (return early) when tools are absent.
+
+**When to add:** For verifying correct runtime behavior — the right exit code, correct iteration counts, correct arithmetic results.
+
+**Pattern:**
+```rust
+/// Milestone N: description.
+///
+/// FLS §X.Y: the relevant spec section.
+#[test]
+fn milestone_N_description() {
+    let Some(exit_code) = compile_and_run("fn main() -> i32 { EXPR }\n") else {
+        return; // tools not available — test self-skips
+    };
+    assert_eq!(exit_code, EXPECTED, "expected {EXPECTED}, got {exit_code}");
+}
+```
 
 ---
 
-## Running Tests Locally
+## Milestone Numbering and Section Headers
 
-```sh
-cargo test                         # all tests (excludes e2e on macOS — tools not present)
-cargo test --lib                   # unit tests only
-cargo test --test fls_fixtures     # parse-acceptance only
-cargo test --test e2e              # e2e only (skips gracefully without cross tools)
-cargo bench                        # benchmarks (requires criterion)
+Each new milestone group in `e2e.rs` gets a section comment:
+```rust
+// ── Milestone N: description ─────────────────────────────────────────────────
+//
+// FLS §X.Y: relevant context
+// FLS §6.1.2:37–45: always cite if runtime instruction emission is involved.
+```
+
+Use the next sequential milestone number. Do not reuse milestone numbers. If you add several related tests under one milestone header, that's fine — one header, multiple tests.
+
+---
+
+## FLS Citations in Tests
+
+Every e2e test doc comment must cite the relevant FLS section(s):
+
+```rust
+/// Milestone N: short description.
+///
+/// FLS §X.Y: what this tests.
+/// FLS §6.1.2:37–45: if this test verifies runtime instruction emission.
+#[test]
+fn milestone_N_name() { ... }
 ```
 
 ---
 
-## Adding a New Test: Checklist
+## Fixture File Conventions
 
-1. **New FLS feature?** → Add fixture to `tests/fixtures/fls_*.rs`, add parse-acceptance test to `tests/fls_fixtures.rs`, add e2e test to `tests/e2e.rs`.
-2. **New IR instruction or codegen change?** → Add `compile_to_asm` assertion in `tests/e2e.rs` checking the specific instruction is emitted.
-3. **New CLI behavior?** → Consider adding to `tests/smoke.rs` or the CI `fuzz-smoke` job.
-4. **New size-sensitive type?** → Add `size_of::<T>()` assertion as a unit test in the relevant `src/*.rs` module.
+- `tests/fixtures/fls_X_Y_description.rs` — source programs drawn from FLS §X.Y examples
+- `tests/fixtures/fls_X_Y_description.s` — expected ARM64 assembly output (present for some milestones)
+- Fixture programs should be minimal: just enough to exercise the construct, no more.
+
+---
+
+## What "New Milestone" Checklist Looks Like
+
+When adding a new FLS milestone to `e2e.rs`:
+
+1. Add a `// ── Milestone N: description` section header with FLS citation
+2. Add at least one `compile_and_run` test with the correct expected exit code
+3. If the feature involves a new runtime instruction (arithmetic, comparison, branch, memory access): add a `compile_to_asm` assembly inspection test that:
+   - Asserts the new instruction appears in the assembly
+   - Asserts the result is NOT constant-folded (for arithmetic)
+4. Cite `FLS §X.Y` in every test's doc comment
+5. If the feature requires a new fixture file, add it to `tests/fixtures/` with the right naming
+
+---
+
+## Common Mistakes
+
+- **Only adding exit-code tests for arithmetic.** Always add assembly inspection too. The const-fold check is non-optional.
+- **Adding to `fls_fixtures.rs` and claiming the feature is implemented.** Parse acceptance is not implementation.
+- **Using `compile_and_run` for assembly inspection.** Use `compile_to_asm` instead — it's simpler, faster, and works on macOS.
+- **Not self-guarding `compile_and_run` tests.** Always use `let Some(exit_code) = compile_and_run(...) else { return; }`.
