@@ -1,167 +1,106 @@
-# Architecture — Galvanic's Pipeline and Design Decisions
+# Galvanic Architecture
 
-This file exists to orient the runtime agent on galvanic's internal structure
-so it can make changes that fit the existing design rather than fighting it.
+This skill exists to answer: "How does galvanic work, and where does a new feature go?"
 
 ---
 
 ## Pipeline
 
 ```
-Source text (.rs)
-     │
-     ▼
-  lexer.rs          tokenize() → Vec<Token>
-     │
-     ▼
-  parser.rs         parse() → SourceFile (AST)
-     │
-     ▼
-  ast.rs            — AST types (SourceFile, Item, FnDef, Expr, Stmt, Pat, Ty, ...)
-     │
-     ▼
-  lower.rs          lower() → Module (IR)
-     │
-     ▼
-  ir.rs             — IR types (Module, IrFn, Instr, IrValue, StaticData, ...)
-     │
-     ▼
-  codegen.rs        emit_asm() → String (GAS ARM64 assembly text)
-     │
-     ▼
-  main.rs           — assembles/links via aarch64-linux-gnu-as + aarch64-linux-gnu-ld
+Source (.rs) → lexer::tokenize() → Vec<Token>
+                                       ↓
+                            parser::parse() → SourceFile (AST)
+                                       ↓
+                            lower::lower() → ir::Module
+                                       ↓
+                          codegen::emit_asm() → String (GAS assembly)
+                                       ↓
+                         aarch64-linux-gnu-as → .o
+                                       ↓
+                         aarch64-linux-gnu-ld → ELF binary
+                                       ↓
+                              qemu-aarch64 → runs
 ```
 
----
-
-## Key Architectural Constraints
-
-### IR is intentionally minimal
-
-`src/ir.rs` grows only as required by the next milestone. Nothing is added
-before it is needed. This keeps the IR simple and traceable to the FLS sections
-that motivated each node type. Do not add IR nodes speculatively.
-
-### Lowering emits runtime instructions, never interprets
-
-`src/lower.rs` is a compiler pass, not an interpreter. Every non-const code
-path emits runtime IR instructions. The litmus test is in the module doc:
-
-> If replacing a literal with a function parameter would break the
-> implementation, you built an interpreter, not a compiler.
-
-The `lower` pass must not constant-fold non-const code. Any value that could
-be a function parameter at runtime must be loaded from a stack slot or register.
-
-### FLS traceability throughout
-
-Every public type, trait, and significant function cites the relevant FLS section:
-
-```rust
-// FLS §9: Functions — each `IrFn` maps to one source-level function.
-```
-
-When the spec is ambiguous: `// FLS §X.Y: AMBIGUOUS — <describe the gap>`.
-This is the project's primary research output.
+All five stages are in `src/`. The CLI in `src/main.rs` drives the pipeline and optionally invokes the assembler/linker.
 
 ---
 
-## Token Layout (lexer.rs)
+## Modules
 
-`Token` is exactly **8 bytes**. This is enforced by `token_is_eight_bytes` test.
+### `src/lexer.rs` — Tokenization (FLS §2)
+- Entry point: `tokenize(source: &str) -> Result<Vec<Token>, String>`
+- `Token` is exactly 8 bytes: `TokenKind` (repr(u8), 1 byte discriminant), span offset (u32, 4 bytes), span length (u16, 2 bytes), padding (1 byte). Cache-line layout: 8 tokens per 64-byte line.
+- Whitespace and comments are consumed but not emitted.
+- The `TokenKind` enum has `repr(u8)`. If it grows past 255 variants, `repr(u8)` becomes invalid. Currently well under that limit.
 
-```
-offset 0 │ kind: TokenKind (u8, repr(u8)) — 1 byte
-offset 1 │ (padding)                      — 1 byte  
-offset 2 │ (padding)                      — 2 bytes
-offset 4 │ span.start: u32                — 4 bytes
-// wait, actually it's:
-```
+### `src/ast.rs` — Abstract Syntax Tree
+- Represents parsed Rust source: `SourceFile`, items, expressions, statements, types.
+- Not designed for the full Rust grammar — grows by exactly what each new milestone needs.
+- Each AST node carries a source span (byte offset + length) for error reporting.
 
-`TokenKind` uses `#[repr(u8)]` so the discriminant is 1 byte. Span uses 4+4 bytes (start: u32, len: u32). With the u8 discriminant and alignment, the total Token fits in 8 bytes — 8 tokens per 64-byte cache line.
+### `src/parser.rs` — Parsing (FLS §3–§19 selectively)
+- Entry point: `parse(tokens: &[Token], source: &str) -> Result<SourceFile, String>`
+- Recursive descent. No parser generator.
+- Implements only the subset of Rust grammar needed for implemented milestones.
 
-This is why parser iteration over `Vec<Token>` is cache-efficient: one cache
-line load covers 8 tokens.
+### `src/ir.rs` — Intermediate Representation
+- Sits between AST and ARM64 codegen.
+- Key types: `Module` (compilation unit), `IrFn` (function), `Instr` (flat instruction list), `IrValue` (constant values), `IrTy` (types).
+- Also contains: `StaticData`, `ClosureTrampoline`, `VtableShim`, `VtableSpec`.
+- **Every public type has a cache-line note** — this is CLAIM-3 and the project's primary research artifact.
+- The IR is intentionally minimal: no SSA, no basic blocks (yet). Instructions are a flat `Vec<Instr>` per function. Labels and branches exist as instructions, not a CFG.
+- Virtual registers map 1:1 to ARM64 registers at this stage. `u8` register indices. Register allocation is trivial (sequential).
 
-**If you add a new `TokenKind` variant**, check that the total remains under 256
-variants (u8 can hold 0..=255) and the test still passes.
+### `src/lower.rs` — AST → IR lowering
+- Entry point: `lower(source_file: &SourceFile, source: &str) -> Result<Module, String>`
+- Walks the AST and emits IR instructions.
+- Tracks a local register counter and stack-slot counter per function.
+- Each `let` binding gets a stack slot; each expression gets a virtual register.
 
----
+### `src/codegen.rs` — IR → ARM64 assembly
+- Entry point: `emit_asm(module: &Module) -> Result<String, CodegenError>`
+- Emits GNU assembler (GAS) syntax for `aarch64-linux-gnu-as`.
+- Target: AArch64 Linux ELF, bare `_start` entry point (no libc).
+- System call convention: syscall number in `x8`, args in `x0`–`x5`.
+- Each `IrFn` emits a labeled function body. `_start` calls `main` and exits via `svc #0`.
 
-## AST Layout (ast.rs)
-
-AST nodes use `Box<T>` for recursive fields (e.g., `Box<Expr>` for nested expressions). This is acknowledged tech debt — an arena design with `u32` indices would be more cache-friendly, but the current priority is FLS correctness, not premature optimization. The module doc explicitly flags this.
-
-`Span` is 8 bytes (start: u32, len: u32) — the one controlled layout in the AST.
-
----
-
-## IR Layout (ir.rs)
-
-`Instr` and `IrValue` are small enums intended to fit in one cache line per instruction. As new instruction types are added, their cache-line implications must be documented in a comment on the type.
-
-`StaticData` holds a name (String, heap pointer) and a value (StaticValue enum). At this milestone, statics are not on the hot path — the cache-line tradeoff between statics (ADRP + LDR, 12 bytes) and constants (MOV, 4 bytes) is documented in the module.
-
----
-
-## Codegen Conventions (codegen.rs)
-
-- Emits **GNU assembler (GAS) syntax** for `aarch64-linux-gnu-as`.
-- Target: AArch64 Linux ELF, bare `_start`, no libc.
-- Entry point: `_start` calls `main`, then `sys_exit` (x8=93, x0=return value).
-- ARM64 instructions are 4 bytes; 16 fill a 64-byte cache line.
-- `emit_asm` returns a `String`. The caller (main.rs) writes it and assembles.
-- **No `unsafe` code** in codegen.rs — string formatting uses `fmt::Write`.
+### `src/main.rs` — CLI driver
+- The only file allowed to use `std::process::Command` (to invoke `aarch64-linux-gnu-as` and `aarch64-linux-gnu-ld`).
+- Usage: `galvanic <source.rs> [-o <output>]`
+- Without `-o`: emits `<source>.s` next to the source file.
+- With `-o`: assembles and links to a standalone binary.
 
 ---
 
-## Module Boundaries
+## Key design decisions
 
-| File | Responsibility | FLS sections |
-|------|---------------|--------------|
-| `lexer.rs` | Tokenization | §2 Lexical Elements |
-| `parser.rs` | AST construction | §3–§6, §8–§13 |
-| `ast.rs` | AST types | all parsed constructs |
-| `lower.rs` | AST → IR, type/scope context | §6.1.2, §7, §8, §9, §10... |
-| `ir.rs` | IR types | IR design |
-| `codegen.rs` | IR → ARM64 assembly text | §18.1 (entry point), §9 (functions) |
-| `main.rs` | CLI, assemble+link | user-facing pipeline |
+### Milestone-driven IR growth
+The IR and codegen grow by exactly the instructions needed for each milestone program. No instruction is added until a milestone program needs it. This is not a limitation — it's the research methodology. The `Instr` enum comment documents which milestone added each variant.
 
----
+### Cache-line as first-class concern
+Every type addition requires a cache-line note. The note documents: size in bytes, how many fit in a 64-byte line, and the cache-line tradeoff (e.g., "stack slots map to 8-byte chunks — one slot per half cache-line entry"). The notes are not aspirational — they reflect the actual footprint.
 
-## Adding a New Feature (Standard Flow)
+### FLS traceability
+Every implementation decision cites the FLS section it implements (`FLS §X.Y`). Ambiguities are marked `FLS §X.Y AMBIGUOUS:` with a note on what's unclear. This is the primary output of the research.
 
-1. **Read the FLS section** for the feature.
-2. **Add AST node(s)** in `ast.rs` with FLS citations.
-3. **Add parser rule** in `parser.rs` mapping the grammar production.
-4. **Add IR node(s)** in `ir.rs` only if needed.
-5. **Add lowering** in `lower.rs` — emit runtime IR, never interpret.
-6. **Add codegen** in `codegen.rs` — emit the ARM64 instruction(s).
-7. **Add fixture** in `tests/fixtures/fls_X_Y_*.rs`.
-8. **Add parse test** in `tests/fls_fixtures.rs`.
-9. **Add assembly inspection test** in `tests/e2e.rs` — with positive AND negative assertion.
-10. **Add compile-and-run test** in `tests/e2e.rs`.
+### No unsafe in library code
+The library is safe Rust throughout. `src/main.rs` invokes external tools (assembler, linker) and may use `Command`, but the compiler library itself stays safe.
 
-Steps 9 and 10 are both required. Step 9 without step 10 means the runtime
-execution was never tested. Step 10 without step 9 means an interpreter would
-pass the test.
+### Flat instruction list (no CFG)
+The IR uses a flat `Vec<Instr>` with explicit `Label`, `Branch`, and `CondBranch` instructions rather than a basic-block CFG. This is simpler for the current milestone scope and intentional: the research question about cache-line codegen doesn't require SSA or a CFG.
 
 ---
 
-## Scope / Variable Storage
+## Adding a new IR feature (checklist)
 
-`lower.rs` maintains a scope stack (HashMap of name → stack slot index) during
-lowering. Local variables are spilled to stack slots at declaration and loaded
-at use. This is a deliberate simplicity choice — all variables go through the
-stack. Register allocation optimization is future work.
-
-Function parameters are spilled from argument registers (x0..x7) to stack slots
-at function entry. This matches the AArch64 ABI for small integers.
-
----
-
-## No Standard Library
-
-Galvanic targets `no_std` ARM64 binaries (no libc startup, no runtime, direct
-syscalls). The galvanic compiler itself uses std, but the programs it produces
-do not link libc. The `_start` entry point calls main and exits via syscall 93.
+1. Add the `Instr` variant (or new type) to `src/ir.rs` with:
+   - A doc comment explaining what it does and its FLS citation
+   - A `Cache-line note:` comment documenting its size/footprint
+2. Update `src/lower.rs` to emit the new instruction when the AST has the relevant construct
+3. Update `src/codegen.rs` to emit the ARM64 assembly for the new instruction
+4. Add a fixture program to `tests/fixtures/fls_X_Y_description.rs`
+5. Add a parse-acceptance test to `tests/fls_fixtures.rs`
+6. If the feature is e2e compilable, add it to `tests/e2e.rs`
+7. Run `cargo test` and `cargo clippy -- -D warnings`
+8. Run `.lathe/falsify.sh` to verify no claims broke

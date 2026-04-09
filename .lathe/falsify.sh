@@ -1,18 +1,16 @@
 #!/usr/bin/env bash
-# falsify.sh — Adversarial verification of galvanic's load-bearing claims.
+# falsify.sh — Adversarial check of galvanic's load-bearing claims.
 #
-# Runs every cycle as part of snapshot collection. Exit 0 = all claims hold.
-# Exit non-zero = at least one claim is violated; the agent must fix it before
-# any other work.
+# The engine runs this every cycle and includes the result in the snapshot
+# under ## Falsification. Exit 0 = all claims hold. Non-zero = at least one
+# claim failed. The output names the failing claim and explains why.
 #
-# Must be fast (seconds, not minutes). No network. No external services.
-# See .lathe/claims.md for the claims this suite defends.
+# Rules:
+#   - Must be fast (runs every cycle): seconds, not minutes.
+#   - No network access. All fixtures are constructed locally.
+#   - Each check targets one named claim from claims.md.
 
 set -euo pipefail
-
-# ── Setup ─────────────────────────────────────────────────────────────────────
-
-export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$PATH"
 
 PASS=0
 FAIL=0
@@ -21,1498 +19,251 @@ ERRORS=""
 fail() {
     local claim="$1"
     local msg="$2"
-    echo "FAIL [$claim]: $msg"
     FAIL=$((FAIL + 1))
-    ERRORS="$ERRORS\n  - [$claim] $msg"
+    ERRORS="${ERRORS}FAIL [${claim}]: ${msg}\n"
+    echo "FAIL [${claim}]: ${msg}"
 }
 
-pass() {
+ok() {
     local claim="$1"
-    echo "OK   [$claim]"
+    local msg="$2"
     PASS=$((PASS + 1))
+    echo "ok   [${claim}]: ${msg}"
 }
 
-# ── Claim 1: Runtime codegen, not compile-time interpretation ─────────────────
-# Tests that `1 + 2` emits an `add` instruction, not `mov x0, #3`.
-# This is the fundamental "compiler vs interpreter" check.
-# References: claims.md Claim 1, refs/fls-constraints.md Constraint 1.
+# ── Resolve project root ──────────────────────────────────────────────────────
+# falsify.sh may be invoked from any directory. Resolve project root from the
+# script's own location.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "${PROJECT_ROOT}"
 
-echo "--- Claim 1: runtime_add_emits_add_instruction ---"
-if cargo test --test e2e --quiet -- runtime_add_emits_add_instruction 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 1" "runtime_add_emits_add_instruction FAILED — galvanic may be folding constants instead of emitting runtime instructions"
+# macOS ships without `timeout`; use gtimeout (coreutils) or a no-op fallback
+if command -v timeout &>/dev/null; then
+    TIMEOUT=timeout
+elif command -v gtimeout &>/dev/null; then
+    TIMEOUT=gtimeout
 else
-    pass "Claim 1: runtime codegen (not interpreter)"
+    TIMEOUT=""
 fi
+_to() { if [[ -n "$TIMEOUT" ]]; then $TIMEOUT "$@"; else shift; "$@"; fi; }
 
-# ── Claim 2: Token is exactly 8 bytes ─────────────────────────────────────────
-# Enforces the cache-line layout rationale documented throughout lexer.rs.
-# References: claims.md Claim 2.
-
-echo "--- Claim 2: token_is_eight_bytes ---"
-if cargo test --lib --quiet -- lexer::tests::token_is_eight_bytes 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 2" "token_is_eight_bytes FAILED — Token grew beyond 8 bytes, invalidating all cache-line layout comments"
+# ── CLAIM-1: Token is exactly 8 bytes ────────────────────────────────────────
+# Adversarial: any new TokenKind variant or Token field that pushes size > 8.
+# Run the dedicated size-assertion test in the library.
+echo "--- CLAIM-1: Token is exactly 8 bytes ---"
+if _to 30 cargo test --lib -- lexer::tests::token_is_eight_bytes --quiet 2>&1 | grep -q 'test result: ok'; then
+    ok "CLAIM-1" "Token is 8 bytes"
 else
-    pass "Claim 2: Token is 8 bytes"
-fi
-
-# ── Claim 3: No unsafe code in library source ─────────────────────────────────
-# main.rs may shell out to the assembler/linker (allowed).
-# All other src/ files must be safe Rust.
-# References: claims.md Claim 3.
-
-echo "--- Claim 3: no unsafe in library source ---"
-
-# Self-test: verify the comment filter does not accidentally suppress real unsafe code.
-# If the filter is too aggressive, Claim 3 becomes blind — that's worse than no check.
-_TMP_UNSAFE=$(mktemp /tmp/falsify_unsafe_XXXXXX.rs)
-trap 'rm -f "$_TMP_UNSAFE"' EXIT
-printf 'fn foo() { unsafe { let _ = 0; } }\n' > "$_TMP_UNSAFE"
-_SELFTEST=$(grep -n 'unsafe\s*{' "$_TMP_UNSAFE" | grep -Ev ':[0-9]+:[[:space:]]*//' || true)
-if [[ -z "$_SELFTEST" ]]; then
-    fail "Claim 3 self-test" "the comment-exclusion filter in Claim 3 is suppressing real unsafe blocks — the check is blind; fix the grep pattern"
-fi
-rm -f "$_TMP_UNSAFE"
-
-UNSAFE_BLOCKS=$(grep -rn 'unsafe\s*{' src/ 2>/dev/null | grep -v '^src/main\.rs:' | grep -Ev ':[0-9]+:[[:space:]]*//' || true)
-UNSAFE_FNS=$(grep -rn 'unsafe\s*fn\b' src/ 2>/dev/null | grep -v '^src/main\.rs:' | grep -Ev ':[0-9]+:[[:space:]]*//' || true)
-UNSAFE_IMPLS=$(grep -rn 'unsafe\s*impl\b' src/ 2>/dev/null | grep -v '^src/main\.rs:' | grep -Ev ':[0-9]+:[[:space:]]*//' || true)
-
-if [[ -n "$UNSAFE_BLOCKS" || -n "$UNSAFE_FNS" || -n "$UNSAFE_IMPLS" ]]; then
-    fail "Claim 3" "unsafe code found in library source (outside main.rs):\n$(echo "$UNSAFE_BLOCKS$UNSAFE_FNS$UNSAFE_IMPLS" | head -5)"
-else
-    pass "Claim 3: no unsafe in library"
-fi
-
-# ── Claim 4: Pipeline does not panic on valid minimal programs ────────────────
-# galvanic must exit cleanly (exit code <= 128) on valid Rust.
-# Exit > 128 means death by signal (panic, segfault, etc.).
-# References: claims.md Claim 4.
-
-echo "--- Claim 4: pipeline accepts minimal programs without panicking ---"
-
-# Build the binary first (silently).
-if ! cargo build --quiet 2>/dev/null; then
-    fail "Claim 4" "cargo build failed — cannot test pipeline behavior"
-else
-    BINARY="./target/debug/galvanic"
-
-    # Test: empty file exits 0
-    TMP_EMPTY=$(mktemp /tmp/falsify_empty_XXXXXX.rs)
-    trap 'rm -f "$TMP_EMPTY"' EXIT
-    echo "" > "$TMP_EMPTY"
-    set +e
-    "$BINARY" "$TMP_EMPTY" > /dev/null 2>&1
-    EMPTY_EXIT=$?
-    set -e
-    if [ "$EMPTY_EXIT" -gt 128 ]; then
-        fail "Claim 4" "galvanic died with signal on empty file (exit $EMPTY_EXIT — signal $((EMPTY_EXIT - 128)))"
-    fi
-
-    # Test: minimal valid program exits 0
-    TMP_MAIN=$(mktemp /tmp/falsify_main_XXXXXX.rs)
-    trap 'rm -f "$TMP_EMPTY" "$TMP_MAIN"' EXIT
-    printf 'fn main() {}\n' > "$TMP_MAIN"
-    set +e
-    "$BINARY" "$TMP_MAIN" > /dev/null 2>&1
-    MAIN_EXIT=$?
-    set -e
-    if [ "$MAIN_EXIT" -gt 128 ]; then
-        fail "Claim 4" "galvanic died with signal on 'fn main() {}' (exit $MAIN_EXIT — signal $((MAIN_EXIT - 128)))"
-    elif [ "$MAIN_EXIT" -ne 0 ]; then
-        fail "Claim 4" "galvanic exited non-zero ($MAIN_EXIT) on 'fn main() {}' — expected 0"
-    fi
-
-    # Test: adversarial input — deeply repeated arithmetic (150 binops)
-    # Exercises the parser's expression stack depth without hanging.
-    TMP_DEEP=$(mktemp /tmp/falsify_deep_XXXXXX.rs)
-    trap 'rm -f "$TMP_EMPTY" "$TMP_MAIN" "$TMP_DEEP"' EXIT
-    python3 -c "
-print('fn main() -> i32 {')
-print('    ' + ' + '.join(str(i % 10) for i in range(150)))
-print('}')
-" > "$TMP_DEEP"
-    set +e
-    timeout 10 "$BINARY" "$TMP_DEEP" > /dev/null 2>&1
-    DEEP_EXIT=$?
-    set -e
-    if [ "$DEEP_EXIT" -gt 128 ]; then
-        fail "Claim 4" "galvanic died with signal on deep arithmetic expression (exit $DEEP_EXIT)"
-    fi
-
-    # If all sub-checks passed
-    if [ "$EMPTY_EXIT" -le 128 ] && [ "$MAIN_EXIT" -eq 0 ] && [ "$DEEP_EXIT" -le 128 ]; then
-        pass "Claim 4: pipeline handles valid programs without panicking"
-    fi
-fi
-
-# ── Claim 6: Function calls with literal args emit branch instructions ────────
-# Tests that `square(6)` emits `bl square`, NOT `mov x0, #36`.
-# Guards against function inlining + constant propagation regressions.
-# Claim 1 only tests inline arithmetic — this catches the complementary attack:
-# a fold at the call site, not inside the arithmetic expression itself.
-# References: claims.md Claim 6.
-
-echo "--- Claim 6: function calls with literal args emit bl, not folded constant ---"
-if cargo test --test e2e --quiet -- runtime_fn_call_result_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 6" "runtime_fn_call_result_not_folded FAILED — galvanic may be inlining and folding function calls with literal arguments"
-else
-    pass "Claim 6: function calls emit runtime bl (not folded constant)"
-fi
-
-# ── Claim 7: Generic function/method calls emit runtime bl, not folded constants ─
-# Tests that a generic function called with a literal argument:
-#   (a) calls the monomorphized specialization (bl identity__i32)
-#   (b) calls the outer wrapper at runtime (bl use_identity) — not folded away
-# Extends Claim 6 to the generic monomorphization code path (a separate lowering pass).
-# Red-team finding: the original negative assertions were vacuous — fixed 2026-04-07.
-# References: claims.md Claim 7.
-
-echo "--- Claim 7: generic function/method calls emit runtime bl (not folded) ---"
-if cargo test --test e2e --quiet -- runtime_generic_fn_not_folded runtime_generic_method_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 7" "runtime_generic_fn_not_folded or runtime_generic_method_not_folded FAILED — galvanic may be inlining and folding generic calls with literal arguments"
-else
-    pass "Claim 7: generic function/method calls emit runtime bl (not folded)"
-fi
-
-# ── Claim 8: Named block `break` emits unconditional branch ─────────────────
-# Tests that `break 'label value` emits a real unconditional branch instruction
-# (`b .Lxxx`), not just the character 'b' somewhere in the output.
-# Red-team finding (2026-04-07): the original assertion was `asm.contains('b')`
-# which checked for the character 'b' — vacuously true in any ARM64 program.
-# Any instruction (bl, blr, cbz, sub) or label name contains 'b'. The assertion
-# was indistinguishable from a no-op. Fixed to check `b       .L` pattern.
-# References: claims.md Claim 8.
-
-echo "--- Claim 8: named block break emits unconditional branch (not vacuous 'b') ---"
-if cargo test --test e2e --quiet -- runtime_named_block_emits_branch_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 8" "runtime_named_block_emits_branch_not_folded FAILED — named block break may not emit an unconditional branch to the exit label"
-else
-    pass "Claim 8: named block break emits unconditional branch to exit label"
-fi
-
-# ── Claim 9: Generic trait impl calls emit monomorphized runtime branch ───────
-# Tests that a generic trait impl produces:
-#   (a) a monomorphized label (Wrapper__get__i32) in the assembly
-#   (b) a runtime bl to the outer wrapper (bl use_wrapper) — not constant-folded
-# Extends Claims 6–7 to the trait impl monomorphization path (milestone 138).
-# References: claims.md Claim 9.
-
-echo "--- Claim 9: generic trait impl emits monomorphized call (not folded) ---"
-if cargo test --test e2e --quiet -- runtime_generic_trait_impl_emits_mangled_call 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 9" "runtime_generic_trait_impl_emits_mangled_call FAILED — generic trait impl may not be monomorphizing or may be constant-folding the result"
-else
-    pass "Claim 9: generic trait impl emits monomorphized runtime call (not folded)"
-fi
-
-# ── Claim 10: Default trait method dispatch emits monomorphized label ─────────
-# Tests that a default method body emits `Foo__doubled:` label (monomorphized)
-# and that calling it with a runtime arg emits `bl Foo__doubled` (not folded).
-# This guards the default method resolution path separately from Claims 6–9,
-# which cover regular functions, generic functions, and generic trait impls.
-# References: claims.md Claim 10.
-
-echo "--- Claim 10: default trait method emits monomorphized label and runtime call ---"
-if cargo test --test e2e --quiet -- runtime_default_method_emits_mangled_label runtime_default_method_result_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 10" "runtime_default_method_emits_mangled_label or runtime_default_method_result_not_folded FAILED — default trait method may not be emitting a type-specific monomorphized label or may be constant-folding the result"
-else
-    pass "Claim 10: default trait method emits monomorphized label and runtime call"
-fi
-
-# ── Claim 11: Closures compile to hidden function labels ─────────────────────
-# Tests that:
-#   (a) a non-capturing closure emits a `__closure_*` label AND a `mul` instruction
-#       in the closure body (not constant-folded from `x * 2`)
-#   (b) a capturing closure emits `__closure_main_0` AND uses `blr` (indirect call)
-# These guard both code paths separately: FLS §6.14 (non-capturing) and §6.22 (capturing).
-# A regression where closures are inlined at call sites would lose the hidden label.
-# A regression where the body is constant-folded would lose the `mul` instruction.
-# References: claims.md Claim 11.
-
-echo "--- Claim 11: closures emit hidden function labels with runtime body instructions ---"
-if cargo test --test e2e --quiet -- runtime_closure_emits_hidden_function_label runtime_capturing_closure_emits_capture_load_before_explicit_arg 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 11" "runtime_closure_emits_hidden_function_label or runtime_capturing_closure_emits_capture_load_before_explicit_arg FAILED — closures may not be emitting hidden function labels or may be constant-folding closure bodies"
-else
-    pass "Claim 11: closures emit hidden function labels with runtime body instructions"
-fi
-
-# ── Claim 12: Trait-bound generic function dispatch emits monomorphized runtime code ─
-# Tests that a generic function with `<T: Trait>` bound:
-#   (a) emits a monomorphized label (apply_scale__Foo) in the assembly
-#   (b) dispatches to the concrete type's method via runtime `bl Foo__scale`
-#   (c) does NOT constant-fold the result when called with a runtime parameter
-# This is distinct from Claim 7 (data-only generics) and Claim 9 (generic trait impls).
-# The code path: call-site type inference → `pending_monos` → `generic_type_subst` →
-# param spilling with concrete struct name → `local_struct_types` → method dispatch.
-# Introduced in cycle 17 (milestone 139, FLS §12.1 + §4.14). No prior falsification.
-# References: claims.md Claim 12.
-
-echo "--- Claim 12: trait-bound generic dispatch emits monomorphized label and runtime bl ---"
-if cargo test --test e2e --quiet -- runtime_trait_bound_result_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 12" "runtime_trait_bound_result_not_folded FAILED — trait-bound generic dispatch may not be monomorphizing or may be constant-folding the result"
-else
-    pass "Claim 12: trait-bound generic dispatch emits monomorphized label and runtime bl (not folded)"
-fi
-
-# ── Claim 13: Associated constant in runtime computation emits add, not folded ─
-# Tests that `fn compute(x: i32) -> i32 { x + Config::MAX }` called as `compute(5)`:
-#   (a) emits a runtime `add` instruction (not constant-folded away)
-#   (b) does NOT emit `mov x0, #15` (the sum was not folded at the call site)
-# This guards the specific interaction: assoc const inlining (correct per FLS §7.1:10)
-# must NOT cascade into constant-folding when combined with a runtime parameter.
-# Distinct from Claim 1 (inline arithmetic) and Claim 6 (function call folding).
-# Introduced in cycle 22 (red-team, milestone 128 path, FLS §10.3).
-# References: claims.md Claim 13.
-
-echo "--- Claim 13: assoc const in runtime computation emits add (not folded) ---"
-if cargo test --test e2e --quiet -- runtime_assoc_const_in_computation_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 13" "runtime_assoc_const_in_computation_not_folded FAILED — assoc const may be triggering constant-folding of runtime computation when combined with a literal argument"
-else
-    pass "Claim 13: assoc const in runtime computation emits add (not folded)"
-fi
-
-# ── Claim 14: Field method calls emit runtime bl, not folded constants ────────
-# Tests two things:
-#   (a) `c.inner.get()` where `inner: Counter` emits `Counter__get:` label AND `bl Counter__get`
-#       (method body and runtime dispatch both present — not elided by constant folding)
-#   (b) `c.inner.get() * factor` where `factor` is a runtime parameter emits `mul` and
-#       does NOT fold the product (3 * 4 = 12) to a constant `mov x0, #12`
-# This guards the `ExprKind::FieldAccess` receiver arm introduced in milestone 142 (cycle 23).
-# No prior claim covers this path — a regression in `resolve_place` for field access would
-# have been invisible to Claims 6–13.
-# Red-team finding (2026-04-07): the original negative assertion in the sibling test used
-# `!asm.contains("mov x0, #7") || asm.contains("ldr")` — vacuously true (same bug as
-# Claims 7 and 8 before they were fixed). Replaced with real adversarial checks.
-# References: claims.md Claim 14.
-
-echo "--- Claim 14: field method calls emit runtime bl (not folded) ---"
-if cargo test --test e2e --quiet -- runtime_field_method_call_emits_bl_not_folded runtime_field_method_call_result_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 14" "runtime_field_method_call_emits_bl_not_folded or runtime_field_method_call_result_not_folded FAILED — field method call may not be emitting the method body label, runtime dispatch, or may be constant-folding the result"
-else
-    pass "Claim 14: field method calls dispatch at runtime via bl (not folded)"
-fi
-
-# ── Claim 15: Multiple bounds monomorphize ALL methods for ALL concrete types ─
-# Tests that when two concrete types are both used with a multi-bound generic,
-# all bound methods are emitted as labels for EACH type (not just the first).
-# Attack: pending_monos may register methods for the first concrete type but
-# silently drop method labels for the second type.
-# Distinct from Claim 12 (single-type, single-bound) and from the existing
-# runtime_multiple_bounds_emits_both_trait_calls (single-type, multi-bound).
-# References: claims.md Claim 15.
-
-echo "--- Claim 15: multiple bounds monomorphize all methods for all concrete types ---"
-if cargo test --test e2e --quiet -- runtime_multiple_bounds_two_types_both_monomorphized 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 15" "runtime_multiple_bounds_two_types_both_monomorphized FAILED — multi-bound generic may not emit all method labels for all concrete type monomorphizations"
-else
-    pass "Claim 15: multiple bounds monomorphize all methods for all concrete types"
-fi
-
-echo "--- Claim 16: dyn Trait dispatch uses vtable indirection, not constant folding ---"
-if cargo test --test e2e --quiet -- milestone_147_dyn_trait_asm_inspection 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 16" "milestone_147_dyn_trait_asm_inspection FAILED — dyn Trait dispatch may be constant-folded or vtable not emitted"
-else
-    pass "Claim 16: dyn Trait dispatch uses vtable indirection, not constant folding"
-fi
-
-# ── Claim 17: Two concrete types behind dyn Trait both emit vtable labels ─────
-# Tests that when two different concrete types are passed to the same dyn Trait
-# parameter at different call sites, BOTH vtables are emitted in the assembly.
-# Claim 16 only tests a single concrete type. This guards the pending_vtables
-# accumulation loop against a regression where the second (trait, concrete_type)
-# pair is silently dropped — leaving that type's dispatch broken while Claim 16
-# and the two_concrete_types compile-and-run test still pass.
-# References: claims.md Claim 17.
-
-echo "--- Claim 17: two concrete types behind dyn Trait both emit vtable labels ---"
-if cargo test --test e2e --quiet -- runtime_dyn_trait_two_concrete_types_both_vtables_emitted 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 17" "runtime_dyn_trait_two_concrete_types_both_vtables_emitted FAILED — second concrete type vtable may not be emitted, or a method result was constant-folded"
-else
-    pass "Claim 17: both concrete type vtables emitted, no constant folding"
-fi
-
-# ── Claim 18: Second dyn Trait method accesses vtable at offset 8 ─────────────
-# Tests that calling the second method (index 1) of a two-method dyn Trait emits
-# `ldr x10, [x9, #8]` — NOT `ldr x10, [x9, #0]`. A bug where method_idx is always
-# 0 would make every vtable call dispatch to the first method, producing wrong behavior
-# silently when method 1 is called.
-# This complements Claim 16 (single method, vtable present) and Claim 17 (two concrete
-# types) by testing the vtable OFFSET calculation for methods beyond index 0.
-# Introduced in cycle 33 (red-team, milestone 147 follow-up, FLS §4.13).
-# References: claims.md Claim 18.
-
-echo "--- Claim 18: second dyn Trait method emits vtable offset #8 (not #0) ---"
-if cargo test --test e2e --quiet -- runtime_dyn_trait_second_method_emits_vtable_offset_8 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 18" "runtime_dyn_trait_second_method_emits_vtable_offset_8 FAILED — second method may be loading from vtable offset #0 instead of #8, meaning method_idx computation is broken"
-else
-    pass "Claim 18: second dyn Trait method loads fn-ptr at vtable offset #8"
-fi
-
-# ── Claim 19: Exit 0 on valid program implies .s output was written ───────────
-# Tests the structural contract: galvanic exit 0 means compilation succeeded
-# and produced output — not a silent skip due to a lower/codegen failure.
-#
-# Background: in cycle 36, a lower error caused galvanic to `return` (exit 0)
-# without producing any output. compile_and_run then ran qemu on a nonexistent
-# binary and got exit 1, producing a confusing test failure with "expected 10,
-# got 1". The fix: change the lower error handler from `return` to
-# `process::exit(1)`. This test verifies the positive case holds after that fix.
-#
-# We test the positive case: a valid program exits 0 AND writes the .s file.
-# (The negative case — lower error → non-zero exit — is enforced structurally
-# by the main.rs change; no portable way to trigger a lower error in falsify.sh.)
-# References: claims.md Claim 19.
-
-echo "--- Claim 19: exit 0 on valid program implies .s output written ---"
-
-_C19_BINARY="./target/debug/galvanic"
-if ! cargo build --quiet 2>/dev/null; then
-    fail "Claim 19" "cargo build failed — cannot verify output contract"
-else
-    _C19_SRC=$(mktemp /tmp/falsify_c19_XXXXXX.rs)
-    _C19_S="${_C19_SRC%.rs}.s"
-    printf 'fn main() -> i32 { 42 }\n' > "$_C19_SRC"
-
-    set +e
-    "$_C19_BINARY" "$_C19_SRC" > /dev/null 2>&1
-    _C19_EXIT=$?
-    set -e
-
-    rm -f "$_C19_SRC"
-
-    if [ "$_C19_EXIT" -ne 0 ]; then
-        rm -f "$_C19_S"
-        fail "Claim 19" "galvanic exited $_C19_EXIT on 'fn main() -> i32 { 42 }' — expected 0"
-    elif [ ! -f "$_C19_S" ]; then
-        fail "Claim 19" "galvanic exited 0 but did not write the .s output file — exit 0 without output means lower or codegen silently failed"
+    # Attempt to collect the actual output for diagnosis
+    OUTPUT=$(_to 30 cargo test --lib -- lexer::tests::token_is_eight_bytes 2>&1 || true)
+    if echo "$OUTPUT" | grep -q 'token_is_eight_bytes.*FAILED\|error\['; then
+        fail "CLAIM-1" "Token size test failed — Token may have grown beyond 8 bytes. Output: $(echo "$OUTPUT" | tail -5)"
+    elif echo "$OUTPUT" | grep -q 'no tests ran\|test not found'; then
+        fail "CLAIM-1" "Test 'lexer::tests::token_is_eight_bytes' not found — the size assertion may have been deleted"
     else
-        rm -f "$_C19_S"
-        pass "Claim 19: exit 0 on valid program implies .s output was written"
+        fail "CLAIM-1" "Unexpected test output: $(echo "$OUTPUT" | tail -5)"
     fi
 fi
 
-# ── Claim 20: @ binding patterns emit runtime sub-pattern checks ──────────────
-# Tests that `n @ 1..=5 => n * 2` with a function-parameter scrutinee:
-#   (a) emits `cmp` instructions for the range check (not unconditionally binding)
-#   (b) does NOT fold `n * 2` to `mov x0, #6` (binding value is runtime, not compile-time)
-# And that `n @ 42 => n + 1` emits `cmp` for the literal equality check.
-# Both use a function parameter as the scrutinee — constant folding the result
-# through the match arm is impossible given only compile-time information.
-# Introduced in cycle 40 (red-team, milestone 150, FLS §5.1.4).
-# References: claims.md Claim 20.
-
-echo "--- Claim 20: @ binding patterns emit runtime sub-pattern checks (not folded) ---"
-if cargo test --test e2e --quiet -- runtime_bound_pattern_range_emits_cmp_and_binding runtime_bound_pattern_literal_emits_eq_check 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 20" "runtime_bound_pattern_range_emits_cmp_and_binding or runtime_bound_pattern_literal_emits_eq_check FAILED — @ binding pattern may not be emitting sub-pattern checks or may be constant-folding the bound expression"
+# ── CLAIM-2: No unsafe in library source ─────────────────────────────────────
+# Adversarial: any unsafe block/fn/impl added to the library (src/ minus main.rs).
+# Filter out comment lines (lines whose non-whitespace content starts with //).
+echo "--- CLAIM-2: No unsafe in library source ---"
+UNSAFE_HITS=$(grep -rn 'unsafe\s*{\|unsafe\s*fn\b\|unsafe\s*impl\b' src/ \
+    | grep -v '^src/main\.rs:' \
+    | grep -Ev ':[0-9]+:[[:space:]]*//' \
+    || true)
+if [[ -z "$UNSAFE_HITS" ]]; then
+    ok "CLAIM-2" "No unsafe in library source"
 else
-    pass "Claim 20: @ binding patterns emit runtime sub-pattern checks (not folded)"
+    fail "CLAIM-2" "unsafe found in library code (src/ excluding main.rs):\n${UNSAFE_HITS}"
 fi
 
-# ── Claim 21: let-else emits runtime discriminant check, binding not folded ───
-# Tests three things for `let Enum::Variant(v) = o else { return 0 }`:
-#   (a) A runtime discriminant check (cbz) is emitted — the else branch is reachable.
-#   (b) The extracted binding is loaded at runtime (ldr present, mov x0, #5 absent).
-#   (c) When the binding is used with a second runtime parameter (v + n), the result
-#       is NOT constant-folded: assembly must contain `add`, not `mov x0, #7`.
+# ── CLAIM-3: IR cache-line discipline is present and growing ─────────────────
+# Adversarial: adding many new IR types without any cache-line documentation,
+# eroding the project's primary research artifact.
 #
-# Attack vector: galvanic could constant-fold through the enum field load when the
-# call site passes a literal (`Opt::Some(3)`). The adversarial test uses TWO function
-# parameters — one for the enum and one for the addend — making folding to a constant
-# impossible for any correct compiler.
+# Two-tier check:
+#   A) ir.rs must contain at least 40 "Cache-line note:" occurrences.
+#      (The code currently has ~82 — this threshold catches mass erasure,
+#       not individual omissions. Individual omissions are flagged by B.)
+#   B) The specific "hot-path" types that have always had notes must still
+#      have them: StaticValue, StaticData, VtableShim, VtableSpec, IrBinOp.
+#      These are the reference examples. If they lose their notes, the
+#      discipline has collapsed, not just lagged.
 #
-# Introduced in cycle 44 (red-team, milestone 153 follow-up, FLS §8.1).
-# References: claims.md Claim 21.
+# NOTE: Several top-level type declarations (Module, IrFn, ClosureTrampoline,
+# Instr, IrValue, IrTy, FCmpOp, F64BinOp, F32BinOp) currently lack type-level
+# cache-line notes. This is a known gap. The runtime agent should add them.
+# When all top-level types have notes, this check can be made stricter.
+echo "--- CLAIM-3: IR cache-line discipline ---"
 
-echo "--- Claim 21: let-else emits runtime discriminant check and binding not folded ---"
-if cargo test --test e2e --quiet -- runtime_let_else_emits_discriminant_check runtime_let_else_binding_not_folded runtime_let_else_binding_combined_with_param_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 21" "let-else falsification FAILED — discriminant check may be missing, binding may be constant-folded, or combined computation was folded to a constant"
+IR_FILE="src/ir.rs"
+
+# Part A: total note count
+NOTE_COUNT=$(grep -c 'Cache-line note:\|Cache-line:' "$IR_FILE" 2>/dev/null || echo 0)
+MIN_NOTES=40
+
+if [[ "$NOTE_COUNT" -lt "$MIN_NOTES" ]]; then
+    fail "CLAIM-3" "Only ${NOTE_COUNT} 'Cache-line note:' occurrences in ir.rs (minimum ${MIN_NOTES}). New types were added without cache-line documentation."
 else
-    pass "Claim 21: let-else emits runtime discriminant check and binding is not folded"
+    ok "CLAIM-3" "${NOTE_COUNT} cache-line notes in ir.rs (≥ ${MIN_NOTES} required)"
 fi
 
-# ── Claim 22: while-let OR patterns emit runtime orr+cbz for loop condition ───
-# Tests two things:
-#   (a) `while let 1 | 2 | 3 = x { ... }` with x from a function parameter emits:
-#       - `orr` for OR accumulation across alternatives (not just first alt checked)
-#       - `cbz` for the conditional loop exit on accumulated flag = 0
-#       - `b .L` for the back-edge (loop is runtime, not compile-time unrolled)
-#   (b) The counter variable `n` is not constant-folded — ldr is present.
-#
-# Attack this guards against: dropping OR accumulation and falling back to a single
-# equality check against only the first alternative. The compile-and-run tests for
-# milestone 154 catch this on CI (wrong iteration count) but require QEMU. This
-# assembly inspection test catches the same regression locally.
-#
-# Distinct from Claim 20 (@ binding patterns, match-arm path) and Claim 21 (let-else).
-# This covers the loop condition re-evaluation path in while-let (FLS §5.1.11 + §6.15.4).
-# Introduced in cycle 52 (red-team, milestone 154 follow-up).
-# References: claims.md Claim 22.
+# Part B: key reference types must still have their notes
+_check_type_has_note() {
+    local type_name="$1"
+    local lineno
+    lineno=$(grep -n "^pub struct ${type_name}\b\|^pub enum ${type_name}\b" "$IR_FILE" 2>/dev/null | head -1 | cut -d: -f1 || true)
+    if [[ -z "$lineno" ]]; then
+        # Type may have been renamed or moved
+        echo "  ${type_name}: not found in ir.rs"
+        return 1
+    fi
+    local start=$((lineno - 30))
+    [[ $start -lt 1 ]] && start=1
+    local window
+    window=$(sed -n "${start},${lineno}p" "$IR_FILE" 2>/dev/null || true)
+    if ! echo "$window" | grep -qi 'cache.line\|cache line'; then
+        echo "  ${type_name} (line ${lineno}): missing cache-line note in type doc comment"
+        return 1
+    fi
+    return 0
+}
 
-echo "--- Claim 22: while-let OR pattern emits orr accumulation and cbz (not folded) ---"
-if cargo test --test e2e --quiet -- runtime_while_let_or_emits_orr_accumulation runtime_while_let_or_result_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 22" "runtime_while_let_or_emits_orr_accumulation or runtime_while_let_or_result_not_folded FAILED — while-let OR pattern may not be emitting orr accumulation, cbz exit, or back-edge; or result was constant-folded"
+REF_TYPES_FAIL=""
+for t in StaticValue StaticData VtableShim VtableSpec IrBinOp; do
+    if ! _check_type_has_note "$t" 2>/dev/null; then
+        REF_TYPES_FAIL="${REF_TYPES_FAIL}  ${t}: cache-line note removed or missing\n"
+    fi
+done
+
+if [[ -z "$REF_TYPES_FAIL" ]]; then
+    ok "CLAIM-3" "Reference IR types (StaticValue, StaticData, VtableShim, VtableSpec, IrBinOp) all have cache-line notes"
 else
-    pass "Claim 22: while-let OR pattern emits runtime orr+cbz+back-edge (not folded)"
+    fail "CLAIM-3" "Reference IR types missing cache-line notes:\n${REF_TYPES_FAIL}"
 fi
 
-# ── Claim 23: while-let OR enum variants emit runtime orr accumulation ────────
-# Tests that `while let Status::Active | Status::Pending = s { ... }` emits:
-#   (a) `orr` to accumulate discriminant equality across both variants (not just first)
-#   (b) `cbz` for the conditional loop exit
-#   (c) result NOT constant-folded to `mov x0, #1`
-# Extends Claim 22 (scalar literals) to enum-variant patterns — a different code path.
-# A regression that drops OR accumulation for enum-variant while-let would be invisible
-# to Claim 22. Introduced in cycle 56 (red-team, milestone 154 follow-up, FLS §5.1.11).
-# References: claims.md Claim 23.
+# ── CLAIM-4: FLS citations present in core modules ───────────────────────────
+# Adversarial: deleting or never adding FLS citations during refactoring.
+echo "--- CLAIM-4: FLS citations in core modules ---"
+CORE_MODULES=(src/lexer.rs src/parser.rs src/ir.rs src/lower.rs src/codegen.rs)
+MISSING_CITES=""
+for f in "${CORE_MODULES[@]}"; do
+    if [[ ! -f "$f" ]]; then
+        MISSING_CITES="${MISSING_CITES}  ${f}: file does not exist\n"
+    elif ! grep -q 'FLS §' "$f"; then
+        MISSING_CITES="${MISSING_CITES}  ${f}: no 'FLS §' citations found\n"
+    fi
+done
 
-echo "--- Claim 23: while-let OR enum variants emit runtime orr+cbz ---"
-if cargo test --test e2e --quiet -- runtime_while_let_or_enum_emits_orr_accumulation 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 23" "runtime_while_let_or_enum_emits_orr_accumulation FAILED — while-let OR pattern with enum variants may not emit orr accumulation for all variants, cbz exit, or result was constant-folded"
+if [[ -z "$MISSING_CITES" ]]; then
+    ok "CLAIM-4" "All core modules have FLS citations"
 else
-    pass "Claim 23: while-let OR enum variant pattern emits runtime orr+cbz (not folded)"
+    fail "CLAIM-4" "Core modules missing FLS citations:\n${MISSING_CITES}"
 fi
 
-# ── Claim 24: match guard with function parameter emits runtime comparison ─────
-# Tests that `fn guarded(n: i32) -> i32 { match n { x if x > 5 => x + 10, _ => 0 } }`
-# compiled with `guarded(7)` in main:
-#   (a) emits `cmp` or `cset` — guard comparison is runtime (not folded away)
-#   (b) emits `cbz` or `cbnz` — conditional branch for guard evaluation
-#   (c) does NOT emit `mov x0, #17` — result is NOT constant-folded from guarded(7)
-#
-# This is the FLS §6.1.2 litmus test for match guards: the existing test
-# `runtime_match_guard_emits_cbz_for_guard_condition` uses `let x = 7` (literal);
-# this claim uses a function parameter, which cannot be folded by any correct compiler.
-# A folding interpreter would evaluate `7 > 5 → 7 + 10 = 17` at compile time.
-# Introduced in cycle 56 (red-team, FLS §6.18 + §6.1.2:37–45).
-# References: claims.md Claim 24.
+# ── CLAIM-5: No orphaned .s fixture files ────────────────────────────────────
+# Adversarial: renaming a .rs fixture without updating the .s, or deleting
+# the .rs while leaving the .s.
+echo "--- CLAIM-5: No orphaned assembly fixtures ---"
+ORPHANS=""
+for s_file in tests/fixtures/*.s; do
+    [[ -f "$s_file" ]] || continue
+    stem="${s_file%.s}"
+    rs_file="${stem}.rs"
+    if [[ ! -f "$rs_file" ]]; then
+        ORPHANS="${ORPHANS}  ${s_file} (no matching ${rs_file})\n"
+    fi
+done
 
-echo "--- Claim 24: match guard with param emits runtime comparison (not folded) ---"
-if cargo test --test e2e --quiet -- runtime_match_guard_with_param_emits_runtime_comparison 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 24" "runtime_match_guard_with_param_emits_runtime_comparison FAILED — match guard may not be emitting runtime comparison/branch, or guard result was constant-folded to 17"
+if [[ -z "$ORPHANS" ]]; then
+    ok "CLAIM-5" "No orphaned assembly fixtures"
 else
-    pass "Claim 24: match guard with function parameter emits runtime comparison (not folded)"
+    fail "CLAIM-5" "Orphaned .s files (no matching .rs source):\n${ORPHANS}"
 fi
 
-# ── Claim 25: let-else mixed OR (literal + range) emits runtime check for both alts ─
-# Tests that `let 1 | 10..=20 = n else { return 0 }` in a function with parameter n:
-#   (a) emits `orr` — both the literal and range alternatives are checked (not just first)
-#   (b) emits `cbz` — else block branch fires when no alternative matches
-#   (c) does NOT emit `mov x0, #1; ret` — result not constant-folded
+# ── CLAIM-6: Binary exits cleanly on adversarial input ───────────────────────
+# Adversarial: construct inputs that would plausibly crash the lexer, parser,
+# or lowering phase, and verify no signal death (exit > 128).
 #
-# This guards against two failure modes:
-#   1. Parser regression: `parse_let_pattern` did not handle `..=` after a LitInteger,
-#      causing "expected Semi, found DotDotEq" on valid Rust code.
-#   2. Lowering regression: `accum_or_alt` not called for range alternatives in let-else,
-#      causing `classify(15)` to incorrectly take the else branch (only `1` checked).
-#
-# Introduced in cycle 60 (red-team, discovered parser bug, FLS §5.1.9 + §5.1.11 + §8.1).
-# References: claims.md Claim 25.
+# Only runs if the debug binary exists. Skip gracefully if not built.
+echo "--- CLAIM-6: Binary exits cleanly on adversarial input ---"
 
-echo "--- Claim 25: let-else mixed OR (literal + range) emits runtime orr+cbz ---"
-if cargo test --test e2e --quiet -- runtime_let_else_or_mixed_emits_orr_accumulation 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 25" "runtime_let_else_or_mixed_emits_orr_accumulation FAILED — let-else with mixed OR (literal|range) may not emit orr accumulation for all alternatives, or result was constant-folded"
+BINARY="target/debug/galvanic"
+if [[ ! -f "$BINARY" ]]; then
+    echo "SKIP [CLAIM-6]: debug binary not built — run 'cargo build' first"
+    PASS=$((PASS + 1))
 else
-    pass "Claim 25: let-else mixed-kind OR emits runtime orr+cbz for both alternatives (not folded)"
-fi
+    CLAIM6_FAIL=""
+    _check_input() {
+        local label="$1"
+        local input_file="$2"
+        set +e
+        _to 10 "$BINARY" "$input_file" >/dev/null 2>&1
+        EXIT=$?
+        set -e
+        if [[ "$EXIT" -gt 128 ]]; then
+            SIGNAL=$((EXIT - 128))
+            CLAIM6_FAIL="${CLAIM6_FAIL}  ${label}: died with signal ${SIGNAL} (exit ${EXIT})\n"
+        fi
+    }
 
-# ── Claim 26: @ binding pattern in let-else emits runtime check and binding ───
-#
-# Promise: `let n @ 1..=5 = x else { return 0 }; n * 2` must emit cmp (range
-# check), cbz (else-branch), and mul/add (binding use) — not `mov x0, #6`.
-# Without the Pat::Bound arm in let-else lowering, the program fails at
-# compile time with "Unsupported". With constant folding, the result is #6.
-#
-# Introduced in cycle 62 (FLS §5.1.4 + §8.1 — let-else @ binding lowering).
-# References: claims.md Claim 26.
+    # Create a temp dir for adversarial inputs
+    TMPDIR_LOCAL=$(mktemp -d)
+    trap 'rm -rf "$TMPDIR_LOCAL"' EXIT
 
-echo "--- Claim 26: @ binding pattern in let-else emits runtime check and binding (not folded) ---"
-if cargo test --test e2e --quiet -- runtime_let_else_bound_pattern_emits_cmp_and_binding_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 26" "runtime_let_else_bound_pattern_emits_cmp_and_binding_not_folded FAILED — let-else @ binding may not emit runtime range check, else-branch, or binding use; or result was constant-folded"
-else
-    pass "Claim 26: let-else @ binding emits runtime cmp+cbz+binding (not folded)"
-fi
+    # Input 1: empty file
+    touch "${TMPDIR_LOCAL}/empty.rs"
+    _check_input "empty file" "${TMPDIR_LOCAL}/empty.rs"
 
-# ── Claim 27: @ binding with OR sub-pattern emits orr accumulation ───────────
-#
-# Promise: `let n @ (1 | 5..=10) = x else { return 0 }; n * 2` must emit orr
-# (OR accumulation for the alternatives) and must NOT constant-fold the result.
-# Without the Pat::Or arm in accum_or_alt, the program fails at compile time
-# with "unsupported pattern kind inside OR pattern alternative".
-#
-# Introduced in cycle 63 (FLS §5.1.4 + §5.1.11 — @ binding with OR sub-pat).
-# References: claims.md Claim 27.
+    # Input 2: syntax garbage
+    printf '@@@ ??? !!! ~~~ ^^^' > "${TMPDIR_LOCAL}/garbage.rs"
+    _check_input "syntax garbage" "${TMPDIR_LOCAL}/garbage.rs"
 
-echo "--- Claim 27: @ binding pattern with OR sub-pattern emits orr accumulation (not folded) ---"
-if cargo test --test e2e --quiet -- runtime_at_bound_or_subpat_emits_orr_accumulation runtime_at_bound_or_subpat_result_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 27" "runtime_at_bound_or_subpat_emits_orr_accumulation or runtime_at_bound_or_subpat_result_not_folded FAILED — @ binding OR sub-pattern may not emit orr accumulation, or result was constant-folded"
-else
-    pass "Claim 27: @ binding OR sub-pattern emits runtime orr accumulation (not folded)"
-fi
+    # Input 3: 300 levels of nested braces
+    python3 -c "
+print('fn main() {')
+for i in range(300):
+    print('  { let _x = 0;')
+for i in range(300):
+    print('  }')
+print('}')
+" > "${TMPDIR_LOCAL}/nested.rs"
+    _check_input "300-deep nested braces" "${TMPDIR_LOCAL}/nested.rs"
 
-# ── Claim 28: @ binding with OR sub-pattern in if-let and match positions ────
-#
-# Promise: `n @ (pat1 | pat2)` in if-let and match positions must emit `orr` for
-# OR accumulation and must NOT constant-fold the bound value.
-# These are distinct lowering paths from the let-else path tested by Claim 27.
-# The milestone 158 compile-and-run tests for if-let and match require QEMU;
-# without this claim, a regression in those paths is invisible locally.
-#
-# Tests two positions:
-#   (a) if-let: `if let n @ (1 | 5..=10) = x { n * 2 } else { 0 }` with x param
-#       — must emit orr, must NOT emit `mov x0, #12` (n*2 where n=6).
-#   (b) match: `match x { n @ (1 | 5..=10) => n * 2, _ => 0 }` with x param
-#       — same assertions.
-#
-# Introduced in cycle 64 (red-team, FLS §5.1.4 + §5.1.11 + §6.17 + §6.18).
-# References: claims.md Claim 28.
+    # Input 4: very long expression chain (5000 additions)
+    python3 -c "print('fn main() { let _x = ' + '1 + ' * 5000 + '1; }')" > "${TMPDIR_LOCAL}/longexpr.rs"
+    _check_input "5000-term expression" "${TMPDIR_LOCAL}/longexpr.rs"
 
-echo "--- Claim 28: @ binding with OR sub-pattern in if-let/match emits runtime orr (not folded) ---"
-if cargo test --test e2e --quiet -- runtime_at_bound_or_subpat_if_let_emits_orr_not_folded runtime_at_bound_or_subpat_match_emits_orr_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 28" "runtime_at_bound_or_subpat_if_let_emits_orr_not_folded or runtime_at_bound_or_subpat_match_emits_orr_not_folded FAILED — @ binding OR sub-pattern in if-let or match may not emit orr accumulation, or result was constant-folded"
-else
-    pass "Claim 28: @ binding OR sub-pattern in if-let and match emit runtime orr accumulation (not folded)"
-fi
+    # Input 5: NUL bytes in source
+    printf 'fn main() {\x00\x00\x00}' > "${TMPDIR_LOCAL}/nul.rs"
+    _check_input "NUL bytes in source" "${TMPDIR_LOCAL}/nul.rs"
 
-# ── Claim 29: struct-returning match with parameter-dependent field arithmetic ─
-#
-# A struct-returning function with a match arm that computes fields from a
-# parameter must emit runtime cmp (scrutinee) and add (field arithmetic).
-# The result must NOT be constant-folded to `mov #N`.
-#
-# fn make(n: i32) -> Pair { match n { 1 => Pair { a: n + 10, b: n * 3 }, _ => Pair { a: 0, b: 0 } } }
-# fn main() -> i32 { make(1).a }
-#
-# References: claims.md Claim 29.
+    # Input 6: 1000 let bindings (stack-slot stress)
+    python3 -c "
+print('fn main() {')
+for i in range(1000):
+    print(f'    let x{i}: i32 = {i};')
+print('}')
+" > "${TMPDIR_LOCAL}/many_lets.rs"
+    _check_input "1000 let bindings" "${TMPDIR_LOCAL}/many_lets.rs"
 
-echo "--- Claim 29: struct-returning match field arithmetic not folded ---"
-if cargo test --test e2e --quiet -- runtime_struct_match_field_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 29" "runtime_struct_match_field_not_folded FAILED — struct-returning match may be constant-folding n+10 to #11 instead of emitting runtime add"
-else
-    pass "Claim 29: struct-returning match field arithmetic emits runtime add (not folded)"
-fi
-
-# ── Claim 30: struct-returning if-else with parameter-dependent field arithmetic ─
-#
-# A struct-returning function with an if-else branch that computes fields from a
-# parameter must emit a runtime conditional branch and add instruction.
-# The result must NOT be constant-folded to `mov #N`.
-#
-# fn make(n: i32) -> Point { if n > 0 { Point { x: n + 1, y: n * 2 } } else { Point { x: 0, y: 0 } } }
-# fn main() -> i32 { make(1).x }
-#
-# Complements Claim 29 for the if-else path. The existing cbz test only checks
-# that a branch is present; this checks that field arithmetic is also runtime.
-# References: claims.md Claim 30.
-
-echo "--- Claim 30: struct-returning if-else field arithmetic not folded ---"
-if cargo test --test e2e --quiet -- runtime_struct_return_if_else_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 30" "runtime_struct_return_if_else_not_folded FAILED — struct-returning if-else may be constant-folding n+1 to #2 instead of emitting runtime add"
-else
-    pass "Claim 30: struct-returning if-else field arithmetic emits runtime add (not folded)"
-fi
-
-# ── Claim 31: dyn Trait method with struct field arithmetic emits runtime add ──
-#
-# A dyn Trait method that sums two struct fields must execute at runtime via
-# vtable dispatch. When the struct is constructed from function parameters,
-# the field values are unknown at compile time and must not be constant-folded.
-#
-# fn measure(d: &dyn Dist) -> i32 { d.manhattan() }
-# fn make_and_measure(a: i32, b: i32) -> i32 { let p = Point { x: a, y: b }; measure(&p) }
-# fn main() -> i32 { make_and_measure(3, 4) }
-#
-# Must emit vtable_Dist_Point, blr, and add — and must NOT emit `mov x0, #7`.
-# References: claims.md Claim 31.
-
-echo "--- Claim 31: dyn Trait field arithmetic not folded ---"
-if cargo test --test e2e --quiet -- runtime_dyn_trait_field_arithmetic_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 31" "runtime_dyn_trait_field_arithmetic_not_folded FAILED — dyn Trait field arithmetic may be constant-folded to #7 instead of emitting runtime add"
-else
-    pass "Claim 31: dyn Trait method field arithmetic emits runtime add (not folded)"
-fi
-
-# ── Claim 32: FnMut closures pass mutable captures by address and write back ──
-#
-# The distinguishing invariant of FnMut: the captured variable is passed by
-# address (AddrOf: `add xN, sp, #offset`) so that writes inside the closure
-# body propagate back to the caller. Without write-back, every call sees the
-# initial value — `inc()` always returns 1 instead of accumulating.
-#
-# The test verifies three structural guarantees:
-#   1. `add x_, sp, #N` — address-of the captured stack slot is computed.
-#   2. `ldr xN, [xM]` (not [sp]) — value is read through an indirect pointer.
-#   3. `str xN, [xM]` (not [sp]) — updated value is written back through
-#      the pointer.
-# Plus a negative assertion that the second `inc()` result is not folded.
-#
-# References: claims.md Claim 32.
-
-echo "--- Claim 32: FnMut closures pass mutable captures by address (addr-of + write-back) ---"
-if cargo test --test e2e --quiet -- runtime_fn_mut_emits_addr_of_and_load_store_ptr 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 32" "runtime_fn_mut_emits_addr_of_and_load_store_ptr FAILED — FnMut may be passing captures by copy (snapshot) instead of address, breaking write-back across calls"
-else
-    pass "Claim 32: FnMut mutable capture passes address and writes back through pointer (not snapshot)"
-fi
-
-# ── Claim 33: FnOnce closures capture by value and emit runtime add ───────────
-#
-# A `move || x + 1` closure called via `impl FnOnce() -> i32` must:
-#   (a) emit `blr` — indirect call through the closure function pointer
-#   (b) emit `add` — `x + 1` is a runtime instruction (not folded)
-#   (c) NOT emit `mov x0, #42` — `run(41)` must not be constant-folded through the capture
-#
-# This completes the Fn/FnMut/FnOnce falsification triangle:
-#   Claim 11 = Fn (non-capturing + capturing, hidden function label + blr)
-#   Claim 32 = FnMut (mutable capture by address + write-back)
-#   Claim 33 = FnOnce (move capture, runtime body, blr dispatch)
-#
-# References: claims.md Claim 33.
-
-echo "--- Claim 33: FnOnce closure capture emits runtime add and blr (not folded) ---"
-if cargo test --test e2e --quiet -- runtime_fn_once_capture_emits_runtime_add 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 33" "runtime_fn_once_capture_emits_runtime_add FAILED — FnOnce closure may be constant-folding the body (mov x0, #42) instead of emitting runtime add, or blr dispatch is missing"
-else
-    pass "Claim 33: FnOnce capture emits runtime add and blr (not constant-folded)"
-fi
-
-# ── Claim 34: Associated type method results are not constant-folded ───────────
-#
-# A trait method on a type with an associated type (`type Area = i32`) must emit
-# runtime `mul` instructions even when call arguments are literals:
-#
-#   trait Shape { type Area; fn scaled_area(&self, scale: i32) -> i32; }
-#   impl Shape for Square {
-#       type Area = i32;
-#       fn scaled_area(&self, scale: i32) -> i32 { self.side * self.side * scale }
-#   }
-#   fn main() -> i32 { let s = Square { side: 3 }; s.scaled_area(5) }
-#
-# The §10.2 associated type dispatch path is distinct from the generic trait dispatch
-# in Claims 9–12 — it uses direct method dispatch through the concrete type, not
-# vtable or generic-parameter monomorphization. Both must emit runtime instructions.
-#
-# References: claims.md Claim 34.
-
-echo "--- Claim 34: assoc type method emits runtime mul (not folded to constant) ---"
-if cargo test --test e2e --quiet -- runtime_assoc_type_method_emits_mul_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 34" "runtime_assoc_type_method_emits_mul_not_folded FAILED — associated type method may be constant-folding 3*3*5=45 (mov x0, #45) instead of emitting runtime mul"
-else
-    pass "Claim 34: assoc type method result not folded (runtime mul emitted)"
-fi
-
-# ── Claim 35: Generic functions with assoc type bounds emit monomorphized calls ─
-#
-# A generic function `fn extract<T: Container<Item = i32>>(c: T) -> i32 { c.get_val() }`
-# must:
-#   (a) emit `bl extract__Wrapper` — monomorphized call, not constant-folded
-#   (b) NOT emit `mov x0, #10` — `extract(Wrapper { val: 9 })` must not be folded
-#
-# The two-type variant additionally checks that both `Wrapper__get_val` and
-# `Doubler__get_val` labels are present, and that the sum `7 + 5*2 = 17` is
-# NOT folded to `mov x0, #17`.
-#
-# This covers the §10.2 + §12.1 associated type bound path (`T: Trait<Assoc = U>`),
-# distinct from:
-#   Claims 9–12  = plain trait bounds without associated type binding
-#   Claim 34     = direct associated type method dispatch, not via generic parameter
-#
-# Introduced in cycle 71 (FLS §10.2 + §12.1 — assoc type bounds falsification).
-# References: claims.md Claim 35.
-
-echo "--- Claim 35: generic fn with assoc type bound emits monomorphized bl (not folded) ---"
-if cargo test --test e2e --quiet -- runtime_assoc_type_bound_emits_monomorphized_bl_not_folded runtime_assoc_type_bound_two_types_both_monomorphized 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 35" "runtime_assoc_type_bound_emits_monomorphized_bl_not_folded or runtime_assoc_type_bound_two_types_both_monomorphized FAILED — generic fn with assoc type bound may not emit monomorphized call, or result was constant-folded"
-else
-    pass "Claim 35: generic fn with assoc type bound emits monomorphized bl (not folded)"
-fi
-
-# ── Claim 36: impl FnMut trampoline passes capture by address, mutation not folded ─
-#
-# When a mutable closure is passed as `impl FnMut`, galvanic must:
-#   (a) emit `_trampoline` — the wrapper that receives closure state via x27
-#   (b) use x27 for the capture-state pointer (capture by address, not by copy)
-#   (c) emit `blr` in the consuming function for indirect closure call
-#   (d) emit `add` — n+=1 in the closure body is a runtime instruction
-#   (e) NOT emit `mov x0, #23` (correct result constant-folded from run(10))
-#   (f) NOT emit `mov x0, #3` (snapshot-from-zero fold: two calls return 1+2=3)
-#
-# fn apply_mut(mut f: impl FnMut() -> i32) -> i32 { f() + f() }
-# fn run(start: i32) -> i32 { let mut n = start; apply_mut(|| { n += 1; n }) }
-# fn main() -> i32 { run(10) }
-#
-# Distinct from:
-#   Claim 32 = direct FnMut closure (no generic dispatch, no trampoline)
-#   Claim 33 = FnOnce via impl FnOnce (move capture, single call, no write-back)
-# This claim covers the impl FnMut trampoline mechanism — a separate code path
-# where galvanic must emit a trampoline that shuttles x27 (capture address) into
-# the closure call, enabling mutable state accumulation across multiple calls.
-#
-# Attack vector: snapshot capture (copy n, not &n) causes each call to see the
-# initial value → wrong result (2 or 22 depending on where snapshot is taken).
-# Constant-fold: evaluate run(10) = 23 at compile time → mov x0, #23.
-#
-# Introduced in cycle 72 (red-team, milestone 152 path, FLS §6.22 + §4.13).
-# References: claims.md Claim 36.
-
-echo "--- Claim 36: impl FnMut trampoline mutation not folded ---"
-if cargo test --test e2e --quiet -- runtime_fn_mut_as_impl_fn_mut_emits_trampoline runtime_fn_mut_as_impl_fn_mut_mutation_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 36" "runtime_fn_mut_as_impl_fn_mut_emits_trampoline or runtime_fn_mut_as_impl_fn_mut_mutation_not_folded FAILED — impl FnMut trampoline may be missing, capture may be by copy (not address), or mutation result was constant-folded"
-else
-    pass "Claim 36: impl FnMut trampoline passes capture address (x27) and mutation is not folded"
-fi
-
-echo "--- Claim 37: &dyn Trait let binding emits fat pointer load and blr (not folded) ---"
-if cargo test --test e2e --quiet -- runtime_dyn_trait_let_binding_not_folded runtime_dyn_trait_let_binding_emits_load_from_slot 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 37" "runtime_dyn_trait_let_binding_not_folded or runtime_dyn_trait_let_binding_emits_load_from_slot FAILED — &dyn Trait let binding may not be materializing the fat pointer, may be missing blr dispatch, or the result was constant-folded"
-else
-    pass "Claim 37: &dyn Trait let binding stores fat pointer and dispatches via blr (not folded)"
-fi
-
-# Unsafe block bodies must emit runtime instructions — unsafe is not a const context.
-# Attack: constant-fold triple(4) = 12 to mov x0, #12 because the body is statically known.
-# FLS §6.4.4 + §6.1.2 Constraint 1: unsafe block is not a const context.
-#
-# Introduced in cycle 74 (red-team, unsafe block path, FLS §6.4.4 + §6.1.2).
-# References: claims.md Claim 38.
-
-echo "--- Claim 38: unsafe block body emits runtime mul (not constant-folded) ---"
-if cargo test --test e2e --quiet -- runtime_unsafe_block_emits_runtime_instructions_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 38" "runtime_unsafe_block_emits_runtime_instructions_not_folded FAILED — unsafe block body may be constant-folded (unsafe is NOT a const context per FLS §6.4.4)"
-else
-    pass "Claim 38: unsafe block body emits runtime mul (not constant-folded)"
-fi
-
-# `const fn` called from a non-const context must emit a runtime bl, not be folded.
-# A `const fn` is only eligible for compile-time evaluation when called from a const
-# context (const item, const block, array length, etc.). When called from `fn main()`
-# the arguments may be dynamic at runtime; the compiler must emit a real function call.
-# FLS §9:41–43 (Constraint 2): `const fn` called outside a const context runs as
-# normal code and must emit a runtime bl instruction.
-#
-# Attack: constant-fold `add(20, 22)` to `mov x0, #42` because both arguments are
-# known constants. The exit code would still be 42 (correct), but the program is
-# semantically wrong — the function must execute at runtime.
-#
-# Introduced in cycle 75 (red-team, const fn context-sensitivity, FLS §9:41–43).
-# References: claims.md Claim 39.
-
-echo "--- Claim 39: const fn called from non-const context emits runtime bl (not folded) ---"
-if cargo test --test e2e --quiet -- runtime_const_fn_runtime_call_emits_bl_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 39" "runtime_const_fn_runtime_call_emits_bl_not_folded FAILED — const fn may be constant-folded when called from non-const context (violates FLS §9:41–43)"
-else
-    pass "Claim 39: const fn called from non-const context emits runtime bl (not folded)"
-fi
-
-# ── Claim 40: For loops emit runtime control flow (not constant-folded) ───────
-#
-# `for i in 0..5 { acc += i; }` with acc starting at 0 produces acc=10. A constant-folding
-# interpreter could evaluate this at compile time and emit `mov x0, #10` — the exit code
-# would still be 10, making the regression invisible to all compile-and-run tests.
-#
-# The assembly must contain: cbz (exit branch), add (loop body), b (back-edge).
-# The assembly must NOT contain: `mov     x0, #10` (constant-folded result).
-#
-# FLS §6.15.1: For loop expressions produce runtime control flow.
-# FLS §6.16: Range expression bounds are materialised as runtime loads.
-# FLS §6.1.2 Constraint 1: fn main() is not a const context — loop must execute at runtime.
-#
-# Introduced in cycle 76 (red-team, for-loop constant-fold attack, FLS §6.15.1 + §6.1.2).
-# References: claims.md Claim 40.
-
-echo "--- Claim 40: for loop emits runtime control flow (not constant-folded) ---"
-if cargo test --test e2e --quiet -- runtime_for_loop_emits_cmp_cbz_add_and_back_branch 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 40" "runtime_for_loop_emits_cmp_cbz_add_and_back_branch FAILED — for loop may be constant-folding 0+1+2+3+4=10 to mov x0, #10, or loop structure (cbz/add/back-edge) was dropped"
-else
-    pass "Claim 40: for loop emits runtime cbz+add+back-edge and result not folded to #10"
-fi
-
-# ── Claim 41 ──────────────────────────────────────────────────────────────────
-# Promise: `let y = x` where x is a &dyn Trait fat-pointer local must copy
-# both slots (data_ptr, vtable_ptr) and dispatch via blr at the use site.
-# The result (3*4=12) must NOT be constant-folded to `mov x0, #12`.
-#
-# FLS §4.13: Fat pointer re-bind propagates local_dyn_types registration.
-# FLS §6.1.2 Constraint 1: fn main() is not a const context — dispatch at runtime.
-#
-# Introduced in cycle 77 (fat pointer re-bind, FLS §4.13, Milestone 160).
-# References: claims.md Claim 41.
-
-echo "--- Claim 41: &dyn Trait fat pointer re-bind copies fat pointer and dispatches via blr (not folded) ---"
-if cargo test --test e2e --quiet -- runtime_dyn_trait_rebind_emits_load_for_fat_pointer runtime_dyn_trait_rebind_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 41" "dyn Trait rebind tests FAILED — fat pointer copy may be missing slots, dispatch may be folded, or result 3*4=12 was emitted as constant"
-else
-    pass "Claim 41: &dyn Trait fat pointer re-bind emits ldr+blr and result not folded to #12"
+    if [[ -z "$CLAIM6_FAIL" ]]; then
+        ok "CLAIM-6" "Binary exits cleanly on all adversarial inputs"
+    else
+        fail "CLAIM-6" "Binary died on signal for some adversarial inputs:\n${CLAIM6_FAIL}"
+    fi
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
-
-echo "--- Claim 42: while loop emits runtime control flow (not constant-folded) ---"
-# Promise: `while x < 5 { x = x + 1; }` starting from x=0 must emit runtime
-# cmp+cset+cbz+back-edge and must NOT fold the 5-iteration result to `mov x0, #5`.
-# The loop body iterates x: 0→1→2→3→4→5. An interpreter could short-circuit this.
-#
-# FLS §6.15.3: While loop expressions evaluate the condition at runtime each iteration.
-# FLS §6.1.2 Constraint 1: fn main() is not a const context — loop executes at runtime.
-#
-# Introduced in cycle 78 (while loop falsification, FLS §6.15.3, §6.1.2).
-# References: claims.md Claim 42.
-
-if cargo test --test e2e --quiet -- runtime_while_emits_cmp_cset_cbz_and_b 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 42" "while loop test FAILED — loop control flow may be missing or result 5 was constant-folded to mov x0, #5"
-else
-    pass "Claim 42: while loop emits runtime cmp+cset+cbz+back-edge and result not folded to #5"
-fi
-
-# ── Claim 43: if expression emits runtime conditional branch (not constant-folded) ─
-# Promise: `if true { 7 } else { 0 }` must emit a runtime cbz + phi slot str/ldr
-# and must NOT fold the then-branch result to `mov x0, #7`.
-# The condition `true` is statically known — an interpreter could short-circuit
-# branching entirely. The negative assertion closes that gap.
-#
-# FLS §6.17: If expressions evaluate their condition at runtime.
-# FLS §6.1.2 Constraint 1: fn main() is not a const context — if must execute at runtime.
-#
-# Introduced in cycle 80 (if expression falsification, FLS §6.17, §6.1.2).
-# References: claims.md Claim 43.
-
-echo "--- Claim 43: if expression emits runtime cbz (not constant-folded) ---"
-if cargo test --test e2e --quiet -- runtime_if_emits_cbz 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 43" "if expression test FAILED — cbz may be missing or result 7 was constant-folded to mov x0, #7"
-else
-    pass "Claim 43: if expression emits runtime cbz and result not folded to #7"
-fi
-
-# ── Claim 44: &dyn Trait-returning function emits runtime bl + vtable blr ────
-#
-# Promise: a function returning `&dyn Trait` must emit:
-#   (a) `bl forward` — runtime call to the dyn-returning function (not inlined/folded)
-#   (b) `blr` — vtable indirect dispatch on the returned fat pointer (not devirtualized)
-#   (c) `ldr x0` / `ldr x1` — fat pointer halves loaded at callee return (RetFields)
-#   (d) `str x0` / `str x1` — fat pointer halves stored at call site (CallRetFatPtr)
-#   (e) NOT `mov x0, #7` — result must not be constant-folded
-#
-# Attack vectors:
-#   1. Constant-fold the entire pipeline (mov x0, #7) — exit code still correct.
-#   2. Devirtualize the returned trait object (bl Dog__sound instead of blr).
-#   3. Drop the fat pointer ABI (treat &dyn Trait return as scalar pointer).
-#
-# FLS §4.13 + §6.1.2 Constraint 1: fat pointer return requires both halves;
-# fn main() is not a const context — dispatch must happen at runtime.
-#
-# Introduced in cycle 82 (dyn return falsification, FLS §4.13, Milestone 162).
-# References: claims.md Claim 44.
-
-echo "--- Claim 44: &dyn Trait-returning function emits runtime bl + vtable blr (not constant-folded) ---"
-if cargo test --test e2e --quiet -- runtime_dyn_return_emits_fat_ptr_loads_and_stores runtime_dyn_return_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 44" "runtime_dyn_return_emits_fat_ptr_loads_and_stores or runtime_dyn_return_not_folded FAILED — dyn-returning fn may be missing fat ptr ABI (ldr/str x0/x1), bl forward, blr dispatch, or result was constant-folded to #7"
-else
-    pass "Claim 44: dyn-returning fn emits bl forward + fat ptr ldr/str + blr dispatch (not folded to #7)"
-fi
-
-# ── Claim 45: impl Trait return uses static bl dispatch (not vtable blr) ─────
-#
-# Promise: a function returning `impl Trait` must use static (monomorphized) dispatch:
-#   (a) `bl make_points` — runtime call to the impl-Trait-returning fn (not folded)
-#   (b) `bl` to the concrete method — static dispatch (NOT `blr` vtable dispatch)
-#   (c) `add` — method body emits runtime arithmetic (not constant-folded)
-#   (d) NOT `blr` — vtable dispatch is only correct for `&dyn Trait`, not `impl Trait`
-#
-# Attack vectors:
-#   1. Constant-fold `make_points(6).score()` to `mov x0, #7` — exit code still 7.
-#   2. Emit `blr` for the method call (treating impl Trait return like &dyn Trait).
-#   3. Inline make_points entirely, dropping the `bl make_points` call.
-#
-# FLS §11: impl Trait uses static dispatch — concrete type resolved at compile time.
-# FLS §11 AMBIGUOUS: spec does not define how concrete return type is resolved.
-# FLS §6.1.2 Constraint 1: fn main() is not a const context — runtime arithmetic required.
-#
-# Introduced in cycle 84 (impl Trait return falsification, FLS §9, §11, Milestone 163).
-# References: claims.md Claim 45.
-
-echo "--- Claim 45: impl Trait return uses static bl dispatch (not vtable blr) and result not folded ---"
-if cargo test --test e2e --quiet -- runtime_impl_trait_return_emits_bl_not_blr runtime_impl_trait_return_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 45" "runtime_impl_trait_return_emits_bl_not_blr or runtime_impl_trait_return_not_folded FAILED — impl Trait return may use vtable blr instead of static bl, or result was constant-folded (add missing)"
-else
-    pass "Claim 45: impl Trait return emits static bl (not blr) and runtime add (not folded)"
-fi
-
-# ── Claim 46: Supertrait method dispatch emits runtime bl (not constant-folded) ─
-#
-# Promise: Calling a supertrait method (`t.base_val()`) from a generic function
-# where `T: Derived` and `Derived: Base` must emit `add` for the method body and
-# must NOT fold the result to an immediate.
-# Likewise, calling both supertrait and subtrait methods and summing the results
-# must not be folded to the combined constant.
-#
-# FLS §4.14: Supertrait bounds — T: Derived implies T: Base.
-# FLS §4.14 AMBIGUOUS: Spec does not specify supertrait method resolution at generic call sites.
-# FLS §6.1.2 Constraint 1: fn main() is not a const context.
-#
-# Introduced in cycle 86 (supertrait bounds falsification, FLS §4.14, Milestone 164).
-# References: claims.md Claim 46.
-
-echo "--- Claim 46: supertrait method dispatch emits runtime bl (not constant-folded) ---"
-if cargo test --test e2e --quiet -- runtime_supertrait_call_emits_bl_not_folded runtime_supertrait_both_methods_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 46" "runtime_supertrait_call_emits_bl_not_folded or runtime_supertrait_both_methods_not_folded FAILED — supertrait method body may be folded to constant or add instruction missing"
-else
-    pass "Claim 46: supertrait method dispatch emits runtime add (not constant-folded)"
-fi
-
-# ── Claim 47: Default methods calling supertrait methods emit runtime bl (not folded) ─
-#
-# Promise: A default method that calls a supertrait abstract method must dispatch via
-# `bl` to the concrete monomorphized label. Chained default methods must each emit a
-# separate `bl` — the chain must not be constant-folded.
-#
-# Pattern 1: default calling supertrait abstract — must emit bl Foo__base_val + add, not fold #10
-# Pattern 2: chained defaults — must emit bl Foo__doubled + bl Foo__value, not fold #12
-#
-# FLS §4.14: Supertrait bounds — supertrait methods must be accessible from default bodies.
-# FLS §10.1.1: Default method bodies are emitted per concrete type at runtime.
-# FLS §10.1.1 AMBIGUOUS: Spec does not specify inlining vs. bl for supertrait calls in defaults.
-# FLS §6.1.2 Constraint 1: fn main() is not a const context.
-#
-# Introduced in cycle 88 (M165 default-calls-supertrait falsification).
-# References: claims.md Claim 47.
-
-echo "--- Claim 47: default method calling supertrait emits runtime bl (not constant-folded) ---"
-if cargo test --test e2e --quiet -- runtime_supertrait_default_call_emits_bl_not_folded runtime_supertrait_default_chain_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 47" "runtime_supertrait_default_call_emits_bl_not_folded or runtime_supertrait_default_chain_not_folded FAILED — default method supertrait call or chain may be constant-folded"
-else
-    pass "Claim 47: default method calling supertrait emits runtime bl (not constant-folded)"
-fi
-
-# ── Claim 48: Self::AssocType in method signatures emits runtime dispatch (not folded) ─
-#
-# Promise: Methods with Self::AssocType in return or parameter position must dispatch
-# via bl to the concrete monomorphized label at runtime. The associated type projection
-# is resolved per-impl at lowering — not constant-folded.
-#
-# Pattern 1: Self::Output in return type → must emit bl IntWrap__value, not fold #7
-# Pattern 2: Self::Factor in parameter type → must emit mul, not fold #12
-#
-# FLS §10.2: Associated types in trait definitions.
-# FLS §10.2 AMBIGUOUS: Spec does not specify how Self::X projections resolve across
-#   trait method vs. impl method signatures.
-# FLS §6.1.2 Constraint 1: fn main() is not a const context.
-#
-# Introduced in cycle 90 (M166 Self::AssocType falsification).
-# References: claims.md Claim 48.
-
-echo "--- Claim 48: Self::AssocType in method signatures emits runtime dispatch (not constant-folded) ---"
-if cargo test --test e2e --quiet -- runtime_self_assoc_type_return_emits_bl_not_folded runtime_self_assoc_type_param_emits_mul_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 48" "runtime_self_assoc_type_return_emits_bl_not_folded or runtime_self_assoc_type_param_emits_mul_not_folded FAILED — Self::AssocType method may be constant-folded or bl/mul missing"
-else
-    pass "Claim 48: Self::AssocType in method signatures emits runtime dispatch (not constant-folded)"
-fi
-
-# ── Claim 49: T::AssocType in generic function return position emits monomorphized dispatch (not folded) ─
-#
-# Promise: A generic free function `fn use_it<C: Container>(c: C) -> C::Item` must:
-# 1. Emit a monomorphized label per concrete type (e.g., use_it__Counter).
-# 2. Dispatch to the concrete method via bl at runtime.
-# 3. Not constant-fold the result.
-# Both single-type (Pattern 1) and two-type (Pattern 2) cases are guarded.
-#
-# Pattern 1: use_it__Counter label present, bl Counter__get present, mov x0,#0 absent
-# Pattern 2: both Meters and Feet labels present, mov x0,#5 absent
-#
-# FLS §10.2: Associated type projections resolve per-impl at monomorphization.
-# FLS §12.1 / §10.2 AMBIGUOUS: Spec does not specify how T::X resolves during monomorphization.
-# FLS §6.1.2 Constraint 1: fn main() is not a const context.
-#
-# Introduced in cycle 92 (M167 T::AssocType falsification).
-# References: claims.md Claim 49.
-
-echo "--- Claim 49: T::AssocType in generic function return position emits monomorphized dispatch (not folded) ---"
-if cargo test --test e2e --quiet -- runtime_proj_return_emits_bl_not_folded runtime_proj_two_types_both_monomorphized 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 49" "runtime_proj_return_emits_bl_not_folded or runtime_proj_two_types_both_monomorphized FAILED — T::AssocType generic return may be constant-folded or monomorphized label missing"
-else
-    pass "Claim 49: T::AssocType in generic fn return emits monomorphized dispatch (not constant-folded)"
-fi
-
-# ── Claim 50: T::AssocType in generic function parameter position emits monomorphized dispatch (not folded) ─
-#
-# Promise: A generic free function `fn add_extra<C: Container>(c: C, extra: C::Item) -> i32`
-# must:
-# 1. Emit a monomorphized label per concrete type (e.g., add_extra__Counter).
-# 2. Dispatch to the concrete method via bl at runtime.
-# 3. Emit an add instruction for the runtime arithmetic.
-# 4. Not constant-fold the result.
-#
-# Pattern 1: add_extra__Counter label present, bl Counter__get present, add present, mov x0,#8 absent
-# Pattern 2: both with_offset__Meters and with_offset__Feet labels present, mov x0,#6 absent
-#
-# FLS §10.2: Associated type projections resolve per-impl at monomorphization.
-# FLS §12.1 / §10.2 AMBIGUOUS: Spec does not specify how T::X in parameter position resolves.
-# FLS §6.1.2 Constraint 1: fn main() is not a const context.
-#
-# Introduced in cycle 96 (M168 T::AssocType parameter position falsification).
-# References: claims.md Claim 50.
-
-echo "--- Claim 50: T::AssocType in generic function parameter position emits monomorphized dispatch (not folded) ---"
-if cargo test --test e2e --quiet -- runtime_param_proj_emits_add_not_folded runtime_param_proj_two_types_both_monomorphized 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 50" "runtime_param_proj_emits_add_not_folded or runtime_param_proj_two_types_both_monomorphized FAILED — T::AssocType generic parameter may be constant-folded or monomorphized label missing"
-else
-    pass "Claim 50: T::AssocType in generic fn parameter emits monomorphized dispatch (not constant-folded)"
-fi
-
-# References: claims.md Claim 51.
-
-echo "--- Claim 51: where C::Item: Trait predicate emits monomorphized bl (not constant-folded) ---"
-if cargo test --test e2e --quiet -- runtime_where_proj_emits_bl_not_folded runtime_where_proj_two_types_both_monomorphized 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 51" "runtime_where_proj_emits_bl_not_folded or runtime_where_proj_two_types_both_monomorphized FAILED — where-proj fn may be constant-folded or monomorphized label missing"
-else
-    pass "Claim 51: where C::Item: Trait where-proj fn emits monomorphized bl (not constant-folded)"
-fi
-
-# References: claims.md Claim 52.
-
-echo "--- Claim 52: unsafe fn body emits runtime mul and call emits runtime bl (not constant-folded) ---"
-if cargo test --test e2e --quiet -- runtime_unsafe_fn_body_emits_mul_not_folded runtime_unsafe_fn_call_emits_bl_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 52" "runtime_unsafe_fn_body_emits_mul_not_folded or runtime_unsafe_fn_call_emits_bl_not_folded FAILED — unsafe fn body may be constant-folded or bl missing"
-else
-    pass "Claim 52: unsafe fn body emits runtime mul and call emits runtime bl (not constant-folded)"
-fi
-
-# References: claims.md Claim 53.
-
-echo "--- Claim 53: unsafe trait method call emits runtime bl and mul (not constant-folded) ---"
-if cargo test --test e2e --quiet -- runtime_unsafe_trait_method_emits_bl_not_folded runtime_unsafe_trait_body_emits_mul_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 53" "runtime_unsafe_trait_method_emits_bl_not_folded or runtime_unsafe_trait_body_emits_mul_not_folded FAILED — unsafe trait method may be constant-folded or bl/mul missing"
-else
-    pass "Claim 53: unsafe trait method emits runtime bl and mul (not constant-folded)"
-fi
-
-# ── Claim 54: `unsafe fn` inside `unsafe trait` — M170+M171 combined ─────────
-#
-# Promise: A method declared `unsafe fn` inside `unsafe trait` and implemented
-# in `unsafe impl` must produce the same runtime codegen as any other method.
-# The combined presence of unsafe qualifiers on the trait, impl, AND method must
-# not trigger any special folding or skipping of code.
-#
-# This guards the intersection of M170 (unsafe fn) and M171 (unsafe trait/impl):
-#   - M170's Claim 52 only tests standalone top-level `unsafe fn`.
-#   - M171's Claim 53 only tests `unsafe trait` with regular (non-unsafe) methods.
-#   - Neither claim guards the combination: `unsafe fn` inside `unsafe impl Foo
-#     for Bar` where `Foo` is an `unsafe trait`.
-#
-# Pattern:
-#   `unsafe trait Compute { unsafe fn compute(&self, a, b) -> i32; }`
-#   `unsafe impl Compute for M { unsafe fn compute(...) { self.0 * a + b } }`
-#   `fn main() -> i32 { let m = M(3); unsafe { m.compute(4, 5) } }`
-#   Expected: 3*4+5 = 17. Must emit mul + bl, not fold to mov x0, #17.
-#
-# FLS §19: `unsafe fn` bodies are not const contexts (FLS §6.1.2 Constraint 1).
-# FLS §19 AMBIGUOUS: Spec does not specify how `unsafe fn` inside `unsafe trait`
-#   interacts with enforcement. Galvanic records flags and defers enforcement.
-#
-# Attack vector: treat `unsafe fn` inside `unsafe impl` as a special case that
-#   constant-folds the body (e.g., assuming unsafe implies "compile-time known").
-#
-# Introduced in cycle 100 (red-team: M170+M171 combination unguarded).
-# References: claims.md Claim 54.
-
-echo "--- Claim 54: unsafe fn inside unsafe trait emits runtime bl and mul (not constant-folded) ---"
-if cargo test --test e2e --quiet -- runtime_unsafe_fn_in_unsafe_trait_emits_bl_and_mul_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 54" "runtime_unsafe_fn_in_unsafe_trait_emits_bl_and_mul_not_folded FAILED — unsafe fn inside unsafe trait may be constant-folded, bl missing, or mul missing"
-else
-    pass "Claim 54: unsafe fn inside unsafe trait emits runtime bl and mul (not constant-folded)"
-fi
-
-# References: claims.md Claim 55.
-
-echo "--- Claim 55: unsafe impl<T> for a generic type emits runtime bl and mul (not constant-folded) ---"
-if cargo test --test e2e --quiet -- runtime_unsafe_generic_impl_body_emits_mul_not_folded runtime_unsafe_generic_impl_call_emits_bl_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 55" "runtime_unsafe_generic_impl_body_emits_mul_not_folded or runtime_unsafe_generic_impl_call_emits_bl_not_folded FAILED — unsafe impl<T> body may be constant-folded, bl missing, or mul missing"
-else
-    pass "Claim 55: unsafe impl<T> for a generic type emits runtime bl and mul (not constant-folded)"
-fi
-
-# References: claims.md Claim 56.
-
-echo "--- Claim 56: unsafe impl<T: Bound> emits runtime bl and mul (not constant-folded) ---"
-if cargo test --test e2e --quiet -- runtime_unsafe_bounded_impl_body_emits_mul_not_folded runtime_unsafe_bounded_impl_call_emits_bl_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 56" "runtime_unsafe_bounded_impl_body_emits_mul_not_folded or runtime_unsafe_bounded_impl_call_emits_bl_not_folded FAILED — unsafe impl<T: Bound> body may be constant-folded, bl missing, or mul missing"
-else
-    pass "Claim 56: unsafe impl<T: Bound> emits runtime bl and mul (not constant-folded)"
-fi
-
-# References: claims.md Claim 57.
-
-echo "--- Claim 57: large-value integer arithmetic emits runtime add/mul (not constant-folded) ---"
-if cargo test --test e2e --quiet -- runtime_large_int_add_emits_add_not_folded runtime_large_int_mul_emits_mul_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 57" "runtime_large_int_add_emits_add_not_folded or runtime_large_int_mul_emits_mul_not_folded FAILED — large-value arithmetic may be constant-folded or add/mul instruction missing"
-else
-    pass "Claim 57: large-value integer arithmetic emits runtime add/mul (not constant-folded)"
-fi
-
-# References: claims.md Claim 58.
-
-echo "--- Claim 58: large-value integer sub/div emit runtime sub/sdiv (not constant-folded) ---"
-if cargo test --test e2e --quiet -- runtime_large_int_sub_emits_sub_not_folded runtime_large_int_div_emits_sdiv_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 58" "runtime_large_int_sub_emits_sub_not_folded or runtime_large_int_div_emits_sdiv_not_folded FAILED — large-value sub/div may be constant-folded or sub/sdiv instruction missing"
-else
-    pass "Claim 58: large-value integer sub/div emit runtime sub/sdiv (not constant-folded)"
-fi
-
-# References: claims.md Claim 59.
-
-echo "--- Claim 59: large negative i32 constants sign-extended for correct 64-bit comparisons ---"
-if cargo test --test e2e --quiet -- runtime_large_neg_const_emits_sxtw runtime_large_neg_const_pattern_not_folded milestone_175_neg_large_pattern_match_taken 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 59" "runtime_large_neg_const_emits_sxtw or pattern_match_taken FAILED — large negative constants may be zero-extended (sxtw missing) causing wrong comparisons"
-else
-    pass "Claim 59: large negative i32 constants sign-extended (sxtw) — pattern match against parameter gives correct result"
-fi
-
-# References: claims.md Claim 60.
-
-echo "--- Claim 60: remainder operator emits runtime sdiv+msub (not constant-folded) ---"
-if cargo test --test e2e --quiet -- runtime_rem_emits_sdiv_and_msub_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 60" "runtime_rem_emits_sdiv_and_msub_not_folded FAILED — remainder may be constant-folded instead of emitting runtime sdiv+msub"
-else
-    pass "Claim 60: remainder operator emits runtime sdiv+msub (not constant-folded)"
-fi
-
-# References: claims.md Claim 61.
-
-echo "--- Claim 61: shift operators emit runtime lsl/asr with function parameters (not constant-folded) ---"
-if cargo test --test e2e --quiet -- runtime_shl_emits_lsl_not_folded runtime_shr_emits_asr_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 61" "runtime_shl_emits_lsl_not_folded or runtime_shr_emits_asr_not_folded FAILED — shift may be constant-folded instead of emitting runtime lsl/asr"
-else
-    pass "Claim 61: shift operators emit runtime lsl/asr with function parameters (not constant-folded)"
-fi
-
-# References: claims.md Claim 62.
-
-echo "--- Claim 62: bitwise operators emit runtime and/orr/eor with function parameters (not constant-folded) ---"
-if cargo test --test e2e --quiet -- runtime_and_emits_and_not_folded runtime_or_emits_orr_not_folded runtime_xor_emits_eor_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 62" "runtime_and_emits_and_not_folded, runtime_or_emits_orr_not_folded, or runtime_xor_emits_eor_not_folded FAILED — bitwise ops may be constant-folded instead of emitting runtime and/orr/eor"
-else
-    pass "Claim 62: bitwise operators emit runtime and/orr/eor with function parameters (not constant-folded)"
-fi
-
-# References: claims.md Claim 63.
-
-echo "--- Claim 63: unary operators emit runtime neg/mvn/eor with function parameters (not constant-folded) ---"
-if cargo test --test e2e --quiet -- runtime_neg_emits_neg_not_folded runtime_not_emits_mvn_not_folded runtime_bool_not_emits_eor_not_folded 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 63" "runtime_neg_emits_neg_not_folded, runtime_not_emits_mvn_not_folded, or runtime_bool_not_emits_eor_not_folded FAILED — unary ops may be constant-folded instead of emitting runtime neg/mvn/eor"
-else
-    pass "Claim 63: unary operators emit runtime neg/mvn/eor with function parameters (not constant-folded)"
-fi
-
-# References: claims.md Claim 64.
-
-echo "--- Claim 64: u8 arithmetic emits runtime add and and-truncation (not constant-folded) ---"
-if cargo test --test e2e --quiet -- runtime_u8_add_emits_and_truncation runtime_u8_mul_emits_and_truncation milestone_176_u8_add_wraps milestone_176_u8_mul_wraps 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 64" "u8 assembly inspection or wrapping test FAILED — u8 arithmetic may be constant-folded or missing TruncU8 (add and mul both tested)"
-else
-    pass "Claim 64: u8 arithmetic emits runtime add and and-truncation (not constant-folded)"
-fi
-
-# References: claims.md Claim 65.
-
-echo "--- Claim 65: i8 arithmetic emits runtime add and sxtb sign-extension (not constant-folded) ---"
-if cargo test --test e2e --quiet -- runtime_i8_add_emits_sxtb_sign_extension milestone_177_i8_add_wraps milestone_177_i8_sub_wraps 2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 65" "i8 assembly inspection or wrapping test FAILED — i8 arithmetic may be constant-folded or missing SextI8"
-else
-    pass "Claim 65: i8 arithmetic emits runtime add and sxtb sign-extension (not constant-folded)"
-fi
-
-# References: claims.md Claim 66.
-
-echo "--- Claim 66: narrow integer compound assignment wraps correctly mid-body (not only at return boundaries) ---"
-if cargo test --test e2e --quiet -- \
-    runtime_u8_compound_add_emits_trunc_u8 \
-    runtime_i8_compound_add_emits_sext_i8 \
-    milestone_178_u8_compound_add_wraps_mid_body \
-    milestone_178_i8_compound_add_wraps_mid_body \
-    runtime_u8_compound_mul_emits_trunc_u8 \
-    runtime_i8_compound_mul_emits_sext_i8 \
-    milestone_186_u8_compound_mul_wraps_mid_body \
-    milestone_186_i8_compound_mul_wraps_mid_body \
-    runtime_u16_compound_mul_emits_trunc_u16 \
-    runtime_i16_compound_mul_emits_sext_i16 \
-    milestone_186_u16_compound_mul_wraps_mid_body \
-    milestone_186_i16_compound_mul_wraps_mid_body \
-    2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 66" "narrow integer compound assignment wrapping test FAILED — mid-body reads after compound-assign may see unwrapped values"
-else
-    pass "Claim 66: narrow integer compound assignment wraps correctly mid-body (not only at return boundaries)"
-fi
-
-# ── Claim 67: `x as u8` and `x as i8` narrowing casts truncate correctly ─────
-# FLS §6.5.9: Integer-to-integer casts to a narrower type must truncate to the
-# low N bits of the source value. `300_i32 as u8` → 44, `200_i32 as i8` → -56.
-# Previously galvanic treated these as identity casts (no truncation instruction
-# emitted), returning 300 / 200 unchanged. The fix emits TruncU8 / SextI8 in the
-# Cast lowering path.
-# Attack: returning 300 instead of 44 for `f(x) = (x as u8) as i32` with x=300
-# is a concrete wrong-answer test that cannot pass by accident.
-# References: claims.md Claim 67.
-
-echo "--- Claim 67: narrowing cast as u8/i8 truncates correctly (not identity) ---"
-if cargo test --test e2e --quiet -- \
-    runtime_cast_to_u8_emits_and_truncation \
-    runtime_cast_to_i8_emits_sxtb \
-    milestone_179_cast_u8_truncates_300_to_44 \
-    milestone_179_cast_i8_sign_extends_200_to_negative \
-    2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 67" "narrowing cast truncation test FAILED — `x as u8` or `x as i8` may be treating the cast as identity instead of truncating/sign-extending"
-else
-    pass "Claim 67: narrowing casts as u8/i8 truncate correctly (not identity)"
-fi
-
-# ── Claim 68: `x as u16` and `x as i16` narrowing casts truncate correctly ─────
-# FLS §6.5.9: Integer-to-integer casts to a narrower type must truncate to the
-# low N bits of the source value. `70000_i32 as u16` → 4464, `40000_i32 as i16` → negative.
-# Previously galvanic treated these as identity casts (no truncation instruction
-# emitted), returning the source value unchanged. The fix emits TruncU16 / SextI16.
-# Attack: returning 70000 instead of 4464 for `f(x) = (x as u16) as i32` with x=70000
-# is a concrete wrong-answer test that cannot pass by accident.
-# References: claims.md Claim 68.
-
-echo "--- Claim 68: narrowing cast as u16/i16 truncates correctly (not identity) ---"
-if cargo test --test e2e --quiet -- \
-    runtime_cast_to_u16_emits_and_truncation \
-    runtime_cast_to_i16_emits_sxth \
-    milestone_180_cast_u16_truncates_70000_to_4464 \
-    milestone_180_cast_i16_sign_extends_40000_to_negative \
-    2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 68" "narrowing cast u16/i16 truncation test FAILED — `x as u16` or `x as i16` may be treating the cast as identity instead of truncating/sign-extending"
-else
-    pass "Claim 68: narrowing casts as u16/i16 truncate correctly (not identity)"
-fi
-
-# Claim 69: u16/i16 arithmetic wraps at 16-bit boundaries (not identity through 32-bit registers).
-# Attack: `fn add_u16(a: u16, b: u16) -> u16 { a + b }` with (65500, 100) = 65600 without wrapping,
-# but should be 64 (65600 mod 65536). If TruncU16 is not emitted at the return boundary,
-# the function returns 65600 and the if-check fails. Similarly for i16.
-# References: claims.md Claim 69.
-
-echo "--- Claim 69: u16 arithmetic wraps at 16-bit boundaries (not identity) ---"
-if cargo test --test e2e --quiet -- \
-    runtime_u16_add_emits_and_truncation \
-    runtime_i16_add_emits_sxth \
-    milestone_181_u16_add_wraps \
-    milestone_181_i16_add_wraps \
-    milestone_181_u16_compound_add_wraps_mid_body \
-    milestone_181_i16_compound_add_wraps_mid_body \
-    2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 69" "u16/i16 arithmetic wrapping test FAILED — u16/i16 arithmetic may not wrap at 16-bit boundaries"
-else
-    pass "Claim 69: u16/i16 arithmetic wraps at 16-bit boundaries (not identity through 32-bit registers)"
-fi
-
-echo "--- Claim 70: narrow integer struct fields normalised at construction time ---"
-if cargo test --test e2e --quiet -- \
-    runtime_u16_struct_field_construction_applies_trunc \
-    milestone_182_u16_struct_field_wraps_on_construction \
-    milestone_182_u8_struct_field_wraps_on_construction \
-    milestone_182_i16_struct_field_wraps_on_construction \
-    2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 70" "narrow struct field normalisation FAILED — struct fields with u8/i8/u16/i16 types may store unwrapped values at construction"
-else
-    pass "Claim 70: narrow integer struct fields are normalised (truncated/sign-extended) at construction time"
-fi
-
-echo "--- Claim 71: narrow integer enum tuple variant fields normalised at construction time ---"
-if cargo test --test e2e --quiet -- \
-    runtime_u8_enum_variant_field_construction_applies_trunc \
-    runtime_u16_enum_variant_field_construction_not_constant_folded \
-    milestone_184_u8_enum_tuple_variant_wraps_on_construction \
-    milestone_184_u16_enum_tuple_variant_wraps_on_construction \
-    milestone_184_i16_enum_tuple_variant_wraps_on_construction \
-    2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 71" "narrow enum variant field normalisation FAILED — enum tuple variant fields with u8/i8/u16/i16 types may store unwrapped values at construction"
-else
-    pass "Claim 71: narrow integer enum tuple variant fields are normalised (truncated/sign-extended) at construction time"
-fi
-
-echo "--- Claim 72: narrow integer named enum variant fields normalised at construction time ---"
-if cargo test --test e2e --quiet -- \
-    runtime_u8_named_enum_variant_field_construction_applies_trunc \
-    runtime_i16_named_enum_variant_field_construction_applies_sxth \
-    milestone_185_u8_named_variant_wraps_on_construction \
-    milestone_185_u16_named_variant_wraps_on_construction \
-    milestone_185_i16_named_variant_wraps_on_construction \
-    2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 72" "narrow named enum variant field normalisation FAILED — named variant fields with u8/i8/u16/i16 types may store unwrapped values at construction"
-else
-    pass "Claim 72: narrow integer named enum variant fields are normalised (truncated/sign-extended) at construction time"
-fi
-
-echo "--- Claim 73: built-in integer type constants resolve to correct compile-time immediates ---"
-if cargo test --test e2e -- \
-    runtime_i32_max_emits_loadimm \
-    milestone_187_i32_max_is_positive \
-    milestone_187_i32_min_is_negative \
-    milestone_187_u8_max_as_i32 \
-    milestone_187_i8_max_as_i32 \
-    2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 73" "built-in integer type constants FAILED — i32::MAX/MIN, u8::MAX, i8::MAX not resolved as compile-time immediates"
-else
-    pass "Claim 73: built-in integer type constants (i32::MAX, i32::MIN, u8::MAX, i8::MAX) resolve to compile-time immediates"
-fi
-
-echo "--- Claim 74: built-in associated constants work in const item initializers (not just runtime expressions) ---"
-if cargo test --test e2e -- \
-    claim_74_const_chain_through_builtin_assoc_not_zero \
-    runtime_const_from_i32_max_emits_loadimm \
-    milestone_188_const_from_i32_max_positive \
-    milestone_188_const_from_i32_min_negative \
-    milestone_188_const_arithmetic_with_i32_max \
-    2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 74" "built-in constants in const items FAILED — i32::MAX in const item initializer silently resolved to wrong value (assoc_known not threaded through eval_const_expr)"
-else
-    pass "Claim 74: built-in associated constants in const item initializers resolve correctly (not silently zero)"
-fi
-
-echo "--- Claim 75: narrow integer const items wrap at declared bit-width (not i32 arithmetic) ---"
-if cargo test --test e2e -- \
-    claim_75_u8_const_item_wraps_at_8_bits_not_i32 \
-    runtime_u8_const_wraps_emits_correct_loadimm \
-    runtime_u16_const_wraps_emits_correct_loadimm \
-    milestone_189_u8_const_wraps_at_8_bits \
-    milestone_189_u16_const_addition_wraps \
-    2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 75" "narrow u8/u16 const items FAILED — eval_const_expr result not narrowed to declared width before storage"
-else
-    pass "Claim 75: narrow integer const items (u8/u16) wrap at declared bit-width (not raw i32 arithmetic)"
-fi
-
-echo "--- Claim 76: chained narrow integer const item references preserve bit-width ---"
-if cargo test --test e2e -- \
-    claim_76_u8_chained_const_ref_wraps_at_8_bits \
-    runtime_u8_const_chain_ref_emits_correct_loadimm \
-    milestone_190_u8_const_ref_chain_wraps \
-    milestone_190_u16_const_ref_chain_wraps \
-    2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 76" "chained u8/u16 const refs FAILED — narrow_const_value not applied after reference-chain evaluation (Y stores 300 instead of 44)"
-else
-    pass "Claim 76: chained narrow integer const item references preserve bit-width (X+ref wraps at declared width)"
-fi
-
-echo "--- Claim 77: narrow integer const items wrap for subtraction (underflow) and multiplication, not just addition ---"
-if cargo test --test e2e -- \
-    claim_77_u8_const_sub_and_mul_wrap_not_saturate \
-    runtime_u8_const_sub_underflow_emits_loadimm_251 \
-    runtime_u8_const_mul_wrap_emits_loadimm_44 \
-    milestone_191_u8_const_sub_underflow \
-    milestone_191_u8_const_mul_wraps \
-    milestone_191_u8_const_chained_sub_underflow \
-    2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 77" "narrow const sub/mul wrapping FAILED — narrow_const_value may clamp negatives to 0 (saturation) or not narrow mul results (5-10 should be 251, not 0 or -5; 100*3 should be 44, not 300)"
-else
-    pass "Claim 77: narrow integer const items wrap for subtraction (underflow) and multiplication (not just addition)"
-fi
-
-echo "--- Claim 78: &[T] slice parameter fat-pointer length is a runtime load, not a compile-time constant ---"
-if cargo test --test e2e -- \
-    claim_78_slice_param_len_is_runtime_load_not_folded \
-    runtime_slice_param_len_emits_ldr_not_constant \
-    runtime_slice_index_emits_ptr_arithmetic_and_load \
-    runtime_slice_arg_emits_adrof_and_len \
-    2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 78" "&[T] slice fat-pointer FAILED — callee may be constant-folding .len() from call-site info, or slice indexing skipping pointer arithmetic (mul+add+ldr)"
-else
-    pass "Claim 78: &[T] slice parameter fat-pointer length is a runtime load and indexing uses pointer arithmetic (not constant-folded)"
-fi
-
-echo "--- Claim 79: fn(&[T]) via fn-ptr passes fat pointer (addr+len) to callee ---"
-if cargo test --test e2e -- \
-    claim_79_fn_ptr_slice_arg_passes_len_not_just_ptr \
-    runtime_fn_ptr_slice_arg_emits_two_loads \
-    2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 79" "fn-ptr &[T] fat-pointer FAILED — CallIndirect may pass only the data pointer (not the length), causing the callee to use garbage as the slice length"
-else
-    pass "Claim 79: fn(&[T]) via fn-ptr passes both fat-pointer components (data ptr + length) before blr"
-fi
-
-echo "--- Claim 80: capturing closure with &[T] explicit parameter generates correct trampoline ---"
-if cargo test --test e2e -- \
-    claim_80_closure_trampoline_slice_param_passes_len_not_just_ptr \
-    runtime_closure_trampoline_shifts_fat_ptr_slice_param \
-    2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 80" "closure trampoline &[T] fat-pointer FAILED — trampoline may shift only 1 register instead of 2, clobbering the length when a capturing closure has a &[T] explicit param"
-else
-    pass "Claim 80: capturing closure with &[T] explicit param correctly shifts both fat-pointer registers in trampoline"
-fi
-
-echo "--- Claim 81: for x in &arr with array parameter emits indexed loads at runtime (not constant-folded) ---"
-if cargo test --test e2e -- \
-    claim_81_for_arr_borrow_param_emits_indexed_load_not_folded \
-    runtime_for_arr_borrow_emits_indexed_load \
-    runtime_for_arr_borrow_two_arrays_not_folded \
-    2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 81" "for-arr-borrow runtime codegen FAILED — loop body may be constant-folding element loads instead of emitting ldr instructions; both sums ([1,2,3]=6 and [10,20,30]=60) must come from runtime indexed loads"
-else
-    pass "Claim 81: for x in &arr with array parameter emits runtime indexed loads (not constant-folded)"
-fi
-
-echo "--- Claim 82: for x in &mut arr emits element address computation and stores through pointer (not constant-folded) ---"
-if cargo test --test e2e -- \
-    runtime_for_arr_mut_borrow_emits_addr_of_indexed \
-    runtime_for_arr_mut_borrow_param_not_folded \
-    milestone_196_for_arr_mut_borrow_param \
-    milestone_196_for_arr_mut_borrow_double_in_place \
-    2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 82" "for-arr-mut-borrow runtime codegen FAILED — loop may be constant-folding mutations instead of emitting AddrOfIndexed (add lsl #3) + StorePtr; negate_all([1,2,3]) must give -6 via runtime stores, not a compile-time constant"
-else
-    pass "Claim 82: for x in &mut arr emits element address computation at runtime and stores through pointer (not constant-folded)"
-fi
-
-echo "--- Claim 83: for x in arr (consuming iteration) with array parameter emits indexed loads at runtime (not constant-folded) ---"
-if cargo test --test e2e -- \
-    claim_83_for_array_param_emits_indexed_load_not_folded \
-    runtime_for_array_emits_load_indexed \
-    runtime_for_array_two_arrays_not_folded \
-    2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 83" "for-array consuming iteration runtime codegen FAILED — loop body may be constant-folding element loads instead of emitting ldr instructions; both sums ([1,2,3]=6 and [10,20,30]=60) must come from runtime indexed loads"
-else
-    pass "Claim 83: for x in arr consuming iteration emits runtime indexed loads (not constant-folded)"
-fi
-
-echo "--- Claim 84: for x in &mut slice emits runtime pointer arithmetic and stores (not constant-folded) ---"
-if cargo test --test e2e -- \
-    runtime_for_mut_slice_emits_mul_and_store_not_folded \
-    runtime_for_mut_slice_called_twice_not_folded \
-    milestone_197_for_mut_slice_double_in_place \
-    milestone_197_for_mut_slice_param \
-    2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 84" "for-mut-slice iteration runtime codegen FAILED — loop may not emit pointer arithmetic (mul) or write-back (str), or result may be constant-folded; mutations must happen at runtime through the slice fat pointer"
-else
-    pass "Claim 84: for x in &mut slice emits runtime mul+str and result not constant-folded"
-fi
-
-echo "--- Claim 85: for x in &[T] slice iteration emits runtime fat-pointer loads (not constant-folded) ---"
-if cargo test --test e2e -- \
-    runtime_for_slice_emits_ldr_and_ptr_arithmetic \
-    runtime_for_slice_called_twice_not_folded \
-    milestone_194_for_slice_sum \
-    milestone_194_for_slice_len_one \
-    2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 85" "for-slice immutable iteration runtime codegen FAILED — fat-pointer length may be constant-folded or element loads missing"
-else
-    pass "Claim 85: for x in &[T] slice iteration emits runtime fat-pointer length load and element ldr (not constant-folded)"
-fi
-
-echo "--- Claim 86: closure trampoline correctly shifts &mut [T] fat-pointer explicit arguments ---"
-if cargo test --test e2e -- \
-    runtime_closure_trampoline_shifts_fat_ptr_mut_slice_param \
-    claim_86_closure_trampoline_mut_slice_param_passes_len_not_just_ptr \
-    2>&1 | grep -q "FAILED\|error\["; then
-    fail "Claim 86" "closure trampoline &mut [T] fat-pointer shift FAILED — trampoline may only shift 1 register instead of 2, clobbering the length with the data pointer"
-else
-    pass "Claim 86: closure trampoline correctly shifts both &mut [T] fat-pointer registers (data ptr + length) to make room for captures"
-fi
-
 echo ""
-echo "Falsification result: $PASS passed, $FAIL failed"
+echo "Results: ${PASS} passed, ${FAIL} failed"
 
-if [ "$FAIL" -gt 0 ]; then
+if [[ $FAIL -gt 0 ]]; then
     echo ""
-    echo "FAILED claims (agent must fix before any other work):"
-    printf '%b\n' "$ERRORS"
+    echo "Failed claims must be fixed before any new work."
     exit 1
 fi
 

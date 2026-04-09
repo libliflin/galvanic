@@ -1,152 +1,100 @@
-# Testing — How Galvanic Tests Itself
+# Testing in Galvanic
 
-This file exists to prevent a specific mistake: writing a milestone test that
-checks only the exit code. An interpreter and a compiler can both produce exit
-code 42 for `fn main() -> i32 { 42 }`. Assembly inspection is what separates them.
+This skill exists to answer: "What does a new test look like in this project, and where should I put it?"
 
 ---
 
-## Test Suite Structure
+## Test structure
 
-```
-tests/
-  smoke.rs          — binary behavior (runs galvanic as a subprocess)
-  fls_fixtures.rs   — parse-only acceptance tests for FLS programs
-  e2e.rs            — full pipeline tests (assembly inspection + compile-and-run)
-  fixtures/
-    fls_*.rs        — Rust programs derived from FLS examples
-    fls_*.s         — expected ARM64 assembly output (golden files)
-    milestone_1.rs  — first milestone program
-```
+Galvanic has three test layers, each with a distinct purpose:
 
----
+### 1. `tests/fls_fixtures.rs` — FLS parse-acceptance tests
 
-## Three Kinds of Tests
+These verify that the lexer and parser accept programs drawn from the FLS without error. They do **not** test lowering, codegen, or correctness of output — only that the input is syntactically accepted.
 
-### 1. Parse acceptance (`tests/fls_fixtures.rs`)
+**When to add**: When a new FLS section is added to the parser. The fixture file goes in `tests/fixtures/fls_X_Y_description.rs`.
 
+**Convention**:
 ```rust
-fn assert_galvanic_accepts(fixture: &str) { ... }
-
 #[test]
-fn fls_10_3_assoc_consts() {
-    assert_galvanic_accepts("fls_10_3_assoc_consts.rs");
+fn fls_6_5_arithmetic() {
+    assert_galvanic_accepts("fls_6_5_arithmetic.rs");
 }
 ```
 
-These verify galvanic can lex and parse a fixture file without error. They do
-**not** verify codegen. A feature can appear here long before it appears in e2e.
-When you add a new fixture (e.g., `fls_12_generics.rs`), add a test here first.
+The helper `assert_galvanic_accepts(fixture)` reads the file, tokenizes it, and parses it — panicking with a clear message if either step fails.
 
-### 2. Assembly inspection (`compile_to_asm` in `tests/e2e.rs`)
-
-```rust
-fn compile_to_asm(source: &str) -> String { ... }
-
-#[test]
-fn runtime_add_emits_add_instruction() {
-    let asm = compile_to_asm("fn main() -> i32 { 1 + 2 }\n");
-    assert!(asm.contains("add"), "expected add instruction...");
-    assert!(!asm.contains("mov     x0, #3"), "must not fold to constant...");
-}
-```
-
-`compile_to_asm` runs lex → parse → lower → codegen and returns the assembly
-string. It does **not** assemble or run the result. It works on macOS without
-cross tools. This is the **primary correctness check** for new codegen features.
-
-Every new operator, control flow construct, or IR instruction type needs:
-- A positive assertion: the expected instruction is present in the assembly.
-- A negative assertion: the constant is NOT folded into a `mov #N`.
-
-### 3. Compile and run (`compile_and_run` in `tests/e2e.rs`)
-
-```rust
-fn compile_and_run(source: &str) -> Option<i32> { ... }
-
-#[test]
-fn milestone_1_main_returns_zero() {
-    let Some(exit_code) = compile_and_run("fn main() -> i32 { 0 }\n") else {
-        return; // skipped if cross tools unavailable
-    };
-    assert_eq!(exit_code, 0);
-}
-```
-
-Runs the full pipeline including assembling, linking, and executing the ARM64
-binary (via qemu-aarch64 on non-ARM64 hosts). Skips automatically when cross
-tools are not installed. Always runs on CI (ubuntu-latest installs them).
-
-This is the end-to-end truth check but it cannot distinguish "correct runtime
-behavior" from "correct constant folded at compile time" by itself — that is
-why assembly inspection is also required.
+**Naming**: `fls_{section}_{short_description}.rs`, e.g. `fls_6_15_for_loop.rs`. Match the FLS section number exactly.
 
 ---
 
-## Writing a Complete Milestone Test
+### 2. `tests/smoke.rs` — CLI-level smoke tests
 
-A well-covered milestone has ALL THREE test layers:
+These test the binary's CLI behavior: argument handling, error messages, and exit codes.
 
-```rust
-// Layer 1: parse acceptance (in fls_fixtures.rs)
-#[test]
-fn fls_15_closures() {
-    assert_galvanic_accepts("fls_15_closures.rs");
-}
+**When to add**: When new CLI behavior is added (flags, error paths, output formats).
 
-// Layer 2: assembly inspection (in e2e.rs) — REQUIRED
-// Tests that the feature emits the right instruction AND doesn't constant-fold
-#[test]
-fn milestone_N_closure_captures_emit_load() {
-    let asm = compile_to_asm("fn main() -> i32 { let x = 7; let f = || x; f() }\n");
-    assert!(asm.contains("ldr"), "closure must emit a load from capture slot");
-    assert!(!asm.contains("mov     x0, #7"), "must not constant-fold captured value");
-}
+**Convention**: Use `Command::new(env!("CARGO_BIN_EXE_galvanic"))` to get the release binary path. `tempfile::NamedTempFile` for input files.
 
-// Layer 3: compile and run (in e2e.rs)
-#[test]
-fn milestone_N_closure_captures_correct_value() {
-    let Some(exit_code) = compile_and_run("fn main() -> i32 { let x = 7; let f = || x; f() }\n") else {
-        return;
-    };
-    assert_eq!(exit_code, 7);
-}
-```
-
-If a milestone only has Layer 3, it is incompletely tested.
+**What these test**: That the CLI doesn't panic on edge cases, that usage errors give clean exits, that expected output appears on stdout.
 
 ---
 
-## Fixture Files (`tests/fixtures/`)
+### 3. `tests/e2e.rs` — Full-pipeline compile-and-run tests
 
-Fixture `.rs` files are Rust programs derived from FLS examples. Not invented —
-taken from the spec. When the FLS provides an example, use it verbatim or
-minimally adapted. If the spec provides no example, note that in the file.
+These test the entire pipeline: lex → parse → lower → codegen → assemble → link → run under qemu. The test verifies the compiled binary's exit code.
 
-Some fixtures have a corresponding `.s` file (expected ARM64 assembly). These
-are golden files. If `emit_asm` output for a fixture changes, update the `.s`
-file and explain the change in the changelog.
+**When to add**: When a new milestone program is implemented end-to-end. These are the most valuable tests — they confirm real correctness.
 
----
+**Structure**: The e2e test helpers (in `tests/e2e.rs`) typically:
+1. Write a Rust source file to a temp path
+2. Run `galvanic <source> -o <output>`
+3. Assemble and link the output `.s` to a binary
+4. Run the binary under `qemu-aarch64`
+5. Assert the exit code matches expected
 
-## Test Naming Convention
+The corresponding `.s` golden file (if present in `tests/fixtures/`) shows the expected assembly output. When the codegen changes, update both the test and the golden file.
 
-Follow the pattern already in `tests/e2e.rs`:
-
-- `milestone_{N}_{description}` — numbered milestone tests
-- `runtime_{op}_emits_{instruction}_instruction` — assembly inspection tests
-- `fls_{section}_{description}` — FLS-derived acceptance tests
+**CI requirement**: e2e tests run in the `e2e` CI job which installs `binutils-aarch64-linux-gnu` and `qemu-user`. Only add e2e tests that use these tools — don't add dependencies on other cross-compilation tools.
 
 ---
 
-## What Makes a Test Adversarial
+## Fixture files
 
-The easiest test is always: `fn main() -> i32 { 42 }`. This tests almost nothing.
-A better test uses:
+`tests/fixtures/` contains two kinds of files:
 
-- **Parameters**: `fn f(x: i32) -> i32 { ... }` — prevents constant folding by making the input unknown at compile time.
-- **Multiple operations**: chains of operations that would produce the wrong answer if any step was skipped.
-- **Boundary values**: 0, negative numbers, i32::MAX, for types that have them.
-- **Interaction between features**: a closure that captures a variable that was computed by a function call.
+- `*.rs` — Rust source programs used as test inputs. Some are parse-only fixtures; others are compile-and-run fixtures with corresponding `.s` files.
+- `*.s` — Golden ARM64 assembly output files. Present when the fixture has been run through full codegen. The e2e tests may compare against these or simply verify runtime behavior.
 
-When writing a test for a new feature, ask: "would this test catch the bug where galvanic constant-folds instead of generating runtime code?" If not, add a negative assertion.
+**Invariant**: Every `.s` file must have a corresponding `.rs` file with the same stem. (This is CLAIM-5 in `claims.md` and is checked by `falsify.sh`.)
+
+---
+
+## Benchmarks
+
+`benches/throughput.rs` uses Criterion to measure lexer and parser throughput on FLS fixture inputs and synthetic stress inputs (N let bindings).
+
+**When to add**: When adding a new parser or lexer feature that has performance implications. Use `Throughput::Bytes` to express results per byte of input.
+
+**Note**: Benchmarks run in CI with a short warm-up (`--warm-up-time 2 --measurement-time 3`). They don't gate CI (no `--bench` exit-code check), but they produce output that's compared for regressions.
+
+---
+
+## Library unit tests
+
+Key unit tests in `src/lexer.rs`:
+- `lexer::tests::token_is_eight_bytes` — asserts `std::mem::size_of::<Token>() == 8`. This is CLAIM-1 and must never be removed.
+- `lexer::tests::span_is_eight_bytes` — asserts `Span` is 8 bytes (may or may not exist; `|| true` in CI).
+
+If you add a new size-sensitive type with a cache-line claim, add a corresponding unit test asserting its size. These tests are the concrete enforcement of cache-line documentation.
+
+---
+
+## What a well-formed new test looks like
+
+For a new FLS section (e.g., §6.15 for-loops):
+
+1. Write `tests/fixtures/fls_6_15_for_loop.rs` with representative examples drawn from the FLS spec text.
+2. Add `#[test] fn fls_6_15_for_loop() { assert_galvanic_accepts("fls_6_15_for_loop.rs"); }` to `tests/fls_fixtures.rs`.
+3. If the section is fully implemented end-to-end, write a milestone fixture and add it to `tests/e2e.rs`.
+4. If there are adversarial inputs that should fail gracefully (not panic), consider adding them to CLAIM-6 in `falsify.sh`.

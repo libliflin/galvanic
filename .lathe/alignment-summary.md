@@ -1,75 +1,73 @@
 # Alignment Summary
 
-Read this before starting cycles. It summarizes the alignment decisions made
-during init and what you should verify before trusting the agent.
+**Read this in 30 seconds before starting cycles. It documents the choices made during init — gut-check them before trusting the agent.**
 
 ---
 
 ## Who This Serves
 
-- **William (you)** — researching FLS implementability and cache-line codegen. Success = finding spec ambiguities and advancing FLS coverage with correct runtime codegen.
-- **FLS/Ferrocene ecosystem** — benefits when galvanic finds real spec ambiguities, documented as `// FLS §X.Y: AMBIGUOUS — ...` in source.
-- **Compiler researchers** — reading galvanic as a reference for spec-driven compiler design. Success = coherent FLS traceability and documented cache-line rationale.
+- **William (you)** — Building galvanic milestone by milestone through FLS sections. Each cycle should either advance FLS coverage, harden existing coverage with adversarial tests, or fix a broken claim/CI failure.
+- **FLS/Ferrocene spec authors** — Galvanic surfaces spec ambiguities. They benefit when galvanic notes `FLS §X.Y AMBIGUOUS:` in source comments. They're not active users but they're a real stakeholder of the research output.
+- **Compiler/systems researchers** — Reading galvanic to understand what cache-line-aware codegen looks like from first principles. They trust the cache-line notes; they leave if those notes become aspirational rather than accurate.
+- **Future contributors** — Reading the codebase to understand it or extend it. They need FLS citations and doc comments to understand the "why."
 
 ---
 
-## Key Tensions (and how I resolved them)
+## Key Tensions
 
-1. **New milestones vs. stress-testing existing ones** — I favored stress-testing. The agent will prioritize adding assembly inspection tests to milestones that only have exit-code tests before adding new FLS sections. Change this if you want aggressive forward progress over depth.
+**Milestone velocity vs. hardening**: At milestone 87+, the temptation is to keep adding FLS sections. But many existing sections have only happy-path tests. The agent is configured to occasionally favor hardening — building adversarial fixtures for existing features. **You can override this** by noting in the snapshot "priority: milestone velocity" or "priority: harden §X.Y."
 
-2. **Cache-line purity vs. pragmatic implementation** — I favored documentation over enforcement. New structs must have a cache-line comment explaining the layout decision, but there is no automated size test beyond Token. If you want to add size tests for other structs, add them to claims.md.
-
-3. **FLS faithfulness vs. making tests pass** — I favored faithfulness. The agent is instructed to document every ambiguity rather than silently resolving it.
+**Cache-line discipline vs. implementation speed**: Every new IR type needs a cache-line note. The agent is instructed to always add the note. If cycles feel slow because of this, it's intentional — the notes are the research output.
 
 ---
 
-## Load-Bearing Claims (what falsify.sh defends every cycle)
+## Load-Bearing Claims
 
-1. **Runtime codegen, not interpretation** — `1 + 2` must emit an `add` instruction, NOT `mov x0, #3`. This is the fundamental correctness claim. `runtime_add_emits_add_instruction` in e2e.rs.
+These are what `falsify.sh` defends every cycle. If any fails, the agent stops new work and fixes it.
 
-2. **Token is 8 bytes** — the cache-line layout rationale in lexer.rs is only valid if Token stays at 8 bytes. `token_is_eight_bytes` test.
+1. **CLAIM-1**: `Token` is exactly 8 bytes — verified by `cargo test --lib -- lexer::tests::token_is_eight_bytes`. If Token grows, the stated 8-tokens-per-cache-line property breaks.
 
-3. **No unsafe in library source** — safe Rust only, outside main.rs. Enforced by CI audit job and falsify.sh grep.
+2. **CLAIM-2**: No `unsafe` in library source (`src/` minus `main.rs`). Structural constraint. Currently passing.
 
-4. **Pipeline doesn't panic on valid programs** — graceful errors, not signals/panics.
+3. **CLAIM-3**: IR cache-line discipline — at least 40 `Cache-line note:` occurrences in `ir.rs`, and the reference types (StaticValue, StaticData, VtableShim, VtableSpec, IrBinOp) still have their notes. **Known gap**: Several top-level types (`Module`, `IrFn`, `Instr`, `IrValue`, `IrTy`, `FCmpOp`, `F64BinOp`, `F32BinOp`, `ClosureTrampoline`) currently lack type-level cache-line notes. The agent should add these.
+
+4. **CLAIM-4**: FLS citations (`FLS §`) present in all five core source files. Currently passing.
+
+5. **CLAIM-5**: No orphaned `.s` fixture files (every `.s` has a matching `.rs`). Currently passing.
+
+6. **CLAIM-6**: Binary exits ≤ 128 on adversarial inputs (no signal death). Verified by running the debug binary against 6 constructed adversarial inputs. Requires `cargo build` to be run first.
 
 ---
 
 ## Current Focus
 
-The agent will prioritize (in order):
+The project is at milestone 87+ with significant FLS coverage. CI is comprehensive (build, test, clippy, fuzz-smoke, audit, e2e, bench). The most valuable near-term work is probably:
 
-1. Fix any falsification failures
-2. Fix any CI failures
-3. Add assembly inspection tests to milestones that only have exit-code tests (especially recent milestones: closures §6.14/§6.22, default trait methods §10.1.1/§13, associated constants §10.3/§11)
-4. Advance to the next FLS section
+1. Adding type-level cache-line notes to `Module`, `IrFn`, `Instr`, `IrValue`, `IrTy`, `FCmpOp`, `F64BinOp`, `F32BinOp`, `ClosureTrampoline` (closes the CLAIM-3 known gap)
+2. Adversarial testing of features that have only happy-path e2e fixtures
+3. Continuing FLS milestone coverage when the above is in good shape
 
 ---
 
 ## What Could Be Wrong
 
-- **Branch protection unknown.** I could not determine whether the main branch requires PR reviews or restricts direct push. Before running cycles, check GitHub → Settings → Branches and confirm protection is enabled. Without it, an agent that directly pushes to main bypasses CI.
+- **Stakeholder I may have missed**: The README says "nobody needs to use this" — but I named FLS authors as a stakeholder based on the research framing. If William doesn't think of the FLS team as a real audience, CLAIM-4 (citation discipline) and the `FLS §X.Y AMBIGUOUS` annotations might feel over-engineered. Check whether the FLS-research framing matches your actual intent.
 
-- **FLS citation accuracy is not automatically tested.** Claim 5 in claims.md is manual-only. The agent is instructed to check citations against `refs/fls-pointer.md`, but there is no automated guard. If citation accuracy matters to you, consider building a local spec TOC checker.
+- **CLAIM-3 threshold**: The minimum of 40 cache-line notes is set conservatively (ir.rs has ~82). If the IR grows rapidly with many new types added without notes, the count could stagnate while `pub` types increase. The agent should periodically check the ratio of pub types to cache-line notes, not just the absolute count.
 
-- **Assembly inspection coverage is unknown.** I can see that assembly inspection tests exist for arithmetic operations (add, sub, mul) and some control flow (if/cbz, while). I do not know if closures, default trait methods, and associated constants — the three most recent milestones — have both positive and negative assembly inspection assertions. The agent will audit this in early cycles.
+- **E2e test coverage**: I couldn't read `tests/e2e.rs` fully (file too large). The claims assume e2e coverage is in good shape. If there are e2e tests that always skip or are marked `#[ignore]`, that's a gap I didn't catch.
 
-- **The "not an interpreter" check covers addition only.** falsify.sh tests `runtime_add_emits_add_instruction`. If closures are implemented as an interpreter but arithmetic is compiled correctly, falsify.sh will pass. The agent should extend falsify.sh when new features are added.
+- **`Token` size test**: CLAIM-1 assumes `lexer::tests::token_is_eight_bytes` exists. If this test was renamed or moved, `falsify.sh` will report it as missing. Check the test name in `src/lexer.rs` if CLAIM-1 fails unexpectedly.
 
-- **falsify.sh needs `chmod +x` before the engine can run it.** This could not be executed during init (sandbox restriction). Run: `chmod +x .lathe/falsify.sh` before starting cycles.
+- **`falsify.sh` executability**: The file was written but `chmod +x` requires shell approval in this environment. Run `chmod +x .lathe/falsify.sh` manually before starting cycles.
 
-- **e2e tests skip on macOS without cross tools.** `compile_and_run` tests return early if aarch64-linux-gnu-as/ld/qemu are unavailable. The `compile_to_asm` tests (assembly inspection) always run. The agent's local validation on macOS only catches codegen correctness, not runtime correctness.
+- **CI timing**: The e2e job has a 20-minute timeout and requires QEMU + cross toolchain. If milestones generate very large assembly files, e2e may approach the limit.
 
 ---
 
-## Before Starting Cycles
+## Repository Security
 
-```bash
-# Make falsify.sh executable
-chmod +x .lathe/falsify.sh
-
-# Verify it runs and exits 0
-./.lathe/falsify.sh
-```
-
-If it exits non-zero, the first cycle will fix the failing claim.
+- **Branch protection**: Unknown — not checked during init. Recommend requiring PR reviews on `main` and restricting direct push.
+- **Actions triggers**: CI uses `pull_request` (not `pull_request_target`), with `permissions: contents: read`. Low injection risk.
+- **Repo visibility**: Public. The engine only fetches structured data (statuses, numbers) — not free-text comments. Risk is low but non-zero.
+- **Recommendation**: Enable branch protection on `main` before running many autonomous cycles.
