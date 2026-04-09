@@ -16077,13 +16077,132 @@ impl<'src> LowerCtx<'src> {
                     return Ok(IrValue::Unit);
                 }
 
+                // ── Inline array literal iterator: `for x in [e1, e2, e3]` ──────────────
+                // FLS §6.15.1: A for loop iterates over values from IntoIterator.
+                // FLS §6.8: An array expression `[e0, e1, …]` creates a value of type [T; N].
+                // A [T; N] implements IntoIterator (consuming), yielding element values.
+                //
+                // Lowering strategy:
+                //   1. Evaluate each element expression left-to-right (FLS §6.4:14).
+                //   2. Store each element into a fresh contiguous stack slot (temp array).
+                //   3. Use a counter 0..N to iterate, loading slot (base + counter) each
+                //      iteration into the loop variable slot.
+                //
+                // FLS §6.1.2:37–45: All element stores and the loop counter loads/compares
+                // are runtime instructions — the loop is not unrolled at compile time.
+                //
+                // FLS §6.15.1 AMBIGUOUS: The spec desugars `for x in [e0, e1, e2]` via
+                // `IntoIterator::into_iter([e0, e1, e2])`. Galvanic special-cases this at
+                // the IR level (no runtime IntoIterator dispatch at this milestone).
+                //
+                // Cache-line note: N element stores + N iterations × ~5 instructions each.
+                // For a 4-element array, the setup (4 stores) plus one loop iteration fills
+                // roughly one 64-byte cache line; the full loop spans 2–3 lines.
+                if let ExprKind::Array(elems) = &iter.kind {
+                    let n = elems.len();
+                    let pat_name = pat.text(self.source);
+
+                    if n == 0 {
+                        // An empty array literal produces zero iterations.
+                        // FLS §6.15.1: The loop body is never entered.
+                        return Ok(IrValue::Unit);
+                    }
+
+                    // Allocate N consecutive stack slots for the temporary array.
+                    let base_slot = self.alloc_slot()?;
+                    for _ in 1..n {
+                        self.alloc_slot()?;
+                    }
+                    // Allocate a counter slot and an element slot.
+                    let counter_slot = self.alloc_slot()?;
+                    let elem_slot = self.alloc_slot()?;
+
+                    let reg_mark = self.next_reg;
+
+                    // Evaluate all element expressions left-to-right and store.
+                    // FLS §6.8, §6.4:14: Elements are evaluated in source order.
+                    // FLS §6.1.2:37–45: Each store is a runtime instruction.
+                    for (i, elem_expr) in elems.iter().enumerate() {
+                        let val = self.lower_expr(elem_expr, &IrTy::I32)?;
+                        let src = self.val_to_reg(val)?;
+                        self.instrs.push(Instr::Store { src, slot: base_slot + i as u8 });
+                    }
+
+                    // Initialise counter to 0.
+                    let r_zero = self.alloc_reg()?;
+                    self.instrs.push(Instr::LoadImm(r_zero, 0));
+                    self.instrs.push(Instr::Store { src: r_zero, slot: counter_slot });
+
+                    let cond_label = self.alloc_label();
+                    let incr_label = self.alloc_label();
+                    let exit_label = self.alloc_label();
+
+                    self.loop_stack.push(LoopCtx {
+                        label: label.clone(),
+                        header_label: incr_label,
+                        exit_label,
+                        break_slot: None,
+                        break_ret_ty: IrTy::Unit,
+                        is_named_block: false,
+                    });
+
+                    // Bind the loop variable so the body can load it via Path.
+                    self.locals.insert(pat_name, elem_slot);
+
+                    // ── Condition: counter < N ─────────────────────────────────────────
+                    // FLS §6.15.1: Loop terminates when all elements have been visited.
+                    // FLS §6.1.2:37–45: The comparison is a runtime instruction.
+                    self.instrs.push(Instr::Label(cond_label));
+                    let r_counter = self.alloc_reg()?;
+                    self.instrs.push(Instr::Load { dst: r_counter, slot: counter_slot });
+                    let r_len = self.alloc_reg()?;
+                    self.instrs.push(Instr::LoadImm(r_len, n as i32));
+                    let r_cmp = self.alloc_reg()?;
+                    self.instrs.push(Instr::BinOp { op: IrBinOp::Lt, dst: r_cmp, lhs: r_counter, rhs: r_len });
+                    self.instrs.push(Instr::CondBranch { reg: r_cmp, label: exit_label });
+
+                    // ── Load element: elem_slot ← arr[counter] ───────────────────────
+                    // FLS §6.9: Element at index `counter` is loaded from the temporary
+                    // array at base_slot + counter. `LoadIndexed` emits an `add` (base
+                    // address) + `ldr` (indexed load) pair — both runtime instructions.
+                    // FLS §6.1.2:37–45: The load is a runtime instruction.
+                    let r_cnt = self.alloc_reg()?;
+                    self.instrs.push(Instr::Load { dst: r_cnt, slot: counter_slot });
+                    let r_elem = self.alloc_reg()?;
+                    self.instrs.push(Instr::LoadIndexed { dst: r_elem, base_slot, index_reg: r_cnt });
+                    self.instrs.push(Instr::Store { src: r_elem, slot: elem_slot });
+
+                    // ── Body ──────────────────────────────────────────────────────────
+                    self.lower_block_to_value(body, &IrTy::Unit)?;
+
+                    // ── Increment: counter += 1 ───────────────────────────────────────
+                    // FLS §6.15.7: `continue` advances to the next element (increment step).
+                    self.instrs.push(Instr::Label(incr_label));
+                    let r_cnt2 = self.alloc_reg()?;
+                    self.instrs.push(Instr::Load { dst: r_cnt2, slot: counter_slot });
+                    let r_one = self.alloc_reg()?;
+                    self.instrs.push(Instr::LoadImm(r_one, 1));
+                    let r_next = self.alloc_reg()?;
+                    self.instrs.push(Instr::BinOp { op: IrBinOp::Add, dst: r_next, lhs: r_cnt2, rhs: r_one });
+                    self.instrs.push(Instr::Store { src: r_next, slot: counter_slot });
+                    self.instrs.push(Instr::Branch(cond_label));
+
+                    // Exit.
+                    self.instrs.push(Instr::Label(exit_label));
+                    self.loop_stack.pop();
+                    self.next_reg = reg_mark;
+
+                    // FLS §6.15.1: "The type of a for loop expression is the unit type ()."
+                    return Ok(IrValue::Unit);
+                }
+
                 // ── Range iterator (existing code) ────────────────────────────────────
                 let (start_expr, end_expr, inclusive) = match iter.as_ref() {
                     Expr { kind: ExprKind::Range { start: Some(s), end: Some(e), inclusive }, .. } => {
                         (s.as_ref(), e.as_ref(), *inclusive)
                     }
                     _ => return Err(LowerError::Unsupported(
-                        "for loop requires an integer range iterator (start..end or start..=end) or a local array variable".into(),
+                        "for loop requires an integer range iterator (start..end or start..=end), a local array variable, or an inline array literal".into(),
                     )),
                 };
 
