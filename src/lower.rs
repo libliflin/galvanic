@@ -4763,6 +4763,23 @@ struct LowerCtx<'src> {
     /// Populated from `let x: i16 = …` annotations and i16 function parameters.
     i16_locals: std::collections::HashSet<&'src str>,
 
+    /// Range variables bound by `let r = start..end` or `let r = start..=end`.
+    ///
+    /// FLS §6.16: A range expression creates a range value. When stored in a
+    /// variable, the for-loop desugaring (`for x in r`) must iterate over that
+    /// range at runtime using the stored start and end bounds.
+    ///
+    /// Each entry maps the variable name to `(start_slot, end_slot, inclusive)`:
+    ///   - `start_slot`: stack slot holding the current loop counter (mutable).
+    ///   - `end_slot`:   stack slot holding the (immutable) end bound.
+    ///   - `inclusive`:  true for `..=`, false for `..`.
+    ///
+    /// FLS §6.1.2:37–45: All loads from these slots are runtime instructions —
+    /// the bounds are never constant-folded even if they are integer literals.
+    ///
+    /// Cache-line note: two 8-byte slots per range variable = 16 bytes.
+    range_locals: HashMap<&'src str, (u8, u8, bool)>,
+
     /// Captured outer-scope slots for each closure fn-pointer slot.
     ///
     /// FLS §6.22: Capturing closures capture free variables from the enclosing
@@ -5471,6 +5488,7 @@ impl<'src> LowerCtx<'src> {
             i8_locals: std::collections::HashSet::new(),
             u16_locals: std::collections::HashSet::new(),
             i16_locals: std::collections::HashSet::new(),
+            range_locals: HashMap::new(),
             local_capture_args: HashMap::new(),
             last_closure_captures: None,
             last_closure_name: None,
@@ -9996,6 +10014,34 @@ impl<'src> LowerCtx<'src> {
                 }
 
                 if let Some(init_expr) = init.as_ref() {
+                    // FLS §6.16: `let r = start..end` / `let r = start..=end` —
+                    // range expression stored in a local variable for later use in
+                    // `for x in r`.  The start bound is stored in `slot` (already
+                    // allocated above) and the end bound in `end_slot = slot + 1`.
+                    // The range is NOT inserted into `self.locals` (it is not a
+                    // scalar value); instead it is tracked in `range_locals` so that
+                    // the for-loop lowering can locate the start and end slots.
+                    //
+                    // FLS §6.1.2:37–45: All stores are runtime instructions.
+                    // Cache-line note: two contiguous 8-byte slots (16 bytes total).
+                    if let ExprKind::Range { start: Some(start_expr), end: Some(end_expr), inclusive } = &init_expr.kind {
+                        let end_slot = self.alloc_slot()?;
+                        let reg_mark = self.next_reg;
+                        // FLS §6:3: left operand evaluated before right operand.
+                        let start_val = self.lower_expr(start_expr, &IrTy::I32)?;
+                        let start_reg = self.val_to_reg(start_val)?;
+                        self.instrs.push(Instr::Store { src: start_reg, slot });
+                        let end_val = self.lower_expr(end_expr, &IrTy::I32)?;
+                        let end_reg = self.val_to_reg(end_val)?;
+                        self.instrs.push(Instr::Store { src: end_reg, slot: end_slot });
+                        self.next_reg = reg_mark;
+                        // Register in range_locals so `for x in r` can find the slots.
+                        // FLS §6.16: range variable binds the start (mutable counter slot)
+                        // and the end (immutable bound slot) at declaration time.
+                        self.range_locals.insert(var_name, (slot, end_slot, *inclusive));
+                        return Ok(());
+                    }
+
                     // FLS §8.1 AMBIGUOUS: the spec does not describe how type
                     // inference resolves the type of the initializer in the
                     // absence of a type annotation. We default to i32 for
@@ -16423,6 +16469,92 @@ impl<'src> LowerCtx<'src> {
                     self.instrs.push(Instr::Branch(cond_label));
 
                     // Exit.
+                    self.instrs.push(Instr::Label(exit_label));
+                    self.loop_stack.pop();
+                    self.next_reg = reg_mark;
+
+                    // FLS §6.15.1: "The type of a for loop expression is the unit type ()."
+                    return Ok(IrValue::Unit);
+                }
+
+                // ── Range variable iterator: `for x in r` where r was bound to a range ──
+                // FLS §6.16: A range expression can be bound to a variable and later
+                // used as a for-loop iterator. `let r = a..b; for x in r { ... }` must
+                // iterate at runtime, loading the start/end bounds from their stack slots.
+                //
+                // `range_locals[name] = (start_slot, end_slot, inclusive)` was populated
+                // by the let-binding lowering when the initializer was a Range expression.
+                //
+                // Lowering: identical to the inline range case except the start and end
+                // values are loaded from slots rather than re-evaluated from sub-expressions.
+                // `start_slot` is used directly as the loop counter (incremented in place).
+                //
+                // FLS §6.1.2:37–45: All loads (start, end) and comparisons are runtime
+                // instructions — the bounds are never constant-folded.
+                // FLS §15.7: Consuming `for x in r` makes `r` unavailable after the loop.
+                // Galvanic does not enforce this (no move-checking); the slot mutation is
+                // observable if `r` is accessed again, but no test does so.
+                //
+                // Cache-line note: same instruction count as the inline range path.
+                if let ExprKind::Path(segs) = &iter.kind
+                    && segs.len() == 1
+                    && let Some(&(i_slot, end_slot, inclusive)) =
+                        self.range_locals.get(segs[0].text(self.source))
+                {
+                    // FLS §6.15.1: Pat may be Ident (bind) or Wildcard (discard).
+                    let pat_name = match pat {
+                        Pat::Ident(span) => Some(span.text(self.source)),
+                        Pat::Wildcard => None,
+                        _ => return Err(LowerError::Unsupported(
+                            "only identifier or wildcard patterns are supported for range-variable for-loops".into(),
+                        )),
+                    };
+
+                    let reg_mark = self.next_reg;
+
+                    let cond_label = self.alloc_label();
+                    let incr_label = self.alloc_label();
+                    let exit_label = self.alloc_label();
+
+                    self.loop_stack.push(LoopCtx {
+                        label: label.clone(),
+                        header_label: incr_label,
+                        exit_label,
+                        break_slot: None,
+                        break_ret_ty: IrTy::Unit,
+                        is_named_block: false,
+                    });
+
+                    // Bind the loop variable name. FLS §6.15.1: Wildcard → no binding.
+                    if let Some(name) = pat_name {
+                        self.locals.insert(name, i_slot);
+                    }
+
+                    // Condition check: load counter and end, compare.
+                    self.instrs.push(Instr::Label(cond_label));
+                    let i_reg = self.alloc_reg()?;
+                    self.instrs.push(Instr::Load { dst: i_reg, slot: i_slot });
+                    let end_reg2 = self.alloc_reg()?;
+                    self.instrs.push(Instr::Load { dst: end_reg2, slot: end_slot });
+                    let cmp_reg = self.alloc_reg()?;
+                    let cmp_op = if inclusive { IrBinOp::Le } else { IrBinOp::Lt };
+                    self.instrs.push(Instr::BinOp { op: cmp_op, dst: cmp_reg, lhs: i_reg, rhs: end_reg2 });
+                    self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: exit_label });
+
+                    // Body.
+                    self.lower_block_to_value(body, &IrTy::Unit)?;
+
+                    // Increment: i_slot += 1.
+                    self.instrs.push(Instr::Label(incr_label));
+                    let i_reg2 = self.alloc_reg()?;
+                    self.instrs.push(Instr::Load { dst: i_reg2, slot: i_slot });
+                    let one_reg = self.alloc_reg()?;
+                    self.instrs.push(Instr::LoadImm(one_reg, 1));
+                    let inc_reg = self.alloc_reg()?;
+                    self.instrs.push(Instr::BinOp { op: IrBinOp::Add, dst: inc_reg, lhs: i_reg2, rhs: one_reg });
+                    self.instrs.push(Instr::Store { src: inc_reg, slot: i_slot });
+                    self.instrs.push(Instr::Branch(cond_label));
+
                     self.instrs.push(Instr::Label(exit_label));
                     self.loop_stack.pop();
                     self.next_reg = reg_mark;

@@ -34510,3 +34510,201 @@ fn runtime_inline_f64_array_for_emits_ldr_dreg_not_folded() {
         "loop body must not be constant-folded to #6:\n{asm}"
     );
 }
+
+// ── Milestone 201: `for x in r` where r is a range variable (FLS §6.16, §6.15.1) ──
+//
+// FLS §6.16: A range expression `start..end` / `start..=end` produces a range
+// value. When stored in a `let` binding the for-loop desugaring must use the
+// stored start and end bounds at runtime.
+// FLS §6.15.1: "The pattern in a for loop expression may be any irrefutable
+// pattern." Ident and Wildcard patterns are supported here.
+// FLS §6.1.2:37–45: The start and end loads and the comparison are runtime
+// instructions — the loop must not be constant-folded even when bounds are
+// integer literals.
+
+/// Milestone 201: basic sum over an exclusive range variable.
+///
+/// FLS §6.16: `let r = 1..6` stores start=1, end=6 (exclusive).
+/// FLS §6.15.1: `for x in r` iterates x = 1,2,3,4,5. Sum = 15.
+#[test]
+fn milestone_201_range_var_sum() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 {\n\
+    let r = 1..6;\n\
+    let mut s = 0;\n\
+    for x in r { s += x; }\n\
+    s\n\
+}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 15, "expected 15, got {exit_code}");
+}
+
+/// Milestone 201: inclusive range variable.
+///
+/// FLS §6.16: `..=` includes the end bound. `let r = 1..=5; for x in r { s += x; }`
+/// yields x = 1,2,3,4,5. Sum = 15.
+#[test]
+fn milestone_201_range_var_inclusive() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 {\n\
+    let r = 1..=5;\n\
+    let mut s = 0;\n\
+    for x in r { s += x; }\n\
+    s\n\
+}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 15, "expected 15, got {exit_code}");
+}
+
+/// Milestone 201: range variable with nonzero start.
+///
+/// FLS §6.16: Start bound is included in the range. `3..7` → 3,4,5,6. Sum = 18.
+#[test]
+fn milestone_201_range_var_nonzero_start() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 {\n\
+    let r = 3..7;\n\
+    let mut s = 0;\n\
+    for x in r { s += x; }\n\
+    s\n\
+}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 18, "expected 18, got {exit_code}");
+}
+
+/// Milestone 201: range variable with parameter-derived bound.
+///
+/// FLS §6.16: The range end bound may be a runtime parameter. Verifies the
+/// codegen does not constant-fold the loop when the bound is not statically known.
+/// `sum_range(5)` → 0+1+2+3+4 = 10.
+#[test]
+fn milestone_201_range_var_param_bound() {
+    let Some(exit_code) = compile_and_run(
+        "fn sum_range(n: i32) -> i32 {\n\
+    let r = 0..n;\n\
+    let mut s = 0;\n\
+    for x in r { s += x; }\n\
+    s\n\
+}\n\
+fn main() -> i32 { sum_range(5) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 10, "expected 10, got {exit_code}");
+}
+
+/// Milestone 201: range variable with arithmetic body.
+///
+/// FLS §6.15.1: The loop body is a general expression, not just accumulation.
+/// `for x in 2..5 { s += x * x; }` → 4 + 9 + 16 = 29.
+#[test]
+fn milestone_201_range_var_arithmetic_body() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 {\n\
+    let r = 2..5;\n\
+    let mut s = 0;\n\
+    for x in r { s += x * x; }\n\
+    s\n\
+}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 29, "expected 29, got {exit_code}");
+}
+
+/// Milestone 201: zero-iteration range variable.
+///
+/// FLS §6.16: An empty range produces zero iterations. `let r = 5..5;` yields
+/// no iterations. The sum stays 0.
+#[test]
+fn milestone_201_range_var_empty() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 {\n\
+    let r = 5..5;\n\
+    let mut s = 0;\n\
+    for _x in r { s += 1; }\n\
+    s\n\
+}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 0, "expected 0 iterations, got {exit_code}");
+}
+
+/// Milestone 201: range variable passed result in arithmetic.
+///
+/// FLS §6.15.1: The for-loop result (unit) is used in an enclosing expression.
+/// `let r = 0..4; for x in r { s += x; } s + 1` → (0+1+2+3) + 1 = 7.
+#[test]
+fn milestone_201_range_var_result_in_arithmetic() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 {\n\
+    let r = 0..4;\n\
+    let mut s = 0;\n\
+    for x in r { s += x; }\n\
+    s + 1\n\
+}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 7, "expected 7, got {exit_code}");
+}
+
+/// Milestone 201: range variable with wildcard pattern.
+///
+/// FLS §6.15.1: A wildcard pattern `_` is legal in for-loop position and
+/// produces no binding. `for _ in r { count += 1; }` counts iterations.
+/// `let r = 0..5` → 5 iterations.
+#[test]
+fn milestone_201_range_var_wildcard_pat() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 {\n\
+    let r = 0..5;\n\
+    let mut count = 0;\n\
+    for _ in r { count += 1; }\n\
+    count\n\
+}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 5, "expected 5, got {exit_code}");
+}
+
+/// Milestone 201: assembly inspection — range variable for-loop emits runtime
+/// loads and comparison, not constant-folded.
+///
+/// FLS §6.1.2:37–45: Even when range bounds are integer literals, the for-loop
+/// over a range variable must load the start and end from their stack slots and
+/// compare at runtime.  No constant-folded result should appear.
+#[test]
+fn runtime_range_var_emits_ldr_cmp_not_folded() {
+    let asm = compile_to_asm(
+        "fn main() -> i32 {\n\
+    let r = 1..6;\n\
+    let mut s = 0;\n\
+    for x in r { s += x; }\n\
+    s\n\
+}\n",
+    );
+    // Must load the end bound from a stack slot (not use an immediate).
+    assert!(
+        asm.contains("ldr") && asm.contains("cmp"),
+        "expected `ldr` and `cmp` instructions for range-variable loop:\n{asm}"
+    );
+    // Conditional branch must be present.
+    assert!(
+        asm.contains("cbz"),
+        "expected `cbz` for runtime loop exit test:\n{asm}"
+    );
+    // The sum 15 must not be constant-folded.
+    assert!(
+        !asm.contains("mov     x0, #15"),
+        "loop over range variable must not be constant-folded to #15:\n{asm}"
+    );
+}
