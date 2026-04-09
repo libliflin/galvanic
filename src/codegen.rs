@@ -968,11 +968,20 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
         // FLS §6.9 + §4.5 + §4.2: Load an f64 element from a `[f64; N]` array.
         //
         // Two-instruction sequence:
-        //   add x9, sp, #{base_slot*8}            — base address of arr[0]
-        //   ldr d{dst}, [x9, x{index_reg}, lsl #3] — load arr[index] into d-register
+        //   add x{dst}, sp, #{base_slot*8}              — base address of arr[0]
+        //   ldr d{dst}, [x{dst}, x{index_reg}, lsl #3]  — load arr[index] into d-register
         //
         // The `lsl #3` scales the index by 8 (bytes per 64-bit slot), matching
         // the element layout of float arrays (each f64 occupies one 8-byte slot).
+        //
+        // We use x{dst} (the integer alias of the destination d-register's slot number)
+        // as the scratch for the base address. On ARM64, integer registers (x0..x30)
+        // and SIMD/FP registers (d0..d31) are separate register files — x{dst} and
+        // d{dst} are distinct physical registers that do not alias. This mirrors the
+        // pattern used by the integer `LoadIndexed` handler (which also uses x{dst}
+        // as scratch) and avoids the hardcoded-x9 bug: if index_reg == 9 and we used
+        // x9 as scratch, the base-address `add` would overwrite the index before the
+        // load could use it.
         //
         // FLS §4.2: f64 values are in d-registers (IEEE 754 double-precision).
         // FLS §6.1.2:37–45: Instructions emitted at runtime.
@@ -983,20 +992,20 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
             let base_offset = *base_slot as u32 * 8;
             writeln!(
                 out,
-                "    add     x9, sp, #{base_offset:<15} // FLS §6.9: address of f64 arr[0]"
+                "    add     x{dst}, sp, #{base_offset:<15} // FLS §6.9: address of f64 arr[0]"
             )?;
             writeln!(
                 out,
-                "    ldr     d{dst}, [x9, x{index_reg}, lsl #3] // FLS §6.9: load f64 arr[index]"
+                "    ldr     d{dst}, [x{dst}, x{index_reg}, lsl #3] // FLS §6.9: load f64 arr[index]"
             )?;
         }
 
         // FLS §6.9 + §4.5 + §4.2: Load an f32 element from a `[f32; N]` array.
         //
         // Three-instruction sequence:
-        //   add x9, sp, #{base_slot*8}            — base address of arr[0]
-        //   add x9, x9, x{index_reg}, lsl #3      — advance by index*8 (stride=8 bytes)
-        //   ldr s{dst}, [x9]                       — load f32 at computed address
+        //   add x{dst}, sp, #{base_slot*8}              — base address of arr[0]
+        //   add x{dst}, x{dst}, x{index_reg}, lsl #3   — advance by index*8 (stride=8 bytes)
+        //   ldr s{dst}, [x{dst}]                        — load f32 at computed address
         //
         // f32 elements occupy one 8-byte slot each on the stack (same as all other types),
         // so the stride is 8 (lsl #3). ARM64 `ldr s` only allows lsl #0 or lsl #2 in the
@@ -1004,21 +1013,25 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
         // `add` with lsl #3 is valid in the shifted-register form of `add`, so we
         // pre-compute the byte address with `add` and then use an unscaled `ldr`.
         //
+        // We use x{dst} as scratch for the same reason as LoadIndexedF64: x{dst} and
+        // s{dst} are separate register files on ARM64 and do not alias. This avoids
+        // the hardcoded-x9 collision when index_reg happens to be 9.
+        //
         // FLS §4.2: f32 values are in s-registers (IEEE 754 single-precision).
         // Cache-line note: add + add + ldr = three 4-byte instructions = 12 bytes.
         Instr::LoadIndexedF32 { dst, base_slot, index_reg } => {
             let base_offset = *base_slot as u32 * 8;
             writeln!(
                 out,
-                "    add     x9, sp, #{base_offset:<15} // FLS §6.9: address of f32 arr[0]"
+                "    add     x{dst}, sp, #{base_offset:<15} // FLS §6.9: address of f32 arr[0]"
             )?;
             writeln!(
                 out,
-                "    add     x9, x9, x{index_reg}, lsl #3 // FLS §6.9: advance by index*8 (stride)"
+                "    add     x{dst}, x{dst}, x{index_reg}, lsl #3 // FLS §6.9: advance by index*8 (stride)"
             )?;
             writeln!(
                 out,
-                "    ldr     s{dst}, [x9]               // FLS §6.9: load f32 arr[index]"
+                "    ldr     s{dst}, [x{dst}]             // FLS §6.9: load f32 arr[index]"
             )?;
         }
 
