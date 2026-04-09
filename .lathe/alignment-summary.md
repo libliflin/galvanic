@@ -1,64 +1,69 @@
-# Alignment Summary — galvanic
+# Alignment Summary
 
-Read this in 30 seconds before starting cycles. It's a briefing, not documentation.
+*Read this in 30 seconds and gut-check before starting cycles.*
 
 ---
 
 ## Who This Serves
 
-**The maintainer (William):** Working through the FLS section by section, implementing each language feature and documenting what the spec says — and doesn't say. Each cycle should advance the FLS frontier by one milestone or harden an existing one.
-
-**The FLS researcher:** Anyone reading the spec or this codebase to understand whether the FLS is independently implementable. Their value is the documented ambiguities: `// FLS §X.Y: AMBIGUOUS — ...` comments and changelog notes. If these are missing, the research record is incomplete.
-
-**The cache-line researcher:** Interested in whether treating cache-line alignment as a first-class constraint (not an optimization pass) produces measurably better code. Their trust depends on `size_of::<Token>() == 8` holding and the cache-line rationale being maintained in new types.
-
-**The CI / lathe pipeline:** Needs clean builds, passing tests, and a falsify.sh that always prints its summary line.
+- **William as FLS conformance researcher** — testing whether the Ferrocene Language Specification is independently implementable, milestone by milestone, with every decision traceable to a `FLS §X.Y` citation and no rustc-internal knowledge.
+- **William as cache-aware codegen researcher** — testing what a compiler looks like when cache-line alignment is a first-class structural constraint from the start, not an optimization pass at the end.
+- **The Sunday contributor** — someone who finds this interesting and wants to add a FLS section; needs clear testing patterns and a clear map of what's done.
+- **CI/validation infrastructure** — the trust substrate; galvanic has solid CI (build, clippy, fuzz-smoke, audit, e2e with QEMU, bench). The lathe's work is only as trustworthy as the CI that validates it.
 
 ---
 
 ## Key Tensions
 
-| Tension | Current resolution |
-|---|---|
-| FLS fidelity vs. constant-folding shortcuts | **FLS fidelity wins, always.** Galvanic is a compiler, not an interpreter. `fls-constraints.md` documents the constraint; the `runtime-codegen` claim enforces it. |
-| Cache-line discipline vs. implementation simplicity | **Maintain discipline on hot paths.** Token, Span, IR instructions: size assertions required. Build-time structs: a brief note is enough. |
-| Milestone breadth vs. e2e test depth | **Favor depth when recent milestones lack e2e tests.** A milestone with only a parse-acceptance test is half-done. |
+- **Parser coverage vs. codegen coverage:** The parser is far ahead of the codegen. `fls_fixtures.rs` covers many FLS constructs that `e2e.rs` doesn't yet compile. The agent favors codegen progress over expanding parse acceptance — confirmed by the project's milestone-based trajectory.
+
+- **FLS fidelity vs. convenience:** The whole value of the project is the discipline (spec-only, no rustc cheating). The agent should never take a convenient path that papers over a spec ambiguity. Fidelity wins.
+
+- **Cache-line documentation vs. enforcement:** There are more cache-line doc comments than size assertions. The agent should add `size_of` assertions for types with explicit budgets, but should not add claims it can't actually enforce. The `Token` size claim is structural and enforced; the IR instruction notes are currently aspirational and documented as such.
 
 ---
 
-## Load-Bearing Claims (what `falsify.sh` defends each cycle)
+## Load-Bearing Claims
 
-1. **`token-is-8-bytes`** — `size_of::<Token>() == 8`. Cache-line density is broken if Token grows.
-2. **`runtime-codegen`** — `fn add(a: i32, b: i32) -> i32 { a + b }` emits a runtime ARM64 `add` instruction. Verifies galvanic is a compiler, not an interpreter.
-3. **`no-unsafe-in-lib`** — No `unsafe` blocks in library code (excluding `main.rs`). The "safe Rust compiler" claim holds.
-4. **`no-command-in-lib`** — No `std::process::Command` in library code. The library is pure computation.
-5. **`clean-exit-empty-input`** — galvanic exits 0 on an empty `.rs` file. No crash or hang on degenerate input.
-6. **`clean-error-missing-file`** — galvanic exits non-zero (cleanly) on a nonexistent file path. No panic on missing input.
+These are the promises encoded in `.lathe/claims.md` and checked every cycle by `falsify.sh`:
+
+1. **Build integrity** — `cargo build` and `cargo clippy -- -D warnings` succeed.
+2. **Test suite passes** — `cargo test` exits 0.
+3. **Token is 8 bytes** — `size_of::<Token>() == 8`, enforced via `lexer::tests::token_is_eight_bytes`.
+4. **No unsafe in library source** — grep check on `src/` excluding `main.rs`.
+5. **Runtime instruction emission** — `fn main() -> i32 { 1 + 2 }` emits a runtime `add`, not `mov x0, #3` (FLS §6.1.2:37–45 compliance proxy).
+6. **CLI handles adversarial inputs** — empty files, binary garbage, NUL bytes, deeply nested braces don't crash the binary (exit > 128).
 
 ---
 
 ## Current Focus
 
-The project is at milestone 197+ with active development on for-loops over slices, closures, and `dyn Trait`. The agent should:
+Galvanic is at milestone 197 (`for x in &mut slice`). The project is advancing through FLS §6.15.1 (for loops with various iterator patterns) and §4.9 (slice/reference types). The agent should continue at this frontier — implementing the next uncovered FLS section that the parser already handles but the codegen doesn't yet fully support.
 
-1. Check whether the last 3–5 milestones have e2e tests. If not, add one — this is usually the highest-value change.
-2. Identify the next FLS section that parses but doesn't lower correctly, and implement it.
-3. Check for Clippy warnings or failing falsification claims before any new work.
+The assembly inspection tests lag the milestone tests. When adding new milestones, always add both exit-code tests AND assembly inspection tests for any new runtime instruction patterns.
 
 ---
 
 ## What Could Be Wrong
 
-**Stakeholders I may have missed:** The project might eventually have external users (other compiler researchers citing galvanic's findings). For now, the codebase shows no external consumers; stakeholder analysis is accurate for the current state.
+**Falsify.sh not verified to run to completion.** The init sandbox could not execute `cargo` or `bash` commands, so `falsify.sh` was not run to confirm the summary line appears. Before starting cycles, you should run:
 
-**The `runtime-codegen` claim assumes the binary is built.** If `cargo build` hasn't been run, `falsify.sh` will mark this claim as "binary not built" rather than failing it. This is intentional — the engine runs `snapshot.sh` (which builds) before `falsify.sh`.
+```bash
+cd /Users/williamlaffin/code/galvanic
+chmod +x .lathe/falsify.sh
+bash .lathe/falsify.sh
+```
 
-**`span_is_eight_bytes` has no test.** The `Span` struct is documented as 8 bytes and structurally guaranteed (two `u32` fields), but there's no test enforcing it the way `token_is_eight_bytes` does. This is a gap. Adding `ast::tests::span_is_eight_bytes` is a good early cycle and should extend `claims.md`.
+Confirm the output ends with `=== Summary === passed: N  failed: M`. If it dies silently before that line, the most likely cause is a `grep` command returning exit code 1 (no matches) under `pipefail`. The script uses `|| true` guards on all grep invocations, but if bash is bailing earlier check for unbound variables or syntax errors.
 
-**Claim 2 (runtime-codegen) uses ARM64 instruction syntax.** It greps for `^\s+add\b` in the assembly. If galvanic changes its codegen for addition (e.g., uses `adds` for flag-setting, or emits a different instruction form), this check may need updating. The claim is correct in principle; the grep pattern is an approximation.
+**Claim 2 (test suite passes) is not in falsify.sh.** Running the full `cargo test` suite every cycle would take 2-5 minutes and is already done by snapshot.sh. The falsify.sh omits it and relies on snapshot output + CI for full test coverage. If you want it in the falsification loop, add a targeted run like `cargo test --lib` (fast) rather than the full suite.
 
-**CI is Linux-only for e2e.** The `e2e` job requires `aarch64-linux-gnu-as`, `aarch64-linux-gnu-ld`, and `qemu-aarch64`. These are installed explicitly on `ubuntu-latest`. Local macOS runs skip e2e tests gracefully. This is intentional and correctly handled, but means macOS development runs only parse-acceptance and unit tests locally.
+**Branch protection not verified.** I couldn't check whether the default branch on GitHub has protection rules (require PR reviews, restrict direct push). For autonomous operation, branch protection on `main` is important. Check repo settings and enable "Require a pull request before merging" if not already set.
 
-**No mutation testing.** The test suite exercises many FLS programs, but mutation testing would reveal whether the tests actually detect regressions. This is a gap worth noting for a future cycle when the feature set stabilizes.
+**Repo visibility not confirmed.** The README doesn't state whether the repo is public or private. If it's public (`libliflin/galvanic`), external contributors can file issues and PRs with injected text. The lathe engine only consumes structured data from GitHub (status codes, PR numbers), not free-text fields, so injection risk is low — but worth knowing.
 
-**Repository security:** The repo appears to be public (higher injection risk). CI uses `pull_request` (not `pull_request_target`) and `contents: read` permissions — good posture. The engine's structured-data-only policy (never reading PR free-text fields into agent context) is the main mitigation. Branch protection on `main` should be verified: require at least one PR review before merging, restrict direct pushes.
+**The e2e test (Claim 5) requires the build to succeed first.** `cargo test --test e2e -- --exact runtime_add_emits_add_instruction` will fail if `cargo build` failed first. The falsify.sh runs build first and stops if it fails, so this ordering is correct — but note that the $FAIL count could cascade if build fails.
+
+**Milestones 102, 107, 128, 141, 146, 158, 171-173, 175-179, 191 are skipped.** The e2e.rs milestone numbering has gaps. This is normal — milestone numbers were retired or reassigned. It's not a bug to investigate.
+
+**The "Sunday contributor" claim is aspirational.** I couldn't find a `CONTRIBUTING.md` or a clear "what's next" document. The Sunday contributor's journey depends on being able to find the next uncovered FLS section. The agent could improve this by adding a brief "where we are / what's next" section to the README, but that's a future cycle.

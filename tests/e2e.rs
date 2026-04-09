@@ -33878,3 +33878,195 @@ fn main() -> i32 {\n\
         "both trampolines must shift len register (x1→x2) — found {shifts_len_count}: {asm}"
     );
 }
+
+// ── Milestone 198: for x in [e1, e2, e3] — inline array literal iterator ────
+//
+// FLS §6.15.1: A for loop iterates over an IntoIterator. An array literal
+// `[e0, e1, …]` of type [T; N] implements IntoIterator (consuming), yielding
+// each element value in order.
+//
+// FLS §6.8: Array expressions create a value of type [T; N]; elements are
+// evaluated left-to-right (FLS §6.4:14).
+//
+// FLS §6.1.2:37–45: All element stores and the counter-based loop control
+// flow are runtime instructions — the iteration is not unrolled at compile
+// time, even when all element values are statically known.
+
+/// Milestone 198: sum elements of an inline three-element array literal.
+///
+/// FLS §6.15.1: for loop over [T; N] inline literal.
+/// FLS §6.8: Array expression elements evaluated left-to-right.
+#[test]
+fn milestone_198_inline_array_sum() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 { let mut s = 0; for x in [1, 2, 3] { s = s + x; } s }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 6, "expected 6 (1+2+3), got {exit_code}");
+}
+
+/// Milestone 198: iterate over a single-element inline array.
+///
+/// FLS §6.15.1, §6.8.
+#[test]
+fn milestone_198_inline_array_single_element() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 { let mut s = 0; for x in [42] { s = x; } s }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 42, "expected 42, got {exit_code}");
+}
+
+/// Milestone 198: first element of inline array (exits after break).
+///
+/// FLS §6.15.1, §6.8.
+#[test]
+fn milestone_198_inline_array_first_element() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 { let mut r = 0; for x in [10, 20, 30] { r = x; break; } r }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 10, "expected 10, got {exit_code}");
+}
+
+/// Milestone 198: inline array with arithmetic on each element.
+///
+/// FLS §6.15.1: loop variable `x` takes each element value.
+/// FLS §6.8: elements [2, 3, 4].
+#[test]
+fn milestone_198_inline_array_arithmetic_on_element() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 { let mut s = 0; for x in [2, 3, 4] { s = s + x * 2; } s }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 18, "expected 18 ((2+3+4)*2), got {exit_code}");
+}
+
+/// Milestone 198: inline array element passed to function.
+///
+/// FLS §6.15.1, §6.8.
+#[test]
+fn milestone_198_inline_array_element_to_fn() {
+    let Some(exit_code) = compile_and_run(
+        "fn double(x: i32) -> i32 { x * 2 }\n\
+fn main() -> i32 { let mut s = 0; for x in [1, 2, 3] { s = s + double(x); } s }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 12, "expected 12 (2+4+6), got {exit_code}");
+}
+
+/// Milestone 198: inline array iteration with continue.
+///
+/// FLS §6.15.7: `continue` advances to the next element.
+/// FLS §6.8: inline array [1, 2, 3, 4, 5].
+#[test]
+fn milestone_198_inline_array_continue() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 { let mut s = 0; for x in [1, 2, 3, 4, 5] { if x == 3 { continue; } s = s + x; } s }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 12, "expected 12 (1+2+4+5), got {exit_code}");
+}
+
+/// Milestone 198: inline array result used in arithmetic.
+///
+/// FLS §6.15.1, §6.8.
+#[test]
+fn milestone_198_inline_array_result_in_arithmetic() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 { let mut s = 0; for x in [10, 20] { s = s + x; } s - 5 }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 25, "expected 25 (30-5), got {exit_code}");
+}
+
+/// Milestone 198: two inline-array loops in sequence.
+///
+/// FLS §6.15.1: two separate for loops with different inline arrays.
+#[test]
+fn milestone_198_inline_array_called_twice() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 {\n\
+    let mut a = 0; for x in [1, 2, 3] { a = a + x; }\n\
+    let mut b = 0; for x in [10, 20] { b = b + x; }\n\
+    a + b\n\
+}\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 36, "expected 36 (6+30), got {exit_code}");
+}
+
+// ── Assembly inspection: Milestone 198 ───────────────────────────────────────
+
+/// Assembly inspection: `for x in [e1, e2, e3]` emits a runtime indexed load
+/// (`lsl #3`) and does NOT constant-fold the sum.
+///
+/// The counter-based iteration must produce:
+/// - `lsl #3` in the `ldr` for element loading (from `LoadIndexed`).
+/// - No constant-folded result (sum 6 must not appear as a load-immediate).
+///
+/// FLS §6.15.1: for loop over inline array literal.
+/// FLS §6.8: Array expression elements.
+/// FLS §6.1.2:37–45: Counter loads, comparisons, and element loads are runtime
+/// instructions — the loop is not unrolled or constant-folded.
+#[test]
+fn runtime_inline_array_for_emits_indexed_load_not_folded() {
+    let asm = compile_to_asm(
+        "fn main() -> i32 { let mut s = 0; for x in [1, 2, 3] { s = s + x; } s }\n",
+    );
+    // LoadIndexed emits `ldr x{N}, [x{N}, x{M}, lsl #3]` — confirms runtime
+    // indexed load, not constant-folding.
+    assert!(
+        asm.contains("lsl #3"),
+        "for-inline-array loop must emit indexed ldr (lsl #3) for element loading: {asm}"
+    );
+    // The sum 6 must not appear as a compile-time immediate.
+    assert!(
+        !asm.contains("mov     x0, #6"),
+        "for-inline-array sum must not be constant-folded to #6: {asm}"
+    );
+}
+
+/// Assembly inspection: two inline-array for loops — neither result is folded.
+///
+/// This rules out per-call constant folding: two separate loops whose results
+/// are summed must both emit runtime control flow.
+///
+/// FLS §6.15.1, §6.8, §6.1.2:37–45.
+#[test]
+fn runtime_inline_array_for_two_loops_not_folded() {
+    let asm = compile_to_asm(
+        "fn main() -> i32 {\n\
+    let mut a = 0; for x in [1, 2, 3] { a = a + x; }\n\
+    let mut b = 0; for x in [10, 20] { b = b + x; }\n\
+    a + b\n\
+}\n",
+    );
+    // Neither intermediate result should appear as a compile-time immediate.
+    assert!(
+        !asm.contains("mov     x0, #6"),
+        "first loop sum must not be constant-folded to #6: {asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #30"),
+        "second loop sum must not be constant-folded to #30: {asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #36"),
+        "combined result must not be constant-folded to #36: {asm}"
+    );
+    // Both loops must use indexed loads (lsl #3).
+    let lsl_count = asm.lines().filter(|l| l.contains("lsl #3")).count();
+    assert!(
+        lsl_count >= 2,
+        "both inline-array loops must emit lsl #3 for element loading — found {lsl_count}: {asm}"
+    );
+}
