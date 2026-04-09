@@ -16108,6 +16108,12 @@ impl<'src> LowerCtx<'src> {
                         return Ok(IrValue::Unit);
                     }
 
+                    // FLS §2.4.4.2, §4.2: Detect element type from the first element.
+                    // Float literals without _f32 suffix are f64; with _f32 are f32.
+                    // This mirrors the named-array path (see `local_f64_array_slots`).
+                    let is_f64_elems = self.is_f64_expr(&elems[0]);
+                    let is_f32_elems = !is_f64_elems && self.is_f32_expr(&elems[0]);
+
                     // Allocate N consecutive stack slots for the temporary array.
                     let base_slot = self.alloc_slot()?;
                     for _ in 1..n {
@@ -16122,10 +16128,37 @@ impl<'src> LowerCtx<'src> {
                     // Evaluate all element expressions left-to-right and store.
                     // FLS §6.8, §6.4:14: Elements are evaluated in source order.
                     // FLS §6.1.2:37–45: Each store is a runtime instruction.
-                    for (i, elem_expr) in elems.iter().enumerate() {
-                        let val = self.lower_expr(elem_expr, &IrTy::I32)?;
-                        let src = self.val_to_reg(val)?;
-                        self.instrs.push(Instr::Store { src, slot: base_slot + i as u8 });
+                    // FLS §4.2: f64/f32 elements use float registers and float stores.
+                    if is_f64_elems {
+                        self.local_f64_array_slots.insert(base_slot);
+                        for (i, elem_expr) in elems.iter().enumerate() {
+                            let val = self.lower_expr(elem_expr, &IrTy::F64)?;
+                            let src = match val {
+                                IrValue::FReg(r) => r,
+                                _ => return Err(LowerError::Unsupported(
+                                    "f64 inline array element did not produce a float value".into(),
+                                )),
+                            };
+                            self.instrs.push(Instr::StoreF64 { src, slot: base_slot + i as u8 });
+                        }
+                    } else if is_f32_elems {
+                        self.local_f32_array_slots.insert(base_slot);
+                        for (i, elem_expr) in elems.iter().enumerate() {
+                            let val = self.lower_expr(elem_expr, &IrTy::F32)?;
+                            let src = match val {
+                                IrValue::F32Reg(r) => r,
+                                _ => return Err(LowerError::Unsupported(
+                                    "f32 inline array element did not produce a float value".into(),
+                                )),
+                            };
+                            self.instrs.push(Instr::StoreF32 { src, slot: base_slot + i as u8 });
+                        }
+                    } else {
+                        for (i, elem_expr) in elems.iter().enumerate() {
+                            let val = self.lower_expr(elem_expr, &IrTy::I32)?;
+                            let src = self.val_to_reg(val)?;
+                            self.instrs.push(Instr::Store { src, slot: base_slot + i as u8 });
+                        }
                     }
 
                     // Initialise counter to 0.
@@ -16147,7 +16180,15 @@ impl<'src> LowerCtx<'src> {
                     });
 
                     // Bind the loop variable so the body can load it via Path.
-                    self.locals.insert(pat_name, elem_slot);
+                    // FLS §4.2: f64/f32 loop variables use float_locals / float32_locals
+                    // so path expressions emit LoadF64Slot / LoadF32Slot instead of Load.
+                    if is_f64_elems {
+                        self.float_locals.insert(pat_name, elem_slot);
+                    } else if is_f32_elems {
+                        self.float32_locals.insert(pat_name, elem_slot);
+                    } else {
+                        self.locals.insert(pat_name, elem_slot);
+                    }
 
                     // ── Condition: counter < N ─────────────────────────────────────────
                     // FLS §6.15.1: Loop terminates when all elements have been visited.
@@ -16163,14 +16204,30 @@ impl<'src> LowerCtx<'src> {
 
                     // ── Load element: elem_slot ← arr[counter] ───────────────────────
                     // FLS §6.9: Element at index `counter` is loaded from the temporary
-                    // array at base_slot + counter. `LoadIndexed` emits an `add` (base
-                    // address) + `ldr` (indexed load) pair — both runtime instructions.
+                    // array at base_slot + counter.
+                    // FLS §4.2: Float elements use float-register load/store instructions.
                     // FLS §6.1.2:37–45: The load is a runtime instruction.
                     let r_cnt = self.alloc_reg()?;
                     self.instrs.push(Instr::Load { dst: r_cnt, slot: counter_slot });
                     let r_elem = self.alloc_reg()?;
-                    self.instrs.push(Instr::LoadIndexed { dst: r_elem, base_slot, index_reg: r_cnt });
-                    self.instrs.push(Instr::Store { src: r_elem, slot: elem_slot });
+                    if is_f64_elems {
+                        self.instrs.push(Instr::LoadIndexedF64 {
+                            dst: r_elem,
+                            base_slot,
+                            index_reg: r_cnt,
+                        });
+                        self.instrs.push(Instr::StoreF64 { src: r_elem, slot: elem_slot });
+                    } else if is_f32_elems {
+                        self.instrs.push(Instr::LoadIndexedF32 {
+                            dst: r_elem,
+                            base_slot,
+                            index_reg: r_cnt,
+                        });
+                        self.instrs.push(Instr::StoreF32 { src: r_elem, slot: elem_slot });
+                    } else {
+                        self.instrs.push(Instr::LoadIndexed { dst: r_elem, base_slot, index_reg: r_cnt });
+                        self.instrs.push(Instr::Store { src: r_elem, slot: elem_slot });
+                    }
 
                     // ── Body ──────────────────────────────────────────────────────────
                     self.lower_block_to_value(body, &IrTy::Unit)?;

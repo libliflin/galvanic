@@ -34070,3 +34070,169 @@ fn runtime_inline_array_for_two_loops_not_folded() {
         "both inline-array loops must emit lsl #3 for element loading — found {lsl_count}: {asm}"
     );
 }
+
+// ── Milestone 199: for x in [f64/f32 literals] — float inline array for-loop ──
+//
+// FLS §6.15.1: A for loop may iterate over any expression that implements
+// IntoIterator. Galvanic special-cases inline array literals at the IR level.
+// FLS §4.2: Float elements use d-registers (f64) or s-registers (f32).
+// FLS §6.8: Array expressions with float elements follow the same left-to-right
+// evaluation order as integer arrays (FLS §6.4:14).
+// FLS §6.1.2:37–45: All element stores and loop loads are runtime instructions —
+// the loop body must not be constant-folded even when all literals are known.
+
+/// Milestone 199: for loop over inline f64 array literal — basic sum.
+///
+/// FLS §6.15.1: Each element is loaded at runtime (not folded).
+/// FLS §4.2: Loop variable `x` lives in a d-register slot.
+#[test]
+fn milestone_199_inline_f64_array_for_sum() {
+    let src = "fn main() -> i32 {\n\
+    let mut sum: f64 = 0.0;\n\
+    for x in [1.0, 2.0, 3.0] { sum += x; }\n\
+    sum as i32\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "1.0+2.0+3.0=6.0→6, got {exit_code}");
+}
+
+/// Milestone 199: for loop over inline f64 array — single element.
+///
+/// FLS §6.15.1: A one-element array executes the body exactly once.
+#[test]
+fn milestone_199_inline_f64_array_for_single_element() {
+    let src = "fn main() -> i32 {\n\
+    let mut acc: f64 = 0.0;\n\
+    for x in [7.0] { acc += x; }\n\
+    acc as i32\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7, "arr=[7.0], acc=7.0→7, got {exit_code}");
+}
+
+/// Milestone 199: for loop over inline f64 array — element used in arithmetic.
+///
+/// FLS §6.15.1: Loop variable accessible in body for use in expressions.
+/// FLS §4.2: f64 loop variable participates in float arithmetic.
+#[test]
+fn milestone_199_inline_f64_array_for_arithmetic_on_element() {
+    let src = "fn main() -> i32 {\n\
+    let mut total: f64 = 0.0;\n\
+    for x in [2.0, 4.0, 6.0] { total += x * 2.0; }\n\
+    total as i32\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 24, "2.0*2+4.0*2+6.0*2=24.0→24, got {exit_code}");
+}
+
+/// Milestone 199: for loop over inline f64 array — element passed to function.
+///
+/// FLS §6.15.1: Loop variable may be passed to other functions.
+/// FLS §4.2: f64 value passes through d0 register in function call ABI.
+#[test]
+fn milestone_199_inline_f64_array_for_element_to_fn() {
+    let src = "fn double(v: f64) -> i32 { (v * 2.0) as i32 }\n\
+fn main() -> i32 {\n\
+    let mut total = 0;\n\
+    for x in [1.0, 2.0, 3.0] { total += double(x); }\n\
+    total\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 12, "double(1)+double(2)+double(3)=2+4+6=12, got {exit_code}");
+}
+
+/// Milestone 199: for loop over inline f64 array — result in arithmetic.
+///
+/// FLS §6.15.1: The for-loop itself has unit type; the accumulator holds the result.
+#[test]
+fn milestone_199_inline_f64_array_for_result_in_arithmetic() {
+    let src = "fn main() -> i32 {\n\
+    let mut sum: f64 = 0.0;\n\
+    for x in [10.0, 20.0] { sum += x; }\n\
+    (sum + 5.0) as i32\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 35, "10+20+5=35, got {exit_code}");
+}
+
+/// Milestone 199: for loop over inline f64 array — called twice, not folded.
+///
+/// FLS §6.1.2:37–45: The loop must execute at runtime even when called multiple
+/// times with the same literal array. Verifies no cross-call constant folding.
+#[test]
+fn milestone_199_inline_f64_array_for_called_twice() {
+    let src = "fn sum_floats() -> i32 {\n\
+    let mut s: f64 = 0.0;\n\
+    for x in [1.0, 2.0, 3.0] { s += x; }\n\
+    s as i32\n\
+}\n\
+fn main() -> i32 { sum_floats() + sum_floats() }\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 12, "6+6=12, got {exit_code}");
+}
+
+/// Milestone 199: for loop over inline f64 array — continue skips remaining body.
+///
+/// FLS §6.15.7: `continue` advances to the next element; elements after the
+/// continue target are skipped for that iteration.
+#[test]
+fn milestone_199_inline_f64_array_for_continue() {
+    let src = "fn main() -> i32 {\n\
+    let mut count = 0;\n\
+    for x in [1.0, 2.0, 3.0, 4.0] {\n\
+        if (x as i32) % 2 == 0 { continue; }\n\
+        count += 1;\n\
+    }\n\
+    count\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 2, "1.0 and 3.0 are odd → count=2, got {exit_code}");
+}
+
+/// Milestone 199: for loop over inline f32 array literal — basic sum.
+///
+/// FLS §4.2: f32 elements use s-registers. FLS §6.15.1: same iteration semantics.
+#[test]
+fn milestone_199_inline_f32_array_for_sum() {
+    let src = "fn main() -> i32 {\n\
+    let mut sum: f32 = 0.0_f32;\n\
+    for x in [1.0_f32, 2.0_f32, 3.0_f32] { sum += x; }\n\
+    sum as i32\n\
+}\n";
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6, "1+2+3=6, got {exit_code}");
+}
+
+/// Milestone 199: assembly inspection — f64 inline array for-loop emits
+/// float indexed load (`ldr d`) and float add (`fadd`), not constant-folded.
+///
+/// FLS §6.1.2:37–45: Runtime float iteration must emit real float instructions.
+/// FLS §4.2: d-registers carry f64 values; `fadd` is the float add instruction.
+#[test]
+fn runtime_inline_f64_array_for_emits_ldr_dreg_not_folded() {
+    let asm = compile_to_asm(
+        "fn main() -> i32 {\n\
+    let mut sum: f64 = 0.0;\n\
+    for x in [1.0, 2.0, 3.0] { sum += x; }\n\
+    sum as i32\n\
+}\n",
+    );
+    // Float indexed load must be emitted (ldr d<n>, [<reg>, <idx>, lsl #3]).
+    assert!(
+        asm.lines().any(|l| {
+            let t = l.trim_start();
+            t.starts_with("ldr") && t.contains("d") && t.contains("lsl #3")
+        }),
+        "expected float indexed load `ldr d<n>, [..., lsl #3]` in assembly:\n{asm}"
+    );
+    // Float add must be emitted (fadd).
+    assert!(
+        asm.contains("fadd"),
+        "expected `fadd` instruction in float array for-loop:\n{asm}"
+    );
+    // The sum 6.0 cast to i32 must not be constant-folded as `mov x0, #6`.
+    assert!(
+        !asm.contains("mov     x0, #6"),
+        "loop body must not be constant-folded to #6:\n{asm}"
+    );
+}
