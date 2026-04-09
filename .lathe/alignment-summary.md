@@ -1,73 +1,64 @@
-# Alignment Summary
+# Alignment Summary — galvanic
 
-**Read this in 30 seconds before starting cycles. It documents the choices made during init — gut-check them before trusting the agent.**
+Read this in 30 seconds before starting cycles. It's a briefing, not documentation.
 
 ---
 
 ## Who This Serves
 
-- **William (you)** — Building galvanic milestone by milestone through FLS sections. Each cycle should either advance FLS coverage, harden existing coverage with adversarial tests, or fix a broken claim/CI failure.
-- **FLS/Ferrocene spec authors** — Galvanic surfaces spec ambiguities. They benefit when galvanic notes `FLS §X.Y AMBIGUOUS:` in source comments. They're not active users but they're a real stakeholder of the research output.
-- **Compiler/systems researchers** — Reading galvanic to understand what cache-line-aware codegen looks like from first principles. They trust the cache-line notes; they leave if those notes become aspirational rather than accurate.
-- **Future contributors** — Reading the codebase to understand it or extend it. They need FLS citations and doc comments to understand the "why."
+**The maintainer (William):** Working through the FLS section by section, implementing each language feature and documenting what the spec says — and doesn't say. Each cycle should advance the FLS frontier by one milestone or harden an existing one.
+
+**The FLS researcher:** Anyone reading the spec or this codebase to understand whether the FLS is independently implementable. Their value is the documented ambiguities: `// FLS §X.Y: AMBIGUOUS — ...` comments and changelog notes. If these are missing, the research record is incomplete.
+
+**The cache-line researcher:** Interested in whether treating cache-line alignment as a first-class constraint (not an optimization pass) produces measurably better code. Their trust depends on `size_of::<Token>() == 8` holding and the cache-line rationale being maintained in new types.
+
+**The CI / lathe pipeline:** Needs clean builds, passing tests, and a falsify.sh that always prints its summary line.
 
 ---
 
 ## Key Tensions
 
-**Milestone velocity vs. hardening**: At milestone 87+, the temptation is to keep adding FLS sections. But many existing sections have only happy-path tests. The agent is configured to occasionally favor hardening — building adversarial fixtures for existing features. **You can override this** by noting in the snapshot "priority: milestone velocity" or "priority: harden §X.Y."
-
-**Cache-line discipline vs. implementation speed**: Every new IR type needs a cache-line note. The agent is instructed to always add the note. If cycles feel slow because of this, it's intentional — the notes are the research output.
+| Tension | Current resolution |
+|---|---|
+| FLS fidelity vs. constant-folding shortcuts | **FLS fidelity wins, always.** Galvanic is a compiler, not an interpreter. `fls-constraints.md` documents the constraint; the `runtime-codegen` claim enforces it. |
+| Cache-line discipline vs. implementation simplicity | **Maintain discipline on hot paths.** Token, Span, IR instructions: size assertions required. Build-time structs: a brief note is enough. |
+| Milestone breadth vs. e2e test depth | **Favor depth when recent milestones lack e2e tests.** A milestone with only a parse-acceptance test is half-done. |
 
 ---
 
-## Load-Bearing Claims
+## Load-Bearing Claims (what `falsify.sh` defends each cycle)
 
-These are what `falsify.sh` defends every cycle. If any fails, the agent stops new work and fixes it.
-
-1. **CLAIM-1**: `Token` is exactly 8 bytes — verified by `cargo test --lib -- lexer::tests::token_is_eight_bytes`. If Token grows, the stated 8-tokens-per-cache-line property breaks.
-
-2. **CLAIM-2**: No `unsafe` in library source (`src/` minus `main.rs`). Structural constraint. Currently passing.
-
-3. **CLAIM-3**: IR cache-line discipline — at least 40 `Cache-line note:` occurrences in `ir.rs`, and the reference types (StaticValue, StaticData, VtableShim, VtableSpec, IrBinOp) still have their notes. **Known gap**: Several top-level types (`Module`, `IrFn`, `Instr`, `IrValue`, `IrTy`, `FCmpOp`, `F64BinOp`, `F32BinOp`, `ClosureTrampoline`) currently lack type-level cache-line notes. The agent should add these.
-
-4. **CLAIM-4**: FLS citations (`FLS §`) present in all five core source files. Currently passing.
-
-5. **CLAIM-5**: No orphaned `.s` fixture files (every `.s` has a matching `.rs`). Currently passing.
-
-6. **CLAIM-6**: Binary exits ≤ 128 on adversarial inputs (no signal death). Verified by running the debug binary against 6 constructed adversarial inputs. Requires `cargo build` to be run first.
+1. **`token-is-8-bytes`** — `size_of::<Token>() == 8`. Cache-line density is broken if Token grows.
+2. **`runtime-codegen`** — `fn add(a: i32, b: i32) -> i32 { a + b }` emits a runtime ARM64 `add` instruction. Verifies galvanic is a compiler, not an interpreter.
+3. **`no-unsafe-in-lib`** — No `unsafe` blocks in library code (excluding `main.rs`). The "safe Rust compiler" claim holds.
+4. **`no-command-in-lib`** — No `std::process::Command` in library code. The library is pure computation.
+5. **`clean-exit-empty-input`** — galvanic exits 0 on an empty `.rs` file. No crash or hang on degenerate input.
+6. **`clean-error-missing-file`** — galvanic exits non-zero (cleanly) on a nonexistent file path. No panic on missing input.
 
 ---
 
 ## Current Focus
 
-The project is at milestone 87+ with significant FLS coverage. CI is comprehensive (build, test, clippy, fuzz-smoke, audit, e2e, bench). The most valuable near-term work is probably:
+The project is at milestone 197+ with active development on for-loops over slices, closures, and `dyn Trait`. The agent should:
 
-1. Adding type-level cache-line notes to `Module`, `IrFn`, `Instr`, `IrValue`, `IrTy`, `FCmpOp`, `F64BinOp`, `F32BinOp`, `ClosureTrampoline` (closes the CLAIM-3 known gap)
-2. Adversarial testing of features that have only happy-path e2e fixtures
-3. Continuing FLS milestone coverage when the above is in good shape
+1. Check whether the last 3–5 milestones have e2e tests. If not, add one — this is usually the highest-value change.
+2. Identify the next FLS section that parses but doesn't lower correctly, and implement it.
+3. Check for Clippy warnings or failing falsification claims before any new work.
 
 ---
 
 ## What Could Be Wrong
 
-- **Stakeholder I may have missed**: The README says "nobody needs to use this" — but I named FLS authors as a stakeholder based on the research framing. If William doesn't think of the FLS team as a real audience, CLAIM-4 (citation discipline) and the `FLS §X.Y AMBIGUOUS` annotations might feel over-engineered. Check whether the FLS-research framing matches your actual intent.
+**Stakeholders I may have missed:** The project might eventually have external users (other compiler researchers citing galvanic's findings). For now, the codebase shows no external consumers; stakeholder analysis is accurate for the current state.
 
-- **CLAIM-3 threshold**: The minimum of 40 cache-line notes is set conservatively (ir.rs has ~82). If the IR grows rapidly with many new types added without notes, the count could stagnate while `pub` types increase. The agent should periodically check the ratio of pub types to cache-line notes, not just the absolute count.
+**The `runtime-codegen` claim assumes the binary is built.** If `cargo build` hasn't been run, `falsify.sh` will mark this claim as "binary not built" rather than failing it. This is intentional — the engine runs `snapshot.sh` (which builds) before `falsify.sh`.
 
-- **E2e test coverage**: I couldn't read `tests/e2e.rs` fully (file too large). The claims assume e2e coverage is in good shape. If there are e2e tests that always skip or are marked `#[ignore]`, that's a gap I didn't catch.
+**`span_is_eight_bytes` has no test.** The `Span` struct is documented as 8 bytes and structurally guaranteed (two `u32` fields), but there's no test enforcing it the way `token_is_eight_bytes` does. This is a gap. Adding `ast::tests::span_is_eight_bytes` is a good early cycle and should extend `claims.md`.
 
-- **`Token` size test**: CLAIM-1 assumes `lexer::tests::token_is_eight_bytes` exists. If this test was renamed or moved, `falsify.sh` will report it as missing. Check the test name in `src/lexer.rs` if CLAIM-1 fails unexpectedly.
+**Claim 2 (runtime-codegen) uses ARM64 instruction syntax.** It greps for `^\s+add\b` in the assembly. If galvanic changes its codegen for addition (e.g., uses `adds` for flag-setting, or emits a different instruction form), this check may need updating. The claim is correct in principle; the grep pattern is an approximation.
 
-- **`falsify.sh` executability**: The file was written but `chmod +x` requires shell approval in this environment. Run `chmod +x .lathe/falsify.sh` manually before starting cycles.
+**CI is Linux-only for e2e.** The `e2e` job requires `aarch64-linux-gnu-as`, `aarch64-linux-gnu-ld`, and `qemu-aarch64`. These are installed explicitly on `ubuntu-latest`. Local macOS runs skip e2e tests gracefully. This is intentional and correctly handled, but means macOS development runs only parse-acceptance and unit tests locally.
 
-- **CI timing**: The e2e job has a 20-minute timeout and requires QEMU + cross toolchain. If milestones generate very large assembly files, e2e may approach the limit.
+**No mutation testing.** The test suite exercises many FLS programs, but mutation testing would reveal whether the tests actually detect regressions. This is a gap worth noting for a future cycle when the feature set stabilizes.
 
----
-
-## Repository Security
-
-- **Branch protection**: Unknown — not checked during init. Recommend requiring PR reviews on `main` and restricting direct push.
-- **Actions triggers**: CI uses `pull_request` (not `pull_request_target`), with `permissions: contents: read`. Low injection risk.
-- **Repo visibility**: Public. The engine only fetches structured data (statuses, numbers) — not free-text comments. Risk is low but non-zero.
-- **Recommendation**: Enable branch protection on `main` before running many autonomous cycles.
+**Repository security:** The repo appears to be public (higher injection risk). CI uses `pull_request` (not `pull_request_target`) and `contents: read` permissions — good posture. The engine's structured-data-only policy (never reading PR free-text fields into agent context) is the main mitigation. Branch protection on `main` should be verified: require at least one PR review before merging, restrict direct pushes.

@@ -75,15 +75,3 @@ echo ""
 echo "## Test Count"
 grep -rn '#\[test\]' --include='*.rs' . 2>/dev/null | wc -l | xargs -I{} echo "{} test functions"
 echo ""
-
-# Falsification suite
-echo "## Falsification"
-FALSIFY_SCRIPT="$(dirname "$0")/falsify.sh"
-if [[ -x "$FALSIFY_SCRIPT" ]]; then
-    echo '```'
-    _to 60 bash "$FALSIFY_SCRIPT" 2>&1 || true
-    echo '```'
-else
-    echo "(falsify.sh not found or not executable — run: chmod +x .lathe/falsify.sh)"
-fi
-echo ""
