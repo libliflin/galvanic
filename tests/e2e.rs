@@ -33728,6 +33728,125 @@ fn main() -> i32 { let mut a = [1, 2, 3]; double_all(&mut a); a[0] + a[1] + a[2]
     );
 }
 
+// ── Milestone 198: Block expression / parenthesized expression disambiguation ─
+//
+// FLS §6.21: Expression precedence. Block-like expressions (for, while, loop,
+// if, match) do not extend rightward to accept postfix call `(` syntax.
+// A parenthesized expression immediately following a block expression is a
+// separate expression in a block sequence, not a function call.
+//
+// These tests are regression guards for the cycle-6 parser fix: parse_postfix
+// must not emit a Call node when the callee is a block-like expression.
+
+/// Milestone 198: for-loop block followed by a parenthesized expression.
+///
+/// FLS §6.21: expression precedence / block-call disambiguation.
+/// FLS §6.15.1: for-loop expression.
+/// FLS §6.1.2:37–45: non-const function body emits runtime instructions.
+#[test]
+fn milestone_198_for_block_then_paren_expr() {
+    let Some(exit_code) =
+        compile_and_run("fn main() -> i32 { let mut s = 0; for x in 0..3 { s += x; } (s + 1) }\n")
+    else {
+        return;
+    };
+    assert_eq!(exit_code, 4, "expected 4 (0+1+2+1), got {exit_code}");
+}
+
+/// Milestone 198: while-loop block followed by a parenthesized expression.
+///
+/// FLS §6.21, §6.15.3.
+#[test]
+fn milestone_198_while_block_then_paren_expr() {
+    let Some(exit_code) =
+        compile_and_run("fn main() -> i32 { let mut x = 0; while x < 3 { x += 1; } (x * 2) }\n")
+    else {
+        return;
+    };
+    assert_eq!(exit_code, 6, "expected 6 (3*2), got {exit_code}");
+}
+
+/// Milestone 198: loop block followed by a parenthesized expression.
+///
+/// FLS §6.21, §6.15.2.
+#[test]
+fn milestone_198_loop_block_then_paren_expr() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 { let mut n = 0; loop { n += 1; if n == 3 { break; } } (n + 7) }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 10, "expected 10 (3+7), got {exit_code}");
+}
+
+/// Milestone 198: for-loop over array borrow followed by parenthesized cast.
+/// This is the exact pattern that triggered the cycle-6 CI failure on Linux.
+///
+/// FLS §6.21, §6.15.1.
+#[test]
+fn milestone_198_for_arr_block_then_paren_cast() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 { let mut sum: f64 = 0.0; for x in [10.0_f64, 20.0] { sum += x; } (sum + 5.0) as i32 }\n",
+    ) else {
+        return;
+    };
+    assert_eq!(exit_code, 35, "expected 35 (10+20+5), got {exit_code}");
+}
+
+/// Milestone 198: parameter-bound for-loop block followed by parenthesized expression.
+///
+/// FLS §6.21, §6.15.1.
+#[test]
+fn milestone_198_for_block_param_then_paren_expr() {
+    let Some(exit_code) = compile_and_run(
+        "fn f(n: i32) -> i32 { let mut s = 0; for x in 0..n { s += x; } (s + 1) }\n\
+fn main() -> i32 { f(4) }\n",
+    ) else {
+        return;
+    };
+    // 0+1+2+3 = 6, + 1 = 7
+    assert_eq!(exit_code, 7, "expected 7 (0+1+2+3+1), got {exit_code}");
+}
+
+/// Milestone 198: multiple block expressions followed by parenthesized result.
+///
+/// FLS §6.21.
+#[test]
+fn milestone_198_multiple_blocks_then_paren_expr() {
+    let Some(exit_code) = compile_and_run(
+        "fn main() -> i32 { let mut a = 0; let mut b = 0; for x in 0..2 { a += x; } while b < 3 { b += 1; } (a + b) }\n",
+    ) else {
+        return;
+    };
+    // a = 0+1 = 1, b = 3, result = 1+3 = 4
+    assert_eq!(exit_code, 4, "expected 4 (1+3), got {exit_code}");
+}
+
+/// Assembly inspection: `for {} (s + 1)` must emit `add` for the parenthesized
+/// arithmetic — NOT `blr` (which would indicate an incorrect call interpretation).
+///
+/// FLS §6.21, §6.15.1, §6.1.2:37–45.
+#[test]
+fn runtime_for_block_then_paren_emits_add_not_blr() {
+    let asm =
+        compile_to_asm("fn main() -> i32 { let mut s = 0; for x in 0..3 { s += x; } (s + 1) }\n");
+    // The `(s + 1)` expression must emit an add instruction.
+    assert!(
+        asm.contains("add"),
+        "parenthesized `(s + 1)` after for-loop must emit add: {asm}"
+    );
+    // Must NOT emit blr (which would mean the parser produced a call expression).
+    assert!(
+        !asm.contains("blr"),
+        "parenthesized expr after for-loop must not emit blr (call): {asm}"
+    );
+    // Result must not be constant-folded.
+    assert!(
+        !asm.contains("mov     x0, #4"),
+        "result must not be constant-folded to #4: {asm}"
+    );
+}
+
 /// Assembly inspection: called with two slices — neither result is constant-folded.
 /// This rules out any specialization on specific argument values.
 ///
