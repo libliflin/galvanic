@@ -206,3 +206,8 @@ fn fls_6_18_match_expressions() {
 fn fls_6_19_return_expressions() {
     assert_galvanic_accepts("fls_6_19_return_expressions.rs");
 }
+
+#[test]
+fn fls_6_5_operator_expressions() {
+    assert_galvanic_accepts("fls_6_5_operator_expressions.rs");
+}
