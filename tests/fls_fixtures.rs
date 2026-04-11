@@ -231,3 +231,8 @@ fn fls_6_11_struct_expressions() {
 fn fls_6_14_closure_expressions() {
     assert_galvanic_accepts("fls_6_14_closure_expressions.rs");
 }
+
+#[test]
+fn fls_6_4_3_named_block() {
+    assert_galvanic_accepts("fls_6_4_3_named_block.rs");
+}
