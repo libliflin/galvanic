@@ -205,6 +205,27 @@ fn main() -> i32 { double(21) }'
         claim_fail "4g const fn at runtime emits bl" \
             "no 'bl' for const fn called from main() — const fn may be folded outside const context (violates FLS §9:41-43)"
     fi
+
+    # 4h: if-else expression with a runtime condition must emit a conditional
+    # branch instruction — not be constant-folded to the taken branch's value.
+    # The condition `x > 0` depends on the runtime parameter `x`; the compiler
+    # cannot eliminate the branch at compile time.
+    #
+    # This case is distinct from claim 4c (while-loop): it specifically guards
+    # the if-else lowering path (FLS §6.17). A broken optimizer that sees
+    # `classify(5)` might fold the entire call to `mov x0, #1` because 5 > 0.
+    # That would be wrong — `x` could be any value at the call site in general.
+    # (FLS §6.17; fls-constraints.md Constraint 1.)
+    SRC_4H='fn classify(x: i32) -> i32 {
+    if x > 0 { 1 } else { -1 }
+}
+fn main() -> i32 { classify(5) }'
+    if check_asm_contains "$SRC_4H" '(cbz|cbnz|b\.eq|b\.ne|b\.lt|b\.gt|b\.le|b\.ge|b\.lo|b\.hi|b\.ls|b\.hs|\bcmp\b)'; then
+        claim_ok "if-else with runtime condition emits branch instruction (not constant-folded — FLS §6.17)"
+    else
+        claim_fail "4h if-else runtime branch" \
+            "no branch instruction for 'if x > 0' — if-else may be constant-folded (violates FLS §6.17)"
+    fi
 fi
 
 # ── Claim 5: adversarial inputs exit cleanly ─────────────────────────────────

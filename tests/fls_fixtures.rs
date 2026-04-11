@@ -223,6 +223,11 @@ fn fls_6_3_path_expressions() {
 }
 
 #[test]
+fn fls_6_11_struct_expressions() {
+    assert_galvanic_accepts("fls_6_11_struct_expressions.rs");
+}
+
+#[test]
 fn fls_6_14_closure_expressions() {
     assert_galvanic_accepts("fls_6_14_closure_expressions.rs");
 }
