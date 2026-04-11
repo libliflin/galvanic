@@ -226,6 +226,30 @@ fn main() -> i32 { classify(5) }'
         claim_fail "4h if-else runtime branch" \
             "no branch instruction for 'if x > 0' — if-else may be constant-folded (violates FLS §6.17)"
     fi
+
+    # 4i: named block break value from a runtime parameter must emit runtime
+    # instructions — specifically an `add` for `n + 1` where `n` is a parameter.
+    # If galvanic constant-folds the named block at compile time (seeing that
+    # `named_block_compute(4)` is called with a literal), it would emit
+    # `mov x0, #5` with no `add` or branch — that is an interpreter, not a compiler.
+    #
+    # The named block's conditional break means the runtime control flow depends
+    # on `n`; replacing 4 with any parameter value must produce correct runtime
+    # behaviour. (FLS §6.4.3: named block expressions; FLS §6.15.6: break with
+    # value; fls-constraints.md Constraint 1: non-const code must not be folded.)
+    SRC_4I='fn named_block_compute(n: i32) -> i32 {
+    '"'"'result: {
+        if n > 0 { break '"'"'result n + 1; }
+        break '"'"'result 0;
+    }
+}
+fn main() -> i32 { named_block_compute(4) }'
+    if check_asm_contains "$SRC_4I" '\badd\b'; then
+        claim_ok "named block break value from runtime param emits 'add' (not constant-folded — FLS §6.4.3)"
+    else
+        claim_fail "4i named block runtime break value" \
+            "no 'add' for named block break value 'n + 1' — named block may be constant-folded (violates FLS §6.4.3)"
+    fi
 fi
 
 # ── Claim 5: adversarial inputs exit cleanly ─────────────────────────────────
