@@ -1,0 +1,15 @@
+Done. Here's what I wrote and why:
+
+---
+
+**`.lathe/goal.md`** — The goal-setter's behavioral instructions.
+
+Four stakeholders grounded in what I actually saw in the code: William (the researcher reading the git log), FLS spec readers (who care about ambiguity findings currently buried in inline comments), future contributors (who can infer the claims methodology from commits but find nothing that explains it), and CI/validation infrastructure. The tensions are real ones I found: parse fixtures vs. full pipeline codegen, breadth vs. correctness depth (the assembly inspection gap), and ambiguity documentation vs. forward progress.
+
+The ranking section deliberately avoids a layer ladder. CI being broken is the floor; above that, stakeholder impact decides.
+
+**`.lathe/skills/testing.md`** — How galvanic actually tests, including the mandatory assembly inspection pattern and the claims methodology.
+
+**`.lathe/skills/architecture.md`** — Pipeline, module responsibilities, the cache-line invariant, what's implemented end-to-end vs. parse-only. The "what can it compile today" section is something the goal-setter needs to avoid picking claims that have unmet prerequisites.
+
+**`.lathe/alignment-summary.md`** — For you. The thing I'm most uncertain about: whether all recently-added features (while-let, match, struct-expressions) actually have `compile_to_asm()` inspection tests or only exit-code tests. Worth a quick `grep -n "compile_to_asm" tests/e2e.rs` to check. If the inspection tests are missing for recent claims, that's the first thing the goal-setter should target.

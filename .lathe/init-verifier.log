@@ -1,0 +1,15 @@
+`.lathe/verifier.md` is written. Here's what shaped it:
+
+**From builder.md:**
+- The builder's self-reported validation is `cargo build && cargo test && cargo clippy`. The verifier's job is to not take that on faith — run it again and check the tests themselves.
+- The builder knows the litmus test but may skip it when under pressure to deliver. The verifier has no goal pressure — it only has correctness pressure.
+- The builder's claims methodology requires all three parts (fixture + exit-code test + assembly inspection). The verifier checks that all three exist and that the assembly inspection includes both a positive instruction assert and a negative constant-fold assert.
+
+**From the project's specific risks:**
+- The central failure mode is a "falsification" that actually constant-folds. An exit code of 3 for `1 + 2` is consistent with both correct codegen and with `mov x0, #3`. The `compile_to_asm()` + `!asm.contains("mov x0, #3")` pattern is the only proof.
+- FLS citation gaps are research output, not cosmetic. A missing `AMBIGUOUS` annotation is a substantive miss.
+- Pipeline completeness (AST → lower → codegen) is a common partial-implementation failure.
+
+**Structural choices:**
+- The instruction table tells the verifier what to look for per construct type — it doesn't have to re-derive this from the codebase each round.
+- "No fixes needed, no commit" is an explicit option — the verifier shouldn't make noise-commits when the builder's work is solid.
