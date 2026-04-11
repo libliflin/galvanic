@@ -34185,14 +34185,20 @@ fn main() -> i32 { classify(5) }\n",
 /// Assembly inspection verifies runtime discriminant comparison is emitted.
 #[test]
 fn claim_4l_enum_all_variants_accepted_emits_cmp() {
+    // Use non-zero return values so the negative-fold assertion is unambiguous.
     let asm = compile_to_asm(
         "enum Color { Red, Blue }\n\
-fn pick(c: Color) -> i32 { match c { Color::Red => 0, Color::Blue => 1 } }\n\
+fn pick(c: Color) -> i32 { match c { Color::Red => 7, Color::Blue => 3 } }\n\
 fn main() -> i32 { pick(Color::Red) }\n",
     );
     assert!(
         asm.contains("cmp"),
         "expected 'cmp' instruction in exhaustive enum match (all variants covered), got:\n{asm}"
+    );
+    // pick(Color::Red) returns 7 at runtime — must not be constant-folded.
+    assert!(
+        !asm.contains("mov     x0, #7"),
+        "result must not be constant-folded to #7: {asm}"
     );
 }
 
@@ -34210,6 +34216,11 @@ fn claim_4l_non_exhaustive_range_match_rejected() {
         result.is_err(),
         "expected exhaustiveness error for range-only match, but lower() returned Ok"
     );
+    let msg = result.err().unwrap().to_string();
+    assert!(
+        msg.contains("exhaustive"),
+        "expected error mentioning 'exhaustive', got: {msg}"
+    );
 }
 
 /// Claim 4l: bool match covering both values accepted.
@@ -34218,13 +34229,20 @@ fn claim_4l_non_exhaustive_range_match_rejected() {
 /// is exhaustive without a wildcard.
 #[test]
 fn claim_4l_bool_both_values_accepted() {
+    // Use values != 1 so the negative-fold assertion does not conflict with
+    // the `mov x0, #1` emitted to pass `true` (bool=1) as the argument.
     let asm = compile_to_asm(
-        "fn to_int(b: bool) -> i32 { match b { true => 1, false => 0 } }\n\
+        "fn to_int(b: bool) -> i32 { match b { true => 5, false => 3 } }\n\
 fn main() -> i32 { to_int(true) }\n",
     );
     // Must emit a runtime comparison — not constant-fold the result.
     assert!(
         asm.contains("cmp"),
         "expected 'cmp' in bool match covering both values, got:\n{asm}"
+    );
+    // to_int(true) returns 5 at runtime — must not be constant-folded.
+    assert!(
+        !asm.contains("mov     x0, #5"),
+        "result must not be constant-folded to #5: {asm}"
     );
 }
