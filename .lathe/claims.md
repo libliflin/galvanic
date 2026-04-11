@@ -1,78 +1,68 @@
 # Claims Registry
 
-Claims are the load-bearing promises galvanic makes to its stakeholders. The falsification suite (`falsify.sh`) checks these every cycle. A failing claim is top priority — fix it before any new work.
+Load-bearing promises galvanic makes to its stakeholders. Each claim is a specific promise that, if violated, would break the research or erode trust. The falsification suite in `falsify.sh` enforces these every cycle.
+
+Claims have lifecycles — retire them here with reasoning when they no longer fit, rather than softening the check.
 
 ---
 
-## Active Claims
+## C1: Token fits a cache-line slot
 
-### Claim 1: Build integrity
-
-**Stakeholders:** All  
-**Promise:** `cargo build` succeeds with no errors and no clippy warnings (`cargo clippy -- -D warnings`).  
-**Why it's load-bearing:** A compiler that doesn't compile is not a compiler. Every stakeholder's trust starts here.  
-**How it's checked:** `falsify.sh` runs `cargo build` and `cargo clippy -- -D warnings`.
+**Stakeholder:** Cache-line codegen researcher  
+**Claim:** `size_of::<Token>() == 8`  
+**Why load-bearing:** Token is the hot type in the lexer's iteration loop. The entire cache-line argument for the lexer ("8 tokens per cache line, ~4× better than a naive 32-byte token") depends on Token being exactly 8 bytes. If Token grows, the claim becomes aspirational prose.  
+**Check:** `cargo test --lib -- --exact lexer::tests::token_is_eight_bytes`
 
 ---
 
-### Claim 2: Test suite passes
+## C2: Span fits a cache-line slot
 
-**Stakeholders:** FLS conformance researcher, cache researcher, Sunday contributor  
-**Promise:** `cargo test` exits 0 — all unit and integration tests pass.  
-**Why it's load-bearing:** The 1700+ tests in `e2e.rs` represent 197 milestones of confirmed FLS compliance. A silent regression invalidates previous work.  
-**How it's checked:** `falsify.sh` runs `cargo test`.
-
----
-
-### Claim 3: Token stays 8 bytes
-
-**Stakeholders:** Cache-aware codegen researcher  
-**Promise:** `size_of::<Token>() == 8` — the lexer's hot-path type fits 8 tokens per 64-byte cache line.  
-**Why it's load-bearing:** This is the primary structural claim of the cache-line-first design thesis. If `Token` grows, the thesis is no longer demonstrated at the lexer level.  
-**How it's checked:** `falsify.sh` runs `cargo test --lib -- --exact lexer::tests::token_is_eight_bytes`.  
-**Structural, not documentary:** This claim fails when the struct grows, regardless of what the doc comment says. A doc comment update does not satisfy this claim.
+**Stakeholder:** Cache-line codegen researcher  
+**Claim:** `size_of::<Span>() == 8`  
+**Why load-bearing:** Span is carried alongside Token in the parser's hot path. The 8-byte budget is documented in `ast.rs` and is the one AST layout property currently enforced.  
+**Check:** Structural assertion in the test suite (`lexer::tests::span_is_eight_bytes` if it exists; otherwise via a direct `assert_eq!` in falsify.sh using a test binary).
 
 ---
 
-### Claim 4: No unsafe code in library source
+## C3: The build succeeds
 
-**Stakeholders:** Sunday contributor, FLS conformance researcher  
-**Promise:** No `unsafe` blocks, `unsafe fn`, or `unsafe impl` in `src/` (excluding `src/main.rs`).  
-**Why it's load-bearing:** Galvanic is a research compiler implemented in safe Rust. If unsafe code creeps into the library, it undermines both the safety argument and the clean-room discipline.  
-**How it's checked:** `falsify.sh` greps `src/` for `unsafe` keywords, excluding `src/main.rs` and comment lines.
-
----
-
-### Claim 5: Runtime instruction emission (no const-fold in non-const functions)
-
-**Stakeholders:** FLS conformance researcher  
-**Promise:** A non-const function that evaluates `1 + 2` emits a runtime `add` instruction, not a folded `mov x0, #3`.  
-**Why it's load-bearing:** FLS §6.1.2:37–45 is the heart of the conformance research question. A compiler that constant-folds non-const code looks correct on exit-code tests but is semantically wrong. The assembly inspection tests in `e2e.rs` are the only way to catch this.  
-**How it's checked:** `falsify.sh` runs `cargo test --test e2e -- --exact runtime_add_emits_add_instruction`.  
-**Note:** This single check is a proxy for the broader claim. The full defense is the set of assembly inspection tests throughout `tests/e2e.rs`. When adding new features that involve new arithmetic or comparison operations, extend the test suite with new inspection tests.
+**Stakeholder:** All — contributors, spec investigator, CI  
+**Claim:** `cargo build` exits 0 with no errors  
+**Why load-bearing:** A project that doesn't compile is not usable by any stakeholder.  
+**Check:** `cargo build`
 
 ---
 
-### Claim 6: CLI handles adversarial inputs without panicking
+## C4: The test suite passes
 
-**Stakeholders:** CI/validation infrastructure, Sunday contributor  
-**Promise:** The galvanic binary does not panic or crash (exit > 128) when given: empty files, binary garbage, NUL bytes, deeply nested braces (500 levels), or large inputs (10k let bindings).  
-**Why it's load-bearing:** A compiler that panics on bad input is not a compiler. Contributors who encounter unexpected panics will leave. The fuzz-smoke CI job encodes this; this claim tracks whether that contract holds locally.  
-**How it's checked:** `falsify.sh` constructs adversarial inputs and verifies clean exit (exit <= 128 or recognizable error exit).
-
----
-
-## Retired Claims
-
-*(None yet. Claims are retired here when they no longer fit the project, with the date and reasoning.)*
+**Stakeholder:** FLS contributor, spec investigator  
+**Claim:** `cargo test` exits 0  
+**Why load-bearing:** The test suite is the contributor's safety net and the spec investigator's regression guard. A failing test is a broken promise to a specific stakeholder.  
+**Check:** `cargo test`
 
 ---
 
-## Adding New Claims
+## C5: No unsafe code in library
 
-When a new milestone introduces a new structural promise:
+**Stakeholder:** Spec investigator  
+**Claim:** No `unsafe` blocks, `unsafe fn`, or `unsafe impl` appear in `src/` excluding `src/main.rs`  
+**Why load-bearing:** Galvanic implements the FLS in safe Rust. Adding unsafe to library code would mean relying on invariants the FLS doesn't guarantee — contaminating the research.  
+**Check:** `grep -rn 'unsafe\s*{\|unsafe\s*fn\b\|unsafe\s*impl\b' src/ | grep -v '^src/main\.rs:'` returns empty
 
-1. Add an entry here with: stakeholder, promise, why it's load-bearing, how it's checked, and whether it's structural (fails if code changes) or documentary (fails if docs change).
-2. Add a corresponding check to `falsify.sh`.
-3. Choose structural over documentary whenever possible. A claim that can be satisfied by editing comments is not a structural claim.
-4. Keep the total number of claims in the 3–10 range. Too many claims that run slowly defeat the purpose. New claims should replace weaker ones where possible.
+---
+
+## C6: Full pipeline works on the milestone_1 program
+
+**Stakeholder:** Spec investigator, cache-line codegen researcher  
+**Claim:** `galvanic tests/fixtures/milestone_1.rs` (the minimal `fn main() -> i32 { 0 }`) exits 0 and emits a `.s` file without error  
+**Why load-bearing:** This is the minimal end-to-end proof that lex → parse → lower → codegen works at all. If this breaks, nothing above it is trustworthy.  
+**Check:** Build the binary, run it against `tests/fixtures/milestone_1.rs`, verify exit 0 and `.s` file creation.
+
+---
+
+## C7: FLS citations are present in source modules
+
+**Stakeholder:** Spec investigator  
+**Claim:** Every `src/` module that implements FLS behavior contains at least one `FLS §` citation in its source.  
+**Why load-bearing:** The research depends on traceability. A module that implements parser rules but has no FLS citations is untraceable — the spec investigator can't verify correctness, can't find ambiguities, can't cite the code in research notes.  
+**Check:** For each of `src/lexer.rs`, `src/parser.rs`, `src/ir.rs`, `src/lower.rs`, `src/codegen.rs`: `grep -c 'FLS §'` returns > 0.

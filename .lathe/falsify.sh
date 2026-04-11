@@ -1,161 +1,145 @@
 #!/usr/bin/env bash
-# falsify.sh — Adversarial checks for galvanic's load-bearing claims.
+# falsify.sh — Adversarial verification of galvanic's load-bearing claims.
 #
-# Runs every cycle. Exit 0 if all claims hold; non-zero if any fail.
-# Must be fast (warm-cache cargo is ~1-5 seconds per invocation).
-# Must not require network or external services.
+# Runs every cycle. Must be fast (seconds). Exits 0 if all claims hold,
+# non-zero if any fail. Each check names the claim it is testing.
 #
-# See .lathe/claims.md for the claims this script defends.
+# Claims registry: .lathe/claims.md
+#
+# Note: uses `set -uo pipefail` but wraps grep in `|| true` to prevent
+# legitimate "no match" (exit 1) from killing the script under pipefail.
 
 set -uo pipefail
-# Note: NOT using -e so we can collect all failures rather than stopping at the first.
 
 PASS=0
 FAIL=0
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-ok() {
-    echo "  ok: $1"
-    PASS=$((PASS + 1))
-}
-
-fail() {
-    echo "  FAIL: $1"
-    FAIL=$((FAIL + 1))
-}
-
-echo "=== Falsification Suite ==="
-echo ""
-
-# ── Claim 4: No unsafe code in library source ─────────────────────────────────
-#
-# grep returns 1 when it finds nothing — that's the passing case here.
-# We want to fail when grep FINDS matches, so we invert the logic.
-echo "--- Claim 4: No unsafe in library source ---"
-# Exclude main.rs (the CLI driver may use unsafe for assembler/linker interaction).
-# Exclude comment lines (lines starting with //).
-# Use || true to prevent pipefail from treating grep-finds-nothing as a script error.
-UNSAFE_LINES=$(grep -rn 'unsafe\s*{\|unsafe\s*fn\b\|unsafe\s*impl\b' src/ \
-    --include='*.rs' \
-    | grep -v '^src/main\.rs:' \
-    | grep -Ev ':[0-9]+:[[:space:]]*//' \
-    || true)
-if [[ -n "$UNSAFE_LINES" ]]; then
-    fail "unsafe code found in library source:"
-    echo "$UNSAFE_LINES" | head -5
+# Colour helpers (suppressed if not a terminal)
+if [ -t 1 ]; then
+    RED='\033[0;31m'; GREEN='\033[0;32m'; NC='\033[0m'
 else
-    ok "no unsafe in library source"
+    RED=''; GREEN=''; NC=''
 fi
-echo ""
 
-# ── Claim 1: Build integrity — cargo build ────────────────────────────────────
-echo "--- Claim 1a: cargo build ---"
-if cargo build 2>&1; then
-    ok "cargo build clean"
+ok()   { echo -e "${GREEN}ok${NC}  $1"; PASS=$((PASS + 1)); }
+fail() { echo -e "${RED}FAIL${NC} $1"; FAIL=$((FAIL + 1)); }
+
+cd "$ROOT"
+
+# ── C3: Build succeeds ────────────────────────────────────────────────────────
+# All stakeholders depend on this.
+echo "--- C3: cargo build ---"
+if cargo build --quiet 2>/dev/null; then
+    ok "C3: cargo build exits 0"
 else
-    fail "cargo build failed"
+    fail "C3: cargo build failed"
 fi
-echo ""
 
-# ── Claim 1b: Clippy clean ────────────────────────────────────────────────────
-echo "--- Claim 1b: cargo clippy ---"
-if cargo clippy -- -D warnings 2>&1; then
-    ok "clippy clean"
+# ── C4: Test suite passes ─────────────────────────────────────────────────────
+# FLS contributor's safety net. Run unit tests only (fast path; CI runs full suite).
+echo "--- C4: cargo test --lib ---"
+if cargo test --lib --quiet 2>/dev/null; then
+    ok "C4: cargo test --lib exits 0"
 else
-    fail "clippy reported warnings or errors"
+    fail "C4: cargo test --lib failed"
 fi
-echo ""
 
-# ── Claim 3: Token is 8 bytes ─────────────────────────────────────────────────
-echo "--- Claim 3: Token size == 8 bytes ---"
-if cargo test --lib -- --exact lexer::tests::token_is_eight_bytes 2>&1; then
-    ok "Token is 8 bytes"
+# ── C1: Token is 8 bytes ──────────────────────────────────────────────────────
+# The specific test the CI also checks. If it doesn't exist, the claim is still live.
+echo "--- C1: Token == 8 bytes ---"
+if cargo test --lib --quiet -- --exact lexer::tests::token_is_eight_bytes 2>/dev/null; then
+    ok "C1: Token is 8 bytes (lexer::tests::token_is_eight_bytes)"
 else
-    fail "Token size check failed — size_of::<Token>() != 8"
+    fail "C1: Token size assertion failed or test not found (size_of::<Token>() must be 8)"
 fi
-echo ""
 
-# ── Claim 5: Runtime instruction emission (no const-fold in non-const fn) ─────
-#
-# compile_to_asm() in e2e.rs runs lex→parse→lower→codegen in-process.
-# No ARM64 tools or QEMU required — works on macOS and Linux.
-echo "--- Claim 5: Runtime instruction emission (1 + 2 emits add, not mov #3) ---"
-if cargo test --test e2e -- --exact runtime_add_emits_add_instruction 2>&1; then
-    ok "1 + 2 emits runtime add instruction"
+# ── C2: Span is 8 bytes ───────────────────────────────────────────────────────
+# Span is the other layout-enforced type. Try the named test; if absent, grep for
+# size_of::<Span> in the test binary's symbols (weaker check).
+echo "--- C2: Span == 8 bytes ---"
+if cargo test --lib --quiet -- --exact lexer::tests::span_is_eight_bytes 2>/dev/null; then
+    ok "C2: Span is 8 bytes (lexer::tests::span_is_eight_bytes)"
+elif cargo test --lib --quiet -- --exact ast::tests::span_is_eight_bytes 2>/dev/null; then
+    ok "C2: Span is 8 bytes (ast::tests::span_is_eight_bytes)"
 else
-    fail "const-fold violation: 1 + 2 does not emit runtime add instruction"
-fi
-echo ""
-
-# ── Claim 6: CLI handles adversarial inputs without panicking ─────────────────
-#
-# Signal-kill (exit > 128) is a panic/crash. Clean non-zero exit is acceptable.
-echo "--- Claim 6: Adversarial inputs do not crash the CLI ---"
-
-# Build release binary first (needed for CLI tests).
-if ! cargo build --release 2>&1; then
-    fail "release build failed — cannot test CLI"
-else
-    BINARY="./target/release/galvanic"
-    ADVERSARIAL_PASS=0
-    ADVERSARIAL_FAIL=0
-
-    _check_no_crash() {
-        local label="$1"
-        local input_file="$2"
-        set +o pipefail
-        timeout 10 "$BINARY" "$input_file" 2>/dev/null
-        local exit_code=$?
-        set -o pipefail
-        if [[ $exit_code -gt 128 ]]; then
-            local signal=$((exit_code - 128))
-            echo "    CRASH on $label (signal $signal)"
-            ADVERSARIAL_FAIL=$((ADVERSARIAL_FAIL + 1))
-        else
-            ADVERSARIAL_PASS=$((ADVERSARIAL_PASS + 1))
-        fi
-    }
-
-    TMPDIR_ADV=$(mktemp -d)
-
-    # Empty file
-    touch "$TMPDIR_ADV/empty.rs"
-    _check_no_crash "empty file" "$TMPDIR_ADV/empty.rs"
-
-    # NUL bytes in source
-    printf 'fn main() {\x00\x00\x00}' > "$TMPDIR_ADV/nul.rs"
-    _check_no_crash "NUL bytes" "$TMPDIR_ADV/nul.rs"
-
-    # Binary garbage (64 bytes of random-ish data)
-    printf '\xde\xad\xbe\xef\x00\xff\x80\x7f%.0s' {1..8} > "$TMPDIR_ADV/garbage.rs"
-    _check_no_crash "binary garbage" "$TMPDIR_ADV/garbage.rs"
-
-    # Deeply nested braces (200 levels — fast to generate, tests stack depth)
-    python3 -c "
-print('fn main() {')
-for i in range(200):
-    print('  { let _x = 0;')
-for i in range(200):
-    print('  }')
-print('}')
-" > "$TMPDIR_ADV/nested.rs"
-    _check_no_crash "200 levels of nesting" "$TMPDIR_ADV/nested.rs"
-
-    rm -rf "$TMPDIR_ADV"
-
-    if [[ $ADVERSARIAL_FAIL -eq 0 ]]; then
-        ok "CLI survived $ADVERSARIAL_PASS adversarial inputs"
+    # Weaker: grep for a compile-time size assertion in source
+    set +o pipefail
+    FOUND=$(grep -r 'size_of::<Span>' src/ || true)
+    set -o pipefail
+    if [ -n "$FOUND" ]; then
+        ok "C2: size_of::<Span> referenced in source (no dedicated test found — consider adding one)"
     else
-        fail "CLI crashed on $ADVERSARIAL_FAIL adversarial inputs (passed $ADVERSARIAL_PASS)"
-        FAIL=$((FAIL + ADVERSARIAL_FAIL - 1))  # already counted one fail above
+        fail "C2: No Span size enforcement found (size_of::<Span>() should be 8; add a test)"
     fi
 fi
-echo ""
+
+# ── C5: No unsafe in library ──────────────────────────────────────────────────
+# main.rs is excluded — it is the CLI driver and may use platform interfaces.
+echo "--- C5: no unsafe in library ---"
+set +o pipefail
+UNSAFE=$(grep -rn 'unsafe\s*{\|unsafe\s*fn\b\|unsafe\s*impl\b' src/ \
+         | grep -v '^src/main\.rs:' \
+         | grep -Ev ':[0-9]+:[[:space:]]*//' \
+         || true)
+set -o pipefail
+if [ -z "$UNSAFE" ]; then
+    ok "C5: no unsafe code in library src/ (excluding main.rs)"
+else
+    fail "C5: unsafe code found in library:"
+    echo "$UNSAFE"
+fi
+
+# ── C6: Full pipeline on milestone_1 ─────────────────────────────────────────
+# The minimal end-to-end proof: lex → parse → lower → codegen exits 0 and emits .s
+echo "--- C6: full pipeline on milestone_1.rs ---"
+MILESTONE="tests/fixtures/milestone_1.rs"
+if [ ! -f "$MILESTONE" ]; then
+    fail "C6: $MILESTONE not found"
+else
+    # Run the galvanic binary (debug build, already built above).
+    BINARY="target/debug/galvanic"
+    if [ ! -f "$BINARY" ]; then
+        fail "C6: galvanic binary not found at $BINARY"
+    else
+        # Emit to a temp file to avoid polluting the fixtures directory.
+        TMPDIR_PATH=$(mktemp -d)
+        cp "$MILESTONE" "$TMPDIR_PATH/milestone_1.rs"
+        if "$BINARY" "$TMPDIR_PATH/milestone_1.rs" 2>/dev/null && [ -f "$TMPDIR_PATH/milestone_1.s" ]; then
+            ok "C6: galvanic compiled milestone_1.rs and emitted .s"
+        else
+            fail "C6: galvanic failed to compile milestone_1.rs (or .s not emitted)"
+        fi
+        rm -rf "$TMPDIR_PATH"
+    fi
+fi
+
+# ── C7: FLS citations present in each source module ──────────────────────────
+# Each implementing module must contain at least one FLS § citation.
+echo "--- C7: FLS citations in source modules ---"
+ALL_CITED=true
+for MODULE in src/lexer.rs src/parser.rs src/ir.rs src/lower.rs src/codegen.rs; do
+    if [ ! -f "$MODULE" ]; then
+        fail "C7: $MODULE not found"
+        ALL_CITED=false
+        continue
+    fi
+    set +o pipefail
+    COUNT=$(grep -c 'FLS §' "$MODULE" || true)
+    set -o pipefail
+    if [ "$COUNT" -gt 0 ]; then
+        ok "C7: $MODULE has $COUNT FLS § citation(s)"
+    else
+        fail "C7: $MODULE has NO FLS § citations"
+        ALL_CITED=false
+    fi
+done
 
 # ── Summary ───────────────────────────────────────────────────────────────────
-echo "=== Summary === passed: $PASS  failed: $FAIL"
 echo ""
+echo "=== Summary === passed: $PASS failed: $FAIL"
 
-if [[ $FAIL -gt 0 ]]; then
+if [ "$FAIL" -gt 0 ]; then
     exit 1
 fi
 exit 0

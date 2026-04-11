@@ -1,106 +1,133 @@
-# Architecture
+# Architecture — Galvanic Compiler Pipeline
 
-*Why this exists: the runtime agent needs to understand the pipeline and major design decisions to make good implementation choices. This is not a language reference — it's what you can't derive from a quick read of the code.*
+This file exists because the runtime agent needs to understand the pipeline layering and the FLS-traceability convention before making any change. Both are non-obvious from a snapshot alone.
 
 ---
 
 ## Pipeline
 
 ```
-source text
-    → lexer::tokenize()        → Vec<Token>           [src/lexer.rs]
-    → parser::parse()          → SourceFile (AST)     [src/parser.rs, src/ast.rs]
-    → lower::lower()           → Module (IR)          [src/lower.rs, src/ir.rs]
-    → codegen::emit_asm()      → String (GAS text)    [src/codegen.rs]
-    → aarch64-linux-gnu-as     → .o
-    → aarch64-linux-gnu-ld     → ELF binary
+source.rs
+   │
+   ▼
+src/lexer.rs       — tokenize()    → Vec<Token>
+   │                  FLS §2 (Lexical Elements)
+   │                  Token: 8 bytes, repr(u8) discriminant
+   ▼
+src/parser.rs      — parse()       → SourceFile (AST)
+   │                  FLS §3–§15 (Items, Types, Expressions)
+   │                  Hand-written recursive descent
+   ▼
+src/ast.rs         — data types only, no logic
+   │                  Span: 8 bytes (layout enforced)
+   │                  Box<T> used for recursive types (arena is future work)
+   ▼
+src/lower.rs       — lower()       → Module (IR)
+   │                  FLS §6 (Expressions), §8 (Statements), §9 (Functions)
+   │                  Emits RUNTIME instructions only — no const folding in non-const contexts
+   ▼
+src/ir.rs          — data types only
+   │                  IrFn, Instr, IrBinOp, StaticData, ClosureTrampoline, VtableShim/Spec
+   │                  Each Instr variant documents its ARM64 encoding and cache-line cost
+   ▼
+src/codegen.rs     — emit_asm()    → String (GAS syntax)
+                     FLS §9 (Functions), §18.1 (Entry point)
+                     Target: AArch64 Linux ELF, GNU assembler syntax
+                     Entry point: _start → main → sys_exit
 ```
 
-The CLI driver is `src/main.rs`. The library is `src/lib.rs` (pub mod for all phases). The library has no runtime dependencies — `tempfile` and `criterion` are dev-only.
+The CLI (`src/main.rs`) drives the pipeline and optionally shells out to `aarch64-linux-gnu-as` + `aarch64-linux-gnu-ld` to produce a binary. Library code (`lib.rs` re-exporting the modules) never shells out.
 
 ---
 
-## Calling Convention (ABI)
+## FLS Traceability Convention
 
-Galvanic uses a flat register ABI: each scalar field of a struct or tuple is passed in a separate register (`x0`, `x1`, ...). This differs from the C ABI (pointer to struct in `x0`) and was chosen because it maps cleanly to the FLS value semantics.
+Every piece of behavior implemented in galvanic must have a specific FLS citation. The project has two citation styles:
 
-Consequences:
-- Struct returns: fields come back in `x0`, `x1`, ...
-- `&self` methods: the struct's fields arrive in `x0..x{n-1}`, not a pointer.
-- `dyn Trait` vtable shims in `ir.rs::VtableShim` bridge between "pointer to struct in `x0`" (vtable call convention) and galvanic's flat field registers.
-- Closures with captures: captured values are placed in ARM64 callee-saved registers (`x27`, `x26`, ...) before a `bl` to the closure body. The `ClosureTrampoline` in `Module` handles the bridge for `impl Fn` callbacks.
+**Inline on the implementing line:**
+```rust
+// FLS §6.19: Return expressions — tail expression lowers to Instr::Ret.
+body.push(Instr::Ret(ret_val));
+```
 
----
+**Doc comment on a type:**
+```rust
+/// FLS §2.6.1: Strict keywords.
+pub enum TokenKind { ... }
+```
 
-## IR Design
+**Ambiguities and deviations are documented with a specific tag:**
+```rust
+// FLS §6.23 AMBIGUOUS: spec requires a panic on divide-by-zero but the
+// mechanism is unspecified. Galvanic does not yet insert the check.
+```
 
-`src/ir.rs` contains:
-- `Module` — top-level compilation unit (functions, statics, trampolines, vtable shims, vtables)
-- `IrFn` — a function: name, parameters, return type, instruction list, stack slot count
-- `Instr` — one instruction (enum: `LoadImm`, `BinOp`, `Store`, `Load`, `Ret`, `Branch`, `Call`, etc.)
-- `IrValue` — a value reference (register, stack slot, immediate)
+**Partial implementations:**
+```rust
+// FLS §2.3 NOTE: NFC normalisation not yet applied. ASCII identifiers
+// are handled correctly; non-ASCII is accepted but not normalised.
+```
 
-The IR is minimal and grows milestone by milestone. Nothing is added until the next milestone needs it.
-
-**Cache-line design:** Every type in `ir.rs` carries a cache-line note documenting its size and how many fit per 64-byte line. These notes are currently aspirational for the IR (the instruction set is growing) but structural for `Token` (8 bytes, enforced by test).
-
-**Stack layout:** Each function allocates a fixed stack frame at entry (`sub sp, sp, #N`) large enough for all local variables. Stack slots are assigned by index (slot 0, slot 1, ...) during lowering.
-
----
-
-## Const vs. Runtime Constraint
-
-This is the most critical architectural constraint. See `.lathe/refs/fls-constraints.md` in full.
-
-The summary: a regular `fn` body (including `fn main`) is NOT a const context. Even if every value is a compile-time constant, the compiler must emit runtime ARM64 instructions. The litmus test: if swapping a literal for a function parameter would break the implementation, it's an interpreter, not a compiler.
-
-**Assembly inspection tests** exist in `tests/e2e.rs` (starting around line 396) specifically to catch const-fold violations. When adding a new arithmetic or control-flow feature, add both an exit-code test AND an assembly inspection test.
+When adding a new feature, the citation goes on the specific code that implements the FLS behavior, not in a block comment at the top of the function. The reader should be able to find the FLS section and verify the line.
 
 ---
 
-## Testing Layers
+## Cache-Line Convention
 
-Three distinct test layers. Keep them separate — mixing them hides what's actually been implemented:
+Cache-line notes document layout decisions. They appear in:
 
-1. **`tests/smoke.rs`** — CLI smoke test. Runs the binary binary, checks exit codes and stdout. No library internals.
+1. **Type definitions** — explaining why a type has the size it has and what that buys.
+2. **Module-level doc comments** — summarizing the hot-path layout story for that module.
+3. **IR doc comments on Instr variants** — explaining the ARM64 instruction count and byte cost.
 
-2. **`tests/fls_fixtures.rs`** — Parse acceptance. Calls `lexer::tokenize` + `parser::parse` on fixture files in `tests/fixtures/`. A passing test here means "galvanic can lex and parse this FLS construct" — NOT that it can compile or run it.
+The only currently *enforced* cache-line constraints are:
+- `Token: 8 bytes` — test `lexer::tests::token_is_eight_bytes`
+- `Span: 8 bytes` — referenced in `ast.rs`, test may or may not exist
 
-3. **`tests/e2e.rs`** — Full pipeline. Calls the whole pipeline (lex → parse → lower → codegen) and either:
-   - Uses `compile_to_asm()` to inspect the emitted ARM64 assembly (no external tools, works on macOS)
-   - Uses `compile_and_run()` to assemble, link, and execute the binary via QEMU (requires `aarch64-linux-gnu-as`, `aarch64-linux-gnu-ld`, `qemu-aarch64`; tests self-skip on macOS)
-
----
-
-## Fixture Files
-
-`tests/fixtures/` contains `.rs` files and paired `.s` files (expected assembly for some). The `.rs` files are real Rust programs drawn from FLS examples. The `.s` files are reference assembly outputs for specific milestones.
-
-Fixture file naming: `fls_X_Y_description.rs` where `X.Y` is the FLS section number.
+All other cache-line notes are design documentation. They become enforced when someone writes a `size_of!` test for them.
 
 ---
 
-## CI Structure
+## Const-Evaluation Boundary (Critical)
 
-Five CI jobs (`.github/workflows/ci.yml`):
+See `.lathe/refs/fls-constraints.md`. The short version:
 
-- **`build`**: `cargo build` + `cargo test` + `cargo clippy -- -D warnings`. Runs on every push/PR.
-- **`fuzz-smoke`**: Adversarial CLI inputs (large inputs, NUL bytes, binary garbage, deeply nested braces). Tests that the compiler doesn't panic, hang, or crash on malformed input.
-- **`audit`**: Grep-based invariant checks. No `unsafe` blocks in library code. No `std::process::Command` in library code (only `main.rs` may shell out). No networking crates.
-- **`e2e`**: Installs `binutils-aarch64-linux-gnu` + `qemu-user` on `ubuntu-latest`, runs `cargo test --test e2e`. Full-pipeline tests including actual ARM64 execution.
-- **`bench`**: `cargo bench` + the `token_is_eight_bytes` size check.
+> Galvanic must emit **runtime instructions** for all non-const code. A regular `fn main()` body is NOT a const context, even if all values happen to be literals.
 
-The `e2e` and `fuzz-smoke` jobs depend on `build` (run in parallel after build passes).
+The litmus test: replacing a literal with a function parameter must not break the implementation. If a while loop only works when the bound is a literal (because lower.rs evaluates it at compile time), that is an interpreter, not a compiler.
+
+`lower.rs` has a module-level comment confirming compliance. Every cycle that touches lowering should verify this invariant holds for the changed code path.
 
 ---
 
-## What "One Milestone" Looks Like
+## IR Growth Pattern
 
-A typical new milestone adds:
-1. IR support in `src/ir.rs`: new `Instr` variant(s) or `IrValue` variant(s)
-2. Lowering in `src/lower.rs`: code to emit the new instruction(s) for the corresponding AST nodes
-3. Codegen in `src/codegen.rs`: ARM64 assembly emission for the new instruction(s)
-4. Tests in `tests/e2e.rs`: exit-code test(s) + assembly inspection test(s) (for any new arithmetic/comparison operations)
-5. FLS citations in all of the above: `FLS §X.Y` in comments and doc comments
+The IR grows exactly one instruction type per milestone program. The pattern from `ir.rs`:
 
-If a milestone introduces a new type with a performance claim, a `size_of` test or static assertion may also be warranted.
+```
+Milestone 11: LoadImm, BinOp        — arithmetic
+Milestone 12: Store, Load           — let bindings / stack
+Milestone 13: Label, Branch, CondBranch — control flow
+Milestone 14: Call                  — function calls
+Milestone 16: comparison ops        — while loops
+Milestone 21: bitwise/shift ops     — §6.5.6, §6.5.7
+```
+
+When adding a new Instr variant:
+1. Add it to `ir.rs` with FLS citation and cache-line note
+2. Add the lowering in `lower.rs`  
+3. Add the ARM64 emission in `codegen.rs`
+4. Add a fixture in `tests/fixtures/` exercising it
+5. Add the fixture to `tests/fls_fixtures.rs` (parse acceptance)
+6. Add the fixture to `tests/e2e.rs` if it can be compiled and run end-to-end
+
+---
+
+## Test Layers
+
+- **Unit tests** (`src/lexer.rs`, etc.) — layout assertions, specific edge cases
+- **FLS fixture parse tests** (`tests/fls_fixtures.rs`) — each fixture in `tests/fixtures/` gets a `assert_galvanic_accepts()` call; verifies lex + parse only
+- **E2E tests** (`tests/e2e.rs`) — full pipeline: galvanic → `.s` → `aarch64-linux-gnu-as` → `aarch64-linux-gnu-ld` → `qemu-aarch64` (runs on Ubuntu CI, requires cross toolchain)
+- **Benchmarks** (`benches/throughput.rs`) — criterion, lexer + parser throughput on FLS fixtures and stress inputs
+
+The e2e tests require `qemu-aarch64` and the cross toolchain. They run in CI on Ubuntu but not necessarily on macOS locally. If you're on macOS without qemu, the e2e tests will be skipped or fail gracefully.

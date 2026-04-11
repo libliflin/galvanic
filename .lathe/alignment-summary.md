@@ -1,69 +1,60 @@
 # Alignment Summary
 
-*Read this in 30 seconds and gut-check before starting cycles.*
+Quick-read for William before starting lathe cycles. 30 seconds to verify the framing is right.
 
 ---
 
-## Who This Serves
+## Who this serves
 
-- **William as FLS conformance researcher** — testing whether the Ferrocene Language Specification is independently implementable, milestone by milestone, with every decision traceable to a `FLS §X.Y` citation and no rustc-internal knowledge.
-- **William as cache-aware codegen researcher** — testing what a compiler looks like when cache-line alignment is a first-class structural constraint from the start, not an optimization pass at the end.
-- **The Sunday contributor** — someone who finds this interesting and wants to add a FLS section; needs clear testing patterns and a clear map of what's done.
-- **CI/validation infrastructure** — the trust substrate; galvanic has solid CI (build, clippy, fuzz-smoke, audit, e2e with QEMU, bench). The lathe's work is only as trustworthy as the CI that validates it.
-
----
-
-## Key Tensions
-
-- **Parser coverage vs. codegen coverage:** The parser is far ahead of the codegen. `fls_fixtures.rs` covers many FLS constructs that `e2e.rs` doesn't yet compile. The agent favors codegen progress over expanding parse acceptance — confirmed by the project's milestone-based trajectory.
-
-- **FLS fidelity vs. convenience:** The whole value of the project is the discipline (spec-only, no rustc cheating). The agent should never take a convenient path that papers over a spec ambiguity. Fidelity wins.
-
-- **Cache-line documentation vs. enforcement:** There are more cache-line doc comments than size assertions. The agent should add `size_of` assertions for types with explicit budgets, but should not add claims it can't actually enforce. The `Token` size claim is structural and enforced; the IR instruction notes are currently aspirational and documented as such.
+- **Spec investigator (William)** — researching whether the FLS is independently implementable; needs FLS citations to be real and deviations to be documented
+- **Cache-line codegen researcher (William, different hat)** — studying whether first-class cache-aware design is measurably enforceable; needs enforced layout claims, not just comments
+- **FLS contributor** — wants to extend galvanic to cover more FLS sections; needs clear patterns, working tests, and traceable citations as a guide
+- **CI system** — quality gate that all three trust; must stay green
 
 ---
 
-## Load-Bearing Claims
+## Key tensions and how I resolved them
 
-These are the promises encoded in `.lathe/claims.md` and checked every cycle by `falsify.sh`:
+**FLS fidelity vs. coverage.** Favor fidelity. One correctly-cited, well-tested FLS section beats three loosely-cited ones. This is a research project — wrong implementations produce misleading data. This does not change.
 
-1. **Build integrity** — `cargo build` and `cargo clippy -- -D warnings` succeed.
-2. **Test suite passes** — `cargo test` exits 0.
-3. **Token is 8 bytes** — `size_of::<Token>() == 8`, enforced via `lexer::tests::token_is_eight_bytes`.
-4. **No unsafe in library source** — grep check on `src/` excluding `main.rs`.
-5. **Runtime instruction emission** — `fn main() -> i32 { 1 + 2 }` emits a runtime `add`, not `mov x0, #3` (FLS §6.1.2:37–45 compliance proxy).
-6. **CLI handles adversarial inputs** — empty files, binary garbage, NUL bytes, deeply nested braces don't crash the binary (exit > 128).
+**Cache-line enforcement vs. pragmatic progress.** Enforce layouts on hot structures now (Token, Span). Defer arena redesign for AST until the FLS mapping is stable. `ast.rs` itself documents this tradeoff — I followed it.
+
+**Adversarial robustness vs. FLS progress.** CI already covers the minimum bar (no panics, no signal death on adversarial inputs). Maintain that bar; don't invest beyond it without a specific new stakeholder need.
 
 ---
 
-## Current Focus
+## Load-bearing claims (what falsify.sh defends)
 
-Galvanic is at milestone 197 (`for x in &mut slice`). The project is advancing through FLS §6.15.1 (for loops with various iterator patterns) and §4.9 (slice/reference types). The agent should continue at this frontier — implementing the next uncovered FLS section that the parser already handles but the codegen doesn't yet fully support.
-
-The assembly inspection tests lag the milestone tests. When adding new milestones, always add both exit-code tests AND assembly inspection tests for any new runtime instruction patterns.
+| Claim | What it checks | Stakeholder |
+|-------|---------------|-------------|
+| C1: Token == 8 bytes | `size_of::<Token>() == 8` via test | Cache-line researcher |
+| C2: Span == 8 bytes | `size_of::<Span>() == 8` via test or grep | Cache-line researcher |
+| C3: Build succeeds | `cargo build` exits 0 | All |
+| C4: Tests pass | `cargo test --lib` exits 0 | Contributors, spec investigator |
+| C5: No unsafe in library | grep for `unsafe` in `src/` excluding `main.rs` | Spec investigator |
+| C6: Milestone-1 pipeline | `galvanic milestone_1.rs` emits `.s` | Spec investigator, researcher |
+| C7: FLS citations present | each `src/` module has ≥1 `FLS §` | Spec investigator |
 
 ---
 
-## What Could Be Wrong
+## Current focus
 
-**Falsify.sh not verified to run to completion.** The init sandbox could not execute `cargo` or `bash` commands, so `falsify.sh` was not run to confirm the summary line appears. Before starting cycles, you should run:
+Galvanic is in **stage 2**: the core pipeline works for a real Rust subset, and CI is comprehensive. The highest-value work is:
 
-```bash
-cd /Users/williamlaffin/code/galvanic
-chmod +x .lathe/falsify.sh
-bash .lathe/falsify.sh
-```
+1. **E2E coverage gaps** — many fixture programs have a `.s` file (emitted) but no e2e test that runs the binary via qemu. Each such fixture is a verification gap.
+2. **Adversarial inputs** — does the full pipeline survive programs with function parameters (not literals) for every Instr variant? The const-evaluation constraint is stated in `fls-constraints.md` but may not be tested adversarially everywhere.
+3. **FLS section coverage** — which sections are cited but not exercised by any fixture? Those are research gaps.
 
-Confirm the output ends with `=== Summary === passed: N  failed: M`. If it dies silently before that line, the most likely cause is a `grep` command returning exit code 1 (no matches) under `pipefail`. The script uses `|| true` guards on all grep invocations, but if bash is bailing earlier check for unbound variables or syntax errors.
+---
 
-**Claim 2 (test suite passes) is not in falsify.sh.** Running the full `cargo test` suite every cycle would take 2-5 minutes and is already done by snapshot.sh. The falsify.sh omits it and relies on snapshot output + CI for full test coverage. If you want it in the falsification loop, add a targeted run like `cargo test --lib` (fast) rather than the full suite.
+## What could be wrong
 
-**Branch protection not verified.** I couldn't check whether the default branch on GitHub has protection rules (require PR reviews, restrict direct push). For autonomous operation, branch protection on `main` is important. Check repo settings and enable "Require a pull request before merging" if not already set.
+**Stakeholder I may have undersold:** The project has a GitHub Actions e2e job that requires Ubuntu + qemu + ARM64 cross toolchain. If lathe is running on macOS, the e2e tests won't pass locally — the agent needs to know this or it will confuse local test failures with actual bugs. I've documented this in `skills/testing.md`.
 
-**Repo visibility not confirmed.** The README doesn't state whether the repo is public or private. If it's public (`libliflin/galvanic`), external contributors can file issues and PRs with injected text. The lathe engine only consumes structured data from GitHub (status codes, PR numbers), not free-text fields, so injection risk is low — but worth knowing.
+**C2 (Span == 8 bytes):** I found the `size_of::<Span>()` claim in `ast.rs` prose and CI references `lexer::tests::span_is_eight_bytes` — but I couldn't verify whether that test exists. `falsify.sh` tries the named test, falls back to a grep, and produces a "consider adding one" note. If the test doesn't exist yet, C2 will pass weakly — the agent will know to add the test.
 
-**The e2e test (Claim 5) requires the build to succeed first.** `cargo test --test e2e -- --exact runtime_add_emits_add_instruction` will fail if `cargo build` failed first. The falsify.sh runs build first and stops if it fails, so this ordering is correct — but note that the $FAIL count could cascade if build fails.
+**C6 (milestone_1 pipeline):** I couldn't run the binary to verify. If the `target/debug/galvanic` binary isn't present when falsify.sh runs (e.g., on a fresh checkout before C3 runs), C6 will fail. The script checks for the binary after the build step, so a failed build naturally cascades to a C6 failure with the right error message.
 
-**Milestones 102, 107, 128, 141, 146, 158, 171-173, 175-179, 191 are skipped.** The e2e.rs milestone numbering has gaps. This is normal — milestone numbers were retired or reassigned. It's not a bug to investigate.
+**The e2e test file is 1.1MB:** I couldn't read it. I don't know exactly what it covers. The agent will encounter it when the snapshot runs `cargo test` — if e2e tests fail, they'll surface there. The skills/testing.md documents the pattern so the agent can write new e2e tests correctly.
 
-**The "Sunday contributor" claim is aspirational.** I couldn't find a `CONTRIBUTING.md` or a clear "what's next" document. The Sunday contributor's journey depends on being able to find the next uncovered FLS section. The agent could improve this by adding a brief "where we are / what's next" section to the README, but that's a future cycle.
+**Repo security for autonomous operation:** The repo is public (`libliflin/galvanic` on GitHub based on the README). Public repos have higher prompt-injection risk from issue/PR spam. The CI workflow uses `pull_request` trigger (not `pull_request_target`), which is safe — untrusted code doesn't get write permissions. The `audit` job uses `permissions: contents: read` at the top level. The default branch protection status is unknown — if you haven't enabled required PR reviews on `main`, consider it.

@@ -1,25 +1,27 @@
-`falsify.sh` needs to be made executable before the engine can use it. Two things to do before starting cycles:
+I need you to run one command to make `falsify.sh` executable — I don't have permission to run chmod in this session:
 
-```bash
-cd /Users/williamlaffin/code/galvanic
-chmod +x .lathe/falsify.sh
-bash .lathe/falsify.sh
+```
+chmod +x /Users/williamlaffin/code/galvanic/.lathe/falsify.sh
 ```
 
-Confirm the last line of output is `=== Summary === passed: N  failed: M`. If it dies before that, check the alignment summary's "What Could Be Wrong" section.
+Then verify it runs to completion (the last line should print `=== Summary ===`):
 
-Here's what was written and why:
+```
+cd /Users/williamlaffin/code/galvanic && bash .lathe/falsify.sh
+```
 
 ---
 
-**`.lathe/agent.md`** — The runtime agent's brain. Four stakeholders: William as FLS conformance researcher, William as cache researcher, the Sunday contributor, and the CI infrastructure. Two real tensions: parser coverage vs. codegen coverage (codegen wins), FLS fidelity vs. convenience (fidelity always wins). No numbered priority ladder — the falsification suite is the floor, then stakeholder impact above it.
+Here's what was written:
 
-**`.lathe/skills/architecture.md`** — The pipeline, the flat-register ABI (critical for understanding struct/closure/vtable codegen), the IR design, and a precise description of the three testing layers.
+**`.lathe/agent.md`** — The runtime agent. Three real stakeholders: the spec investigator (FLS citation fidelity), the cache-line codegen researcher (enforced layout budgets), and the FLS contributor (clean patterns + passing tests). Each has a named load-bearing claim. Tensions are documented honestly — fidelity beats coverage, forever.
 
-**`.lathe/skills/testing.md`** — How the three test layers differ and when to use each. The most important non-obvious thing: assembly inspection tests (`compile_to_asm`) must accompany every new arithmetic/branch feature — exit codes alone can't distinguish "compiled correctly" from "constant-folded."
+**`.lathe/claims.md`** — Seven claims, each named and stakeholder-tagged: Token==8 bytes, Span==8 bytes, build succeeds, tests pass, no unsafe in library, milestone_1 full pipeline, FLS citations present in every source module.
 
-**`.lathe/claims.md`** — Six claims. The most important: Claim 5 (runtime instruction emission) is the proxy for FLS §6.1.2:37–45, the heart of the conformance research question. Claim 3 (Token is 8 bytes) is the only structural cache-line claim that's currently enforced.
+**`.lathe/falsify.sh`** — Runs all seven claims in order, prints per-claim ok/FAIL, ends with `=== Summary === passed: N failed: M`. Uses `|| true` throughout any grep-in-pipeline to avoid `set -uo pipefail` killing it on a legitimate no-match.
 
-**`.lathe/falsify.sh`** — Claim 4 (no unsafe) via grep, Claim 1 (build/clippy) via cargo, Claim 3 (token size) via one `--lib` test, Claim 5 (runtime codegen) via one `--test e2e` assembly inspection, Claim 6 (adversarial CLI) via constructed inputs. Skips Claim 2 (full test suite) since snapshot.sh already runs it and it would double the cycle time.
+**`.lathe/skills/architecture.md`** — Pipeline diagram, FLS traceability convention (inline citations, `AMBIGUOUS:` / `NOTE:` tags), cache-line enforcement scope, IR growth pattern, test layer summary.
 
-**`.lathe/alignment-summary.md`** — Honest about the fact that falsify.sh couldn't be verified to run to completion due to sandbox restrictions, and lists branch protection + repo visibility as unverified.
+**`.lathe/skills/testing.md`** — All four test layers with copy-pasteable patterns, fixture naming convention, adversarial fixture guidance, and the critical "don't test only literals" rule.
+
+**`.lathe/alignment-summary.md`** — Plain-English brief for you. Includes: the one weak claim (C2/Span test may not exist), the macOS/qemu local-vs-CI split, the 1.1MB e2e file I couldn't read, and the repo security observation (public repo, `pull_request` trigger is safe, branch protection unknown).
