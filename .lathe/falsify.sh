@@ -250,6 +250,33 @@ fn main() -> i32 { named_block_compute(4) }'
         claim_fail "4i named block runtime break value" \
             "no 'add' for named block break value 'n + 1' — named block may be constant-folded (violates FLS §6.4.3)"
     fi
+
+    # 4j: match expression with range-pattern arms on a runtime parameter must
+    # emit comparison instructions — not be constant-folded to the matched arm's
+    # value based on the call site.
+    #
+    # A broken optimizer seeing `grade(85)` might emit `mov x0, #3` (the result
+    # for 85 in the 80..=89 arm) without emitting any `cmp`. That would be wrong
+    # whenever `grade` is called with a different value, and constitutes
+    # constant-folding a non-const function. Range-pattern match arms require
+    # runtime boundary comparisons (`cmp` + conditional branches) that cannot be
+    # eliminated unless the scrutinee value is statically known.
+    # (FLS §6.18: match expressions; §5.1.9: range patterns;
+    #  fls-constraints.md Constraint 1: non-const code must not be folded.)
+    SRC_4J='fn grade(score: i32) -> i32 {
+    match score {
+        90..=100 => 4,
+        80..=89 => 3,
+        _ => 1,
+    }
+}
+fn main() -> i32 { grade(85) }'
+    if check_asm_contains "$SRC_4J" '\bcmp\b'; then
+        claim_ok "match with range-pattern arms on runtime param emits 'cmp' (not constant-folded — FLS §6.18)"
+    else
+        claim_fail "4j match expression runtime comparison" \
+            "no 'cmp' for 'match score { 90..=100 => 4, ... }' — match may be constant-folded (violates FLS §6.18)"
+    fi
 fi
 
 # ── Claim 5: adversarial inputs exit cleanly ─────────────────────────────────
