@@ -688,4 +688,65 @@ that return mutable references) are not supported at this milestone.
 
 ---
 
-*Last updated: 2026-04-11. Source annotation count at time of writing: ~155 `AMBIGUOUS` markers across 6 source files. Covers all sections with 2+ annotations; sections with 1 annotation (§6.6.1, §6.3.2) are also included where the gap is architecturally significant.*
+## §13 — Trait Definition Order and Default Method Bodies
+
+**Two gaps:**
+
+1. **Definition order:** The FLS does not specify whether a trait must be
+   defined before its implementations within a crate. Standard Rust requires
+   the trait to be defined first for type-checking, but the FLS is silent on
+   ordering. Galvanic does not type-check at this milestone; traits and impls
+   can appear in any order in the source file.
+
+2. **Default method bodies:** The FLS allows trait methods to have default
+   bodies (`fn foo(&self) -> i32 { 0 }`). The spec does not specify whether
+   an impl that omits the method silently inherits the default, or whether
+   some declaration is required. Galvanic resolves method calls to the
+   concrete impl's body if present, otherwise falls back to the trait's
+   default body — but the spec's resolution algorithm is not defined.
+
+**Source:** `src/ast.rs:437`, `src/parser.rs:695`
+
+---
+
+## §14 — Visibility and Name Resolution
+
+**Gap:** The FLS does not specify whether visibility modifiers on struct
+definitions (`pub struct`) and on individual struct fields interact with
+name resolution in a well-defined way across all contexts. For example,
+the spec does not state what happens when a `pub(crate)` struct has private
+fields accessed from a different module. Galvanic records visibility
+annotations in the AST but defers enforcement to a future name-resolution
+phase; all fields are currently accessible regardless of visibility.
+
+**Source:** `src/ast.rs:576`, `src/ast.rs:661`
+
+---
+
+## §19 — Unsafety Enforcement Mechanism
+
+**Three distinct gaps:**
+
+1. **`unsafe fn` call enforcement:** The FLS requires that callers of `unsafe fn`
+   use an unsafe context (an `unsafe { }` block or another `unsafe fn`). The
+   spec does not specify the compiler mechanism for verifying this. Galvanic
+   records the `is_unsafe` qualifier but defers call-site enforcement — no
+   check is performed at this milestone.
+
+2. **`unsafe impl` pairing:** The FLS states `unsafe impl` signals that the
+   implementor satisfies the safety invariants of an unsafe trait, but does
+   not specify how a compiler verifies that `unsafe impl Foo for Bar` only
+   appears when `Foo` is declared `unsafe trait`. Galvanic parses both but
+   does not verify the pairing.
+
+3. **`unsafe trait` contract:** The spec defines an unsafe trait as one whose
+   implementations may only be done via `unsafe impl`, but the enforcement
+   mechanism is left to the implementation. Galvanic records `is_unsafe` on
+   the `TraitDef` node and defers enforcement.
+
+**Source:** `src/ast.rs:266`, `src/ast.rs:388`, `src/ast.rs:442`,
+`src/parser.rs:229`, `src/parser.rs:243`, `src/parser.rs:255`
+
+---
+
+*Last updated: 2026-04-11. Source annotation count at time of writing: ~155 `AMBIGUOUS` markers across 6 source files. Covers all sections with annotations; three previously missing sections (§13, §14, §19) added in this revision.*
