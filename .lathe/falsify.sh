@@ -277,6 +277,35 @@ fn main() -> i32 { grade(85) }'
         claim_fail "4j match expression runtime comparison" \
             "no 'cmp' for 'match score { 90..=100 => 4, ... }' — match may be constant-folded (violates FLS §6.18)"
     fi
+
+    # 4k: while-let with a range pattern on a runtime scrutinee must emit
+    # comparison instructions — not be constant-folded to the loop result
+    # for the specific call-site argument.
+    #
+    # `while let` (FLS §6.15.4) is a distinct lowering path from `while`
+    # (claim 4c guards `while x < n`). A broken optimizer seeing
+    # `count_down(5)` might emit `mov x0, #4` without any `cmp` — treating
+    # the loop as an interpreter over the call-site value. The range check
+    # `1..=100` on the runtime variable `x` requires two boundary comparisons
+    # at runtime that cannot be eliminated without knowing `x` statically.
+    # (FLS §6.15.4: while-let expressions; §5.1.9: range patterns;
+    #  fls-constraints.md Constraint 1: non-const code must not be folded.)
+    SRC_4K='fn count_down(n: i32) -> i32 {
+    let mut x = n;
+    let mut steps = 0;
+    while let 1..=100 = x {
+        steps += 1;
+        x -= 1;
+    }
+    steps
+}
+fn main() -> i32 { count_down(5) }'
+    if check_asm_contains "$SRC_4K" '\bcmp\b'; then
+        claim_ok "while-let with range pattern on runtime scrutinee emits 'cmp' (not constant-folded — FLS §6.15.4)"
+    else
+        claim_fail "4k while-let runtime comparison" \
+            "no 'cmp' for 'while let 1..=100 = x' on runtime param — while-let may be constant-folded (violates FLS §6.15.4)"
+    fi
 fi
 
 # ── Claim 5: adversarial inputs exit cleanly ─────────────────────────────────

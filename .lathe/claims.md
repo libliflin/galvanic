@@ -155,6 +155,43 @@ Must emit at least one `cmp` instruction (for the range boundary checks). If the
 
 ---
 
+## Claim 4k: while-let with range pattern on runtime scrutinee emits comparison instructions
+
+**Stakeholder**: William (FLS §6.15.4 compliance; research conclusions depend on correct while-let codegen)
+**Type**: Behavioral — structural check on emitted assembly
+
+When galvanic compiles a `while let` expression whose scrutinee is a runtime-valued variable and whose pattern is a range (`1..=100`), it must emit runtime comparison instructions (e.g., `cmp`, `cbz`) — not constant-fold the loop body for the call site's specific value.
+
+`while let` (FLS §6.15.4) is a distinct lowering path from `while` (FLS §6.15.3). Claim 4c guards `while x < n`; this claim guards `while let RANGE_PATTERN = x`. Both are while-loop forms; both must emit runtime branches.
+
+A broken optimizer seeing `count_down(5)` might emit `mov x0, #4` (the correct result for 5 steps) without emitting any `cmp` — it would be interpreting the while-let body, not compiling it.
+
+This claim is complementary to:
+- **4c** (`while x < n`): regular while loop with parameter bound
+- **4h** (if-else): branch instructions for conditionals
+- **4j** (match): comparison for range-pattern match arms
+
+**Falsification case**:
+```rust
+fn count_down(n: i32) -> i32 {
+    let mut x = n;
+    let mut steps = 0;
+    while let 1..=100 = x {
+        steps += 1;
+        x -= 1;
+    }
+    steps
+}
+fn main() -> i32 { count_down(5) }
+```
+Must emit at least one `cmp` instruction (for the `1..=100` range check on `x`). If the compiler emits only `mov x0, #4` (the correct result for `count_down(5)`), it is constant-folding a non-const function — violating fls-constraints.md Constraint 1.
+
+**Falsification check**: Build galvanic, compile the case above, inspect the `.s` file for `cmp`.
+
+**Lifecycle**: Permanent. `while let` lowering is a distinct path from `while` and must be defended independently.
+
+---
+
 ## Retired Claims
 
 *(none yet)*
