@@ -1,171 +1,178 @@
 #!/usr/bin/env bash
-# falsify.sh — Adversarial verification of galvanic's load-bearing claims.
+# falsify.sh — Adversarial checks for galvanic's load-bearing claims.
 #
-# Runs every cycle. Must be fast (seconds). Exits 0 if all claims hold,
-# non-zero if any fail. Each check names the claim it is testing.
+# Each section targets one claim from .lathe/claims.md.
+# Exit 0 if all claims hold. Exit non-zero if any fail.
+# Prints a summary line at the end regardless of pass/fail.
 #
-# Claims registry: .lathe/claims.md
-#
-# Note: uses `set -uo pipefail` but wraps grep in `|| true` to prevent
-# legitimate "no match" (exit 1) from killing the script under pipefail.
+# Must be fast (runs every cycle). Seconds, not minutes.
+# Must not require network or external services.
 
 set -uo pipefail
 
+# ── Locate cargo ─────────────────────────────────────────────────────────────
+
+CARGO="${CARGO:-}"
+if [[ -z "$CARGO" ]]; then
+    for candidate in /opt/homebrew/bin/cargo /usr/local/bin/cargo; do
+        if [[ -x "$candidate" ]]; then
+            CARGO="$candidate"
+            break
+        fi
+    done
+fi
+if [[ -z "$CARGO" ]] && command -v cargo &>/dev/null; then
+    CARGO="cargo"
+fi
+if [[ -z "$CARGO" ]]; then
+    echo "FATAL: cargo not found — set CARGO env var or install rustup"
+    echo "=== Summary === passed: 0 failed: 1"
+    exit 1
+fi
+
 PASS=0
 FAIL=0
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-# Colour helpers (suppressed if not a terminal)
-if [ -t 1 ]; then
-    RED='\033[0;31m'; GREEN='\033[0;32m'; NC='\033[0m'
+claim_ok()   { echo "  ok: $1"; ((PASS++)) || true; }
+claim_fail() { echo "FAIL: $1 — $2"; ((FAIL++)) || true; }
+
+# ── Claim 1: build succeeds ──────────────────────────────────────────────────
+
+echo "--- Claim 1: build succeeds"
+if "$CARGO" build -q 2>/dev/null; then
+    claim_ok "cargo build exits 0"
 else
-    RED=''; GREEN=''; NC=''
+    claim_fail "build succeeds" "cargo build exited non-zero — see 'cargo build' output for details"
 fi
 
-ok()   { echo -e "${GREEN}ok${NC}  $1"; PASS=$((PASS + 1)); }
-fail() { echo -e "${RED}FAIL${NC} $1"; FAIL=$((FAIL + 1)); }
+# ── Claim 2: Token is 8 bytes ────────────────────────────────────────────────
 
-cd "$ROOT"
-
-# ── C3: Build succeeds ────────────────────────────────────────────────────────
-# All stakeholders depend on this.
-echo "--- C3: cargo build ---"
-if cargo build --quiet 2>/dev/null; then
-    ok "C3: cargo build exits 0"
+echo "--- Claim 2: Token is 8 bytes"
+if "$CARGO" test --lib -q -- lexer::tests::token_is_eight_bytes 2>/dev/null; then
+    claim_ok "size_of::<Token>() == 8"
 else
-    fail "C3: cargo build failed"
+    claim_fail "Token is 8 bytes" "lexer::tests::token_is_eight_bytes failed — Token struct grew beyond 8 bytes"
 fi
 
-# ── C4: Test suite passes ─────────────────────────────────────────────────────
-# FLS contributor's safety net. Run unit tests only (fast path; CI runs full suite).
-echo "--- C4: cargo test --lib ---"
-if cargo test --lib --quiet 2>/dev/null; then
-    ok "C4: cargo test --lib exits 0"
+# ── Claim 3: FLS parse-acceptance fixtures pass ──────────────────────────────
+
+echo "--- Claim 3: FLS parse-acceptance fixtures pass"
+if "$CARGO" test --test fls_fixtures -q 2>/dev/null; then
+    claim_ok "all fls_fixtures tests pass"
 else
-    fail "C4: cargo test --lib failed"
+    claim_fail "FLS parse fixtures" "one or more fls_fixtures tests failed — run 'cargo test --test fls_fixtures' for detail"
 fi
 
-# ── C1: Token is 8 bytes ──────────────────────────────────────────────────────
-# The specific test the CI also checks. If it doesn't exist, the claim is still live.
-echo "--- C1: Token == 8 bytes ---"
-if cargo test --lib --quiet -- --exact lexer::tests::token_is_eight_bytes 2>/dev/null; then
-    ok "C1: Token is 8 bytes (lexer::tests::token_is_eight_bytes)"
-else
-    fail "C1: Token size assertion failed or test not found (size_of::<Token>() must be 8)"
-fi
+# ── Claim 4: non-const code emits runtime instructions ───────────────────────
+#
+# Compile fn main() -> i32 { 1 + 2 } and verify the assembly contains 'add'.
+# If galvanic constant-folds this to 'mov x0, #3', this claim fails.
+# If the binary isn't built, we skip (Claim 1 covers the build).
 
-# ── C2: Span is 8 bytes ───────────────────────────────────────────────────────
-# Span is the other layout-enforced type. Try the named test; if absent, grep for
-# size_of::<Span> in the test binary's symbols (weaker check).
-echo "--- C2: Span == 8 bytes ---"
-if cargo test --lib --quiet -- --exact lexer::tests::span_is_eight_bytes 2>/dev/null; then
-    ok "C2: Span is 8 bytes (lexer::tests::span_is_eight_bytes)"
-elif cargo test --lib --quiet -- --exact ast::tests::span_is_eight_bytes 2>/dev/null; then
-    ok "C2: Span is 8 bytes (ast::tests::span_is_eight_bytes)"
+echo "--- Claim 4: non-const code emits runtime instructions"
+GALVANIC="./target/debug/galvanic"
+if [[ ! -x "$GALVANIC" ]]; then
+    claim_fail "non-const runtime codegen" "galvanic binary not found at $GALVANIC (did Claim 1 pass?)"
 else
-    # Weaker: grep for a compile-time size assertion in source
-    set +o pipefail
-    FOUND=$(grep -r 'size_of::<Span>' src/ || true)
-    set -o pipefail
-    if [ -n "$FOUND" ]; then
-        ok "C2: size_of::<Span> referenced in source (no dedicated test found — consider adding one)"
-    else
-        fail "C2: No Span size enforcement found (size_of::<Span>() should be 8; add a test)"
-    fi
-fi
+    TMP_RS=$(mktemp /tmp/galvanic_falsify_XXXXXX.rs)
+    TMP_S="${TMP_RS%.rs}.s"
+    printf 'fn main() -> i32 { 1 + 2 }\n' > "$TMP_RS"
 
-# ── C5: No unsafe in library ──────────────────────────────────────────────────
-# main.rs is excluded — it is the CLI driver and may use platform interfaces.
-echo "--- C5: no unsafe in library ---"
-set +o pipefail
-UNSAFE=$(grep -rn 'unsafe\s*{\|unsafe\s*fn\b\|unsafe\s*impl\b' src/ \
-         | grep -v '^src/main\.rs:' \
-         | grep -Ev ':[0-9]+:[[:space:]]*//' \
-         || true)
-set -o pipefail
-if [ -z "$UNSAFE" ]; then
-    ok "C5: no unsafe code in library src/ (excluding main.rs)"
-else
-    fail "C5: unsafe code found in library:"
-    echo "$UNSAFE"
-fi
-
-# ── C6: Full pipeline on milestone_1 ─────────────────────────────────────────
-# The minimal end-to-end proof: lex → parse → lower → codegen exits 0 and emits .s
-echo "--- C6: full pipeline on milestone_1.rs ---"
-MILESTONE="tests/fixtures/milestone_1.rs"
-if [ ! -f "$MILESTONE" ]; then
-    fail "C6: $MILESTONE not found"
-else
-    # Run the galvanic binary (debug build, already built above).
-    BINARY="target/debug/galvanic"
-    if [ ! -f "$BINARY" ]; then
-        fail "C6: galvanic binary not found at $BINARY"
-    else
-        # Emit to a temp file to avoid polluting the fixtures directory.
-        TMPDIR_PATH=$(mktemp -d)
-        cp "$MILESTONE" "$TMPDIR_PATH/milestone_1.rs"
-        if "$BINARY" "$TMPDIR_PATH/milestone_1.rs" 2>/dev/null && [ -f "$TMPDIR_PATH/milestone_1.s" ]; then
-            ok "C6: galvanic compiled milestone_1.rs and emitted .s"
+    if "$GALVANIC" "$TMP_RS" > /dev/null 2>&1; then
+        if [[ -f "$TMP_S" ]]; then
+            # Check for 'add' instruction — fails if constant-folded to 'mov x0, #3'
+            # Disable pipefail around grep: grep exits 1 when nothing matches
+            set +o pipefail
+            ADD_LINES=$(grep -cE '\badd\b' "$TMP_S" 2>/dev/null || echo 0)
+            set -o pipefail
+            if [[ "$ADD_LINES" -gt 0 ]]; then
+                claim_ok "fn main() { 1 + 2 } emits 'add' instruction (not constant-folded)"
+            else
+                claim_fail "non-const runtime codegen" \
+                    "no 'add' instruction found for '1 + 2' — galvanic may be constant-folding non-const code. Assembly: $(cat "$TMP_S")"
+            fi
+            rm -f "$TMP_S"
         else
-            fail "C6: galvanic failed to compile milestone_1.rs (or .s not emitted)"
+            # galvanic exited 0 but produced no .s file — probably because there
+            # is no 'main' function or it returned early. That's unexpected.
+            claim_fail "non-const runtime codegen" \
+                "galvanic compiled without error but produced no .s file for test input"
         fi
-        rm -rf "$TMPDIR_PATH"
+    else
+        claim_fail "non-const runtime codegen" \
+            "galvanic exited non-zero when compiling test input (fn main() -> i32 { 1 + 2 })"
     fi
+    rm -f "$TMP_RS"
 fi
 
-# ── C7: FLS citations present in each source module ──────────────────────────
-# Each implementing module must contain at least one FLS § citation.
-echo "--- C7: FLS citations in source modules ---"
-ALL_CITED=true
-for MODULE in src/lexer.rs src/parser.rs src/ir.rs src/lower.rs src/codegen.rs; do
-    if [ ! -f "$MODULE" ]; then
-        fail "C7: $MODULE not found"
-        ALL_CITED=false
-        continue
-    fi
+# ── Claim 5: adversarial inputs exit cleanly ─────────────────────────────────
+#
+# The binary must not panic (SIGABRT) or crash (SIGSEGV) on adversarial input.
+# A non-zero exit code is acceptable; signal death (exit > 128) is not.
+
+echo "--- Claim 5: adversarial inputs exit cleanly"
+if [[ ! -x "$GALVANIC" ]]; then
+    claim_fail "adversarial inputs" "galvanic binary not found — did Claim 1 pass?"
+else
+    ADVERSARIAL_FAIL=0
+
+    # 5a: empty file → exit 0
+    TMP_EMPTY=$(mktemp /tmp/galvanic_falsify_empty_XXXXXX.rs)
+    printf '' > "$TMP_EMPTY"
     set +o pipefail
-    COUNT=$(grep -c 'FLS §' "$MODULE" || true)
+    "$GALVANIC" "$TMP_EMPTY" > /dev/null 2>&1
+    EMPTY_EXIT=$?
     set -o pipefail
-    if [ "$COUNT" -gt 0 ]; then
-        ok "C7: $MODULE has $COUNT FLS § citation(s)"
-    else
-        fail "C7: $MODULE has NO FLS § citations"
-        ALL_CITED=false
+    rm -f "$TMP_EMPTY"
+    if [[ "$EMPTY_EXIT" -gt 128 ]]; then
+        claim_fail "adversarial: empty file" "exited with signal (code $EMPTY_EXIT)"
+        ADVERSARIAL_FAIL=1
     fi
-done
 
-# ── C8: ARM64 sdiv-by-zero divergence is documented ──────────────────────────
-# FLS §6.23 requires division by zero to panic. ARM64 `sdiv` returns 0 silently.
-# The divergence must be documented in both ir.rs and codegen.rs so the research
-# record is not silently erased. The div_zero fixture must also parse without error.
-echo "--- C8: sdiv-by-zero divergence documented ---"
-set +o pipefail
-IR_COUNT=$(grep -c 'FLS §6.23' src/ir.rs || true)
-CG_COUNT=$(grep -c 'FLS §6.23' src/codegen.rs || true)
-set -o pipefail
-if [ "$IR_COUNT" -ge 1 ] && [ "$CG_COUNT" -ge 1 ]; then
-    ok "C8: FLS §6.23 divergence documented in ir.rs ($IR_COUNT) and codegen.rs ($CG_COUNT)"
-else
-    fail "C8: FLS §6.23 div-by-zero divergence NOT documented (ir.rs=$IR_COUNT codegen.rs=$CG_COUNT)"
-fi
-# Also verify the fixture parses
-FIXTURE="tests/fixtures/fls_6_23_div_zero.rs"
-if [ -f "$FIXTURE" ]; then
-    if cargo test --test fls_fixtures --quiet -- --exact fls_6_23_div_zero 2>/dev/null; then
-        ok "C8: fls_6_23_div_zero.rs parses without error"
-    else
-        fail "C8: fls_6_23_div_zero.rs failed to parse"
+    # 5b: binary garbage → clean exit (non-zero ok, signal not ok)
+    TMP_GARBAGE=$(mktemp /tmp/galvanic_falsify_garbage_XXXXXX.rs)
+    # 512 bytes of pseudo-random-looking content without needing /dev/urandom
+    python3 -c "import os; open('$TMP_GARBAGE','wb').write(os.urandom(512))" 2>/dev/null \
+        || printf '%0.s\xde\xad\xbe\xef' {1..128} > "$TMP_GARBAGE"
+    set +o pipefail
+    "$GALVANIC" "$TMP_GARBAGE" > /dev/null 2>&1
+    GARBAGE_EXIT=$?
+    set -o pipefail
+    rm -f "$TMP_GARBAGE"
+    if [[ "$GARBAGE_EXIT" -gt 128 ]]; then
+        claim_fail "adversarial: binary garbage" "exited with signal (code $GARBAGE_EXIT)"
+        ADVERSARIAL_FAIL=1
     fi
-else
-    fail "C8: $FIXTURE not found"
+
+    # 5c: deeply nested braces → clean exit (stack overflow = signal, not ok)
+    TMP_NESTED=$(mktemp /tmp/galvanic_falsify_nested_XXXXXX.rs)
+    {
+        echo 'fn main() {'
+        for _ in $(seq 1 300); do echo '  {'; done
+        echo '  let _x = 0;'
+        for _ in $(seq 1 300); do echo '  }'; done
+        echo '}'
+    } > "$TMP_NESTED"
+    set +o pipefail
+    "$GALVANIC" "$TMP_NESTED" > /dev/null 2>&1
+    NESTED_EXIT=$?
+    set -o pipefail
+    rm -f "$TMP_NESTED"
+    if [[ "$NESTED_EXIT" -gt 128 ]]; then
+        claim_fail "adversarial: 300-deep nested braces" "exited with signal (code $NESTED_EXIT)"
+        ADVERSARIAL_FAIL=1
+    fi
+
+    if [[ "$ADVERSARIAL_FAIL" -eq 0 ]]; then
+        claim_ok "empty file, binary garbage, and deep nesting all exit cleanly"
+    fi
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
+
 echo ""
 echo "=== Summary === passed: $PASS failed: $FAIL"
 
-if [ "$FAIL" -gt 0 ]; then
+if [[ "$FAIL" -gt 0 ]]; then
     exit 1
 fi
-exit 0

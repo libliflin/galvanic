@@ -1,27 +1,23 @@
-I need you to run one command to make `falsify.sh` executable — I don't have permission to run chmod in this session:
+All five files are written. One thing to do before starting cycles:
 
-```
-chmod +x /Users/williamlaffin/code/galvanic/.lathe/falsify.sh
+```bash
+chmod +x .lathe/falsify.sh
 ```
 
-Then verify it runs to completion (the last line should print `=== Summary ===`):
-
-```
-cd /Users/williamlaffin/code/galvanic && bash .lathe/falsify.sh
-```
+The sandbox blocked `chmod` during init — that's the only manual step needed.
 
 ---
 
-Here's what was written:
+Here's what was produced and the key decisions:
 
-**`.lathe/agent.md`** — The runtime agent. Three real stakeholders: the spec investigator (FLS citation fidelity), the cache-line codegen researcher (enforced layout budgets), and the FLS contributor (clean patterns + passing tests). Each has a named load-bearing claim. Tensions are documented honestly — fidelity beats coverage, forever.
+**`agent.md`** — Three stakeholders: William (the researcher), future contributors, and the FLS itself as a test subject. The FLS Notes section is mandatory in every changelog — that's the primary deliverable. The agent ranks by falsification floor first, then FLS-section depth over breadth at the current project stage.
 
-**`.lathe/claims.md`** — Seven claims, each named and stakeholder-tagged: Token==8 bytes, Span==8 bytes, build succeeds, tests pass, no unsafe in library, milestone_1 full pipeline, FLS citations present in every source module.
+**`skills/testing.md`** — Documents the three-layer test structure: parse-acceptance (`fls_fixtures.rs`), assembly-inspection (`compile_to_asm` in `e2e.rs`, runs everywhere including macOS), and runtime-execution tests (Linux + cross-tools only). The const-vs-runtime litmus test is explained.
 
-**`.lathe/falsify.sh`** — Runs all seven claims in order, prints per-claim ok/FAIL, ends with `=== Summary === passed: N failed: M`. Uses `|| true` throughout any grep-in-pipeline to avoid `set -uo pipefail` killing it on a legitimate no-match.
+**`skills/architecture.md`** — The pipeline, the IR growth model (add nothing until a concrete test requires it), and the invariants that must never break (no unsafe, no Command in library, Token=8 bytes, runtime-only lowering).
 
-**`.lathe/skills/architecture.md`** — Pipeline diagram, FLS traceability convention (inline citations, `AMBIGUOUS:` / `NOTE:` tags), cache-line enforcement scope, IR growth pattern, test layer summary.
+**`claims.md`** — Five claims: build, Token size, FLS parse suite, non-const runtime codegen, and adversarial robustness. Claim 4 is the critical one — it directly encodes the research constraint that galvanic must be a compiler, not an interpreter.
 
-**`.lathe/skills/testing.md`** — All four test layers with copy-pasteable patterns, fixture naming convention, adversarial fixture guidance, and the critical "don't test only literals" rule.
+**`falsify.sh`** — Checks all five claims. Claim 4 compiles `fn main() -> i32 { 1 + 2 }` and greps the emitted assembly for `add` instruction. Handles macOS cargo PATH via a search loop.
 
-**`.lathe/alignment-summary.md`** — Plain-English brief for you. Includes: the one weak claim (C2/Span test may not exist), the macOS/qemu local-vs-CI split, the 1.1MB e2e file I couldn't read, and the repo security observation (public repo, `pull_request` trigger is safe, branch protection unknown).
+**`alignment-summary.md`** — Written for you to read in 30 seconds. The "what could be wrong" section flags: the `chmod` issue, the `add` grep heuristic being simple, unverified branch protection, and the assumption that Claim 4's test program compiles cleanly.

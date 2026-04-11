@@ -1,113 +1,126 @@
-# Testing — How Galvanic Tests
+# Testing in Galvanic
 
-This file exists so the runtime agent can write tests that match the project's conventions rather than inventing new patterns. Read this before adding any test.
-
----
-
-## Test layers and when to use each
-
-### 1. Unit tests — `src/*.rs` inline `#[cfg(test)]`
-
-Used for: layout assertions, single-function correctness, edge cases that don't need the full pipeline.
-
-Current examples:
-- `lexer::tests::token_is_eight_bytes` — enforces `size_of::<Token>() == 8`
-
-Pattern:
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn token_is_eight_bytes() {
-        assert_eq!(std::mem::size_of::<Token>(), 8);
-    }
-}
-```
-
-When to add: when the claim is about a specific function or type that doesn't need a full pipeline run.
+This file answers: how does galvanic test? What are the layers, what are the conventions, and what should new tests look like?
 
 ---
 
-### 2. FLS fixture parse tests — `tests/fls_fixtures.rs`
+## Three test layers
 
-Used for: verifying galvanic can lex and parse a given Rust program without error. Does NOT test lowering or codegen.
+### 1. Parse-acceptance tests (`tests/fls_fixtures.rs`)
 
-Pattern (from the existing file):
+These tests verify that the lexer + parser accept a fixture file without error. They do NOT test lowering or codegen.
+
+**Pattern:**
 ```rust
-fn assert_galvanic_accepts(fixture: &str) {
-    let fixture_path = format!(
-        "{}/tests/fixtures/{fixture}",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    let source = std::fs::read_to_string(&fixture_path).unwrap();
-    let tokens = galvanic::lexer::tokenize(&source).unwrap();
-    galvanic::parser::parse(&tokens, &source).unwrap();
-}
-
 #[test]
-fn fls_6_expressions() {
-    assert_galvanic_accepts("fls_6_expressions.rs");
+fn fls_6_17_if_expressions() {
+    assert_galvanic_accepts("fls_6_17_if_expressions.rs");
 }
 ```
 
-**Fixture naming:** `fls_{section}_{topic}.rs` — e.g., `fls_8_1_let_else.rs` for FLS §8.1 let-else. Use the FLS section number, not a feature name.
+The `assert_galvanic_accepts` helper (defined at the top of `fls_fixtures.rs`) reads the fixture, runs the lexer, runs the parser, and panics on any error. It does not invoke `lower` or `codegen`.
 
-**Fixture file requirements:** 
-- Must be valid Rust that galvanic can parse (even if it can't lower or codegen it yet)
-- Must contain a comment citing the FLS sections it exercises
-- Must be self-contained (no `use std::*`, no imports galvanic doesn't support)
+**Fixture naming**: `fls_{section}_{name}.rs` — always derived from FLS section numbers. Never invent test programs — derive them from FLS examples. If the spec doesn't provide an example, note that in a comment at the top of the fixture.
 
-When to add: whenever a new FLS section is targeted. Add the fixture first, then the parse test, then (if lowering works) the e2e test.
+**When to add**: Every new parser feature gets a fixture. The fixture should exercise the grammar construct in isolation, plus one or two combinations with related constructs.
+
+**Location**: `tests/fixtures/` — all fixture files live here.
+
+### 2. Assembly-inspection tests (`tests/e2e.rs`, `compile_to_asm` helper)
+
+These tests run the full galvanic pipeline (lex → parse → lower → codegen) and inspect the emitted ARM64 assembly text — without assembling or linking.
+
+**The key helper:**
+```rust
+fn compile_to_asm(source: &str) -> String {
+    let tokens = galvanic::lexer::tokenize(source).expect("lex failed");
+    let sf = galvanic::parser::parse(&tokens, source).expect("parse failed");
+    let module = galvanic::lower::lower(&sf, source).expect("lower failed");
+    galvanic::codegen::emit_asm(&module).expect("codegen failed")
+}
+```
+
+**Why this matters**: A test that only checks the exit code cannot distinguish "compiled correctly" from "constant-folded at compile time." Assembly inspection closes that gap. For example:
+
+```rust
+let asm = compile_to_asm("fn main() -> i32 { 1 + 2 }\n");
+assert!(asm.contains("add"), "expected 'add' instruction for 1+2, got:\n{asm}");
+```
+
+This test works on any platform (including macOS). Use it whenever you want to verify that galvanic emits *specific instructions*, not just that the exit code is right.
+
+### 3. End-to-end run tests (`tests/e2e.rs`, `compile_and_run` helper)
+
+These tests assemble and execute the binary via QEMU. They only run on Linux with `aarch64-linux-gnu-as`, `aarch64-linux-gnu-ld`, and `qemu-aarch64` installed. The CI `e2e` job installs these. On macOS they are silently skipped via `tools_available()`.
+
+**When to add**: When the correct exit code provides additional confidence beyond what assembly inspection shows. Don't duplicate — if an assembly inspection test already covers a feature, an e2e test for the same feature is lower priority.
+
+### 4. CLI smoke tests (`tests/smoke.rs`)
+
+Tests the galvanic binary's command-line behavior: usage errors, missing files, empty files. These run everywhere. Use `env!("CARGO_BIN_EXE_galvanic")` to locate the binary.
+
+### 5. Unit tests (inline in `src/*.rs`)
+
+Structural invariants live here — mainly size assertions. The key existing test:
+
+```rust
+// src/lexer.rs
+#[test]
+fn token_is_eight_bytes() {
+    assert_eq!(std::mem::size_of::<Token>(), 8);
+}
+```
+
+Add `size_of` assertions whenever a new IR type or token type has a stated cache-line budget.
 
 ---
 
-### 3. E2E tests — `tests/e2e.rs`
+## What makes a good fixture
 
-Used for: full pipeline verification — lex → parse → lower → codegen → assemble → link → run with qemu.
+1. **Derived from the FLS, not invented.** Start with the FLS section's examples. Write the fixture as if it were a spec compliance test.
 
-The file is large (1.1MB). The pattern for compile-and-run tests:
-- Build the galvanic binary with `env!("CARGO_BIN_EXE_galvanic")`
-- Write a fixture to a temp file (or use `tests/fixtures/`)
-- Run galvanic to produce `.s` output
-- Assemble with `aarch64-linux-gnu-as`
-- Link with `aarch64-linux-gnu-ld`
-- Run with `qemu-aarch64` and check exit code
+2. **Covers the grammar, not the happy path.** A fixture for `§6.17` (if expressions) should include: bare `if`, `if-else`, `if-let`, nested `if-else`, `if` with a block body containing multiple statements, `if` as an expression in a larger expression. One example is not a fixture.
 
-E2E tests only run cleanly when the cross toolchain and qemu are present (Ubuntu CI). On macOS without the toolchain, compile-and-assemble may still work but link/run won't.
+3. **Has a comment header** citing the FLS section and explaining what it tests:
+```rust
+//! Fixture: FLS §6.17 — If and if-let expressions.
+//! Tests galvanic's parser acceptance of the various if-expression forms.
+//! Examples derived from FLS §6.17.
+```
 
-When to add: when a feature is fully implemented through codegen and produces an ARM64 binary. The fixture in `tests/fixtures/` should already have a `.s` file committed if it was previously emitted.
-
----
-
-### 4. Benchmarks — `benches/throughput.rs`
-
-Used for: regression guard on lexer and parser throughput.
-
-Pattern: criterion benchmarks using `black_box`, `Throughput::Bytes`, fixtures from `tests/fixtures/`.
-
-When to add: when adding a new fixture that represents a common pattern (not one-off). The existing stress fixtures (`stress_let_bindings(n)`) are good models for scale testing.
+4. **Is parseable but doesn't need to be lowerable.** Parse-acceptance fixtures may contain constructs (generics, traits, closures) that the lowering pass doesn't support yet. That's fine — note it.
 
 ---
 
-## Adversarial test fixtures
+## FLS-tracing convention in tests
 
-Galvanic's research purpose means adversarial inputs are first-class. Good adversarial fixtures:
+Every new test function should carry an inline comment citing the FLS section(s) it exercises. This is the same convention as production code. Example:
 
-- **Many let bindings** — 1000+ let bindings in a single function (exercises stack slot limits)
-- **Deeply nested blocks** — 500 levels of `{ let _x = 0;` (exercises parser recursion)
-- **Parameters + arithmetic** — `fn foo(a: i32, b: i32) -> i32 { a + b * 2 - 1 }` with non-literal inputs (verifies the "compiler not interpreter" constraint)
-- **Mixed type operations** — i32, u32, f64 in the same function
-- **Named struct with many fields** — a struct with 20 fields exercises struct codegen at scale
-
-When writing a new adversarial fixture, add a comment at the top explaining what it's testing and what the expected behavior is (e.g., "expects exit 0 and emits .s without error" vs. "expects a clean non-zero exit with an error message").
+```rust
+/// FLS §6.5.5: Addition operator. Verifies runtime instruction emission.
+#[test]
+fn add_emits_runtime_instruction() {
+    let asm = compile_to_asm("fn main() -> i32 { 1 + 2 }\n");
+    assert!(asm.contains("add"), "expected 'add' instruction");
+}
+```
 
 ---
 
-## What NOT to do
+## The const-vs-runtime litmus test (critical)
 
-- Do not add a test that only exercises the case where all inputs are literals (that's testing an interpreter behavior, not a compiler). Pair it with a test where inputs come from function parameters.
-- Do not add `#[ignore]` to a test unless it has a comment explaining exactly when the ignore should be removed.
-- Do not remove tests to make the suite pass — if a test is failing, that's information.
-- Do not add a fixture that `use`s crates galvanic doesn't support. All fixtures must be `no_std`-compatible or use only things galvanic's lexer/parser can handle.
+Any test that only checks an exit code can pass even if galvanic is constant-folding non-const code. Before writing or accepting a lowering test, ask:
+
+> Would this test still pass if `lower.rs` just evaluated the expression at compile time and emitted `mov x0, #<result>`?
+
+If yes, the test is insufficient. Add an assembly-inspection check that verifies specific runtime instructions are present. See `fls-constraints.md` (loaded as a ref) for full context on why this matters.
+
+---
+
+## Running tests locally on macOS
+
+- `cargo test` — runs everything except e2e tests that require cross tools (those silently skip)
+- `cargo test --lib` — unit tests only (fast, for structural invariants)
+- `cargo test --test fls_fixtures` — parse-acceptance tests only
+- `cargo test --test e2e` — assembly inspection + e2e tests (e2e runtime tests skip on macOS)
+- `cargo clippy -- -D warnings` — lint (required to pass before commit)

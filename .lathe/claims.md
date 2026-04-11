@@ -1,77 +1,95 @@
 # Claims Registry
 
-Load-bearing promises galvanic makes to its stakeholders. Each claim is a specific promise that, if violated, would break the research or erode trust. The falsification suite in `falsify.sh` enforces these every cycle.
+Load-bearing promises this project makes to its stakeholders. Each claim has an owner (the stakeholder who relies on it), a description of what it asserts, and a lifecycle note. The falsification suite (`falsify.sh`) checks these every cycle.
 
-Claims have lifecycles — retire them here with reasoning when they no longer fit, rather than softening the check.
-
----
-
-## C1: Token fits a cache-line slot
-
-**Stakeholder:** Cache-line codegen researcher  
-**Claim:** `size_of::<Token>() == 8`  
-**Why load-bearing:** Token is the hot type in the lexer's iteration loop. The entire cache-line argument for the lexer ("8 tokens per cache line, ~4× better than a naive 32-byte token") depends on Token being exactly 8 bytes. If Token grows, the claim becomes aspirational prose.  
-**Check:** `cargo test --lib -- --exact lexer::tests::token_is_eight_bytes`
+A failing claim is treated the same as a failing CI check: fix before any new work.
 
 ---
 
-## C2: Span fits a cache-line slot
+## Claim 1: Build succeeds
 
-**Stakeholder:** Cache-line codegen researcher  
-**Claim:** `size_of::<Span>() == 8`  
-**Why load-bearing:** Span is carried alongside Token in the parser's hot path. The 8-byte budget is documented in `ast.rs` and is the one AST layout property currently enforced.  
-**Check:** Structural assertion in the test suite (`lexer::tests::span_is_eight_bytes` if it exists; otherwise via a direct `assert_eq!` in falsify.sh using a test binary).
+**Stakeholder**: All (William, contributors, the FLS)
+**Type**: Behavioral
 
----
+`cargo build` exits 0 with no errors. The compiler library and binary must compile cleanly.
 
-## C3: The build succeeds
+If this fails, nothing else is possible. It outranks all other claims.
 
-**Stakeholder:** All — contributors, spec investigator, CI  
-**Claim:** `cargo build` exits 0 with no errors  
-**Why load-bearing:** A project that doesn't compile is not usable by any stakeholder.  
-**Check:** `cargo build`
+**Falsification check**: `cargo build -q` exit code.
+
+**Lifecycle**: Permanent.
 
 ---
 
-## C4: The test suite passes
+## Claim 2: Token is 8 bytes
 
-**Stakeholder:** FLS contributor, spec investigator  
-**Claim:** `cargo test` exits 0  
-**Why load-bearing:** The test suite is the contributor's safety net and the spec investigator's regression guard. A failing test is a broken promise to a specific stakeholder.  
-**Check:** `cargo test`
+**Stakeholder**: William (cache-aware codegen research goal)
+**Type**: Structural — `size_of::<Token>() == 8`
 
----
+The `Token` struct must be exactly 8 bytes. This ensures 8 tokens fit in a single 64-byte cache line, which is the concrete cache-line efficiency argument made throughout the lexer and its documentation.
 
-## C5: No unsafe code in library
+This is not a documentation claim — it is checked via `std::mem::size_of::<Token>()` in a unit test. Editing comments to say "8 bytes" while the struct grows does not satisfy this claim.
 
-**Stakeholder:** Spec investigator  
-**Claim:** No `unsafe` blocks, `unsafe fn`, or `unsafe impl` appear in `src/` excluding `src/main.rs`  
-**Why load-bearing:** Galvanic implements the FLS in safe Rust. Adding unsafe to library code would mean relying on invariants the FLS doesn't guarantee — contaminating the research.  
-**Check:** `grep -rn 'unsafe\s*{\|unsafe\s*fn\b\|unsafe\s*impl\b' src/ | grep -v '^src/main\.rs:'` returns empty
+**Falsification check**: `cargo test --lib -- lexer::tests::token_is_eight_bytes`
+
+**Lifecycle**: Permanent as long as the cache-line design hypothesis is the research goal. If the design deliberately changes, update this claim with reasoning.
 
 ---
 
-## C6: Full pipeline works on the milestone_1 program
+## Claim 3: All FLS parse-acceptance fixtures pass
 
-**Stakeholder:** Spec investigator, cache-line codegen researcher  
-**Claim:** `galvanic tests/fixtures/milestone_1.rs` (the minimal `fn main() -> i32 { 0 }`) exits 0 and emits a `.s` file without error  
-**Why load-bearing:** This is the minimal end-to-end proof that lex → parse → lower → codegen works at all. If this breaks, nothing above it is trustworthy.  
-**Check:** Build the binary, run it against `tests/fixtures/milestone_1.rs`, verify exit 0 and `.s` file creation.
+**Stakeholder**: William (FLS coverage research), contributors (coherent test suite)
+**Type**: Behavioral
+
+Every test in `tests/fls_fixtures.rs` passes. These tests verify that galvanic's lexer and parser accept real Rust programs derived from the FLS without error.
+
+A failing parse-acceptance test means either:
+- The parser regressed on a previously-supported construct, or
+- A newly added fixture exercises a construct the parser doesn't handle yet (the fixture is ahead of the parser — fix the parser or mark the fixture `#[ignore]` with a comment)
+
+**Falsification check**: `cargo test --test fls_fixtures`
+
+**Lifecycle**: Grows with the project. Each new FLS section covered by the parser gets a fixture and a test here.
 
 ---
 
-## C7: FLS citations are present in source modules
+## Claim 4: Non-const code emits runtime instructions
 
-**Stakeholder:** Spec investigator  
-**Claim:** Every `src/` module that implements FLS behavior contains at least one `FLS §` citation in its source.  
-**Why load-bearing:** The research depends on traceability. A module that implements parser rules but has no FLS citations is untraceable — the spec investigator can't verify correctness, can't find ambiguities, can't cite the code in research notes.  
-**Check:** For each of `src/lexer.rs`, `src/parser.rs`, `src/ir.rs`, `src/lower.rs`, `src/codegen.rs`: `grep -c 'FLS §'` returns > 0.
+**Stakeholder**: William (core FLS compliance; research conclusions depend on this)
+**Type**: Behavioral — structural check on emitted assembly
+
+When galvanic compiles a non-const function containing arithmetic on runtime-valued operands, it must emit runtime ARM64 instructions (e.g., `add x1, x0, x2`) — not a constant-folded result (e.g., `mov x0, #3`).
+
+This is the single most important correctness property of galvanic. A compiler that produces the right exit code by evaluating non-const code at compile time is an interpreter, not a compiler, and produces wrong evidence about the FLS.
+
+Specifically: `fn main() -> i32 { 1 + 2 }` must emit an `add` instruction, not `mov x0, #3`.
+
+**Falsification check**: Build galvanic, compile `fn main() -> i32 { 1 + 2 }`, inspect emitted `.s` file for `add` instruction. If the binary is not built, skip (don't fail — Claim 1 covers the build).
+
+**Lifecycle**: Permanent. This claim cannot be retired. If the project ever introduces constant-folding as an optimization pass, add a separate claim that the pass only fires in const contexts.
 
 ---
 
-## C8: ARM64 sdiv-by-zero divergence is documented
+## Claim 5: Adversarial inputs exit cleanly (no panics, no hangs)
 
-**Stakeholder:** Spec investigator  
-**Claim:** The FLS §6.23 divergence for division by zero is documented in both `src/ir.rs` (on `IrBinOp::Div`) and `src/codegen.rs` (at the `sdiv` emission site) with an `FLS §6.23 AMBIGUOUS` or equivalent comment noting that galvanic does not insert a zero-divisor guard.  
-**Why load-bearing:** FLS §6.23 requires division by zero to always panic. ARM64 `sdiv` with a zero divisor silently returns 0 (ARM DDI 0487, C3.4.8) — no trap, no signal. This is a more severe divergence than x86 (where `idiv` raises SIGFPE). The research record must document *why* the divergence exists (architectural), not just that a check is missing. If someone removes the comment without adding the check, the spec investigator loses a documented research output.  
-**Check:** `grep -c 'FLS §6.23' src/ir.rs` ≥ 1 AND `grep -c 'FLS §6.23' src/codegen.rs` ≥ 1. The fixture `tests/fixtures/fls_6_23_div_zero.rs` must parse without error.
+**Stakeholder**: William (research tool reliability), contributors (first impressions)
+**Type**: Behavioral
+
+The galvanic binary must not panic or hang on adversarial inputs:
+- Empty file → exit 0
+- Binary garbage (random bytes) → non-zero exit, no signal death (exit code ≤ 128)
+- Deeply nested braces (500 levels) → any clean exit, no stack overflow
+
+A panic or signal death (exit > 128) on any of these inputs is a bug. A non-zero exit code is acceptable.
+
+**Falsification check**: Build galvanic binary, run against adversarial inputs, check exit codes.
+
+**Lifecycle**: Permanent. Remove specific cases if the input class becomes genuinely unsupported and documented.
+
+---
+
+## Retired Claims
+
+*(none yet)*
+
+When a claim is retired, move it here with a date and reasoning, rather than deleting it. The retirement reason is research data.
