@@ -72,6 +72,10 @@ Four adversarial cases (from weakest to strongest, reflecting the litmus test in
 
 **4d** — recursive function call: a recursive `fib(n)` must emit `bl fib` instructions (runtime call to itself). If galvanic pre-computes `fib(5) == 5` at compile time and emits only `mov x0, #5`, the call is being interpreted. Recursive calls with a runtime parameter cannot be pre-computed. (FLS §6.12.1.)
 
+**4e** — capturing closure: a closure that captures a runtime variable (`let n = 5; let f = |x| x + n; f(3)`) must emit a hidden `__closure_*` function label in the assembly. If galvanic folds the closure call to `mov x0, #8`, it is interpreting closure application. (FLS §6.14, §6.22.)
+
+**4f** — method call dispatch: a method call on a struct (`w.get()`) must emit a `bl` instruction to the mangled method label at runtime. If galvanic inlines or pre-evaluates the method body, no `bl` appears. (FLS §6.12.2.)
+
 **Falsification check**: Build galvanic, compile each case, inspect emitted `.s` file for the expected instruction class. If the binary is not built, skip (don't fail — Claim 1 covers the build).
 
 **Lifecycle**: Permanent. This claim cannot be retired. If the project ever introduces constant-folding as an optimization pass, add a separate claim that the pass only fires in const contexts.
