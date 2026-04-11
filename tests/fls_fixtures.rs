@@ -186,3 +186,8 @@ fn fls_4_9_slices() {
 fn fls_6_23_div_zero() {
     assert_galvanic_accepts("fls_6_23_div_zero.rs");
 }
+
+#[test]
+fn fls_6_15_loop_expressions() {
+    assert_galvanic_accepts("fls_6_15_loop_expressions.rs");
+}
