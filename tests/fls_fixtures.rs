@@ -196,3 +196,8 @@ fn fls_6_15_loop_expressions() {
 fn fls_6_17_if_expressions() {
     assert_galvanic_accepts("fls_6_17_if_expressions.rs");
 }
+
+#[test]
+fn fls_6_18_match_expressions() {
+    assert_galvanic_accepts("fls_6_18_match_expressions.rs");
+}
