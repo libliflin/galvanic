@@ -33927,3 +33927,105 @@ fn main() -> i32 {\n\
         "both trampolines must shift len register (x1→x2) — found {shifts_len_count}: {asm}"
     );
 }
+
+// ── FLS §6.3 Path expressions — assembly-inspection ─────────────────────────
+//
+// These tests promote the fls_6_3_path_expressions.rs parse-acceptance fixture
+// to full lowering verification. Parse proves the grammar is accepted; these
+// tests prove the constructs are correctly lowered and emit the expected ARM64
+// instruction forms. (FLS §6.3: path expressions resolve a path to the value
+// it denotes.)
+
+/// FLS §6.3: The entire §6.3 path-expressions fixture must compile without
+/// error through the full lex → parse → lower → codegen pipeline.
+///
+/// This test promotes `fls_6_3_path_expressions.rs` from parse-only to a
+/// lowering regression test. If any path form added to the fixture causes a
+/// panic in the lowering pass, this test catches it.
+#[test]
+fn fls_6_3_fixture_compiles_through_full_pipeline() {
+    let fixture_path = format!(
+        "{}/tests/fixtures/fls_6_3_path_expressions.rs",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let source = std::fs::read_to_string(&fixture_path)
+        .expect("could not read fls_6_3_path_expressions.rs");
+    // compile_to_asm panics on lex/parse/lower/codegen failure — that's the test.
+    let asm = compile_to_asm(&source);
+    assert!(
+        !asm.is_empty(),
+        "fls_6_3_path_expressions.rs produced empty assembly"
+    );
+}
+
+/// FLS §6.3: A path expression resolving to a function item coerced to a
+/// fn-pointer value must emit `blr` (indirect call) at the call site — not
+/// `bl` (direct call). The path `square` is resolved to an address via `adrp`
+/// and stored; the call goes through the pointer at runtime.
+///
+/// This distinguishes "function item used as a value" (§6.3 + §4.6 fn pointer
+/// coercion) from a direct function call. If galvanic emitted `bl square`
+/// instead of loading the address and calling via `blr`, it would be treating
+/// the fn-ptr variable as syntactic sugar for a direct call, losing the
+/// generality that arbitrary fn-pointer values require.
+///
+/// Complement of `runtime_fn_ptr_emits_adrp_and_blr` — this test frames the
+/// property in §6.3 path-expression terms rather than §4.6 fn-pointer terms.
+#[test]
+fn fls_6_3_fn_item_path_as_value_emits_blr_not_direct_call() {
+    // FLS §6.3: `square` is a path expression that resolves to a function item.
+    // The item is then coerced to a fn(i32) -> i32 pointer and called via `f(x)`.
+    let asm = compile_to_asm(
+        "fn square(n: i32) -> i32 { n * n }\n\
+fn path_fn_item_as_value(x: i32) -> i32 {\n\
+    let f: fn(i32) -> i32 = square;\n\
+    f(x)\n\
+}\n\
+fn main() -> i32 { path_fn_item_as_value(5) }\n",
+    );
+    // The call through the fn pointer must be indirect (blr).
+    assert!(
+        asm.contains("blr"),
+        "expected indirect call 'blr' for fn-pointer path call, got:\n{asm}"
+    );
+    // The result must not be constant-folded to square(5) = 25.
+    assert!(
+        !asm.contains("mov     x0, #25"),
+        "result must not be constant-folded to #25 (square(5)): {asm}"
+    );
+}
+
+/// FLS §6.3: A two-segment path expression in call position (e.g., `Point::new`)
+/// must emit a direct `bl` to the mangled associated-function label — not an
+/// indirect `blr`. The two-segment path resolves statically to the function's
+/// address, so no runtime pointer lookup is needed.
+///
+/// This is the key structural difference between §6.3 one-segment paths (local
+/// variable load) and two-segment paths (static dispatch to a known function).
+#[test]
+fn fls_6_3_two_segment_assoc_fn_path_emits_direct_bl() {
+    // FLS §6.3: `Point::new` is a two-segment path expression in call position,
+    // resolving statically to the associated function.
+    let asm = compile_to_asm(
+        "struct Point { x: i32, y: i32 }\n\
+impl Point {\n\
+    fn new(px: i32, py: i32) -> Point { Point { x: px, y: py } }\n\
+    fn sum(&self) -> i32 { self.x + self.y }\n\
+}\n\
+fn path_assoc_fn(a: i32, b: i32) -> i32 {\n\
+    let p = Point::new(a, b);\n\
+    p.sum()\n\
+}\n\
+fn main() -> i32 { path_assoc_fn(10, 20) }\n",
+    );
+    // Two-segment path call must emit a direct `bl` to the mangled label.
+    assert!(
+        asm.contains("bl      Point__new"),
+        "expected 'bl Point__new' for two-segment path call, got:\n{asm}"
+    );
+    // Result must not be constant-folded to 10 + 20 = 30.
+    assert!(
+        !asm.contains("mov     x0, #30"),
+        "result must not be constant-folded to #30: {asm}"
+    );
+}

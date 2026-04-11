@@ -76,6 +76,8 @@ Four adversarial cases (from weakest to strongest, reflecting the litmus test in
 
 **4f** — method call dispatch: a method call on a struct (`w.get()`) must emit a `bl` instruction to the mangled method label at runtime. If galvanic inlines or pre-evaluates the method body, no `bl` appears. (FLS §6.12.2.)
 
+**4g** — `const fn` called from a non-const context: `const fn double(n: i32) -> i32 { n * 2 }` called from `fn main()` must emit a `bl` instruction — not fold the call to `mov x0, #42`. FLS §9:41–43 permits compile-time evaluation of `const fn` only when called from a const context (const items, const blocks, array lengths, etc.). `fn main()` is not a const context. (fls-constraints.md Constraint 2.)
+
 **Falsification check**: Build galvanic, compile each case, inspect emitted `.s` file for the expected instruction class. If the binary is not built, skip (don't fail — Claim 1 covers the build).
 
 **Lifecycle**: Permanent. This claim cannot be retired. If the project ever introduces constant-folding as an optimization pass, add a separate claim that the pass only fires in const contexts.
