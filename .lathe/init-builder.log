@@ -1,0 +1,18 @@
+`.lathe/builder.md` is written. Here's what it encodes:
+
+**Aligned with the goal-setter's worldview:**
+- Stakeholder framing carries through — "which stakeholder" shapes what counts as done (assembly inspection proof for William, contribution clarity for future contributors)
+- The litmus test from `refs/fls-constraints.md` is made a pre-commit check, not just a reminder
+- FLS citation discipline and `// AMBIGUOUS` annotations are called out as mandatory, not optional
+
+**Project-specific rules derived from reading the codebase:**
+- Three-file pipeline rule (AST → lower → codegen) — easy to miss, painful to debug
+- IR is flat/explicit — stack slots, no SSA, study existing constructs before adding IR instructions
+- Fixtures are derived from FLS examples, not invented
+- Claims methodology fully encoded including the assembly inspection requirement and the `compile_to_asm()` pattern
+- Cache-line constraint (`Token` = 8 bytes) is called out as a research artifact — if it breaks, document it rather than silently relaxing the test
+
+**CI/PR model:**
+- Builder never merges or creates branches, just implements → validates → commits → pushes → creates PR if missing
+- CI failures are unconditionally top priority regardless of the goal file
+- Audit constraints (no `unsafe` in `src/`, no network deps) are called out explicitly

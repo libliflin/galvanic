@@ -1,66 +1,41 @@
 # Alignment Summary
 
-A 30-second brief on the decisions I made during init. Read this, gut-check it, then start cycles.
+This file is for William (the user), not the runtime agent. It records the decisions made during goal-setter setup and the uncertainties worth checking.
 
 ---
 
-## Who This Serves
+## Who this serves
 
-- **William** — the researcher. Primary stakeholder. Reads the git log to judge whether the tool is earning its keep. Cares about two things: (1) FLS ambiguities surfaced by the implementation, and (2) whether treating cache-line alignment as a first-class constraint from the start produces measurably different outcomes. Both questions require the compiler to be *correct*, not just working.
+**William Laffin** — the primary researcher. Reads the git log. Evaluates whether cycles advance the two research questions: (1) is the FLS implementable? (2) what does cache-line-aware codegen look like from the start? His relationship with the project is through commit history and the research findings that surface.
 
-- **Future contributors** — anyone who finds the repo and spends 90 seconds deciding whether to contribute. The code needs to be intelligible: consistent FLS citations, clear design decisions, tests that aren't cheating.
+**FLS spec readers / Ferrocene team** — people who want to know where the spec fails to pin down behavior. They see the project through `// FLS §X.Y: AMBIGUOUS —` annotations. The research output they care about is currently scattered — no single document collects the findings.
 
-- **The FLS / Ferrocene spec** — galvanic tests the spec. Every section it can implement cleanly is evidence. Every ambiguity it encounters is the research output. The `// FLS §X.Y: AMBIGUOUS — <description>` pattern in the code is the primary deliverable.
+**Future contributors** — the person who finds this on GitHub on a Sunday. They can read the commits and infer the "claims" methodology, but nothing explicitly documents the contribution pattern. The README is 4 short paragraphs.
 
----
-
-## Key Tensions
-
-**FLS parse coverage vs. lowering depth**: There are ~40 parse-acceptance fixtures but many FLS sections have no lowering or codegen tests. I favored **depth over breadth** at the current stage — promoting a parse-only fixture to a runtime test is more valuable than adding another parse-only fixture. This flips if there are obvious parser gaps.
-
-**Cache-line design vs. FLS compliance**: I favored **FLS compliance** as the harder constraint. The cache-line design is documented and argued; if they conflict, document the tradeoff as an FLS note.
-
-**Compiler correctness vs. milestone pace**: No contest. The FLS constraints file (`refs/fls-constraints.md`) is explicit: a compiler that constant-folds non-const code is wrong, even if it produces the right exit codes. I encoded this as a falsification claim (Claim 4).
+**Lathe itself** — reads goal.md + snapshot each cycle. The goal-setter is now set up to rank work by stakeholder impact rather than a fixed feature ladder.
 
 ---
 
-## Load-Bearing Claims
+## Key tensions
 
-The falsification suite checks these every cycle:
+**Parse acceptance vs. full pipeline.** ~40 parse fixtures exist for closures, generics, traits, etc. Adding more parse fixtures is not research progress — it's scaffolding. Real progress is taking a parse fixture all the way to e2e codegen with assembly inspection.
 
-1. **Build succeeds** — `cargo build` exits 0. Baseline for everything.
-2. **Token is 8 bytes** — `size_of::<Token>() == 8`. Structural invariant for the cache-line design hypothesis.
-3. **FLS parse-acceptance suite passes** — all 40+ tests in `tests/fls_fixtures.rs` pass. Regression guard on the parser.
-4. **Non-const code emits runtime instructions** — `fn main() -> i32 { 1 + 2 }` produces an `add` instruction, not `mov x0, #3`. The most important correctness property: galvanic must be a compiler, not an interpreter.
-5. **Adversarial inputs exit cleanly** — empty file, binary garbage, and 300-deep nested braces don't panic or hang.
+**FLS breadth vs. correctness depth.** Several implemented features may have exit-code e2e tests but no assembly inspection tests. A test that checks only the exit code cannot distinguish "compiled correctly" from "constant-folded at compile time and emitted the result." Assembly inspection closes the gap. Until that gap is closed for all existing features, new claims may be premature.
+
+**Ambiguity documentation vs. forward progress.** The project's primary research output — where the FLS is silent, ambiguous, or contradictory — lives as scattered inline comments with no surface document collecting them. One cycle spent aggregating those findings would make the research more visible.
 
 ---
 
-## Current Focus
+## What could be wrong
 
-The agent will prioritize: **FLS sections that parse but don't lower or codegen**. Many sections have parse fixtures but no runtime tests. The highest-value cycles promote a parse-only section to a runtime-verified section, which produces FLS evidence.
+**The assembly inspection coverage may be incomplete.** I looked at the e2e test structure but didn't read every test. It's possible that some milestone features (e.g., while-let, match, struct-expressions, which appear in recent commits) have only exit-code tests and no `compile_to_asm()` inspection. If so, the core constraint could be silently violated. Recommend checking: `grep -n "compile_to_asm" tests/e2e.rs` to see which features have assembly inspection.
 
-Second priority: assembly-inspection tests for features already in the lowering pass but not yet verified at the instruction level.
+**Closures (§6.14) are the hard case.** They require a capture environment — a fundamentally different memory model than anything currently implemented. The goal-setter ranks next claims by proximity to existing infrastructure. If a cycle picks closures and the IR doesn't support capture slots, the agent will hit a wall. The goal.md notes that closures are unimplemented at codegen level, but I haven't verified whether the IR has any scaffolding for them.
 
----
+**No branch protection check performed.** I couldn't directly query GitHub's branch protection settings from here. The CI uses `pull_request` (not `pull_request_target`) — that's the safe pattern. The `permissions: contents: read` on the main CI job is correct. Recommend verifying via GitHub settings that the default branch (`main`) is protected and requires CI to pass before merge.
 
-## What Could Be Wrong
+**The repo is public** (github.com/libliflin/galvanic). The snapshot.sh reads `git log` and `git status` — not PR titles or issue comments — so prompt injection from external PR metadata is not a current risk. If the engine is ever configured to feed PR descriptions into the agent prompt, that changes and should be audited.
 
-**Stakeholder I might have missed**: The project is currently single-author. If William has specific collaborators or a downstream audience for his research (a paper, a talk, a course), they're stakeholders I haven't named. The agent.md treats the FLS team as an indirect stakeholder, but if there's a specific human reading William's findings, they deserve their own entry.
+**No `skills/fls-constraints.md`** exists — the constraints doc is in `refs/fls-constraints.md`. That's fine, but the testing.md I wrote refers to `refs/fls-constraints.md` correctly. The goal.md also references it correctly.
 
-**Claim 4 assumption**: The falsification check for "runtime codegen" compiles `fn main() -> i32 { 1 + 2 }` and checks for `add` in the assembly. This assumes galvanic actually handles this program without error. If the lowering pass currently fails on this exact program (regression), the claim check would fail for the wrong reason. I believe this works based on the milestone history in the code, but I couldn't verify by running `cargo test` during init.
-
-**Claim 4's `add` heuristic**: ARM64 uses `add` for integer addition. But the codegen might emit `adds` (add + set flags) or `add` with immediate form. The grep is for the literal string `add` as a whole word, which should match ARM64's `add x1, x0, x2` form. If the codegen emits `madd` or similar, the check might produce a false pass. This is intentionally simple — refine it if the heuristic ever gives false results.
-
-**falsify.sh not executable**: I couldn't run `chmod +x` in this environment. **Before starting cycles, run:**
-```bash
-chmod +x .lathe/falsify.sh
-```
-
-**Branch protection**: I could not verify whether the GitHub repo's default branch has push protection enabled. For an autonomous agent writing to feature branches and creating PRs, this is the main security control. Confirm that direct pushes to `main` are restricted in GitHub Settings → Branches → Branch protection rules.
-
-**No `pull_request_target` risk**: The CI workflow (`ci.yml`) triggers on `push` to `main` and `pull_request` to `main`. No `pull_request_target` or `issue_comment` triggers — those would allow untrusted input to run with elevated permissions. The repo's CI is low-risk for prompt injection.
-
-**Public repo + autonomous agent**: The repo is public. Anyone can submit a PR. The lathe engine reads structured CI data (statuses, numbers) — not free-text fields like PR comments or titles. But if your engine setup ever adds PR comment reading, revisit this.
-
-**`snapshot.sh` already runs `cargo test`**: The snapshot collects full test output. The falsify.sh also runs `cargo test --test fls_fixtures`. This means the FLS parse tests run twice per cycle (once in snapshot, once in falsify). This is intentional — the falsification suite is the authoritative pass/fail signal; the snapshot provides context. If the cycle time becomes too slow, retire the snapshot's `cargo test` and rely on falsify.sh instead.
+**The "claims" numbering** (4a, 4b, ..., 4k) appears to be within a milestone 4 series. I don't know what claims 1–3 covered or what determines a milestone boundary. The goal-setter doesn't need this, but a future contributor would benefit from the methodology being documented somewhere explicit.
