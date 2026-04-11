@@ -1,99 +1,118 @@
-# Goal: Implement §6.18 Match Exhaustiveness — Compile-Time Gap Check
+# Goal: §6.23 Divide-by-Zero — Compile-Time Literal Divisor Check
 
 ## What
 
-Add a compile-time exhaustiveness check to galvanic's match expression lowering
-(`src/lower.rs`) so that non-exhaustive match arms produce a diagnostic error
-rather than silently falling through to undefined behavior.
+Add a compile-time divide-by-zero guard to galvanic's lowering pass
+(`src/lower.rs`) so that a literal zero divisor in `/` or `%` produces a
+diagnostic error rather than silently emitting `sdiv`/`udiv` with undefined
+behavior.
 
 The builder should:
 
-1. In the match lowering path (`lower_match` or equivalent in `src/lower.rs`),
-   after collecting all match arms, verify exhaustiveness:
-   - If any arm is a wildcard (`_`) or an identifier pattern, the match is trivially
-     exhaustive — no check needed.
-   - If all arms are literal patterns on an integer type, warn/error that the match
-     may not be exhaustive (a wildcard or range pattern is needed). Galvanic's choice:
-     emit a compile-time `Err` indicating "non-exhaustive match — add a wildcard arm."
-   - If all arms are enum variant patterns, verify that every declared variant name
-     appears at least once (or a wildcard exists). Emit a compile-time `Err` for
-     missing variants.
+1. In the arithmetic lowering path for `/` and `%` in `src/lower.rs`, after
+   evaluating the right-hand operand, check if it is a compile-time-known
+   literal zero. If so, return a `LowerError` with a clear message:
+   `"divide by zero: divisor is the literal 0"`.
+
+   - The check applies to integer division (`i32`, `u32`, `i64`, `u64`, `u8`,
+     `i8`, `u16`, `i16`, `usize`, `isize`) and remainder (`%`).
+   - The check does NOT apply to float division (IEEE 754 defines that
+     behavior as producing infinity/NaN).
+   - The check does NOT need to handle the `MIN / -1` case (that requires
+     runtime knowledge of the dividend). False negatives (missing a runtime
+     zero divisor) are acceptable. False positives (rejecting a valid program)
+     are not acceptable.
+   - If the divisor is a variable (not a literal), no check is needed — let
+     the codegen emit `sdiv`/`udiv` as before.
 
 2. Add at least two test cases to `tests/e2e.rs`:
-   - A test that verifies galvanic *rejects* a clearly non-exhaustive integer match
-     (all literal arms, no wildcard) by asserting `compile_to_asm()` or `compile_and_run()`
-     returns an error rather than producing assembly.
-   - A test that verifies galvanic *accepts* the same match once a wildcard arm is added.
+   - A test that verifies galvanic *rejects* `fn main() -> i32 { 10 / 0 }` —
+     the divisor is a literal zero, so lowering should return `Err`.
+   - A test that verifies galvanic *rejects* `fn main() -> i32 { 10 % 0 }` —
+     same guard for remainder.
+   - A test that verifies galvanic *accepts* `fn div(x: i32, y: i32) -> i32 { x / y }` —
+     variable divisor is not rejected at compile time.
+   - Optionally: a test that verifies galvanic accepts `fn main() -> i32 { 10 / 2 }` —
+     non-zero literal is not rejected.
 
-3. Update the §6.18 entry in `refs/fls-ambiguities.md`:
-   - Change "No exhaustiveness check is performed at this milestone" to document the
-     scope of what IS now checked and what remains deferred (e.g., range pattern
-     exhaustiveness, tuple/struct pattern completeness).
-   - Add the FLS gap: the spec says exhaustiveness is required but provides no algorithm.
-     Document galvanic's chosen algorithm (heuristic: any arm with wildcard/ident = trivially
-     exhaustive; literal-only arms with no wildcard = non-exhaustive for integer types).
+3. Update the §6.9/§6.23 entry in `refs/fls-ambiguities.md`:
+   - Change "Divide-by-zero: `sdiv`/`udiv` emit no guard; behavior is undefined"
+     to document that literal-zero divisors are now caught at compile time.
+   - Document what remains deferred: runtime zero divisors, `MIN / -1` overflow,
+     out-of-bounds indexing, and integer overflow panics all still require a
+     panic infrastructure that does not yet exist.
+   - Add the FLS gap: §6.23 requires a panic for divide-by-zero but does not
+     specify the mechanism. Galvanic's conservative choice: reject literal zero
+     at compile time; runtime zero is undefined behavior at this milestone.
 
-The check does NOT need to be complete. A conservative check that catches the most
-common case (literal-only integer arms with no wildcard or ident catch-all) is enough.
-False negatives (accepting a non-exhaustive match) are acceptable at this milestone.
-False positives (rejecting a valid exhaustive match) are not acceptable.
+The check does NOT need to be complete. Only the literal-zero case is required.
 
 ## Which stakeholder
 
 **William (the researcher)** and **FLS spec readers (the Ferrocene team)**.
 
-The §6.18 entry in `refs/fls-ambiguities.md` currently reads:
-> "If no arm matches at runtime, the match expression falls through to undefined behavior."
+The §6.9/§6.23 entry in `refs/fls-ambiguities.md` currently reads:
+> "Divide-by-zero: `sdiv`/`udiv` emit no guard; behavior is undefined on ARM64."
 
-This is the most visible correctness gap in the ambiguities document — a case where
-galvanic silently produces wrong code rather than catching the error. Every FLS spec
-reader who opens the ambiguities doc will see this. Closing it (even partially) changes
-the narrative from "galvanic ignores non-exhaustive matches" to "galvanic checks the
-most common case and documents what the FLS leaves underspecified."
+This is the most prominent remaining *silent UB* gap that can be partially
+closed without a panic runtime. The §6.18 exhaustiveness check established the
+pattern: conservative compile-time rejection of the obvious case, false negatives
+acceptable, false positives not. Applying the same pattern here closes the most
+obvious division-by-zero case.
 
-For William: this is the kind of change that makes the research output credible.
-Reporting "the FLS doesn't define an exhaustiveness algorithm" is more convincing when
-galvanic has a concrete implementation that makes a defensible choice.
+For spec readers: the FLS says divide-by-zero must panic (§6.23) but provides
+no mechanism. The ambiguities doc should document galvanic's chosen heuristic
+(same as exhaustiveness: catch the literal case, defer the runtime case).
+
+For William: this is the second compile-time correctness gap closed without
+panic infrastructure. Together with §6.18, they form a pattern: galvanic has
+a systematic approach to catching the obvious case at compile time even when
+full runtime enforcement is deferred.
 
 ## Why now
 
-The project just completed a four-commit documentation sprint (#256–#261). The
-ambiguities and constraints documents are in good shape. The build is clean. The test
-count is at 1987, all passing.
+The §6.18 exhaustiveness check (Claim 4l) just landed in the prior session
+(commits #262–264). The build is clean at 1992 tests, all passing.
 
-The §6.18 gap is the most prominent correctness hole called out in `refs/fls-ambiguities.md`:
-"falls through to undefined behavior." Every other deferred gap (bounds checking, overflow
-panics, unsafe enforcement) requires a runtime panic infrastructure that doesn't exist yet.
-Exhaustiveness checking is different — it happens entirely at compile time. No runtime
-infrastructure needed. One function, one new error kind, two tests.
+The §6.23 gap is structurally identical to the §6.18 gap:
+- The FLS requires something (exhaustiveness / no div-by-zero)
+- The spec provides no algorithm for checking it
+- The obvious compile-time case (literal zero) can be caught without a panic
+  runtime
+- The fix is one condition in lowering, one new error kind (or reuse of
+  existing `LowerError`), and two tests
 
-This is the single deferred item in the ambiguities doc that can be closed without a
-panic runtime. Doing it now moves the document from "here are the gaps" to "here are the
-gaps, and here's the one we fixed."
+Doing this now:
+1. Reinforces the "conservative compile-time check" pattern — it's now a
+   methodology, not a one-off.
+2. Closes the second entry in `refs/fls-ambiguities.md` that says "undefined
+   behavior" rather than "checked" or "deferred to panic runtime."
+3. Requires no new infrastructure — just a guard in the existing `/` and `%`
+   lowering paths.
 
 ---
 
 ## Acceptance criteria
 
 - `cargo build` passes.
-- `cargo test` passes (all 1987 existing tests continue to pass).
-- At least one new test demonstrates that a literal-only integer match without a wildcard
-  arm is rejected at lowering time.
-- At least one new test demonstrates that adding a wildcard arm makes the same match
-  compile and produce the correct result.
-- The §6.18 entry in `refs/fls-ambiguities.md` is updated to reflect the new state:
-  what is checked, what is not, and what the FLS leaves undefined.
+- `cargo test` passes (all 1992 existing tests continue to pass).
+- At least one new test demonstrates that `10 / 0` (literal zero divisor) is
+  rejected at lowering time with an error result.
+- At least one new test demonstrates that `10 % 0` (literal zero remainder) is
+  rejected at lowering time.
+- At least one new test demonstrates that `x / y` (variable divisor) is
+  accepted and compiles.
+- The §6.9/§6.23 entry in `refs/fls-ambiguities.md` is updated to reflect the
+  new state: literal zero caught at compile time, runtime zero still deferred.
 - No new FLS citations are wrong or vague.
 
 ## FLS notes
 
-- **§6.18:37–41**: "A match expression is exhaustive if every possible value of the
-  subject expression type is covered by at least one match arm." The spec requires
-  exhaustiveness but provides no algorithm. This is the primary FLS gap galvanic's
-  check must document.
-- The heuristic: if any arm is a wildcard (`_`) or an identifier pattern (which binds
-  any value), the match is trivially exhaustive. Otherwise, for integer-typed subjects
-  with only literal arms: non-exhaustive.
-- Enum exhaustiveness: if the subject is an enum, collect all variant names from the
-  enum definition; check that every variant appears in at least one arm or a wildcard
-  arm exists.
+- **§6.23:1–10**: "Integer arithmetic may produce an overflow" and "dividing by
+  zero is a panic." The spec requires a panic but does not specify the check
+  mechanism. The primary FLS gap: the spec mandates the outcome but leaves the
+  detection algorithm to the implementation.
+- **§6.9**: Out-of-bounds indexing must panic. Same structural gap — deferred.
+- The check for `MIN / -1` (signed integer overflow on division) is a separate
+  case; leave it as a deferred note in the ambiguities doc.
+- Float division by zero is NOT an error per IEEE 754 — do not reject `1.0 / 0.0`.
