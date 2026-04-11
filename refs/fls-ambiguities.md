@@ -354,12 +354,26 @@ specify the compiler mechanism for checking exhaustiveness or the behavior
 if exhaustiveness is violated at runtime (the spec says it is a static error,
 but provides no algorithm).
 
-**Galvanic's choice:** No exhaustiveness check is performed at this milestone.
-If no arm matches at runtime, the match expression falls through to undefined
-behavior (no code is emitted for the "no match" case). Exhaustiveness is a
-known gap.
+**Galvanic's choice:** A conservative compile-time exhaustiveness check is
+implemented in `check_match_exhaustiveness` (src/lower.rs). The heuristic
+accepts if any of the following holds:
+1. Any arm (without guard) has a Wildcard, Ident, or single-segment struct
+   pattern — trivially catches all values.
+2. Both `true` and `false` literal patterns are present (bool exhaustiveness).
+3. All declared variants of a known enum are covered by Path/TupleStruct/
+   StructVariant patterns without guards (enum exhaustiveness).
+4. Otherwise, if all patterns are integer/bool literals or ranges with no
+   catch-all, the match is rejected as definitively non-exhaustive.
+5. Patterns too complex to analyse (e.g., nested patterns, mixed types) are
+   accepted conservatively (false negatives are acceptable; false positives
+   are not).
 
-**Source:** `src/lower.rs:11891`, `src/lower.rs:12652`, `src/parser.rs:3212`
+**Remaining gap:** Complex pattern combinations (e.g., integer ranges that
+together tile all i32 values, nested or-patterns with ranges) are not checked
+and silently accepted. Full usefulness/completeness analysis is future work.
+
+**Source:** `src/lower.rs` — `check_match_exhaustiveness` (inserted before the
+`LowerCtx` impl block); called at all four match-lowering sites.
 
 ---
 
