@@ -526,4 +526,166 @@ immutable captures are passed by value.
 
 ---
 
-*Last updated: 2026-04-11. Source annotation count at time of writing: ~155 `AMBIGUOUS` markers across 6 source files.*
+## §4.14 — Where-Clause Bounds: When Are They Checked?
+
+**Gap:** The FLS does not specify whether where-clause bounds on trait, struct,
+and enum definitions are checked at definition time, implementation time, or
+monomorphization time. The spec also does not define how supertrait method
+availability is resolved for concrete types at call sites.
+
+**Galvanic's choice:**
+- Supertrait method availability: resolved naturally at monomorphization;
+  `t.base_method()` on a generic `T: Derived` resolves to `T__base_method`,
+  which exists because the concrete type implements the supertrait.
+- Where-clause bounds on struct/trait/enum definitions: parsed and stored but
+  not checked at parse time, type-check time, or monomorphization. The bound
+  is present in the AST but has no enforcement mechanism at this milestone.
+
+**Source:** `src/parser.rs:719`, `src/parser.rs:744`, `src/parser.rs:858`,
+`src/parser.rs:1133`, `src/parser.rs:1226`
+
+---
+
+## §6.10 — Tuple Return Calling Convention
+
+**Gap:** The FLS defines tuple expressions as producing values but does not
+specify the ABI for returning tuples from functions — which registers carry
+which elements, or whether tuples are returned on the stack.
+
+**Galvanic's choice:** Extends the struct-return convention: element[i] is
+returned in register x{i}. For tuples with more than 8 elements (beyond x0–x7),
+this would overflow the register set; only tuples up to 8 elements are currently
+supported. This is consistent with the general struct-return convention but is
+not mandated by the spec.
+
+**Source:** `src/lower.rs:1923`, `src/lower.rs:3824`
+
+---
+
+## §6.13 — Field Access on Temporary Expressions
+
+**Gap:** The FLS does not specify whether field access on a temporary
+(non-place) expression is well-formed, or how the compiler should handle the
+lifetime of the temporary.
+
+**Galvanic's choice:** Field access is restricted to named local variables and
+chained field access expressions. Temporary struct values returned from
+function calls are not yet supported as receivers for field access — the
+caller must assign to a named binding first.
+
+**Source:** `src/lower.rs:17213`
+
+---
+
+## §6.14 — Inner Function Name Visibility
+
+**Gap:** The FLS does not distinguish inner functions from closures in terms
+of name visibility or calling convention. The spec's treatment of nested
+function definitions is under §9 (functions), not §6.14 (closures), but the
+distinction is not explicit.
+
+**Galvanic's choice:** Inner function names are direct-call targets compiled
+to a separate label (not `blr` indirect dispatch). They are visible only
+within the enclosing function body. Closures use trampoline dispatch (`blr`);
+inner functions use direct call (`bl`).
+
+**Source:** `src/lower.rs:10101`, `src/parser.rs:3061`
+
+---
+
+## §6.12.2 — Method Auto-Deref Step Limit
+
+**Gap:** The FLS does not specify how many auto-deref steps are legal for
+method call receivers, or how auto-deref interacts with `Deref` trait
+implementations.
+
+**Galvanic's choice:** Zero auto-deref steps: the receiver must already be
+the correct struct type. Method calls on references require explicit
+dereferencing. Auto-deref is deferred to a future type-checking phase.
+
+**Source:** `src/lower.rs:17388`, `src/ast.rs:1127`
+
+---
+
+## §6.15.6 — Break-with-Value: Syntactic or Semantic Restriction?
+
+**Gap:** The FLS does not clearly distinguish whether the restriction that
+`break expr` is only valid inside `loop` (not `while` or `for`) is a
+syntactic constraint (parse error) or a semantic constraint (type error).
+
+**Galvanic's choice:** `break expr` is parsed freely in any loop context.
+The restriction is not enforced at the parse level; it is deferred to a
+future semantic analysis phase. A `break 5` inside a `while` loop parses
+successfully but has unspecified runtime behavior.
+
+**Source:** `src/ast.rs:1242`
+
+---
+
+## §6.17 — Struct Literal Restriction in Condition Positions
+
+**Gap:** The FLS does not explicitly enumerate the positions where struct
+literal expressions are forbidden (e.g., `if`, `while`, `for` conditions).
+The restriction exists in the Rust grammar but the FLS's treatment is implicit.
+
+**Galvanic's choice:** The parser tracks a `restrict_struct_lit` flag that
+is set when entering condition positions. When the flag is set, struct literal
+syntax is rejected to avoid ambiguity with block delimiters. This matches
+observed Rust behavior but the spec does not state it explicitly.
+
+**Source:** `src/parser.rs:99`
+
+---
+
+## §9.2 — Irrefutable Patterns in Parameter Position
+
+**Gap:** The FLS allows arbitrary irrefutable patterns in function parameter
+position (e.g., `fn foo((a, b): (i32, i32))`) but does not enumerate which
+patterns are valid there. The reader must cross-reference §5 (patterns)
+without a direct statement of the intersection.
+
+**Galvanic's choice:** Supports struct, tuple, and tuple-struct destructuring
+patterns in parameter position. Slice patterns and or-patterns in parameter
+position are not yet supported. Nested patterns in parameter position are
+future work.
+
+**Source:** `src/ast.rs:489`
+
+---
+
+## §10.2 — `Self::X` Projection Resolution in Default Methods
+
+**Gap:** The FLS does not fully specify how `Self::X` associated type
+projections are resolved when `Self` appears in a default method body or
+trait method signature — specifically, whether resolution happens at
+trait-definition time or impl-instantiation time.
+
+**Galvanic's choice:** `Self::X` is resolved to the concrete associated type
+registered in the impl block (or the trait's default) at codegen time.
+Resolution is deferred until monomorphization; if no concrete type is known,
+the projection fails at codegen.
+
+**Source:** `src/parser.rs:1786`
+
+---
+
+## §14.1 — Valid Place Expressions for Assignment LHS
+
+**Gap:** The FLS defines assignment expressions as requiring a place expression
+on the left-hand side but does not enumerate which expression forms qualify as
+place expressions. The categorization must be inferred from §6.1.4.
+
+**Galvanic's choice:** Restricts assignment LHS to:
+- Simple variable paths (`x = ...`)
+- Field access chains (`s.field = ...`)
+- Array index expressions (`arr[i] = ...`)
+- Dereference expressions (`*ptr = ...`)
+
+More complex LHS forms (e.g., tuple field assignment via `.0`, method calls
+that return mutable references) are not supported at this milestone.
+
+**Source:** `src/lower.rs:14302`, `src/lower.rs:14393`, `src/lower.rs:14604`
+
+---
+
+*Last updated: 2026-04-11. Source annotation count at time of writing: ~155 `AMBIGUOUS` markers across 6 source files. Covers all sections with 2+ annotations; sections with 1 annotation (§6.6.1, §6.3.2) are also included where the gap is architecturally significant.*
