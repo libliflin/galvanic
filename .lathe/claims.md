@@ -62,13 +62,15 @@ When galvanic compiles a non-const function containing arithmetic on runtime-val
 
 This is the single most important correctness property of galvanic. A compiler that produces the right exit code by evaluating non-const code at compile time is an interpreter, not a compiler, and produces wrong evidence about the FLS.
 
-Three adversarial cases (from weakest to strongest, reflecting the litmus test in `fls-constraints.md`):
+Four adversarial cases (from weakest to strongest, reflecting the litmus test in `fls-constraints.md`):
 
 **4a** — literal operands: `fn main() -> i32 { 1 + 2 }` must emit `add`, not `mov x0, #3`.
 
 **4b** — runtime parameter operands: `fn add(a: i32, b: i32) -> i32 { a + b }` must emit `add` in the function body. Parameters are runtime values; no constant folding is possible. If the compiler cannot handle this case, it is an interpreter.
 
 **4c** — runtime loop with parameter bound: `fn count(n: i32) -> i32 { let mut x = 0; while x < n { x += 1; } x }` must emit control-flow instructions (`cbz` or `b.`) rather than a folded constant. A loop with a runtime-valued bound cannot be unrolled or eliminated at compile time.
+
+**4d** — recursive function call: a recursive `fib(n)` must emit `bl fib` instructions (runtime call to itself). If galvanic pre-computes `fib(5) == 5` at compile time and emits only `mov x0, #5`, the call is being interpreted. Recursive calls with a runtime parameter cannot be pre-computed. (FLS §6.12.1.)
 
 **Falsification check**: Build galvanic, compile each case, inspect emitted `.s` file for the expected instruction class. If the binary is not built, skip (don't fail — Claim 1 covers the build).
 
@@ -84,7 +86,8 @@ Three adversarial cases (from weakest to strongest, reflecting the litmus test i
 The galvanic binary must not panic or hang on adversarial inputs:
 - Empty file → exit 0
 - Binary garbage (random bytes) → non-zero exit, no signal death (exit code ≤ 128)
-- Deeply nested braces (500 levels) → any clean exit, no stack overflow
+- Deeply nested braces (300 levels) → any clean exit, no stack overflow (block parser recursion)
+- Deeply nested parenthesized expressions (300 levels) → any clean exit, no stack overflow (expression parser recursion — separate codepath from block nesting)
 
 A panic or signal death (exit > 128) on any of these inputs is a bug. A non-zero exit code is acceptable.
 

@@ -136,6 +136,22 @@ fn main() -> i32 { count(5) }'
         claim_fail "4c runtime loop with parameter bound" \
             "no branch instructions for while loop over runtime parameter — loop may be eliminated at compile time"
     fi
+
+    # 4d: recursive function calls — a recursive function must emit a runtime `bl`
+    # to itself. If galvanic pre-computes fib(5) at compile time and emits only
+    # `mov x0, #5`, this claim fails.
+    # (FLS §6.12.1: call expressions invoke functions at runtime; fls-constraints.md
+    # Constraint 1: non-const functions must not be evaluated at compile time.)
+    SRC_4D='fn fib(n: i32) -> i32 {
+    if n <= 1 { n } else { fib(n - 1) + fib(n - 2) }
+}
+fn main() -> i32 { fib(5) }'
+    if check_asm_contains "$SRC_4D" '\bbl\s+fib\b'; then
+        claim_ok "recursive fib(n) emits 'bl fib' instruction (not pre-computed)"
+    else
+        claim_fail "4d recursive call emits runtime bl" \
+            "no 'bl fib' instruction in recursive fib — call may be pre-computed or inlined"
+    fi
 fi
 
 # ── Claim 5: adversarial inputs exit cleanly ─────────────────────────────────
@@ -196,8 +212,30 @@ else
         ADVERSARIAL_FAIL=1
     fi
 
+    # 5d: deeply nested parenthesized expressions → clean exit.
+    # Block nesting and expression nesting recurse through different parser paths.
+    # 300 levels of `(((1)))` tests the expression parser's recursion depth
+    # independently of the block parser fix from Claim 5c.
+    TMP_DEEP_EXPR=$(mktemp /tmp/galvanic_falsify_deep_expr_XXXXXX.rs)
+    {
+        printf 'fn main() -> i32 {\n    '
+        printf '%0.s(' $(seq 1 300)
+        printf '1'
+        printf '%0.s)' $(seq 1 300)
+        printf '\n}\n'
+    } > "$TMP_DEEP_EXPR"
+    set +o pipefail
+    "$GALVANIC" "$TMP_DEEP_EXPR" > /dev/null 2>&1
+    DEEP_EXPR_EXIT=$?
+    set -o pipefail
+    rm -f "$TMP_DEEP_EXPR"
+    if [[ "$DEEP_EXPR_EXIT" -gt 128 ]]; then
+        claim_fail "adversarial: 300-deep nested paren expressions" "exited with signal (code $DEEP_EXPR_EXIT)"
+        ADVERSARIAL_FAIL=1
+    fi
+
     if [[ "$ADVERSARIAL_FAIL" -eq 0 ]]; then
-        claim_ok "empty file, binary garbage, and deep nesting all exit cleanly"
+        claim_ok "empty file, binary garbage, deep brace nesting, and deep paren nesting all exit cleanly"
     fi
 fi
 
