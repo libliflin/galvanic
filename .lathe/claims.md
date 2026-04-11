@@ -62,9 +62,15 @@ When galvanic compiles a non-const function containing arithmetic on runtime-val
 
 This is the single most important correctness property of galvanic. A compiler that produces the right exit code by evaluating non-const code at compile time is an interpreter, not a compiler, and produces wrong evidence about the FLS.
 
-Specifically: `fn main() -> i32 { 1 + 2 }` must emit an `add` instruction, not `mov x0, #3`.
+Three adversarial cases (from weakest to strongest, reflecting the litmus test in `fls-constraints.md`):
 
-**Falsification check**: Build galvanic, compile `fn main() -> i32 { 1 + 2 }`, inspect emitted `.s` file for `add` instruction. If the binary is not built, skip (don't fail — Claim 1 covers the build).
+**4a** — literal operands: `fn main() -> i32 { 1 + 2 }` must emit `add`, not `mov x0, #3`.
+
+**4b** — runtime parameter operands: `fn add(a: i32, b: i32) -> i32 { a + b }` must emit `add` in the function body. Parameters are runtime values; no constant folding is possible. If the compiler cannot handle this case, it is an interpreter.
+
+**4c** — runtime loop with parameter bound: `fn count(n: i32) -> i32 { let mut x = 0; while x < n { x += 1; } x }` must emit control-flow instructions (`cbz` or `b.`) rather than a folded constant. A loop with a runtime-valued bound cannot be unrolled or eliminated at compile time.
+
+**Falsification check**: Build galvanic, compile each case, inspect emitted `.s` file for the expected instruction class. If the binary is not built, skip (don't fail — Claim 1 covers the build).
 
 **Lifecycle**: Permanent. This claim cannot be retired. If the project ever introduces constant-folding as an optimization pass, add a separate claim that the pass only fires in const contexts.
 
