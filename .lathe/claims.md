@@ -78,6 +78,8 @@ Four adversarial cases (from weakest to strongest, reflecting the litmus test in
 
 **4g** — `const fn` called from a non-const context: `const fn double(n: i32) -> i32 { n * 2 }` called from `fn main()` must emit a `bl` instruction — not fold the call to `mov x0, #42`. FLS §9:41–43 permits compile-time evaluation of `const fn` only when called from a const context (const items, const blocks, array lengths, etc.). `fn main()` is not a const context. (fls-constraints.md Constraint 2.)
 
+**4h** — `if-else` expression with a runtime condition: `fn classify(x: i32) -> i32 { if x > 0 { 1 } else { -1 } }` must emit a conditional branch instruction (`cbz`, `b.le`, `b.gt`, `cmp`, or similar) — not fold the result to `mov x0, #1` based on the call site `classify(5)`. The condition `x > 0` depends on the runtime parameter `x`; the branch cannot be eliminated at compile time. This case is distinct from claim 4c (while-loop): it tests the `if-else` lowering path specifically. (FLS §6.17; fls-constraints.md Constraint 1.)
+
 **Falsification check**: Build galvanic, compile each case, inspect emitted `.s` file for the expected instruction class. If the binary is not built, skip (don't fail — Claim 1 covers the build).
 
 **Lifecycle**: Permanent. This claim cannot be retired. If the project ever introduces constant-folding as an optimization pass, add a separate claim that the pass only fires in const contexts.

@@ -34029,3 +34029,103 @@ fn main() -> i32 { path_assoc_fn(10, 20) }\n",
         "result must not be constant-folded to #30: {asm}"
     );
 }
+
+// ── FLS §6.11 Struct Expressions — runtime tests ──────────────────────────────
+//
+// These tests promote the fls_6_11_struct_expressions.rs parse-acceptance
+// fixture to full lowering verification. Parse proves the grammar is accepted;
+// these tests prove the constructs lower correctly and emit the expected ARM64
+// instruction forms.
+//
+// Key behavioral property: struct literal construction stores each field into
+// a stack slot at runtime (via `str` instructions). Field access loads from
+// those slots (via `ldr`). Neither construction nor access may be constant-
+// folded when the field values are runtime parameters.
+// (FLS §6.11: struct expressions; fls-constraints.md Constraint 1.)
+
+/// FLS §6.11: The entire §6.11 struct-expressions fixture must compile without
+/// error through the full lex → parse → lower → codegen pipeline.
+///
+/// This test promotes `fls_6_11_struct_expressions.rs` from parse-only to a
+/// lowering regression test. Any struct expression form in the fixture that
+/// causes a panic in the lowering or codegen pass is caught here.
+#[test]
+fn fls_6_11_fixture_compiles_through_full_pipeline() {
+    let fixture_path = format!(
+        "{}/tests/fixtures/fls_6_11_struct_expressions.rs",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let source = std::fs::read_to_string(&fixture_path)
+        .expect("could not read fls_6_11_struct_expressions.rs");
+    let asm = compile_to_asm(&source);
+    assert!(
+        !asm.is_empty(),
+        "fls_6_11_struct_expressions.rs produced empty assembly"
+    );
+}
+
+/// FLS §6.11: Named field struct construction with runtime parameter values
+/// must emit `str` instructions to store each field into its stack slot.
+///
+/// If galvanic tracked struct field values symbolically and folded the
+/// addition without emitting stores, this test catches the regression.
+/// The `str` instructions are the evidence that fields are materialized
+/// in memory at runtime, not elided.
+#[test]
+fn fls_6_11_struct_literal_stores_all_fields() {
+    // FLS §6.11: Named field struct expression where both field values are
+    // runtime parameters — neither can be constant-folded.
+    let asm = compile_to_asm(
+        "struct Point { x: i32, y: i32 }\n\
+fn named_fields(a: i32, b: i32) -> i32 {\n\
+    let p = Point { x: a, y: b };\n\
+    p.x + p.y\n\
+}\n\
+fn main() -> i32 { named_fields(3, 4) }\n",
+    );
+    // Both fields must be stored into stack slots.
+    assert!(
+        asm.contains("str"),
+        "expected 'str' instructions for struct field construction, got:\n{asm}"
+    );
+    // Field access must load from stack (not inline constants).
+    assert!(
+        asm.contains("ldr"),
+        "expected 'ldr' instructions for struct field access, got:\n{asm}"
+    );
+    // Result must not be constant-folded to named_fields(3,4) = 7.
+    assert!(
+        !asm.contains("mov     x0, #7"),
+        "result must not be constant-folded to #7 (named_fields(3,4)): {asm}"
+    );
+}
+
+/// FLS §6.11: Struct update syntax (`..base`) must emit a runtime load for
+/// the copied field, not inline the base struct's value as a constant.
+///
+/// If galvanic treated `..base` as a compile-time copy of a known value, it
+/// would skip emitting the `ldr` for the y-field. The `ldr` proves that the
+/// y-field is fetched from the base struct's memory location at runtime.
+#[test]
+fn fls_6_11_update_syntax_loads_copied_field_at_runtime() {
+    // FLS §6.11: `y` is copied from `base` via the `..base` clause.
+    // Both `new_x` and `base.y` are runtime values; neither is a constant.
+    let asm = compile_to_asm(
+        "struct Point { x: i32, y: i32 }\n\
+fn update_syntax(base: Point, new_x: i32) -> i32 {\n\
+    let p = Point { x: new_x, ..base };\n\
+    p.x + p.y\n\
+}\n\
+fn main() -> i32 { update_syntax(Point { x: 10, y: 20 }, 5) }\n",
+    );
+    // The copied field (y from base) must be loaded at runtime.
+    assert!(
+        asm.contains("ldr"),
+        "expected 'ldr' for copied field in struct update syntax, got:\n{asm}"
+    );
+    // Result must not be constant-folded to update_syntax(...) = 5 + 20 = 25.
+    assert!(
+        !asm.contains("mov     x0, #25"),
+        "result must not be constant-folded to #25 (5 + 20): {asm}"
+    );
+}
