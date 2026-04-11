@@ -188,6 +188,23 @@ fn main() -> i32 {
         claim_fail "4f method call emits runtime bl" \
             "no 'bl' instruction for w.get() — method call may be constant-folded or inlined"
     fi
+
+    # 4g: const fn called from a non-const context must emit a runtime `bl` call —
+    # not be evaluated at compile time. FLS §9:41–43 (fls-constraints.md Constraint 2)
+    # permits const fn to be evaluated at compile time ONLY when called from a const
+    # context (const item, const block, array length, etc.). A call from fn main() is
+    # NOT a const context; the result must be produced at runtime via a bl instruction.
+    #
+    # Regression scenario: a future "const fn optimization" that forgets the context
+    # check and folds all const fn calls, not just those in const contexts.
+    SRC_4G='const fn double(n: i32) -> i32 { n * 2 }
+fn main() -> i32 { double(21) }'
+    if check_asm_contains "$SRC_4G" '\bbl\b'; then
+        claim_ok "const fn called from non-const context emits 'bl' (not folded — FLS §9:41-43)"
+    else
+        claim_fail "4g const fn at runtime emits bl" \
+            "no 'bl' for const fn called from main() — const fn may be folded outside const context (violates FLS §9:41-43)"
+    fi
 fi
 
 # ── Claim 5: adversarial inputs exit cleanly ─────────────────────────────────
