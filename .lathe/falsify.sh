@@ -152,6 +152,42 @@ fn main() -> i32 { fib(5) }'
         claim_fail "4d recursive call emits runtime bl" \
             "no 'bl fib' instruction in recursive fib — call may be pre-computed or inlined"
     fi
+
+    # 4e: capturing closure — a closure that captures a runtime variable must
+    # emit a hidden `__closure_*` function label in the assembly. If galvanic
+    # folds the closure call away (treating it as an interpreter), no closure
+    # label would appear — the result would be `mov x0, #8` instead.
+    # (FLS §6.14: closure expressions; FLS §6.22: variable capturing;
+    #  fls-constraints.md Constraint 1: non-const code must emit runtime instructions.)
+    SRC_4E='fn main() -> i32 {
+    let n = 5;
+    let add_n = |x: i32| x + n;
+    add_n(3)
+}'
+    if check_asm_contains "$SRC_4E" '__closure_'; then
+        claim_ok "capturing closure emits '__closure_*' label (not constant-folded)"
+    else
+        claim_fail "4e capturing closure runtime emission" \
+            "no '__closure_*' label for capturing closure — closure may be constant-folded or inlined"
+    fi
+
+    # 4f: method call emits a mangled `bl` instruction — a method on a struct
+    # must dispatch via a named label at runtime, not be inlined or constant-folded.
+    # If galvanic evaluated `w.get()` at compile time and emitted `mov x0, #42`,
+    # no `bl` instruction would appear.
+    # (FLS §6.12.2: method call expressions; fls-constraints.md Constraint 1.)
+    SRC_4F='struct Wrap { val: i32 }
+impl Wrap { fn get(&self) -> i32 { self.val } }
+fn main() -> i32 {
+    let w = Wrap { val: 42 };
+    w.get()
+}'
+    if check_asm_contains "$SRC_4F" '\bbl\b'; then
+        claim_ok "method call on struct emits 'bl' instruction (not constant-folded)"
+    else
+        claim_fail "4f method call emits runtime bl" \
+            "no 'bl' instruction for w.get() — method call may be constant-folded or inlined"
+    fi
 fi
 
 # ── Claim 5: adversarial inputs exit cleanly ─────────────────────────────────
