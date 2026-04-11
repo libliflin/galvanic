@@ -181,3 +181,8 @@ fn fls_6_23_overflow() {
 fn fls_4_9_slices() {
     assert_galvanic_accepts("fls_4_9_slices.rs");
 }
+
+#[test]
+fn fls_6_23_div_zero() {
+    assert_galvanic_accepts("fls_6_23_div_zero.rs");
+}

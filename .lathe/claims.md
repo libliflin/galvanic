@@ -66,3 +66,12 @@ Claims have lifecycles — retire them here with reasoning when they no longer f
 **Claim:** Every `src/` module that implements FLS behavior contains at least one `FLS §` citation in its source.  
 **Why load-bearing:** The research depends on traceability. A module that implements parser rules but has no FLS citations is untraceable — the spec investigator can't verify correctness, can't find ambiguities, can't cite the code in research notes.  
 **Check:** For each of `src/lexer.rs`, `src/parser.rs`, `src/ir.rs`, `src/lower.rs`, `src/codegen.rs`: `grep -c 'FLS §'` returns > 0.
+
+---
+
+## C8: ARM64 sdiv-by-zero divergence is documented
+
+**Stakeholder:** Spec investigator  
+**Claim:** The FLS §6.23 divergence for division by zero is documented in both `src/ir.rs` (on `IrBinOp::Div`) and `src/codegen.rs` (at the `sdiv` emission site) with an `FLS §6.23 AMBIGUOUS` or equivalent comment noting that galvanic does not insert a zero-divisor guard.  
+**Why load-bearing:** FLS §6.23 requires division by zero to always panic. ARM64 `sdiv` with a zero divisor silently returns 0 (ARM DDI 0487, C3.4.8) — no trap, no signal. This is a more severe divergence than x86 (where `idiv` raises SIGFPE). The research record must document *why* the divergence exists (architectural), not just that a check is missing. If someone removes the comment without adding the check, the spec investigator loses a documented research output.  
+**Check:** `grep -c 'FLS §6.23' src/ir.rs` ≥ 1 AND `grep -c 'FLS §6.23' src/codegen.rs` ≥ 1. The fixture `tests/fixtures/fls_6_23_div_zero.rs` must parse without error.

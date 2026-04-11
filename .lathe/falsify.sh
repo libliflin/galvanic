@@ -135,6 +135,32 @@ for MODULE in src/lexer.rs src/parser.rs src/ir.rs src/lower.rs src/codegen.rs; 
     fi
 done
 
+# ── C8: ARM64 sdiv-by-zero divergence is documented ──────────────────────────
+# FLS §6.23 requires division by zero to panic. ARM64 `sdiv` returns 0 silently.
+# The divergence must be documented in both ir.rs and codegen.rs so the research
+# record is not silently erased. The div_zero fixture must also parse without error.
+echo "--- C8: sdiv-by-zero divergence documented ---"
+set +o pipefail
+IR_COUNT=$(grep -c 'FLS §6.23' src/ir.rs || true)
+CG_COUNT=$(grep -c 'FLS §6.23' src/codegen.rs || true)
+set -o pipefail
+if [ "$IR_COUNT" -ge 1 ] && [ "$CG_COUNT" -ge 1 ]; then
+    ok "C8: FLS §6.23 divergence documented in ir.rs ($IR_COUNT) and codegen.rs ($CG_COUNT)"
+else
+    fail "C8: FLS §6.23 div-by-zero divergence NOT documented (ir.rs=$IR_COUNT codegen.rs=$CG_COUNT)"
+fi
+# Also verify the fixture parses
+FIXTURE="tests/fixtures/fls_6_23_div_zero.rs"
+if [ -f "$FIXTURE" ]; then
+    if cargo test --test fls_fixtures --quiet -- --exact fls_6_23_div_zero 2>/dev/null; then
+        ok "C8: fls_6_23_div_zero.rs parses without error"
+    else
+        fail "C8: fls_6_23_div_zero.rs failed to parse"
+    fi
+else
+    fail "C8: $FIXTURE not found"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "=== Summary === passed: $PASS failed: $FAIL"
