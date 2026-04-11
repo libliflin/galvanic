@@ -216,3 +216,8 @@ fn fls_6_5_operator_expressions() {
 fn fls_6_16_range_expressions() {
     assert_galvanic_accepts("fls_6_16_range_expressions.rs");
 }
+
+#[test]
+fn fls_6_3_path_expressions() {
+    assert_galvanic_accepts("fls_6_3_path_expressions.rs");
+}
