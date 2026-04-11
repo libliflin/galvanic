@@ -5369,6 +5369,159 @@ fn walk_expr_for_mutations(
     }
 }
 
+// ── §6.18 Exhaustiveness check ────────────────────────────────────────────────
+
+/// FLS §6.18: Compile-time match exhaustiveness check.
+///
+/// FLS §6.18: "A match expression must be exhaustive — every possible value of
+/// the scrutinee type must be handled by at least one arm."
+///
+/// FLS §6.18: AMBIGUOUS — The spec requires exhaustiveness but provides no
+/// algorithm. Galvanic uses a conservative heuristic: accept when exhaustiveness
+/// can be proven, reject only when non-exhaustiveness is certain, and accept
+/// (false negative) for patterns too complex to analyse statically.
+///
+/// Rules (in priority order):
+/// 1. Any arm with a catch-all pattern (Wildcard, Ident, single-segment struct,
+///    or Or containing one) and no guard → trivially exhaustive.
+/// 2. Bool: both `true` and `false` covered without guard → exhaustive.
+/// 3. Enum: all declared variants of a known enum covered without guard → exhaustive.
+/// 4. All patterns are integer/bool literals or ranges (no catch-all) → definitively
+///    non-exhaustive; return error.
+/// 5. Otherwise: accept (false negative is acceptable).
+fn check_match_exhaustiveness(
+    arms: &[crate::ast::MatchArm],
+    source: &str,
+    enum_defs: &EnumDefs,
+) -> Result<(), LowerError> {
+    use crate::ast::Pat;
+
+    /// Returns `true` if `pat` is a catch-all — matches any value.
+    fn is_catch_all(pat: &Pat) -> bool {
+        match pat {
+            // FLS §5.1: Wildcard always matches.
+            // FLS §5.1.4: Bare identifier pattern always matches.
+            Pat::Wildcard | Pat::Ident(_) => true,
+            // FLS §5.1.11: OR pattern is a catch-all if any alternative is.
+            Pat::Or(alts) => alts.iter().any(is_catch_all),
+            // FLS §5.3: Single-segment struct pattern (StructName { … }) always
+            // matches any value of that struct type — the struct has exactly one
+            // "variant". Two-segment paths (EnumName::VariantName { … }) are
+            // enum-variant patterns and are NOT catch-alls.
+            Pat::StructVariant { path, .. } if path.len() == 1 => true,
+            _ => false,
+        }
+    }
+
+    // Rule 1: trivial catch-all arm (no guard required).
+    if arms.iter().any(|a| a.guard.is_none() && is_catch_all(&a.pat)) {
+        return Ok(());
+    }
+
+    // Rule 2: bool exhaustiveness — both `true` and `false` covered without guard.
+    let has_true = arms
+        .iter()
+        .any(|a| a.guard.is_none() && matches!(a.pat, Pat::LitBool(true)));
+    let has_false = arms
+        .iter()
+        .any(|a| a.guard.is_none() && matches!(a.pat, Pat::LitBool(false)));
+    if has_true && has_false {
+        return Ok(());
+    }
+
+    // Rule 3: enum exhaustiveness — all declared variants of a known enum covered
+    // without a guard on the covering arm.
+    //
+    // Identify the enum name from the first two-segment path/tuple-struct/struct-variant
+    // pattern found among the arms.
+    let enum_name_opt = arms.iter().find_map(|a| {
+        if a.guard.is_some() {
+            return None;
+        }
+        match &a.pat {
+            Pat::Path(segs) if segs.len() == 2 => {
+                Some(segs[0].text(source).to_owned())
+            }
+            Pat::TupleStruct { path, .. } if path.len() == 2 => {
+                Some(path[0].text(source).to_owned())
+            }
+            Pat::StructVariant { path, .. } if path.len() == 2 => {
+                Some(path[0].text(source).to_owned())
+            }
+            _ => None,
+        }
+    });
+    if let Some(ref enum_name) = enum_name_opt
+        && let Some(variants) = enum_defs.get(enum_name.as_str()) {
+        {
+            let mut covered: std::collections::HashSet<&str> =
+                std::collections::HashSet::new();
+            for arm in arms {
+                if arm.guard.is_some() {
+                    continue;
+                }
+                let variant_name: Option<&str> = match &arm.pat {
+                    Pat::Path(segs)
+                        if segs.len() == 2 && segs[0].text(source) == enum_name =>
+                    {
+                        Some(segs[1].text(source))
+                    }
+                    Pat::TupleStruct { path, .. }
+                        if path.len() == 2 && path[0].text(source) == enum_name =>
+                    {
+                        Some(path[1].text(source))
+                    }
+                    Pat::StructVariant { path, .. }
+                        if path.len() == 2 && path[0].text(source) == enum_name =>
+                    {
+                        Some(path[1].text(source))
+                    }
+                    _ => None,
+                };
+                if let Some(vn) = variant_name {
+                    covered.insert(vn);
+                }
+            }
+            if variants.keys().all(|v| covered.contains(v.as_str())) {
+                return Ok(());
+            }
+        }
+    }
+
+    // Rule 4: all patterns are integer/bool literals or ranges — definitely
+    // non-exhaustive for an i32 or similar type.
+    //
+    // FLS §6.18: AMBIGUOUS — spec does not define the exhaustiveness algorithm.
+    // Galvanic rejects only when every arm is a literal/range (no structural
+    // pattern that might cover all values). This avoids false positives for
+    // patterns we cannot statically analyse.
+    let all_literal_or_range = arms.iter().all(|a| {
+        fn is_lit_or_range(p: &Pat) -> bool {
+            matches!(
+                p,
+                Pat::LitInt(_)
+                    | Pat::NegLitInt(_)
+                    | Pat::RangeInclusive { .. }
+                    | Pat::RangeExclusive { .. }
+                    | Pat::LitBool(_)
+            ) || matches!(p, Pat::Or(alts) if alts.iter().all(is_lit_or_range))
+        }
+        is_lit_or_range(&a.pat)
+    });
+    if all_literal_or_range {
+        return Err(LowerError::Unsupported(
+            "match expression is not exhaustive: no arm covers all possible values; \
+             add a wildcard `_` arm"
+                .into(),
+        ));
+    }
+
+    // Rule 5: patterns too complex to analyse — accept conservatively.
+    // FLS §6.18: AMBIGUOUS — galvanic cannot prove exhaustiveness here but
+    // also cannot prove non-exhaustiveness, so it accepts (false negative).
+    Ok(())
+}
+
 impl<'src> LowerCtx<'src> {
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -6844,6 +6997,8 @@ impl<'src> LowerCtx<'src> {
                         "enum-returning match expression with no arms".into(),
                     ));
                 }
+                // FLS §6.18: Exhaustiveness check — reject definitively non-exhaustive matches.
+                check_match_exhaustiveness(arms, self.source, self.enum_defs)?;
 
                 // FLS §6.18: The scrutinee is evaluated once before any arm is
                 // tried. We spill it to a stack slot so each arm's pattern check
@@ -7090,6 +7245,8 @@ impl<'src> LowerCtx<'src> {
                         "match expression with no arms".into(),
                     ));
                 }
+                // FLS §6.18: Exhaustiveness check — reject definitively non-exhaustive matches.
+                check_match_exhaustiveness(arms, self.source, self.enum_defs)?;
 
                 // FLS §6.18: The scrutinee is evaluated once before any arm is
                 // tried. We spill it to a stack slot so each arm's pattern check
@@ -7425,6 +7582,8 @@ impl<'src> LowerCtx<'src> {
                         "struct-returning match expression with no arms".into(),
                     ));
                 }
+                // FLS §6.18: Exhaustiveness check — reject definitively non-exhaustive matches.
+                check_match_exhaustiveness(arms, self.source, self.enum_defs)?;
 
                 // FLS §6.18: The scrutinee is evaluated once before any arm is
                 // tried. We spill it to a stack slot so each arm's pattern check
@@ -11900,6 +12059,8 @@ impl<'src> LowerCtx<'src> {
                 if arms.is_empty() {
                     return Err(LowerError::Unsupported("match expression with no arms".into()));
                 }
+                // FLS §6.18: Exhaustiveness check — reject definitively non-exhaustive matches.
+                check_match_exhaustiveness(arms, self.source, self.enum_defs)?;
 
                 // Lower the scrutinee and spill to a stack slot.
                 // The scrutinee may be i32 or bool; both use integer registers.

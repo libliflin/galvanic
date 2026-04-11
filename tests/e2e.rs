@@ -34129,3 +34129,102 @@ fn main() -> i32 { update_syntax(Point { x: 10, y: 20 }, 5) }\n",
         "result must not be constant-folded to #25 (5 + 20): {asm}"
     );
 }
+
+// ── Claim 4l: §6.18 match exhaustiveness check ─────────────────────────────���─
+
+/// Claim 4l: non-exhaustive integer match rejected at compile time.
+///
+/// FLS §6.18: "A match expression must be exhaustive."
+/// A match with only literal-integer arms and no wildcard cannot cover all
+/// i32 values; galvanic must reject it with a compile-time error.
+///
+/// This test calls `lower()` directly and asserts it returns an error.
+/// It does NOT call `compile_to_asm` (which panics on error).
+#[test]
+fn claim_4l_non_exhaustive_literal_match_rejected() {
+    let src = "fn main() -> i32 { let x = 5; match x { 0 => 0, 1 => 1 } }\n";
+    let tokens = galvanic::lexer::tokenize(src).expect("lex failed");
+    let sf = galvanic::parser::parse(&tokens, src).expect("parse failed");
+    let result = galvanic::lower::lower(&sf, src);
+    assert!(
+        result.is_err(),
+        "expected exhaustiveness error for literal-only match, but lower() returned Ok"
+    );
+    let msg = result.err().unwrap().to_string();
+    assert!(
+        msg.contains("exhaustive"),
+        "expected error mentioning 'exhaustive', got: {msg}"
+    );
+}
+
+/// Claim 4l: match with wildcard arm accepted (trivially exhaustive).
+///
+/// FLS §6.18: A wildcard `_` arm covers all values not handled by earlier arms.
+/// Assembly inspection verifies runtime comparison is emitted (not constant-folded).
+#[test]
+fn claim_4l_wildcard_arm_accepted_emits_cmp() {
+    let asm = compile_to_asm(
+        "fn classify(x: i32) -> i32 { match x { 0 => 0, _ => 1 } }\n\
+fn main() -> i32 { classify(5) }\n",
+    );
+    assert!(
+        asm.contains("cmp"),
+        "expected 'cmp' instruction in match with wildcard arm, got:\n{asm}"
+    );
+    // Must not constant-fold the result.
+    assert!(
+        !asm.contains("mov     x0, #1"),
+        "result must not be constant-folded to #1: {asm}"
+    );
+}
+
+/// Claim 4l: enum match covering all variants accepted (enum exhaustiveness).
+///
+/// FLS §6.18: A match covering all declared variants of an enum is exhaustive.
+/// No wildcard arm is required when all variants are present.
+/// Assembly inspection verifies runtime discriminant comparison is emitted.
+#[test]
+fn claim_4l_enum_all_variants_accepted_emits_cmp() {
+    let asm = compile_to_asm(
+        "enum Color { Red, Blue }\n\
+fn pick(c: Color) -> i32 { match c { Color::Red => 0, Color::Blue => 1 } }\n\
+fn main() -> i32 { pick(Color::Red) }\n",
+    );
+    assert!(
+        asm.contains("cmp"),
+        "expected 'cmp' instruction in exhaustive enum match (all variants covered), got:\n{asm}"
+    );
+}
+
+/// Claim 4l: non-exhaustive range-only match rejected.
+///
+/// FLS §6.18: A match with only range patterns and no wildcard is non-exhaustive
+/// for i32 (the range cannot cover all 2^32 values). Galvanic rejects it.
+#[test]
+fn claim_4l_non_exhaustive_range_match_rejected() {
+    let src = "fn main() -> i32 { let x = 5; match x { 1..=3 => 0, 4..=6 => 1 } }\n";
+    let tokens = galvanic::lexer::tokenize(src).expect("lex failed");
+    let sf = galvanic::parser::parse(&tokens, src).expect("parse failed");
+    let result = galvanic::lower::lower(&sf, src);
+    assert!(
+        result.is_err(),
+        "expected exhaustiveness error for range-only match, but lower() returned Ok"
+    );
+}
+
+/// Claim 4l: bool match covering both values accepted.
+///
+/// FLS §6.18: A match on a bool scrutinee with both `true` and `false` arms
+/// is exhaustive without a wildcard.
+#[test]
+fn claim_4l_bool_both_values_accepted() {
+    let asm = compile_to_asm(
+        "fn to_int(b: bool) -> i32 { match b { true => 1, false => 0 } }\n\
+fn main() -> i32 { to_int(true) }\n",
+    );
+    // Must emit a runtime comparison — not constant-fold the result.
+    assert!(
+        asm.contains("cmp"),
+        "expected 'cmp' in bool match covering both values, got:\n{asm}"
+    );
+}
