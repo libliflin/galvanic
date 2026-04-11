@@ -120,6 +120,41 @@ This is not a documentation claim — it is checked via `std::mem::size_of::<Spa
 
 ---
 
+## Claim 4j: match expression with runtime scrutinee emits comparison instructions
+
+**Stakeholder**: William (FLS §6.18 compliance; research conclusions depend on correct match codegen)
+**Type**: Behavioral — structural check on emitted assembly
+
+When galvanic compiles a `match` expression whose scrutinee is a runtime-valued parameter with range-pattern arms, it must emit runtime comparison instructions (e.g., `cmp`, `cbz`, `b.lt`, `b.le`) — not constant-fold the result to the matching arm's value based on the call site.
+
+Match expressions are the most prevalent pattern-matching construct in Rust and cover the widest set of FLS §6.18 semantics. A broken optimizer that sees `grade(85)` and folds it to `mov x0, #3` would silently produce wrong results whenever `grade` is called with any other value. The arms with range patterns (`90..=100 => 4`, `80..=89 => 3`) require runtime range comparisons that cannot be eliminated without knowing the value of `score` at compile time.
+
+This claim is complementary to:
+- **4b** (parameter arithmetic): operands in expressions
+- **4c** (while-loop): branch instructions for loops
+- **4h** (if-else): branch instructions for conditionals
+
+Match is a separate lowering path from if-else and while; each must be defended independently.
+
+**Falsification case**:
+```rust
+fn grade(score: i32) -> i32 {
+    match score {
+        90..=100 => 4,
+        80..=89 => 3,
+        _ => 1,
+    }
+}
+fn main() -> i32 { grade(85) }
+```
+Must emit at least one `cmp` instruction (for the range boundary checks). If the compiler emits only `mov x0, #3` (the correct result for `grade(85)`), it is constant-folding a non-const function — violating fls-constraints.md Constraint 1.
+
+**Falsification check**: Build galvanic, compile the case above, inspect the `.s` file for `cmp`.
+
+**Lifecycle**: Permanent. Match expression lowering is load-bearing for FLS §6.18 coverage.
+
+---
+
 ## Retired Claims
 
 *(none yet)*
