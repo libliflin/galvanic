@@ -1,55 +1,86 @@
-# Goal: Create `refs/fls-ambiguities.md` — FLS Ambiguity Findings Index
+# Goal: Add CONTRIBUTING.md — Document the Claim Methodology
 
 ## What
 
-Create `refs/fls-ambiguities.md`: a discoverable document that aggregates all
-`AMBIGUOUS` annotations from the galvanic source code (`src/`) into a single
-index, grouped by FLS section, with a consolidated entry per finding.
+Create `CONTRIBUTING.md` at the repo root. It must explain the "Claim"
+methodology clearly enough that a newcomer with 90 minutes can make a real
+contribution without asking anyone.
 
-The builder should:
+The document must cover:
 
-1. Read every `AMBIGUOUS` comment in `src/ast.rs`, `src/codegen.rs`, `src/ir.rs`,
-   `src/lexer.rs`, and `src/lower.rs` (there are ~155 total across these files).
-2. Group findings by FLS section number (§2, §4, §5, §6, §7, §8, §9, §10, §11, §13, §15, §19).
-3. Consolidate near-duplicate findings (e.g., multiple §6.23 overflow notes that
-   say the same thing) into one entry per distinct gap. Target ~20–30 consolidated
-   findings rather than 155 raw annotations.
-4. For each consolidated finding, write an entry with:
-   - **FLS citation** (e.g., `§6.9`)
-   - **The gap**: what the spec leaves unspecified, ambiguous, or contradictory
-   - **Galvanic's choice**: what the implementation does and why
-   - **Source location**: which file(s) contain the annotation
-5. Open the document with a 2–3 sentence introduction explaining its purpose:
-   this is the primary research output of galvanic — a record of where the FLS
-   fails to fully specify implementable behavior.
+1. **What a "Claim" is:** One FLS section → parse fixture (if missing) + e2e
+   exit-code test + assembly inspection test. The three-part structure is
+   non-negotiable: exit codes alone don't prove runtime codegen.
 
-Each entry must be **self-contained and readable** without opening the source —
-citable in a spec review or bug report without further context.
+2. **The contribution loop, step by step:**
+   - Find an FLS section with a parse fixture but no e2e codegen. The gap list
+     lives in `refs/fls-ambiguities.md` and the parse-only fixtures are in
+     `tests/fixtures/`. Range expressions as standalone values (§6.16) is one
+     concrete open example.
+   - Read the FLS section. Note any ambiguities.
+   - Add an e2e exit-code test in `tests/e2e.rs` using `compile_and_run()`.
+   - Add an assembly inspection test using `compile_to_asm()` asserting the
+     correct ARM64 instruction (e.g. `add`, `cbz`, `ldr`) IS emitted, and the
+     constant-folded form (e.g. `mov x0, #5`) is NOT.
+   - If the spec is silent or contradictory on a point, add
+     `// FLS §X.Y: AMBIGUOUS — <what the spec leaves unspecified>` in the
+     source and add an entry to `refs/fls-ambiguities.md`.
+   - Commit as: `Claim N: add <feature> runtime falsification for FLS §X.Y`
 
-## Which stakeholder
+3. **The litmus test** (from `refs/fls-constraints.md`): replace every literal
+   in a function with a function parameter. If the implementation breaks, it
+   was evaluating at compile time — not compiling. All claims must survive this.
 
-**William (the researcher)** and **FLS spec readers (the Ferrocene team)**.
+4. **FLS citation discipline:** every source change implementing a spec feature
+   must carry `// FLS §X.Y: <brief description>`. Ambiguities go as
+   `// FLS §X.Y: AMBIGUOUS — <desc>`.
 
-William's first research question is: where does the FLS fail to specify behavior
-completely? The answer is in 155 annotations across 5 source files. He cannot
-find it without reading every file. This change makes the primary research output
-visible at a glance.
+5. **What CI enforces** — build, tests, clippy, fuzz-smoke, e2e on
+   ubuntu+qemu (ARM64 cross-compile + qemu-user), and an audit job (no `unsafe`
+   in `src/`, no `Command` outside `main.rs`, no network crate deps).
 
-FLS spec readers — the people most likely to act on the findings — need a citable
-document. A `refs/fls-ambiguities.md` can be linked from a GitHub issue, a spec
-PR, or a blog post. A grepped list of code comments cannot.
+6. **What CI does NOT enforce** — the core constraint: that non-const code emits
+   runtime ARM64 instructions. The assembly inspection test is the only guard. A
+   PR with only an exit-code test for a new feature is incomplete.
 
-## Why now
+7. **The research framing:** a contributor's value is not "make galvanic compile
+   more programs" but "find where the FLS fails to specify behavior, and
+   document what choice galvanic made." `refs/fls-ambiguities.md` is where that
+   research accumulates.
 
-The project has 155 `AMBIGUOUS` annotations in `src/`. The build is clean. The
-last 5 commits have all been forward progress on codegen (Claims 4g–4k). The
-ambiguity-finding work has been continuous and real, but the research output has
-never been surfaced in one place.
+Keep the document under 150 lines. Honest and terse beats comprehensive.
 
-This is the first cycle of this session. The goal-history is empty. The highest-
-leverage act for this cycle is to make existing findings visible — not to add
-finding 156. One well-placed document now is worth more than the next incremental
-feature.
+Do NOT add a CONTRIBUTING.md entry to the README or modify any other file.
+One new file only: `CONTRIBUTING.md` at the repo root.
+
+## Which Stakeholder
+
+**Future contributors** — specifically the "someone with 90 minutes on a Sunday"
+persona from the goal doc. They currently have:
+- A README explaining the project's purpose ✓
+- A `refs/fls-ambiguities.md` showing the research output ✓
+- A git log full of "Claim 4k" commits with no explanation of what "Claim" means
+
+They're missing the contribution model. Without it, they can't contribute even
+if they want to.
+
+**William** also benefits: a CONTRIBUTING.md makes the research methodology
+replicable and hands off gracefully.
+
+## Why Now
+
+`refs/fls-ambiguities.md` was just completed (previous session, commits #256–#259).
+It makes the research OUTPUT visible. CONTRIBUTING.md makes the research
+METHODOLOGY visible. These two documents together give the project a complete
+research interface:
+
+- "What did galvanic find?" → `refs/fls-ambiguities.md`
+- "How do I find more?" → `CONTRIBUTING.md`
+
+Without CONTRIBUTING.md, the ambiguity doc is a dead end: a reader learns what
+gaps exist but has no path to contribute new findings. The build is clean, all
+1987 tests pass, and the right move is to close the contributor onboarding gap
+before the next codegen claim.
 
 ---
 
