@@ -201,6 +201,15 @@ else
     fi
 fi
 
+# ── Claim 6: Span is 8 bytes ─────────────────────────────────────────────────
+
+echo "--- Claim 6: Span is 8 bytes"
+if "$CARGO" test --lib -q -- ast::tests::span_is_eight_bytes 2>/dev/null; then
+    claim_ok "size_of::<Span>() == 8"
+else
+    claim_fail "Span is 8 bytes" "ast::tests::span_is_eight_bytes failed — Span struct grew beyond 8 bytes"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

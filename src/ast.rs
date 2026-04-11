@@ -1822,3 +1822,18 @@ pub enum BinOp {
     /// `%`
     Rem,
 }
+
+// ── Structural invariant tests ────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::Span;
+
+    // FLS §1: source text is UTF-8; Span records byte offsets as u32 pairs.
+    // Cache-line design: Span is 8 bytes so it fits alongside a Token (also 8 bytes)
+    // in a single 64-byte cache line. Both fields are u32; no padding is inserted.
+    #[test]
+    fn span_is_eight_bytes() {
+        assert_eq!(std::mem::size_of::<Span>(), 8);
+    }
+}

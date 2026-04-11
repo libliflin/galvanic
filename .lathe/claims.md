@@ -94,6 +94,21 @@ A panic or signal death (exit > 128) on any of these inputs is a bug. A non-zero
 
 ---
 
+## Claim 6: Span is 8 bytes
+
+**Stakeholder**: William (cache-aware design research goal), contributors (architectural invariant)
+**Type**: Structural — `size_of::<Span>() == 8`
+
+The `Span` struct must be exactly 8 bytes. This is the layout note stated in the `Span` doc comment and in the architecture document: two `u32` fields, no padding. 8 bytes means a `Span` fits alongside a `Token` (also 8 bytes) in a single 64-byte cache line.
+
+This is not a documentation claim — it is checked via `std::mem::size_of::<Span>()` in a unit test in `src/ast.rs`. Editing comments to say "8 bytes" while the struct grows does not satisfy this claim.
+
+**Falsification check**: `cargo test --lib -- ast::tests::span_is_eight_bytes`
+
+**Lifecycle**: Permanent as long as the cache-line design hypothesis is the research goal. If the design deliberately changes (e.g., adding a file-id field), update this claim with reasoning and adjust the layout doc.
+
+---
+
 ## Retired Claims
 
 *(none yet)*
