@@ -70,6 +70,15 @@ pub fn parse(tokens: &[Token], src: &str) -> Result<SourceFile, ParseError> {
 // ── Parser ────────────────────────────────────────────────────────────────────
 
 /// Recursive-descent parser.
+/// Maximum block-nesting depth. Beyond this depth `parse_block` returns a
+/// parse error instead of recursing, preventing stack overflow on adversarial
+/// input.
+///
+/// FLS §6.4: Block expressions may be arbitrarily nested; the spec imposes no
+/// depth limit. This limit is an implementation constraint, not a spec
+/// requirement.
+const MAX_BLOCK_DEPTH: u32 = 200;
+
 struct Parser<'src> {
     tokens: &'src [Token],
     src: &'src str,
@@ -92,13 +101,16 @@ struct Parser<'src> {
     /// struct expressions are not allowed in expression-without-struct-literal
     /// positions (e.g., `if`/`while`/`for` conditions).
     restrict_struct_lit: bool,
+    /// Current block-nesting depth, used to enforce `MAX_BLOCK_DEPTH` and
+    /// prevent stack overflow on deeply nested adversarial input. FLS §6.4.
+    block_depth: u32,
 }
 
 impl<'src> Parser<'src> {
     fn new(tokens: &'src [Token], src: &'src str) -> Self {
         // Guard: we require at least one token (the Eof sentinel).
         assert!(!tokens.is_empty(), "token slice must contain at least Eof");
-        Parser { tokens, src, cursor: 0, restrict_struct_lit: false }
+        Parser { tokens, src, cursor: 0, restrict_struct_lit: false, block_depth: 0 }
     }
 
     // ── Low-level token access ────────────────────────────────────────────────
@@ -1891,6 +1903,20 @@ impl<'src> Parser<'src> {
     /// and a tail expression (not followed by `;`) is purely syntactic and
     /// must be resolved during parsing, not type-checking.
     fn parse_block(&mut self) -> Result<Block, ParseError> {
+        // FLS §6.4: Enforce a nesting depth limit to prevent stack overflow on
+        // adversarial input. The spec imposes no limit; this is an
+        // implementation constraint.
+        if self.block_depth >= MAX_BLOCK_DEPTH {
+            let span = self.current_span();
+            return Err(ParseError {
+                span,
+                message: format!(
+                    "block nesting depth exceeds maximum of {MAX_BLOCK_DEPTH}"
+                ),
+            });
+        }
+        self.block_depth += 1;
+
         let start = self.current_span();
         self.expect(TokenKind::OpenBrace)?;
 
@@ -1912,6 +1938,7 @@ impl<'src> Parser<'src> {
         let end = self.current_span();
         self.expect(TokenKind::CloseBrace)?;
 
+        self.block_depth -= 1;
         Ok(Block { stmts, tail, span: start.to(end) })
     }
 

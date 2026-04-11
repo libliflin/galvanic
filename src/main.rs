@@ -2,12 +2,41 @@ use std::env;
 use std::path::Path;
 use std::process;
 
+/// Stack size for the compilation thread.
+///
+/// The lexer, parser, lowering, and codegen passes all use recursive descent.
+/// Deeply nested source files can overflow the default thread stack (typically
+/// 8 MB on macOS/Linux). We run the pipeline in a thread with a larger stack
+/// so that adversarial inputs produce a clean parse error (via the parser's
+/// MAX_BLOCK_DEPTH limit) rather than an OS signal.
+///
+/// 64 MB matches rustc's own compilation-thread stack budget.
+const COMPILE_STACK_SIZE: usize = 64 * 1024 * 1024;
+
 fn main() {
     let args: Vec<String> = env::args().collect();
 
+    // Run the entire compilation pipeline in a thread with a larger stack so
+    // deeply-nested programs produce a clean error instead of a signal death.
+    let child = std::thread::Builder::new()
+        .stack_size(COMPILE_STACK_SIZE)
+        .spawn(move || compile(args))
+        .expect("failed to spawn compilation thread");
+
+    // If the child calls process::exit the whole process exits immediately and
+    // join() is unreachable. Otherwise join() propagates the exit code.
+    match child.join() {
+        Ok(code) => process::exit(code),
+        Err(_) => process::exit(101),
+    }
+}
+
+/// Run the full compilation pipeline. Returns the intended process exit code
+/// so the caller can use process::exit without preventing unwinding in tests.
+fn compile(args: Vec<String>) -> i32 {
     if args.len() < 2 {
         eprintln!("usage: galvanic <source.rs> [-o <output>]");
-        process::exit(1);
+        return 1;
     }
 
     let source_path = Path::new(&args[1]);
@@ -28,7 +57,7 @@ fn main() {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: could not read {filename}: {e}");
-            process::exit(1);
+            return 1;
         }
     };
 
@@ -37,7 +66,7 @@ fn main() {
         Ok(t) => t,
         Err(e) => {
             eprintln!("error: {e}");
-            process::exit(1);
+            return 1;
         }
     };
 
@@ -46,7 +75,7 @@ fn main() {
         Ok(sf) => sf,
         Err(e) => {
             eprintln!("error: {e}");
-            process::exit(1);
+            return 1;
         }
     };
 
@@ -57,13 +86,13 @@ fn main() {
         Ok(m) => m,
         Err(e) => {
             eprintln!("error: lower failed ({e})");
-            process::exit(1);
+            return 1;
         }
     };
 
     // Nothing to compile if there is no entry point.
     if !module.fns.iter().any(|f| f.name == "main") {
-        return;
+        return 0;
     }
 
     // ── Emit ARM64 assembly ───────────────────────────────────────────────────
@@ -71,7 +100,7 @@ fn main() {
         Ok(a) => a,
         Err(e) => {
             eprintln!("error: {e}");
-            process::exit(1);
+            return 1;
         }
     };
 
@@ -79,7 +108,7 @@ fn main() {
         // If -o was given, assemble and link into a binary.
         if let Err(e) = assemble_and_link(&asm, out) {
             eprintln!("error: {e}");
-            process::exit(1);
+            return 1;
         }
         println!("galvanic: wrote {out}");
     } else {
@@ -87,10 +116,12 @@ fn main() {
         let out_path = source_path.with_extension("s");
         if let Err(e) = std::fs::write(&out_path, &asm) {
             eprintln!("error: could not write {}: {e}", out_path.display());
-            process::exit(1);
+            return 1;
         }
         println!("galvanic: emitted {}", out_path.display());
     }
+
+    0
 }
 
 /// Write assembly text to a temp file, assemble it to an object file, and
