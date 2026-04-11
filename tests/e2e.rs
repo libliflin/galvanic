@@ -957,6 +957,55 @@ fn runtime_div_emits_sdiv() {
     );
 }
 
+/// Assembly inspection: `x / y` with parameters emits `sdiv` with NO overflow guard.
+///
+/// FLS §6.23: `i32::MIN / -1` must panic (signed overflow outside i32 range).
+/// FLS §6.23 AMBIGUOUS: galvanic does NOT insert a MIN/-1 guard before `sdiv`.
+/// ARM64 `sdiv` with lhs=i32::MIN and rhs=-1 returns 2147483648 (a positive 64-bit
+/// value outside i32 range) rather than panicking — an architectural difference from
+/// x86 `idiv` which raises SIGFPE on the equivalent operation.
+///
+/// This test pins the documented divergence at the assembly level. If galvanic adds
+/// an overflow guard in the future (a cmp+branch before sdiv), this test will fail
+/// and claims.md C8 must be updated to reflect the narrowed divergence.
+///
+/// Companion to `runtime_div_emits_sdiv` and claim C8.
+#[test]
+fn runtime_sdiv_no_min_neg_one_guard() {
+    let asm = compile_to_asm(
+        "fn f(x: i32, y: i32) -> i32 { x / y }\nfn main() -> i32 { f(10, 2) }\n",
+    );
+    // sdiv must be emitted (not constant-folded)
+    assert!(
+        asm.contains("sdiv"),
+        "expected `sdiv` in `fn f(x: i32, y: i32) -> i32 {{ x / y }}`, got:\n{asm}"
+    );
+    // FLS §6.23 AMBIGUOUS: no MIN/-1 overflow guard.
+    // A conforming compiler would emit: cmp x{lhs}, #0x80000000; b.eq <panic>
+    // Galvanic emits bare `sdiv` without this check.
+    // The constant 0x80000000 (i32::MIN) would appear in the assembly if such a
+    // guard existed. Its absence confirms the documented divergence from FLS §6.23.
+    assert!(
+        !asm.contains("0x80000000"),
+        "unexpected MIN/-1 overflow guard in `f` — FLS §6.23 divergence narrowed; update claims.md:\n{asm}"
+    );
+    // Confirm no conditional branch in the division function body (no guard of any kind)
+    let f_section: String = asm
+        .lines()
+        .skip_while(|l| !l.trim_start().starts_with("f:"))
+        .take_while(|l| l.trim_start().starts_with("f:") || !l.contains(':') || l.contains("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let has_branch = f_section.lines().any(|l| {
+        let t = l.trim_start();
+        t.starts_with("cbz") || t.starts_with("cbnz") || t.starts_with("b.")
+    });
+    assert!(
+        !has_branch,
+        "unexpected conditional branch in division function — no guard expected per FLS §6.23 AMBIGUOUS:\n{f_section}"
+    );
+}
+
 /// Assembly inspection: `10 % 3` must emit `sdiv` + `msub`.
 ///
 /// FLS §6.5.5: Remainder operator `%`.
