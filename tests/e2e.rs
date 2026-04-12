@@ -35009,4 +35009,11 @@ fn claim_4q_cmn_guard_appears_before_sdiv() {
         asm.contains("cbz") && asm.contains("_galvanic_panic"),
         "expected `cbz` zero-guard alongside MIN/-1 guard, got:\n{asm}"
     );
+    // Ordering: cmn guard must appear before sdiv in the instruction stream.
+    let cmn_pos = asm.find("cmn").expect("cmn guard must be present");
+    let sdiv_pos = asm.find("sdiv").expect("sdiv must be present");
+    assert!(
+        cmn_pos < sdiv_pos,
+        "cmn overflow guard must appear before sdiv; cmn at {cmn_pos}, sdiv at {sdiv_pos}"
+    );
 }
