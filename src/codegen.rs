@@ -540,12 +540,43 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
                 // ARM64: `sdiv x{dst}, x{lhs}, x{rhs}` — signed division.
                 // FLS §6.23: Division by zero panics at runtime.
                 // Guard: `cbz x{rhs}, _galvanic_panic` checks the divisor before sdiv.
-                // ARM64 `cbz xN, label` branches if xN == 0 (4-byte instruction).
-                // Cache-line note: two instructions (cbz + sdiv) = 8 bytes per division.
+                // FLS §6.23: i32::MIN / -1 overflows (result 2147483648 exceeds i32::MAX).
+                // ARM64 `sdiv` silently returns i32::MIN (wraps); we must guard.
+                // Guard sequence:
+                //   cmn x{rhs}, #1      → test rhs + 1 == 0 (iff rhs == -1)
+                //   b.ne .Ldivok_{fn}_{dst}  → skip if rhs != -1
+                //   movn x{dst}, #0x7fff, lsl #16  → dst = ~(0x7fff<<16) = 0xFFFFFFFF80000000 = i32::MIN
+                //   cmp  x{lhs}, x{dst} → compare lhs with i32::MIN
+                //   b.eq _galvanic_panic → panic if lhs == i32::MIN and rhs == -1
+                // Cache-line note: 7 instructions (cbz+cmn+bne+movn+cmp+beq+sdiv) = 28 bytes.
                 IrBinOp::Div => {
                     writeln!(
                         out,
                         "    cbz     x{rhs}, _galvanic_panic         // FLS §6.23: div-by-zero guard"
+                    )?;
+                    writeln!(
+                        out,
+                        "    cmn     x{rhs}, #1                      // FLS §6.23: MIN/-1 guard: test rhs==-1"
+                    )?;
+                    writeln!(
+                        out,
+                        "    b.ne    .Ldivok_{fn_name}_{dst:<13} // FLS §6.23: skip if rhs != -1"
+                    )?;
+                    writeln!(
+                        out,
+                        "    movn    x{dst}, #0x7fff, lsl #16        // FLS §6.23: load i32::MIN into scratch"
+                    )?;
+                    writeln!(
+                        out,
+                        "    cmp     x{lhs}, x{dst}                  // FLS §6.23: lhs == i32::MIN?"
+                    )?;
+                    writeln!(
+                        out,
+                        "    b.eq    _galvanic_panic                  // FLS §6.23: MIN/-1 overflow → panic"
+                    )?;
+                    writeln!(
+                        out,
+                        ".Ldivok_{fn_name}_{dst}:                    // FLS §6.23: division safe to proceed"
                     )?;
                     writeln!(
                         out,
@@ -560,11 +591,37 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
                 // so reusing dst for the intermediate quotient is safe.
                 // FLS §6.23: Remainder by zero panics at runtime.
                 // Guard: `cbz x{rhs}, _galvanic_panic` checks the divisor before sdiv.
-                // Cache-line note: three instructions (cbz + sdiv + msub) = 12 bytes.
+                // FLS §6.23: i32::MIN % -1 triggers the same sdiv overflow as div.
+                // The same MIN/-1 guard applies before the sdiv used for remainder.
+                // Cache-line note: 9 instructions = 36 bytes.
                 IrBinOp::Rem => {
                     writeln!(
                         out,
                         "    cbz     x{rhs}, _galvanic_panic         // FLS §6.23: rem-by-zero guard"
+                    )?;
+                    writeln!(
+                        out,
+                        "    cmn     x{rhs}, #1                      // FLS §6.23: MIN/-1 guard: test rhs==-1"
+                    )?;
+                    writeln!(
+                        out,
+                        "    b.ne    .Lremok_{fn_name}_{dst:<13} // FLS §6.23: skip if rhs != -1"
+                    )?;
+                    writeln!(
+                        out,
+                        "    movn    x{dst}, #0x7fff, lsl #16        // FLS §6.23: load i32::MIN into scratch"
+                    )?;
+                    writeln!(
+                        out,
+                        "    cmp     x{lhs}, x{dst}                  // FLS §6.23: lhs == i32::MIN?"
+                    )?;
+                    writeln!(
+                        out,
+                        "    b.eq    _galvanic_panic                  // FLS §6.23: MIN/-1 overflow → panic"
+                    )?;
+                    writeln!(
+                        out,
+                        ".Lremok_{fn_name}_{dst}:                    // FLS §6.23: remainder safe to proceed"
                     )?;
                     writeln!(
                         out,
