@@ -104,12 +104,10 @@ For `&[T]`, length is the element count.
 not specify the panic mechanism — whether it is a library call, a trap
 instruction, or something else.
 
-**Galvanic's choice:** No bounds check is emitted at this milestone. Out-of-
-bounds access produces undefined behavior at the assembly level (load/store at
-wrong address). This is a known deviation; the check is deferred until a panic
-infrastructure is in place.
-
-**Source:** `src/ir.rs:730`, `src/codegen.rs:926`, `src/lower.rs:17880`
+**Galvanic's choice (Claim 4p):** A `cmp`/`b.hs` bounds check is emitted
+before every array and slice load and store. Out-of-bounds access branches to
+`_galvanic_panic` (exit 101). This was implemented in Claim 4p and is covered
+by `claim_4p_*` tests in `tests/e2e.rs`.
 
 ---
 
@@ -297,10 +295,12 @@ specify the panic mechanism — library call, trap instruction, signal handler.
   the overflow case, branching to `_galvanic_panic`. (Claim 4q)
 - Out-of-bounds indexing: `cmp`/`b.hs` bounds check before every array/slice
   load and store; out-of-bounds branches to `_galvanic_panic`. (Claim 4p)
-- `+`, `-`, `*` overflow: no overflow check; arithmetic wraps per 64-bit
-  hardware. This is a known deviation from debug-mode Rust semantics.
-  FLS §6.23 AMBIGUOUS — spec requires debug-mode panic but galvanic uses 64-bit
-  arithmetic throughout and does not insert overflow checks for these operators.
+- `+`, `-`, `*` overflow: 4-instruction guard after each op: `sxtw x9, w{dst}`
+  + `cmp x{dst}, x9` + `b.ne _galvanic_panic`. Fires when 64-bit result ≠
+  sign-extend(32-bit result), i.e., the result overflowed i32. (Claim 4s)
+  FLS §6.23 AMBIGUOUS — galvanic emits this guard for all add/sub/mul regardless
+  of actual type (i32, i64, u32). Operations on i64 or u32 locals would
+  incorrectly trigger the guard. Galvanic does not yet track types through IR.
 
 The panic primitive `_galvanic_panic` calls `sys_exit(101)` directly. No stack
 unwinding, no panic message. This matches the FLS requirement (panics terminate
