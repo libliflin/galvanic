@@ -104,12 +104,13 @@ For `&[T]`, length is the element count.
 not specify the panic mechanism — whether it is a library call, a trap
 instruction, or something else.
 
-**Galvanic's choice:** No bounds check is emitted at this milestone. Out-of-
-bounds access produces undefined behavior at the assembly level (load/store at
-wrong address). This is a known deviation; the check is deferred until a panic
-infrastructure is in place.
+**Galvanic's choice (updated — Claim 4p):** A `cmp x{idx}, #len; b.hs
+_galvanic_panic` guard is emitted before every array/slice load and store.
+The `b.hs` (branch if higher or same, unsigned) catches both too-large indices
+and negative indices (which wrap to large unsigned values). Out-of-bounds access
+branches to `_galvanic_panic` which exits with code 101.
 
-**Source:** `src/ir.rs:730`, `src/codegen.rs:926`, `src/lower.rs:17880`
+**Source:** `src/codegen.rs` (bounds check before `LoadIndexed`/`StoreIndexed`)
 
 ---
 
@@ -297,6 +298,13 @@ specify the panic mechanism — library call, trap instruction, signal handler.
   the overflow case, branching to `_galvanic_panic`. (Claim 4q)
 - Out-of-bounds indexing: `cmp`/`b.hs` bounds check before every array/slice
   load and store; out-of-bounds branches to `_galvanic_panic`. (Claim 4p)
+- Shift overflow (§6.5.9): `cmp x{rhs}, #64; b.hs _galvanic_panic` guard
+  before every `lsl`, `asr`, and `lsr` instruction. Negative shift amounts
+  (sign bit set) reinterpret as large unsigned values ≥ 2^63, which are >> 64,
+  so `b.hs` catches them without a separate sign check. **Known false negative:**
+  for `i32` the valid range is [0, 31]; galvanic checks against 64 (the register
+  width), so shifts of 32..63 on `i32` values are not caught. This is analogous
+  to the `i64 MIN/-1` false positive in Claim 4q. (Claim 4r)
 - `+`, `-`, `*` overflow: no overflow check; arithmetic wraps per 64-bit
   hardware. This is a known deviation from debug-mode Rust semantics.
   FLS §6.23 AMBIGUOUS — spec requires debug-mode panic but galvanic uses 64-bit

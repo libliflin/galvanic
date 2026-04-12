@@ -1910,6 +1910,66 @@ fn claim_4r_shr_emits_cmp_shift_guard() {
         cmp_pos < asr_pos,
         "cmp guard must appear before asr, but cmp={cmp_pos} asr={asr_pos}:\n{asm}"
     );
+    // Must NOT constant-fold shr(16, 2) = 4.
+    assert!(
+        !asm.contains("mov     x0, #4"),
+        "must not constant-fold `shr(16, 2)` to #4:\n{asm}"
+    );
+}
+
+/// Claim 4r: unsigned right shift with negative amount exits 101.
+///
+/// FLS §6.5.9: Same guard applies to unsigned (`u32`) right shift (`lsr`).
+/// Negative i32 arguments are sign-extended to i64 then reinterpreted as
+/// large unsigned values (≥ 2^63), which are >> 64, so b.hs catches them.
+#[test]
+fn claim_4r_runtime_ushr_negative_amount_exits_101() {
+    let src =
+        "fn ushr(x: u32, n: u32) -> u32 { x >> n }\nfn main() -> i32 { ushr(16, 4294967295) as i32 }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 101, "expected panic (101) for `16 >> 0xFFFFFFFF`, got {exit_code}");
+}
+
+/// Claim 4r: unsigned right shift with amount >= 64 exits 101.
+#[test]
+fn claim_4r_runtime_ushr_too_large_exits_101() {
+    let src =
+        "fn ushr(x: u32, n: u32) -> u32 { x >> n }\nfn main() -> i32 { ushr(8, 64) as i32 }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 101, "expected panic (101) for `8 >> 64`, got {exit_code}");
+}
+
+/// Claim 4r: assembly inspection — lsr must be preceded by `cmp` shift guard.
+///
+/// FLS §6.5.9: The shift overflow guard applies to unsigned (`lsr`) shifts too.
+#[test]
+fn claim_4r_lsr_emits_cmp_shift_guard() {
+    let src =
+        "fn ushr(x: u32, n: u32) -> u32 { x >> n }\nfn main() -> i32 { ushr(16, 2) as i32 }\n";
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("cmp") && asm.contains("b.hs"),
+        "expected shift guard (cmp + b.hs) before lsr, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("lsr"),
+        "expected `lsr` instruction after guard, got:\n{asm}"
+    );
+    let cmp_pos = asm.find("cmp").unwrap();
+    let lsr_pos = asm.find("    lsr").unwrap();
+    assert!(
+        cmp_pos < lsr_pos,
+        "cmp guard must appear before lsr, but cmp={cmp_pos} lsr={lsr_pos}:\n{asm}"
+    );
+    // Must NOT constant-fold ushr(16, 2) = 4.
+    assert!(
+        !asm.contains("mov     x0, #4"),
+        "must not constant-fold `ushr(16, 2)` to #4:\n{asm}"
+    );
 }
 
 // ── Milestone 13: compound assignment operators ───────────────────────────────
