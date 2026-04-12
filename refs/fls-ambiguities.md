@@ -104,10 +104,11 @@ For `&[T]`, length is the element count.
 not specify the panic mechanism — whether it is a library call, a trap
 instruction, or something else.
 
-**Galvanic's choice:** No bounds check is emitted at this milestone. Out-of-
-bounds access produces undefined behavior at the assembly level (load/store at
-wrong address). This is a known deviation; the check is deferred until a panic
-infrastructure is in place.
+**Galvanic's choice (updated — Claim 4p):** A `cmp`/`b.hs` bounds check is
+emitted before every array and slice load and store. If the index is out of
+bounds, the branch goes to `_galvanic_panic` which exits with code 101. The
+check uses the array length as a compile-time immediate where known, and a
+runtime load from the fat-pointer length slot for slice parameters.
 
 **Source:** `src/ir.rs:730`, `src/codegen.rs:926`, `src/lower.rs:17880`
 
@@ -297,10 +298,14 @@ specify the panic mechanism — library call, trap instruction, signal handler.
   the overflow case, branching to `_galvanic_panic`. (Claim 4q)
 - Out-of-bounds indexing: `cmp`/`b.hs` bounds check before every array/slice
   load and store; out-of-bounds branches to `_galvanic_panic`. (Claim 4p)
-- `+`, `-`, `*` overflow: no overflow check; arithmetic wraps per 64-bit
-  hardware. This is a known deviation from debug-mode Rust semantics.
-  FLS §6.23 AMBIGUOUS — spec requires debug-mode panic but galvanic uses 64-bit
-  arithmetic throughout and does not insert overflow checks for these operators.
+- `+`, `-`, `*` overflow: overflow guard emitted for all three operators.
+  (Claim 4s) Pattern: primary op → `sxtw x9, w{dst}` → `cmp x{dst}, x9` →
+  `b.ne _galvanic_panic`. If the 64-bit result differs from the sign-extended
+  low 32 bits, the value overflowed i32 → panic.
+  FLS §6.23: AMBIGUOUS — spec distinguishes debug-mode panic from release-mode
+  wrap; galvanic always inserts the debug-mode guard. Release mode is not
+  distinguished. Also: the sxtw guard is specific to i32; i64 overflow detection
+  would require a different technique (adds + b.vs).
 
 The panic primitive `_galvanic_panic` calls `sys_exit(101)` directly. No stack
 unwinding, no panic message. This matches the FLS requirement (panics terminate

@@ -1147,11 +1147,13 @@ fn claim_4o_udiv_emits_cbz_guard() {
 /// assembly inspection tests for unrelated operations.
 #[test]
 fn claim_4o_galvanic_panic_absent_without_division() {
-    // Pure arithmetic with no division
-    let asm = compile_to_asm("fn main() -> i32 { 2 + 3 * 4 - 1 }\n");
+    // A literal-return program with no division, indexing, or shift operations
+    // must not reference _galvanic_panic. After Claim 4s, +/* also emit guards,
+    // so use a program with no arithmetic operations at all.
+    let asm = compile_to_asm("fn main() -> i32 { 42 }\n");
     assert!(
         !asm.contains("_galvanic_panic"),
-        "`_galvanic_panic` must not appear in assembly for programs with no division:\n{asm}"
+        "`_galvanic_panic` must not appear in assembly for a literal-return program:\n{asm}"
     );
 }
 
@@ -1946,6 +1948,130 @@ fn claim_4r_ushr_emits_cmp_shift_guard() {
         !asm.contains("mov     x0, #42"),
         "must not constant-fold `ushr(84, 1)` to #42:\n{asm}"
     );
+}
+
+// ── Claim 4s: §6.23 arithmetic overflow guard for i32 +, -, * ────────────────
+//
+// FLS §6.23: Integer overflow. In debug mode, integer overflow panics at runtime.
+// Galvanic guards `add`, `sub`, and `mul` on i32 with a sign-extension check:
+//   primary op → sxtw x9, w{dst} → cmp x{dst}, x9 → b.ne _galvanic_panic
+// The sxtw instruction sign-extends the low 32 bits; if the 64-bit result
+// differs from the sign-extended 32-bit result, the value overflowed i32.
+
+/// Claim 4s: assembly inspection — add must emit overflow guard.
+///
+/// FLS §6.23: i32 addition must emit sxtw+cmp+b.ne guard after `add`.
+#[test]
+fn claim_4s_add_emits_overflow_guard() {
+    let src = "fn add(x: i32, y: i32) -> i32 { x + y }\nfn main() -> i32 { add(1, 2) }\n";
+    let asm = compile_to_asm(src);
+    assert!(asm.contains("add"), "expected `add` instruction:\n{asm}");
+    assert!(asm.contains("sxtw"), "expected `sxtw` after add for overflow check:\n{asm}");
+    assert!(asm.contains("b.ne"), "expected `b.ne _galvanic_panic` after add overflow check:\n{asm}");
+    let add_pos = asm.find("    add ").unwrap_or_else(|| asm.find("    add\t").unwrap());
+    let sxtw_pos = asm.find("sxtw").unwrap();
+    assert!(add_pos < sxtw_pos, "sxtw guard must follow add, add={add_pos} sxtw={sxtw_pos}");
+}
+
+/// Claim 4s: assembly inspection — sub must emit overflow guard.
+///
+/// FLS §6.23: i32 subtraction must emit sxtw+cmp+b.ne guard after `sub`.
+#[test]
+fn claim_4s_sub_emits_overflow_guard() {
+    let src = "fn sub(x: i32, y: i32) -> i32 { x - y }\nfn main() -> i32 { sub(5, 2) }\n";
+    let asm = compile_to_asm(src);
+    assert!(asm.contains("sub"), "expected `sub` instruction:\n{asm}");
+    assert!(asm.contains("sxtw"), "expected `sxtw` after sub for overflow check:\n{asm}");
+    assert!(asm.contains("b.ne"), "expected `b.ne _galvanic_panic` after sub overflow check:\n{asm}");
+}
+
+/// Claim 4s: assembly inspection — mul must emit overflow guard.
+///
+/// FLS §6.23: i32 multiplication must emit sxtw+cmp+b.ne guard after `mul`.
+#[test]
+fn claim_4s_mul_emits_overflow_guard() {
+    let src = "fn mul(x: i32, y: i32) -> i32 { x * y }\nfn main() -> i32 { mul(3, 4) }\n";
+    let asm = compile_to_asm(src);
+    assert!(asm.contains("mul"), "expected `mul` instruction:\n{asm}");
+    assert!(asm.contains("sxtw"), "expected `sxtw` after mul for overflow check:\n{asm}");
+    assert!(asm.contains("b.ne"), "expected `b.ne _galvanic_panic` after mul overflow check:\n{asm}");
+    let mul_pos = asm.find("    mul ").unwrap_or_else(|| asm.find("    mul\t").unwrap());
+    let sxtw_pos = asm.find("sxtw").unwrap();
+    assert!(mul_pos < sxtw_pos, "sxtw guard must follow mul, mul={mul_pos} sxtw={sxtw_pos}");
+}
+
+/// Claim 4s: runtime — i32::MAX + 1 must exit with code 101 (panic).
+///
+/// FLS §6.23: i32::MAX + 1 overflows and must panic at runtime in debug mode.
+/// Requires ARM64 cross-toolchain and qemu.
+#[test]
+fn claim_4s_runtime_add_overflow_panics() {
+    let src =
+        "fn add(x: i32, y: i32) -> i32 { x + y }\nfn main() -> i32 { add(2147483647, 1) }\n";
+    if let Some(code) = compile_and_run(src) {
+        assert_eq!(code, 101, "i32::MAX + 1 must panic (exit 101), got {code}");
+    }
+}
+
+/// Claim 4s: runtime — i32::MIN - 1 must exit with code 101 (panic).
+///
+/// FLS §6.23: i32::MIN - 1 overflows (negative overflow) and must panic.
+/// Requires ARM64 cross-toolchain and qemu.
+#[test]
+fn claim_4s_runtime_sub_overflow_panics() {
+    let src =
+        "fn sub(x: i32, y: i32) -> i32 { x - y }\nfn main() -> i32 { sub(-2147483648, 1) }\n";
+    if let Some(code) = compile_and_run(src) {
+        assert_eq!(code, 101, "i32::MIN - 1 must panic (exit 101), got {code}");
+    }
+}
+
+/// Claim 4s: runtime — i32::MAX * 2 must exit with code 101 (panic).
+///
+/// FLS §6.23: i32::MAX * 2 overflows and must panic at runtime.
+/// Requires ARM64 cross-toolchain and qemu.
+#[test]
+fn claim_4s_runtime_mul_overflow_panics() {
+    let src =
+        "fn mul(x: i32, y: i32) -> i32 { x * y }\nfn main() -> i32 { mul(2147483647, 2) }\n";
+    if let Some(code) = compile_and_run(src) {
+        assert_eq!(code, 101, "i32::MAX * 2 must panic (exit 101), got {code}");
+    }
+}
+
+/// Claim 4s: runtime — normal addition must not panic.
+///
+/// FLS §6.23: Non-overflowing i32 addition must succeed (exit 0 via return value).
+/// The return value 5 fits in [0,255] so the OS exit code is 5.
+/// Requires ARM64 cross-toolchain and qemu.
+#[test]
+fn claim_4s_runtime_add_no_overflow_succeeds() {
+    let src = "fn add(x: i32, y: i32) -> i32 { x + y }\nfn main() -> i32 { add(2, 3) }\n";
+    if let Some(code) = compile_and_run(src) {
+        assert_eq!(code, 5, "2 + 3 must return 5, got {code}");
+    }
+}
+
+/// Claim 4s: runtime — normal subtraction must not panic.
+///
+/// FLS §6.23: Non-overflowing i32 subtraction must succeed.
+#[test]
+fn claim_4s_runtime_sub_no_overflow_succeeds() {
+    let src = "fn sub(x: i32, y: i32) -> i32 { x - y }\nfn main() -> i32 { sub(10, 3) }\n";
+    if let Some(code) = compile_and_run(src) {
+        assert_eq!(code, 7, "10 - 3 must return 7, got {code}");
+    }
+}
+
+/// Claim 4s: runtime — normal multiplication must not panic.
+///
+/// FLS §6.23: Non-overflowing i32 multiplication must succeed.
+#[test]
+fn claim_4s_runtime_mul_no_overflow_succeeds() {
+    let src = "fn mul(x: i32, y: i32) -> i32 { x * y }\nfn main() -> i32 { mul(3, 4) }\n";
+    if let Some(code) = compile_and_run(src) {
+        assert_eq!(code, 12, "3 * 4 must return 12, got {code}");
+    }
 }
 
 // ── Milestone 13: compound assignment operators ───────────────────────────────
