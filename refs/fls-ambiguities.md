@@ -104,10 +104,12 @@ For `&[T]`, length is the element count.
 not specify the panic mechanism — whether it is a library call, a trap
 instruction, or something else.
 
-**Galvanic's choice:** No bounds check is emitted at this milestone. Out-of-
-bounds access produces undefined behavior at the assembly level (load/store at
-wrong address). This is a known deviation; the check is deferred until a panic
-infrastructure is in place.
+**Galvanic's choice (updated — Claim 4p):** A `cmp`/`b.hs` bounds check is
+emitted before every array and slice load/store. The index is compared against
+the array length (a compile-time constant) or slice length (a runtime load);
+if index >= length, execution branches to `_galvanic_panic` which calls
+`sys_exit(101)`. Negative indices (stored as large unsigned values) are
+caught by the unsigned-comparison `b.hs` condition.
 
 **Source:** `src/ir.rs:730`, `src/codegen.rs:926`, `src/lower.rs:17880`
 
@@ -284,7 +286,7 @@ Rust's de-facto behavior.
 indexing (§6.9), and integer overflow in debug mode (§6.23), but does not
 specify the panic mechanism — library call, trap instruction, signal handler.
 
-**Galvanic's choice (updated — Claims 4m, 4o, 4p, 4q):**
+**Galvanic's choice (updated — Claims 4m, 4o, 4p, 4q, 4r):**
 - Divide-by-zero with a literal 0 divisor: **caught at compile time** in
   `src/lower.rs`. The lowering pass rejects integer `/` and `%` expressions
   whose RHS is `LitInt(0)` before emitting any IR. (Claim 4m)
@@ -297,6 +299,11 @@ specify the panic mechanism — library call, trap instruction, signal handler.
   the overflow case, branching to `_galvanic_panic`. (Claim 4q)
 - Out-of-bounds indexing: `cmp`/`b.hs` bounds check before every array/slice
   load and store; out-of-bounds branches to `_galvanic_panic`. (Claim 4p)
+- Invalid shift amounts (negative or >= 64): `cmp x{rhs}, #64; b.hs _galvanic_panic`
+  guard emitted before every `lsl`, `asr`, and `lsr` instruction. (Claim 4r)
+  **AMBIGUOUS — i32 false negative:** Valid range for i32 shifts is [0, 31],
+  but galvanic checks against 64 (register width). Shifts of 32..63 on i32
+  values are not caught. Analogous to the i64 false positive in Claim 4q.
 - `+`, `-`, `*` overflow: no overflow check; arithmetic wraps per 64-bit
   hardware. This is a known deviation from debug-mode Rust semantics.
   FLS §6.23 AMBIGUOUS — spec requires debug-mode panic but galvanic uses 64-bit
@@ -804,4 +811,4 @@ phase; all fields are currently accessible regardless of visibility.
 
 ---
 
-*Last updated: 2026-04-11. Source annotation count at time of writing: ~155 `AMBIGUOUS` markers across 6 source files. Covers all sections with annotations; three previously missing sections (§13, §14, §19) added in this revision.*
+*Last updated: 2026-04-12. Source annotation count at time of writing: ~155 `AMBIGUOUS` markers across 6 source files. Covers all sections with annotations; §4.9 updated for Claim 4p bounds check; §6.9/§6.23 updated with Claim 4r shift overflow guard and i32 false-negative ambiguity.*

@@ -1910,6 +1910,77 @@ fn claim_4r_shr_emits_cmp_shift_guard() {
         cmp_pos < asr_pos,
         "cmp guard must appear before asr, but cmp={cmp_pos} asr={asr_pos}:\n{asm}"
     );
+    // Must NOT constant-fold shr(16, 2) = 4.
+    assert!(
+        !asm.contains("mov     x0, #4"),
+        "must not constant-fold `shr(16, 2)` to #4:\n{asm}"
+    );
+}
+
+/// Claim 4r: UShr (u32 `>>`) with a negative shift amount panics at runtime.
+///
+/// FLS §6.5.9: A negative shift amount (stored as a large unsigned value) is
+/// >= 64, so the `cmp x{rhs}, #64; b.hs _galvanic_panic` guard fires.
+/// Requires Linux/qemu — skipped on macOS.
+#[test]
+fn claim_4r_runtime_ushr_negative_amount_exits_101() {
+    let src =
+        "fn ushr(x: u32, n: u32) -> u32 { x >> n }\nfn main() -> i32 { ushr(16, 4294967295) as i32 }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(
+        exit_code, 101,
+        "expected panic (101) for ushr with n=u32::MAX, got {exit_code}"
+    );
+}
+
+/// Claim 4r: UShr (u32 `>>`) with shift amount >= 32 panics at runtime.
+///
+/// FLS §6.5.9: Valid range for u32 right shift is [0, 31]. A shift of 32 is
+/// invalid; galvanic checks against 64 (register width) so shifts 32..63 are
+/// a known false-negative — but shifts >= 64 are correctly caught.
+/// Requires Linux/qemu — skipped on macOS.
+#[test]
+fn claim_4r_runtime_ushr_too_large_exits_101() {
+    let src =
+        "fn ushr(x: u32, n: u32) -> u32 { x >> n }\nfn main() -> i32 { ushr(16, 64) as i32 }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(
+        exit_code, 101,
+        "expected panic (101) for ushr with n=64, got {exit_code}"
+    );
+}
+
+/// Claim 4r: assembly inspection — lsr must be preceded by `cmp` shift guard.
+///
+/// FLS §6.5.9: Same guard required for logical right-shift (unsigned `>>`).
+#[test]
+fn claim_4r_lsr_emits_cmp_shift_guard() {
+    let src =
+        "fn ushr(x: u32, n: u32) -> u32 { x >> n }\nfn main() -> i32 { ushr(16, 2) as i32 }\n";
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("cmp") && asm.contains("b.hs"),
+        "expected shift guard (cmp + b.hs) before lsr, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("lsr"),
+        "expected `lsr` instruction after guard, got:\n{asm}"
+    );
+    let cmp_pos = asm.find("cmp").unwrap();
+    let lsr_pos = asm.find("    lsr").unwrap();
+    assert!(
+        cmp_pos < lsr_pos,
+        "cmp guard must appear before lsr, but cmp={cmp_pos} lsr={lsr_pos}:\n{asm}"
+    );
+    // Must NOT constant-fold ushr(16, 2) = 4.
+    assert!(
+        !asm.contains("mov     x0, #4"),
+        "must not constant-fold `ushr(16, 2)` to #4:\n{asm}"
+    );
 }
 
 // ── Milestone 13: compound assignment operators ───────────────────────────────
