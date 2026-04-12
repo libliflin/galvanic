@@ -529,7 +529,19 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
         // `cset x{dst}, <cond>` materialises 1 or 0 based on flags.
         // Cache-line note: two 4-byte instructions (8 bytes) per comparison.
         // Signed comparison (signed integers are the only type at this milestone).
-        Instr::BinOp { op, dst, lhs, rhs } => {
+        // Constraint 8 (refs/fls-constraints.md): `ty` tags each BinOp with its
+        // semantic type. Codegen uses `ty` to distinguish user arithmetic that may
+        // need overflow guards (IrTy::I32) from internal address/index arithmetic
+        // that must never be guarded (IrTy::Addr). Comparison and logic ops use
+        // IrTy::Bool to indicate they produce 0/1 boolean results, not numeric values.
+        //
+        // When Claim 4s (§6.23 overflow guard for Add/Sub/Mul) is implemented, the
+        // overflow guard logic MUST check `ty == IrTy::I32` before emitting `sxtw`
+        // and `b.ne` guards. Without this check, array-index multiplications like
+        // `index * 8` would falsely trigger the panic path at runtime.
+        Instr::BinOp { op, dst, lhs, rhs, ty } => {
+            // Silence unused-variable warning until Claim 4s uses ty.
+            let _ = ty;
             match op {
                 // FLS §6.23: ARM64 integer arithmetic uses 64-bit registers (xN),
                 // so these instructions wrap at 2^64, not at i32::MAX (2^31-1).

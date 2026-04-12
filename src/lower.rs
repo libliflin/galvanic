@@ -6118,12 +6118,14 @@ impl<'src> LowerCtx<'src> {
                     dst: eq_reg,
                     lhs: si_reg,
                     rhs: alt_reg,
+                    ty: IrTy::Bool,
                 });
                 self.instrs.push(Instr::BinOp {
                     op: IrBinOp::BitOr,
                     dst: matched_reg,
                     lhs: matched_reg,
                     rhs: eq_reg,
+                    ty: IrTy::Bool,
                 });
             }
             // Inclusive range: lo..=hi → (scrut >= lo) & (scrut <= hi)
@@ -6138,6 +6140,7 @@ impl<'src> LowerCtx<'src> {
                     dst: cmp1,
                     lhs: s_reg,
                     rhs: lo_reg,
+                    ty: IrTy::Bool,
                 });
                 let hi_reg = self.alloc_reg()?;
                 self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
@@ -6147,6 +6150,7 @@ impl<'src> LowerCtx<'src> {
                     dst: cmp2,
                     lhs: s_reg,
                     rhs: hi_reg,
+                    ty: IrTy::Bool,
                 });
                 let in_range = self.alloc_reg()?;
                 self.instrs.push(Instr::BinOp {
@@ -6154,12 +6158,14 @@ impl<'src> LowerCtx<'src> {
                     dst: in_range,
                     lhs: cmp1,
                     rhs: cmp2,
+                    ty: IrTy::Bool,
                 });
                 self.instrs.push(Instr::BinOp {
                     op: IrBinOp::BitOr,
                     dst: matched_reg,
                     lhs: matched_reg,
                     rhs: in_range,
+                    ty: IrTy::Bool,
                 });
             }
             // Exclusive range: lo..hi → (scrut >= lo) & (scrut < hi)
@@ -6174,6 +6180,7 @@ impl<'src> LowerCtx<'src> {
                     dst: cmp1,
                     lhs: s_reg,
                     rhs: lo_reg,
+                    ty: IrTy::Bool,
                 });
                 let hi_reg = self.alloc_reg()?;
                 self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
@@ -6183,6 +6190,7 @@ impl<'src> LowerCtx<'src> {
                     dst: cmp2,
                     lhs: s_reg,
                     rhs: hi_reg,
+                    ty: IrTy::Bool,
                 });
                 let in_range = self.alloc_reg()?;
                 self.instrs.push(Instr::BinOp {
@@ -6190,12 +6198,14 @@ impl<'src> LowerCtx<'src> {
                     dst: in_range,
                     lhs: cmp1,
                     rhs: cmp2,
+                    ty: IrTy::Bool,
                 });
                 self.instrs.push(Instr::BinOp {
                     op: IrBinOp::BitOr,
                     dst: matched_reg,
                     lhs: matched_reg,
                     rhs: in_range,
+                    ty: IrTy::Bool,
                 });
             }
             // FLS §5.1.4 + §5.1.11: Nested OR within an OR alternative.
@@ -7059,7 +7069,7 @@ impl<'src> LowerCtx<'src> {
                             let p_reg = self.alloc_reg()?;
                             self.instrs.push(Instr::LoadImm(p_reg, *n as i32));
                             let eq_reg = self.alloc_reg()?;
-                            self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg });
+                            self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg, ty: IrTy::Bool });
                             self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label });
                         }
 
@@ -7069,7 +7079,7 @@ impl<'src> LowerCtx<'src> {
                             let p_reg = self.alloc_reg()?;
                             self.instrs.push(Instr::LoadImm(p_reg, -(*n as i32)));
                             let eq_reg = self.alloc_reg()?;
-                            self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg });
+                            self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg, ty: IrTy::Bool });
                             self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label });
                         }
 
@@ -7079,7 +7089,7 @@ impl<'src> LowerCtx<'src> {
                             let p_reg = self.alloc_reg()?;
                             self.instrs.push(Instr::LoadImm(p_reg, *b as i32));
                             let eq_reg = self.alloc_reg()?;
-                            self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg });
+                            self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg, ty: IrTy::Bool });
                             self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label });
                         }
 
@@ -7308,7 +7318,7 @@ impl<'src> LowerCtx<'src> {
                             let p_reg = self.alloc_reg()?;
                             self.instrs.push(Instr::LoadImm(p_reg, *n as i32));
                             let eq_reg = self.alloc_reg()?;
-                            self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg });
+                            self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg, ty: IrTy::Bool });
                             self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label });
                         }
 
@@ -7318,7 +7328,7 @@ impl<'src> LowerCtx<'src> {
                             let p_reg = self.alloc_reg()?;
                             self.instrs.push(Instr::LoadImm(p_reg, -(*n as i32)));
                             let eq_reg = self.alloc_reg()?;
-                            self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg });
+                            self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg, ty: IrTy::Bool });
                             self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label });
                         }
 
@@ -7328,7 +7338,7 @@ impl<'src> LowerCtx<'src> {
                             let p_reg = self.alloc_reg()?;
                             self.instrs.push(Instr::LoadImm(p_reg, *b as i32));
                             let eq_reg = self.alloc_reg()?;
-                            self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg });
+                            self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg, ty: IrTy::Bool });
                             self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label });
                         }
 
@@ -7644,7 +7654,7 @@ impl<'src> LowerCtx<'src> {
                             let p_reg = self.alloc_reg()?;
                             self.instrs.push(Instr::LoadImm(p_reg, *n as i32));
                             let eq_reg = self.alloc_reg()?;
-                            self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg });
+                            self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg, ty: IrTy::Bool });
                             self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label });
                         }
 
@@ -7654,7 +7664,7 @@ impl<'src> LowerCtx<'src> {
                             let p_reg = self.alloc_reg()?;
                             self.instrs.push(Instr::LoadImm(p_reg, -(*n as i32)));
                             let eq_reg = self.alloc_reg()?;
-                            self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg });
+                            self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg, ty: IrTy::Bool });
                             self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label });
                         }
 
@@ -7664,7 +7674,7 @@ impl<'src> LowerCtx<'src> {
                             let p_reg = self.alloc_reg()?;
                             self.instrs.push(Instr::LoadImm(p_reg, *b as i32));
                             let eq_reg = self.alloc_reg()?;
-                            self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg });
+                            self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg, ty: IrTy::Bool });
                             self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label });
                         }
 
@@ -7889,6 +7899,7 @@ impl<'src> LowerCtx<'src> {
                                 dst: cmp_reg,
                                 lhs: s_reg,
                                 rhs: p_reg,
+                                ty: IrTy::Bool,
                             });
                             // CondBranch branches when reg == 0 (false), i.e., no match.
                             self.instrs.push(Instr::CondBranch {
@@ -10922,7 +10933,7 @@ impl<'src> LowerCtx<'src> {
                                 BinOp::Shr => IrBinOp::Shr,
                                 _ => unreachable!("matched above"),
                             };
-                            self.instrs.push(Instr::BinOp { op: ir_op, dst, lhs: lhs_reg, rhs: rhs_reg });
+                            self.instrs.push(Instr::BinOp { op: ir_op, dst, lhs: lhs_reg, rhs: rhs_reg, ty: *ret_ty });
                             acc_val = IrValue::Reg(dst);
                         }
                         Ok(acc_val)
@@ -10975,7 +10986,7 @@ impl<'src> LowerCtx<'src> {
                                 BinOp::Shr => IrBinOp::UShr,
                                 _ => unreachable!("matched above"),
                             };
-                            self.instrs.push(Instr::BinOp { op: ir_op, dst, lhs: lhs_reg, rhs: rhs_reg });
+                            self.instrs.push(Instr::BinOp { op: ir_op, dst, lhs: lhs_reg, rhs: rhs_reg, ty: *ret_ty });
                             acc_val = IrValue::Reg(dst);
                         }
                         Ok(acc_val)
@@ -11306,6 +11317,11 @@ impl<'src> LowerCtx<'src> {
                         self.instrs.push(Instr::LoadF32Slot { dst: result_freg, slot: phi_slot });
                         Ok(IrValue::F32Reg(result_freg))
                     }
+
+                    // Constraint 8: IrTy::Addr is an internal type used only within
+                    // BinOp address calculations. It never appears as a user-facing
+                    // expression type. If we reach here, the lowering logic has a bug.
+                    IrTy::Addr => unreachable!("IrTy::Addr cannot be an if-expression result type"),
                 }
             }
 
@@ -11403,6 +11419,7 @@ impl<'src> LowerCtx<'src> {
                             dst: eq_reg,
                             lhs: s_reg,
                             rhs: p_reg,
+                            ty: IrTy::Bool,
                         });
                         self.instrs.push(Instr::CondBranch { reg: eq_reg, label: else_label });
                     }
@@ -11417,6 +11434,7 @@ impl<'src> LowerCtx<'src> {
                             dst: eq_reg,
                             lhs: s_reg,
                             rhs: p_reg,
+                            ty: IrTy::Bool,
                         });
                         self.instrs.push(Instr::CondBranch { reg: eq_reg, label: else_label });
                     }
@@ -11431,6 +11449,7 @@ impl<'src> LowerCtx<'src> {
                             dst: eq_reg,
                             lhs: s_reg,
                             rhs: p_reg,
+                            ty: IrTy::Bool,
                         });
                         self.instrs.push(Instr::CondBranch { reg: eq_reg, label: else_label });
                     }
@@ -11457,6 +11476,7 @@ impl<'src> LowerCtx<'src> {
                             dst: eq_reg,
                             lhs: s_reg,
                             rhs: p_reg,
+                            ty: IrTy::Bool,
                         });
                         self.instrs.push(Instr::CondBranch { reg: eq_reg, label: else_label });
                     }
@@ -11476,6 +11496,7 @@ impl<'src> LowerCtx<'src> {
                             dst: cmp1,
                             lhs: s_reg,
                             rhs: lo_reg,
+                            ty: IrTy::Bool,
                         });
                         let hi_reg = self.alloc_reg()?;
                         self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
@@ -11485,6 +11506,7 @@ impl<'src> LowerCtx<'src> {
                             dst: cmp2,
                             lhs: s_reg,
                             rhs: hi_reg,
+                            ty: IrTy::Bool,
                         });
                         let matched = self.alloc_reg()?;
                         self.instrs.push(Instr::BinOp {
@@ -11492,6 +11514,7 @@ impl<'src> LowerCtx<'src> {
                             dst: matched,
                             lhs: cmp1,
                             rhs: cmp2,
+                            ty: IrTy::Bool,
                         });
                         self.instrs.push(Instr::CondBranch { reg: matched, label: else_label });
                     }
@@ -11506,6 +11529,7 @@ impl<'src> LowerCtx<'src> {
                             dst: cmp1,
                             lhs: s_reg,
                             rhs: lo_reg,
+                            ty: IrTy::Bool,
                         });
                         let hi_reg = self.alloc_reg()?;
                         self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
@@ -11515,6 +11539,7 @@ impl<'src> LowerCtx<'src> {
                             dst: cmp2,
                             lhs: s_reg,
                             rhs: hi_reg,
+                            ty: IrTy::Bool,
                         });
                         let matched = self.alloc_reg()?;
                         self.instrs.push(Instr::BinOp {
@@ -11522,6 +11547,7 @@ impl<'src> LowerCtx<'src> {
                             dst: matched,
                             lhs: cmp1,
                             rhs: cmp2,
+                            ty: IrTy::Bool,
                         });
                         self.instrs.push(Instr::CondBranch { reg: matched, label: else_label });
                     }
@@ -11598,6 +11624,7 @@ impl<'src> LowerCtx<'src> {
                             dst: cmp_reg,
                             lhs: s_reg,
                             rhs: p_reg,
+                            ty: IrTy::Bool,
                         });
                         self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: else_label });
                         // Install positional field bindings into bound_names.
@@ -11721,6 +11748,7 @@ impl<'src> LowerCtx<'src> {
                                 dst: cmp_reg,
                                 lhs: s_reg,
                                 rhs: p_reg,
+                                ty: IrTy::Bool,
                             });
                             self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: else_label });
                             // Install named field bindings by declaration order.
@@ -11803,6 +11831,7 @@ impl<'src> LowerCtx<'src> {
                                 let cmp_reg = self.alloc_reg()?;
                                 self.instrs.push(Instr::BinOp {
                                     op: IrBinOp::Eq, dst: cmp_reg, lhs: s_reg, rhs: p_reg,
+                                    ty: IrTy::Bool,
                                 });
                                 self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: else_label });
                             }
@@ -11814,6 +11843,7 @@ impl<'src> LowerCtx<'src> {
                                 let cmp_reg = self.alloc_reg()?;
                                 self.instrs.push(Instr::BinOp {
                                     op: IrBinOp::Eq, dst: cmp_reg, lhs: s_reg, rhs: p_reg,
+                                    ty: IrTy::Bool,
                                 });
                                 self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: else_label });
                             }
@@ -11825,16 +11855,19 @@ impl<'src> LowerCtx<'src> {
                                 let cmp1 = self.alloc_reg()?;
                                 self.instrs.push(Instr::BinOp {
                                     op: IrBinOp::Ge, dst: cmp1, lhs: s_reg, rhs: lo_reg,
+                                    ty: IrTy::Bool,
                                 });
                                 let hi_reg = self.alloc_reg()?;
                                 self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
                                 let cmp2 = self.alloc_reg()?;
                                 self.instrs.push(Instr::BinOp {
                                     op: IrBinOp::Le, dst: cmp2, lhs: s_reg, rhs: hi_reg,
+                                    ty: IrTy::Bool,
                                 });
                                 let matched = self.alloc_reg()?;
                                 self.instrs.push(Instr::BinOp {
                                     op: IrBinOp::BitAnd, dst: matched, lhs: cmp1, rhs: cmp2,
+                                    ty: IrTy::Bool,
                                 });
                                 self.instrs.push(Instr::CondBranch { reg: matched, label: else_label });
                             }
@@ -11846,16 +11879,19 @@ impl<'src> LowerCtx<'src> {
                                 let cmp1 = self.alloc_reg()?;
                                 self.instrs.push(Instr::BinOp {
                                     op: IrBinOp::Ge, dst: cmp1, lhs: s_reg, rhs: lo_reg,
+                                    ty: IrTy::Bool,
                                 });
                                 let hi_reg = self.alloc_reg()?;
                                 self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
                                 let cmp2 = self.alloc_reg()?;
                                 self.instrs.push(Instr::BinOp {
                                     op: IrBinOp::Lt, dst: cmp2, lhs: s_reg, rhs: hi_reg,
+                                    ty: IrTy::Bool,
                                 });
                                 let matched = self.alloc_reg()?;
                                 self.instrs.push(Instr::BinOp {
                                     op: IrBinOp::BitAnd, dst: matched, lhs: cmp1, rhs: cmp2,
+                                    ty: IrTy::Bool,
                                 });
                                 self.instrs.push(Instr::CondBranch { reg: matched, label: else_label });
                             }
@@ -12043,6 +12079,9 @@ impl<'src> LowerCtx<'src> {
                         self.instrs.push(Instr::LoadF32Slot { dst: result_freg, slot: phi_slot });
                         Ok(IrValue::F32Reg(result_freg))
                     }
+
+                    // Constraint 8: IrTy::Addr is internal-only; never a user-facing result.
+                    IrTy::Addr => unreachable!("IrTy::Addr cannot be an if-let expression result type"),
                 }
             }
 
@@ -12293,6 +12332,7 @@ impl<'src> LowerCtx<'src> {
                                         dst: cmp1,
                                         lhs: s_reg,
                                         rhs: lo_reg,
+                                        ty: IrTy::Bool,
                                     });
                                     let hi_reg = self.alloc_reg()?;
                                     self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
@@ -12302,6 +12342,7 @@ impl<'src> LowerCtx<'src> {
                                         dst: cmp2,
                                         lhs: s_reg,
                                         rhs: hi_reg,
+                                        ty: IrTy::Bool,
                                     });
                                     let matched = self.alloc_reg()?;
                                     self.instrs.push(Instr::BinOp {
@@ -12309,6 +12350,7 @@ impl<'src> LowerCtx<'src> {
                                         dst: matched,
                                         lhs: cmp1,
                                         rhs: cmp2,
+                                        ty: IrTy::Bool,
                                     });
                                     self.instrs.push(Instr::CondBranch {
                                         reg: matched,
@@ -12330,6 +12372,7 @@ impl<'src> LowerCtx<'src> {
                                         dst: cmp1,
                                         lhs: s_reg,
                                         rhs: lo_reg,
+                                        ty: IrTy::Bool,
                                     });
                                     let hi_reg = self.alloc_reg()?;
                                     self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
@@ -12339,6 +12382,7 @@ impl<'src> LowerCtx<'src> {
                                         dst: cmp2,
                                         lhs: s_reg,
                                         rhs: hi_reg,
+                                        ty: IrTy::Bool,
                                     });
                                     let matched = self.alloc_reg()?;
                                     self.instrs.push(Instr::BinOp {
@@ -12346,6 +12390,7 @@ impl<'src> LowerCtx<'src> {
                                         dst: matched,
                                         lhs: cmp1,
                                         rhs: cmp2,
+                                        ty: IrTy::Bool,
                                     });
                                     self.instrs.push(Instr::CondBranch {
                                         reg: matched,
@@ -12381,6 +12426,7 @@ impl<'src> LowerCtx<'src> {
                                         dst: cmp_reg,
                                         lhs: s_reg,
                                         rhs: pat_reg,
+                                        ty: IrTy::Bool,
                                     });
                                     self.instrs.push(Instr::CondBranch {
                                         reg: cmp_reg,
@@ -12427,6 +12473,7 @@ impl<'src> LowerCtx<'src> {
                                         dst: cmp_reg,
                                         lhs: s_reg,
                                         rhs: p_reg,
+                                        ty: IrTy::Bool,
                                     });
                                     self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
                                     // Install field bindings.
@@ -12563,6 +12610,7 @@ impl<'src> LowerCtx<'src> {
                                             dst: cmp_reg,
                                             lhs: s_reg,
                                             rhs: p_reg,
+                                            ty: IrTy::Bool,
                                         });
                                         self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
                                         // Install named field bindings by declaration order.
@@ -12653,6 +12701,7 @@ impl<'src> LowerCtx<'src> {
                                                 dst: cmp_reg,
                                                 lhs: s_reg,
                                                 rhs: p_reg,
+                                                ty: IrTy::Bool,
                                             });
                                             self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
                                         }
@@ -12667,6 +12716,7 @@ impl<'src> LowerCtx<'src> {
                                                 dst: cmp_reg,
                                                 lhs: s_reg,
                                                 rhs: p_reg,
+                                                ty: IrTy::Bool,
                                             });
                                             self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
                                         }
@@ -12681,6 +12731,7 @@ impl<'src> LowerCtx<'src> {
                                                 dst: cmp_reg,
                                                 lhs: s_reg,
                                                 rhs: p_reg,
+                                                ty: IrTy::Bool,
                                             });
                                             self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
                                         }
@@ -12695,6 +12746,7 @@ impl<'src> LowerCtx<'src> {
                                                 dst: cmp1,
                                                 lhs: s_reg,
                                                 rhs: lo_reg,
+                                                ty: IrTy::Bool,
                                             });
                                             let hi_reg = self.alloc_reg()?;
                                             self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
@@ -12704,6 +12756,7 @@ impl<'src> LowerCtx<'src> {
                                                 dst: cmp2,
                                                 lhs: s_reg,
                                                 rhs: hi_reg,
+                                                ty: IrTy::Bool,
                                             });
                                             let matched = self.alloc_reg()?;
                                             self.instrs.push(Instr::BinOp {
@@ -12711,6 +12764,7 @@ impl<'src> LowerCtx<'src> {
                                                 dst: matched,
                                                 lhs: cmp1,
                                                 rhs: cmp2,
+                                                ty: IrTy::Bool,
                                             });
                                             self.instrs.push(Instr::CondBranch { reg: matched, label: next_label });
                                         }
@@ -12725,6 +12779,7 @@ impl<'src> LowerCtx<'src> {
                                                 dst: cmp1,
                                                 lhs: s_reg,
                                                 rhs: lo_reg,
+                                                ty: IrTy::Bool,
                                             });
                                             let hi_reg = self.alloc_reg()?;
                                             self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
@@ -12734,6 +12789,7 @@ impl<'src> LowerCtx<'src> {
                                                 dst: cmp2,
                                                 lhs: s_reg,
                                                 rhs: hi_reg,
+                                                ty: IrTy::Bool,
                                             });
                                             let matched = self.alloc_reg()?;
                                             self.instrs.push(Instr::BinOp {
@@ -12741,6 +12797,7 @@ impl<'src> LowerCtx<'src> {
                                                 dst: matched,
                                                 lhs: cmp1,
                                                 rhs: cmp2,
+                                                ty: IrTy::Bool,
                                             });
                                             self.instrs.push(Instr::CondBranch { reg: matched, label: next_label });
                                         }
@@ -12781,6 +12838,7 @@ impl<'src> LowerCtx<'src> {
                                         dst: cmp_reg,
                                         lhs: s_reg,
                                         rhs: pat_reg,
+                                        ty: IrTy::Bool,
                                     });
                                     // cbz: skip this arm if condition is 0 (not equal).
                                     self.instrs.push(Instr::CondBranch {
@@ -13079,6 +13137,7 @@ impl<'src> LowerCtx<'src> {
                                         dst: cmp1,
                                         lhs: s_reg,
                                         rhs: lo_reg,
+                                        ty: IrTy::Bool,
                                     });
                                     let hi_reg = self.alloc_reg()?;
                                     self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
@@ -13088,6 +13147,7 @@ impl<'src> LowerCtx<'src> {
                                         dst: cmp2,
                                         lhs: s_reg,
                                         rhs: hi_reg,
+                                        ty: IrTy::Bool,
                                     });
                                     let matched = self.alloc_reg()?;
                                     self.instrs.push(Instr::BinOp {
@@ -13095,6 +13155,7 @@ impl<'src> LowerCtx<'src> {
                                         dst: matched,
                                         lhs: cmp1,
                                         rhs: cmp2,
+                                        ty: IrTy::Bool,
                                     });
                                     self.instrs.push(Instr::CondBranch {
                                         reg: matched,
@@ -13113,6 +13174,7 @@ impl<'src> LowerCtx<'src> {
                                         dst: cmp1,
                                         lhs: s_reg,
                                         rhs: lo_reg,
+                                        ty: IrTy::Bool,
                                     });
                                     let hi_reg = self.alloc_reg()?;
                                     self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
@@ -13122,6 +13184,7 @@ impl<'src> LowerCtx<'src> {
                                         dst: cmp2,
                                         lhs: s_reg,
                                         rhs: hi_reg,
+                                        ty: IrTy::Bool,
                                     });
                                     let matched = self.alloc_reg()?;
                                     self.instrs.push(Instr::BinOp {
@@ -13129,6 +13192,7 @@ impl<'src> LowerCtx<'src> {
                                         dst: matched,
                                         lhs: cmp1,
                                         rhs: cmp2,
+                                        ty: IrTy::Bool,
                                     });
                                     self.instrs.push(Instr::CondBranch {
                                         reg: matched,
@@ -13162,6 +13226,7 @@ impl<'src> LowerCtx<'src> {
                                         dst: cmp_reg,
                                         lhs: s_reg,
                                         rhs: pat_reg,
+                                        ty: IrTy::Bool,
                                     });
                                     self.instrs.push(Instr::CondBranch {
                                         reg: cmp_reg,
@@ -13197,6 +13262,7 @@ impl<'src> LowerCtx<'src> {
                                         dst: cmp_reg,
                                         lhs: s_reg,
                                         rhs: p_reg,
+                                        ty: IrTy::Bool,
                                     });
                                     self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
                                     // Install field bindings.
@@ -13314,6 +13380,7 @@ impl<'src> LowerCtx<'src> {
                                             dst: cmp_reg,
                                             lhs: s_reg,
                                             rhs: p_reg,
+                                            ty: IrTy::Bool,
                                         });
                                         self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
                                         // FLS §4.2, §15: Float fields use float loads/stores.
@@ -13386,6 +13453,7 @@ impl<'src> LowerCtx<'src> {
                                             let cmp_reg = self.alloc_reg()?;
                                             self.instrs.push(Instr::BinOp {
                                                 op: IrBinOp::Eq, dst: cmp_reg, lhs: s_reg, rhs: p_reg,
+                                                ty: IrTy::Bool,
                                             });
                                             self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
                                         }
@@ -13397,16 +13465,19 @@ impl<'src> LowerCtx<'src> {
                                             let cmp1 = self.alloc_reg()?;
                                             self.instrs.push(Instr::BinOp {
                                                 op: IrBinOp::Ge, dst: cmp1, lhs: s_reg, rhs: lo_reg,
+                                                ty: IrTy::Bool,
                                             });
                                             let hi_reg = self.alloc_reg()?;
                                             self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
                                             let cmp2 = self.alloc_reg()?;
                                             self.instrs.push(Instr::BinOp {
                                                 op: IrBinOp::Le, dst: cmp2, lhs: s_reg, rhs: hi_reg,
+                                                ty: IrTy::Bool,
                                             });
                                             let matched = self.alloc_reg()?;
                                             self.instrs.push(Instr::BinOp {
                                                 op: IrBinOp::BitAnd, dst: matched, lhs: cmp1, rhs: cmp2,
+                                                ty: IrTy::Bool,
                                             });
                                             self.instrs.push(Instr::CondBranch { reg: matched, label: next_label });
                                         }
@@ -13443,6 +13514,7 @@ impl<'src> LowerCtx<'src> {
                                         dst: cmp_reg,
                                         lhs: s_reg,
                                         rhs: pat_reg,
+                                        ty: IrTy::Bool,
                                     });
                                     self.instrs.push(Instr::CondBranch {
                                         reg: cmp_reg,
@@ -13626,6 +13698,9 @@ impl<'src> LowerCtx<'src> {
                     IrTy::F64 | IrTy::F32 => Err(LowerError::Unsupported(
                         "match expression producing float type not yet supported (FLS §4.2)".into(),
                     )),
+
+                    // Constraint 8: IrTy::Addr is internal-only; never a user-facing result.
+                    IrTy::Addr => unreachable!("IrTy::Addr cannot be a match expression result type"),
                 }
             }
 
@@ -14619,6 +14694,7 @@ impl<'src> LowerCtx<'src> {
                                 dst: prod_reg,
                                 lhs: i_reg,
                                 rhs: m_reg,
+                                ty: IrTy::Addr,
                             });
                             let linear_reg = self.alloc_reg()?;
                             self.instrs.push(Instr::BinOp {
@@ -14626,6 +14702,7 @@ impl<'src> LowerCtx<'src> {
                                 dst: linear_reg,
                                 lhs: prod_reg,
                                 rhs: j_reg,
+                                ty: IrTy::Addr,
                             });
                             let scratch = self.alloc_reg()?;
                             // FLS §6.9: bounds check against total element count (outer * inner).
@@ -14840,7 +14917,7 @@ impl<'src> LowerCtx<'src> {
                         _ => unreachable!("compound assignment operator must be arithmetic or bitwise"),
                     };
                     let res_reg = self.alloc_reg()?;
-                    self.instrs.push(Instr::BinOp { op: ir_op, dst: res_reg, lhs: lhs_reg, rhs: rhs_reg });
+                    self.instrs.push(Instr::BinOp { op: ir_op, dst: res_reg, lhs: lhs_reg, rhs: rhs_reg, ty: IrTy::I32 });
 
                     // Store the result back through the pointer.
                     self.instrs.push(Instr::StorePtr { src: res_reg, addr: ptr_reg });
@@ -14967,7 +15044,7 @@ impl<'src> LowerCtx<'src> {
                         _ => unreachable!("compound assignment op must be arithmetic or bitwise"),
                     };
                     let res_reg = self.alloc_reg()?;
-                    self.instrs.push(Instr::BinOp { op: ir_op, dst: res_reg, lhs: lhs_reg, rhs: rhs_reg });
+                    self.instrs.push(Instr::BinOp { op: ir_op, dst: res_reg, lhs: lhs_reg, rhs: rhs_reg, ty: IrTy::I32 });
                     self.instrs.push(Instr::StorePtr { src: res_reg, addr: ptr_reg });
                     return Ok(IrValue::Unit);
                 }
@@ -14998,7 +15075,7 @@ impl<'src> LowerCtx<'src> {
                     ),
                 };
                 let dst = self.alloc_reg()?;
-                self.instrs.push(Instr::BinOp { op: ir_op, dst, lhs: lhs_reg, rhs: rhs_reg });
+                self.instrs.push(Instr::BinOp { op: ir_op, dst, lhs: lhs_reg, rhs: rhs_reg, ty: IrTy::I32 });
 
                 // FLS §4.1, §6.23: narrow integer wrapping at compound-assignment stores.
                 //
@@ -15175,7 +15252,7 @@ impl<'src> LowerCtx<'src> {
                     BinOp::Ne => IrBinOp::Ne,
                     _ => unreachable!("matched above"),
                 };
-                self.instrs.push(Instr::BinOp { op: ir_op, dst, lhs: lhs_reg, rhs: rhs_reg });
+                self.instrs.push(Instr::BinOp { op: ir_op, dst, lhs: lhs_reg, rhs: rhs_reg, ty: IrTy::Bool });
                 Ok(IrValue::Reg(dst))
             }
 
@@ -15369,6 +15446,7 @@ impl<'src> LowerCtx<'src> {
                             dst: eq_reg,
                             lhs: s_reg,
                             rhs: p_reg,
+                            ty: IrTy::Bool,
                         });
                         self.instrs.push(Instr::CondBranch { reg: eq_reg, label: exit_label });
                     }
@@ -15383,6 +15461,7 @@ impl<'src> LowerCtx<'src> {
                             dst: eq_reg,
                             lhs: s_reg,
                             rhs: p_reg,
+                            ty: IrTy::Bool,
                         });
                         self.instrs.push(Instr::CondBranch { reg: eq_reg, label: exit_label });
                     }
@@ -15397,6 +15476,7 @@ impl<'src> LowerCtx<'src> {
                             dst: eq_reg,
                             lhs: s_reg,
                             rhs: p_reg,
+                            ty: IrTy::Bool,
                         });
                         self.instrs.push(Instr::CondBranch { reg: eq_reg, label: exit_label });
                     }
@@ -15411,6 +15491,7 @@ impl<'src> LowerCtx<'src> {
                             dst: cmp1,
                             lhs: s_reg,
                             rhs: lo_reg,
+                            ty: IrTy::Bool,
                         });
                         let hi_reg = self.alloc_reg()?;
                         self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
@@ -15420,6 +15501,7 @@ impl<'src> LowerCtx<'src> {
                             dst: cmp2,
                             lhs: s_reg,
                             rhs: hi_reg,
+                            ty: IrTy::Bool,
                         });
                         let matched = self.alloc_reg()?;
                         self.instrs.push(Instr::BinOp {
@@ -15427,6 +15509,7 @@ impl<'src> LowerCtx<'src> {
                             dst: matched,
                             lhs: cmp1,
                             rhs: cmp2,
+                            ty: IrTy::Bool,
                         });
                         self.instrs.push(Instr::CondBranch { reg: matched, label: exit_label });
                     }
@@ -15441,6 +15524,7 @@ impl<'src> LowerCtx<'src> {
                             dst: cmp1,
                             lhs: s_reg,
                             rhs: lo_reg,
+                            ty: IrTy::Bool,
                         });
                         let hi_reg = self.alloc_reg()?;
                         self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
@@ -15450,6 +15534,7 @@ impl<'src> LowerCtx<'src> {
                             dst: cmp2,
                             lhs: s_reg,
                             rhs: hi_reg,
+                            ty: IrTy::Bool,
                         });
                         let matched = self.alloc_reg()?;
                         self.instrs.push(Instr::BinOp {
@@ -15457,6 +15542,7 @@ impl<'src> LowerCtx<'src> {
                             dst: matched,
                             lhs: cmp1,
                             rhs: cmp2,
+                            ty: IrTy::Bool,
                         });
                         self.instrs.push(Instr::CondBranch { reg: matched, label: exit_label });
                     }
@@ -15511,6 +15597,7 @@ impl<'src> LowerCtx<'src> {
                             dst: eq_reg,
                             lhs: s_reg,
                             rhs: p_reg,
+                            ty: IrTy::Bool,
                         });
                         self.instrs.push(Instr::CondBranch { reg: eq_reg, label: exit_label });
                     }
@@ -15560,6 +15647,7 @@ impl<'src> LowerCtx<'src> {
                             dst: cmp_reg,
                             lhs: s_reg,
                             rhs: p_reg,
+                            ty: IrTy::Bool,
                         });
                         self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: exit_label });
                         // Install positional field bindings into bound_names.
@@ -15673,6 +15761,7 @@ impl<'src> LowerCtx<'src> {
                                 dst: cmp_reg,
                                 lhs: s_reg,
                                 rhs: p_reg,
+                                ty: IrTy::Bool,
                             });
                             self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: exit_label });
                             // Install named field bindings by declaration order.
@@ -15750,6 +15839,7 @@ impl<'src> LowerCtx<'src> {
                                 let eq_reg = self.alloc_reg()?;
                                 self.instrs.push(Instr::BinOp {
                                     op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg,
+                                    ty: IrTy::Bool,
                                 });
                                 self.instrs.push(Instr::CondBranch { reg: eq_reg, label: exit_label });
                             }
@@ -15761,16 +15851,19 @@ impl<'src> LowerCtx<'src> {
                                 let cmp1 = self.alloc_reg()?;
                                 self.instrs.push(Instr::BinOp {
                                     op: IrBinOp::Ge, dst: cmp1, lhs: s_reg, rhs: lo_reg,
+                                    ty: IrTy::Bool,
                                 });
                                 let hi_reg = self.alloc_reg()?;
                                 self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
                                 let cmp2 = self.alloc_reg()?;
                                 self.instrs.push(Instr::BinOp {
                                     op: IrBinOp::Le, dst: cmp2, lhs: s_reg, rhs: hi_reg,
+                                    ty: IrTy::Bool,
                                 });
                                 let matched = self.alloc_reg()?;
                                 self.instrs.push(Instr::BinOp {
                                     op: IrBinOp::BitAnd, dst: matched, lhs: cmp1, rhs: cmp2,
+                                    ty: IrTy::Bool,
                                 });
                                 self.instrs.push(Instr::CondBranch { reg: matched, label: exit_label });
                             }
@@ -15967,7 +16060,7 @@ impl<'src> LowerCtx<'src> {
                     // ptr_slot + 1 is the length slot (consecutive allocation).
                     self.instrs.push(Instr::Load { dst: r_len, slot: ptr_slot + 1 });
                     let r_cmp = self.alloc_reg()?;
-                    self.instrs.push(Instr::BinOp { op: IrBinOp::Lt, dst: r_cmp, lhs: r_counter, rhs: r_len });
+                    self.instrs.push(Instr::BinOp { op: IrBinOp::Lt, dst: r_cmp, lhs: r_counter, rhs: r_len, ty: IrTy::Bool });
                     self.instrs.push(Instr::CondBranch { reg: r_cmp, label: exit_label });
 
                     // ── Bind element ──────────────────────────────────────────────────
@@ -15987,9 +16080,9 @@ impl<'src> LowerCtx<'src> {
                     let r_eight = self.alloc_reg()?;
                     self.instrs.push(Instr::LoadImm(r_eight, 8));
                     let r_off = self.alloc_reg()?;
-                    self.instrs.push(Instr::BinOp { op: IrBinOp::Mul, dst: r_off, lhs: r_counter2, rhs: r_eight });
+                    self.instrs.push(Instr::BinOp { op: IrBinOp::Mul, dst: r_off, lhs: r_counter2, rhs: r_eight, ty: IrTy::Addr });
                     let r_addr = self.alloc_reg()?;
-                    self.instrs.push(Instr::BinOp { op: IrBinOp::Add, dst: r_addr, lhs: r_ptr2, rhs: r_off });
+                    self.instrs.push(Instr::BinOp { op: IrBinOp::Add, dst: r_addr, lhs: r_ptr2, rhs: r_off, ty: IrTy::Addr });
                     if is_mut_slice {
                         // For &mut [T]: elem_slot holds the element address (pointer).
                         // The loop variable `x` acts as `&mut T` — body writes `*x = val`.
@@ -16013,7 +16106,7 @@ impl<'src> LowerCtx<'src> {
                     let r_one = self.alloc_reg()?;
                     self.instrs.push(Instr::LoadImm(r_one, 1));
                     let r_next = self.alloc_reg()?;
-                    self.instrs.push(Instr::BinOp { op: IrBinOp::Add, dst: r_next, lhs: r_cnt, rhs: r_one });
+                    self.instrs.push(Instr::BinOp { op: IrBinOp::Add, dst: r_next, lhs: r_cnt, rhs: r_one, ty: IrTy::Addr });
                     self.instrs.push(Instr::Store { src: r_next, slot: counter_slot });
                     self.instrs.push(Instr::Branch(cond_label));
 
@@ -16199,7 +16292,7 @@ impl<'src> LowerCtx<'src> {
                     let len_reg = self.alloc_reg()?;
                     self.instrs.push(Instr::LoadImm(len_reg, arr_len as i32));
                     let cmp_reg = self.alloc_reg()?;
-                    self.instrs.push(Instr::BinOp { op: IrBinOp::Lt, dst: cmp_reg, lhs: counter_reg, rhs: len_reg });
+                    self.instrs.push(Instr::BinOp { op: IrBinOp::Lt, dst: cmp_reg, lhs: counter_reg, rhs: len_reg, ty: IrTy::Bool });
                     self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: exit_label });
 
                     // ── Bind element ──────────────────────────────────────────────────
@@ -16277,6 +16370,7 @@ impl<'src> LowerCtx<'src> {
                         dst: next_counter,
                         lhs: counter_reg2,
                         rhs: one_reg,
+                        ty: IrTy::Addr,
                     });
                     self.instrs.push(Instr::Store { src: next_counter, slot: counter_slot });
 
@@ -16351,7 +16445,7 @@ impl<'src> LowerCtx<'src> {
                 // Exclusive `..`: continue while i < end (IrBinOp::Lt).
                 // Inclusive `..=`: continue while i <= end (IrBinOp::Le).
                 let cmp_op = if inclusive { IrBinOp::Le } else { IrBinOp::Lt };
-                self.instrs.push(Instr::BinOp { op: cmp_op, dst: cmp_reg, lhs: i_reg, rhs: end_reg2 });
+                self.instrs.push(Instr::BinOp { op: cmp_op, dst: cmp_reg, lhs: i_reg, rhs: end_reg2, ty: IrTy::Bool });
                 // Exit if condition is false (i >= end for exclusive, i > end for inclusive).
                 self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: exit_label });
 
@@ -16368,7 +16462,7 @@ impl<'src> LowerCtx<'src> {
                 let one_reg = self.alloc_reg()?;
                 self.instrs.push(Instr::LoadImm(one_reg, 1));
                 let inc_reg = self.alloc_reg()?;
-                self.instrs.push(Instr::BinOp { op: IrBinOp::Add, dst: inc_reg, lhs: i_reg2, rhs: one_reg });
+                self.instrs.push(Instr::BinOp { op: IrBinOp::Add, dst: inc_reg, lhs: i_reg2, rhs: one_reg, ty: IrTy::Addr });
                 self.instrs.push(Instr::Store { src: inc_reg, slot: i_slot });
 
                 // Back-edge: jump to condition check.
@@ -18151,6 +18245,7 @@ impl<'src> LowerCtx<'src> {
                         dst: prod_reg,
                         lhs: i_reg,
                         rhs: m_reg,
+                        ty: IrTy::Addr,
                     });
                     let linear_reg = self.alloc_reg()?;
                     self.instrs.push(Instr::BinOp {
@@ -18158,6 +18253,7 @@ impl<'src> LowerCtx<'src> {
                         dst: linear_reg,
                         lhs: prod_reg,
                         rhs: j_reg,
+                        ty: IrTy::Addr,
                     });
                     let dst = self.alloc_reg()?;
                     // FLS §6.9: bounds check against total element count (outer * inner).
@@ -18209,6 +18305,7 @@ impl<'src> LowerCtx<'src> {
                             dst: r_off,
                             lhs: r_idx,
                             rhs: r_eight,
+                            ty: IrTy::Addr,
                         });
                         // Compute element address: ptr + offset.
                         let r_addr = self.alloc_reg()?;
@@ -18217,6 +18314,7 @@ impl<'src> LowerCtx<'src> {
                             dst: r_addr,
                             lhs: r_ptr,
                             rhs: r_off,
+                            ty: IrTy::Addr,
                         });
                         // Load element value through the address.
                         let r_val = self.alloc_reg()?;

@@ -383,6 +383,21 @@ pub enum Instr {
         lhs: u8,
         /// Right-hand operand register.
         rhs: u8,
+        /// Semantic type of this operation.
+        ///
+        /// Constraint 8 (refs/fls-constraints.md): codegen uses this field to
+        /// distinguish user arithmetic (needs overflow guards) from internal
+        /// address/index arithmetic (no guards). Before this field existed,
+        /// `BinOp { op: IrBinOp::Add, ... }` was ambiguous between `a + b`
+        /// in user code and `index * 8 + base_ptr` in array access codegen.
+        ///
+        /// - `IrTy::I32` / `IrTy::I8` / `IrTy::I16`: user-visible signed arithmetic →
+        ///   emit overflow guards when Claim 4s is implemented.
+        /// - `IrTy::U32` / `IrTy::U8` / `IrTy::U16`: user-visible unsigned arithmetic →
+        ///   no i32 overflow guards (wrapping handled by TruncU8/TruncU16 at boundaries).
+        /// - `IrTy::Bool`: comparison or logical op producing a 0/1 boolean → no guards.
+        /// - `IrTy::Addr`: internal address/index arithmetic → never emit overflow guards.
+        ty: IrTy,
     },
 
     /// Store a virtual register to a stack slot.
@@ -1735,4 +1750,20 @@ pub enum IrTy {
     /// Cache-line note: same 8-byte slot footprint as `IrTy::F64`; slightly
     /// smaller constant pool entries (`.word` vs `.quad`).
     F32,
+
+    /// Internal address/index arithmetic. FLS §6.9 (array indexing), §6.15.1 (loop counters).
+    ///
+    /// Used to tag `BinOp` instructions that compute array indices, byte offsets,
+    /// or loop counter increments rather than user-visible arithmetic. Codegen does
+    /// NOT emit overflow guards for `IrTy::Addr` operations — these are pointer-width
+    /// arithmetic that the compiler emits internally, not the result of user `+`/`*`
+    /// expressions subject to FLS §6.23 overflow semantics.
+    ///
+    /// Constraint 8: This variant is the key mechanism by which the type system
+    /// prevents overflow guards from accidentally firing on address calculations.
+    /// Any `BinOp { op: IrBinOp::Add, ty: IrTy::Addr, ... }` is internal;
+    /// `BinOp { op: IrBinOp::Add, ty: IrTy::I32, ... }` is user arithmetic.
+    ///
+    /// Cache-line note: identical register/slot footprint to `IrTy::I32`.
+    Addr,
 }
