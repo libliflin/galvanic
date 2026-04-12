@@ -104,10 +104,10 @@ For `&[T]`, length is the element count.
 not specify the panic mechanism — whether it is a library call, a trap
 instruction, or something else.
 
-**Galvanic's choice:** No bounds check is emitted at this milestone. Out-of-
-bounds access produces undefined behavior at the assembly level (load/store at
-wrong address). This is a known deviation; the check is deferred until a panic
-infrastructure is in place.
+**Galvanic's choice (Claim 4p):** A `cmp`/`b.hs` bounds check is emitted before
+every array/slice load and store. If the index is out of bounds (unsigned
+comparison: index >= length), the program branches to `_galvanic_panic` and
+exits with code 101.
 
 **Source:** `src/ir.rs:730`, `src/codegen.rs:926`, `src/lower.rs:17880`
 
@@ -297,10 +297,13 @@ specify the panic mechanism — library call, trap instruction, signal handler.
   the overflow case, branching to `_galvanic_panic`. (Claim 4q)
 - Out-of-bounds indexing: `cmp`/`b.hs` bounds check before every array/slice
   load and store; out-of-bounds branches to `_galvanic_panic`. (Claim 4p)
-- `+`, `-`, `*` overflow: no overflow check; arithmetic wraps per 64-bit
-  hardware. This is a known deviation from debug-mode Rust semantics.
-  FLS §6.23 AMBIGUOUS — spec requires debug-mode panic but galvanic uses 64-bit
-  arithmetic throughout and does not insert overflow checks for these operators.
+- `+`, `-`, `*` overflow: guarded via `sxtw`/`cmp`/`b.ne _galvanic_panic` after
+  each `add`/`sub`/`mul` instruction. The guard computes the operation in 64-bit,
+  sign-extends the low 32 bits, and compares — if unequal, the result overflowed
+  i32 range and the program panics with exit 101. (Claim 4s)
+  FLS §6.23 AMBIGUOUS — spec mandates debug-mode panic but does not specify the
+  detection mechanism. Galvanic's sxtw/cmp approach is sound for signed 32-bit
+  overflow detection. Release-mode (wrapping, no guard) is not yet implemented.
 
 The panic primitive `_galvanic_panic` calls `sys_exit(101)` directly. No stack
 unwinding, no panic message. This matches the FLS requirement (panics terminate
