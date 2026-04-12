@@ -1,118 +1,127 @@
-# Goal: §6.23 Divide-by-Zero — Compile-Time Literal Divisor Check
+# Goal: §6.21 Comparison Non-Associativity — Compile-Time Chained-Comparison Rejection
 
 ## What
 
-Add a compile-time divide-by-zero guard to galvanic's lowering pass
-(`src/lower.rs`) so that a literal zero divisor in `/` or `%` produces a
-diagnostic error rather than silently emitting `sdiv`/`udiv` with undefined
-behavior.
+Add a compile-time chained-comparison guard to galvanic's lowering pass
+(`src/lower.rs`) so that a comparison operator (`<`, `>`, `<=`, `>=`, `==`,
+`!=`) whose left or right operand is itself a comparison expression produces a
+`LowerError` with a clear message rather than silently compiling to wrong code.
 
 The builder should:
 
-1. In the arithmetic lowering path for `/` and `%` in `src/lower.rs`, after
-   evaluating the right-hand operand, check if it is a compile-time-known
-   literal zero. If so, return a `LowerError` with a clear message:
-   `"divide by zero: divisor is the literal 0"`.
+1. In the lowering path for binary comparison operators in `src/lower.rs`,
+   after parsing both operands, check if either operand AST node's kind is
+   itself a binary comparison (`BinOp` with `Lt`, `Gt`, `Le`, `Ge`, `Eq`,
+   `Ne`). If so, return a `LowerError` with the message:
+   `"chained comparison is not allowed: use && to combine comparisons (e.g. a < b && b < c)"`.
 
-   - The check applies to integer division (`i32`, `u32`, `i64`, `u64`, `u8`,
-     `i8`, `u16`, `i16`, `usize`, `isize`) and remainder (`%`).
-   - The check does NOT apply to float division (IEEE 754 defines that
-     behavior as producing infinity/NaN).
-   - The check does NOT need to handle the `MIN / -1` case (that requires
-     runtime knowledge of the dividend). False negatives (missing a runtime
-     zero divisor) are acceptable. False positives (rejecting a valid program)
-     are not acceptable.
-   - If the divisor is a variable (not a literal), no check is needed — let
-     the codegen emit `sdiv`/`udiv` as before.
+   - The check applies to all six comparison operators: `<`, `>`, `<=`, `>=`,
+     `==`, `!=`.
+   - The check does NOT apply to arithmetic or logical operators (`+`, `&&`,
+     `||`, etc.) — only to comparison operators.
+   - The check is structural (AST-level): if the left or right child of a
+     comparison is a comparison-typed `BinOp` node, reject. This catches the
+     common case `a < b < c` (parsed as `(a < b) < c`).
+   - False negatives (e.g., a comparison result stored in a variable and then
+     compared) are acceptable. False positives (rejecting a valid program) are
+     not acceptable. Only reject when the AST *directly* has a comparison as a
+     sub-expression of another comparison.
 
-2. Add at least two test cases to `tests/e2e.rs`:
-   - A test that verifies galvanic *rejects* `fn main() -> i32 { 10 / 0 }` —
-     the divisor is a literal zero, so lowering should return `Err`.
-   - A test that verifies galvanic *rejects* `fn main() -> i32 { 10 % 0 }` —
-     same guard for remainder.
-   - A test that verifies galvanic *accepts* `fn div(x: i32, y: i32) -> i32 { x / y }` —
-     variable divisor is not rejected at compile time.
-   - Optionally: a test that verifies galvanic accepts `fn main() -> i32 { 10 / 2 }` —
-     non-zero literal is not rejected.
+2. Add test cases to `tests/e2e.rs`:
+   - Reject `fn f(a: i32, b: i32, c: i32) -> i32 { if a < b < c { 1 } else { 0 } }` —
+     chained `<` should fail at lowering.
+   - Reject `fn f(a: i32, b: i32, c: i32) -> i32 { if a == b == c { 1 } else { 0 } }` —
+     chained `==` should fail.
+   - Accept `fn f(a: i32, b: i32, c: i32) -> i32 { if a < b && b < c { 1 } else { 0 } }` —
+     correct form using `&&` should compile fine.
+   - Accept `fn f(a: i32, b: i32) -> i32 { if a < b { 1 } else { 0 } }` —
+     simple (non-chained) comparison should compile fine.
 
-3. Update the §6.9/§6.23 entry in `refs/fls-ambiguities.md`:
-   - Change "Divide-by-zero: `sdiv`/`udiv` emit no guard; behavior is undefined"
-     to document that literal-zero divisors are now caught at compile time.
-   - Document what remains deferred: runtime zero divisors, `MIN / -1` overflow,
-     out-of-bounds indexing, and integer overflow panics all still require a
-     panic infrastructure that does not yet exist.
-   - Add the FLS gap: §6.23 requires a panic for divide-by-zero but does not
-     specify the mechanism. Galvanic's conservative choice: reject literal zero
-     at compile time; runtime zero is undefined behavior at this milestone.
-
-The check does NOT need to be complete. Only the literal-zero case is required.
+3. Update the §6.21 / §6.7 entry in `refs/fls-ambiguities.md`:
+   - Change "Enforcement of non-associativity is deferred" to document that
+     direct chained comparisons are now caught at compile time.
+   - Document what remains deferred: a comparison result stored in a variable
+     and then used as a comparand is not caught; full type-checking would be
+     needed to close that gap.
+   - Note the alignment with the §6.18 and §6.23 methodology: statically-
+     obvious violations caught at compile time, complex cases deferred.
 
 ## Which stakeholder
 
 **William (the researcher)** and **FLS spec readers (the Ferrocene team)**.
 
-The §6.9/§6.23 entry in `refs/fls-ambiguities.md` currently reads:
-> "Divide-by-zero: `sdiv`/`udiv` emit no guard; behavior is undefined on ARM64."
+The §6.21/§6.7 entry in `refs/fls-ambiguities.md` currently reads:
+> "Galvanic's choice: Comparison operators are left-associative at the grammar
+> level. A chained comparison `a < b < c` parses successfully but produces
+> incorrect results at runtime. Enforcement of non-associativity is deferred."
 
-This is the most prominent remaining *silent UB* gap that can be partially
-closed without a panic runtime. The §6.18 exhaustiveness check established the
-pattern: conservative compile-time rejection of the obvious case, false negatives
-acceptable, false positives not. Applying the same pattern here closes the most
-obvious division-by-zero case.
+This is a documented silent-correctness gap. Galvanic compiles `a < b < c` as
+`(a < b) < c`, which compares the integer result of `(a < b)` — 0 or 1 — with
+`c`. The FLS states explicitly that comparisons are non-associative and the
+Rust type system would reject this (can't compare `bool` with `i32`). Galvanic
+silently produces the wrong answer.
 
-For spec readers: the FLS says divide-by-zero must panic (§6.23) but provides
-no mechanism. The ambiguities doc should document galvanic's chosen heuristic
-(same as exhaustiveness: catch the literal case, defer the runtime case).
+For spec readers: this is the clearest possible example of galvanic diverging
+from Rust's type rules — and the fix follows the established methodology.
 
-For William: this is the second compile-time correctness gap closed without
-panic infrastructure. Together with §6.18, they form a pattern: galvanic has
-a systematic approach to catching the obvious case at compile time even when
-full runtime enforcement is deferred.
+For William: this is the **third** entry in the "conservative compile-time
+check" methodology (after §6.18 exhaustiveness and §6.23 literal zero). Three
+entries make it a system, not a pattern.
 
 ## Why now
 
-The §6.18 exhaustiveness check (Claim 4l) just landed in the prior session
-(commits #262–264). The build is clean at 1992 tests, all passing.
+The §6.23 literal-zero check (Claim 4m) just landed (commits #266–267). The
+build is clean at 1999 tests. The methodology is established:
 
-The §6.23 gap is structurally identical to the §6.18 gap:
-- The FLS requires something (exhaustiveness / no div-by-zero)
-- The spec provides no algorithm for checking it
-- The obvious compile-time case (literal zero) can be caught without a panic
-  runtime
-- The fix is one condition in lowering, one new error kind (or reuse of
-  existing `LowerError`), and two tests
+- §6.18 (Claim 4l): match exhaustiveness — conservative compile-time rejection
+- §6.23 (Claim 4m): literal zero divisor — conservative compile-time rejection
+- §6.21 (Claim 4n): chained comparison — conservative compile-time rejection
+
+The implementation cost is minimal:
+- One check in the comparison-operator lowering path (three or four lines)
+- Four tests
+- One paragraph update in `refs/fls-ambiguities.md`
+
+No new infrastructure is needed. The AST already represents both sides of
+every binary op as `Expr` nodes, so checking if the child is itself a
+comparison is a single `matches!` on the child's `ExprKind`.
 
 Doing this now:
-1. Reinforces the "conservative compile-time check" pattern — it's now a
-   methodology, not a one-off.
-2. Closes the second entry in `refs/fls-ambiguities.md` that says "undefined
-   behavior" rather than "checked" or "deferred to panic runtime."
-3. Requires no new infrastructure — just a guard in the existing `/` and `%`
-   lowering paths.
+1. Closes the third "silent wrong behavior" entry without requiring a type
+   system — only AST structure matters.
+2. Reinforces the methodology in `refs/fls-ambiguities.md` as a system with
+   three examples.
+3. The §6.21 gap is explicitly about non-associativity — the spec is
+   unambiguous, galvanic's current behavior is unambiguously wrong.
 
 ---
 
 ## Acceptance criteria
 
 - `cargo build` passes.
-- `cargo test` passes (all 1992 existing tests continue to pass).
-- At least one new test demonstrates that `10 / 0` (literal zero divisor) is
+- `cargo test` passes (all 1999 existing tests continue to pass).
+- At least one new test demonstrates that `a < b < c` (chained `<`) is
   rejected at lowering time with an error result.
-- At least one new test demonstrates that `10 % 0` (literal zero remainder) is
-  rejected at lowering time.
-- At least one new test demonstrates that `x / y` (variable divisor) is
+- At least one new test demonstrates that `a == b == c` (chained `==`) is
+  rejected.
+- At least one new test demonstrates that `a < b && b < c` (correct form) is
   accepted and compiles.
-- The §6.9/§6.23 entry in `refs/fls-ambiguities.md` is updated to reflect the
-  new state: literal zero caught at compile time, runtime zero still deferred.
+- The §6.21/§6.7 entry in `refs/fls-ambiguities.md` is updated to reflect
+  the new state: direct chained comparisons caught at compile time, indirect
+  (variable-mediated) chains still deferred.
 - No new FLS citations are wrong or vague.
 
 ## FLS notes
 
-- **§6.23:1–10**: "Integer arithmetic may produce an overflow" and "dividing by
-  zero is a panic." The spec requires a panic but does not specify the check
-  mechanism. The primary FLS gap: the spec mandates the outcome but leaves the
-  detection algorithm to the implementation.
-- **§6.9**: Out-of-bounds indexing must panic. Same structural gap — deferred.
-- The check for `MIN / -1` (signed integer overflow on division) is a separate
-  case; leave it as a deferred note in the ambiguities doc.
-- Float division by zero is NOT an error per IEEE 754 — do not reject `1.0 / 0.0`.
+- **§6.21:1**: "Comparison operators are non-associative." The spec is explicit.
+  A chained comparison is a *type error* in Rust — comparing a `bool` with an
+  `i32` — not merely a logic error. Galvanic has no type system, so the AST
+  structural check is the appropriate proxy.
+- **§6.7**: Parenthesized expressions should override the non-associativity
+  restriction: `(a < b) == true` is valid if `a < b` is a valid sub-expression.
+  The check must only fire when the *direct* child (not a parenthesized
+  sub-expression) is a comparison. Check the `ExprKind` of the raw child —
+  if the parser wraps parenthesized expressions in a `Paren` variant, skip the
+  check. If not, only check one level of nesting.
+- The check for `bool` operands (`true < false`) is separate and not required
+  by this goal — reject only when both sides are comparison-typed operators.
