@@ -104,12 +104,15 @@ For `&[T]`, length is the element count.
 not specify the panic mechanism — whether it is a library call, a trap
 instruction, or something else.
 
-**Galvanic's choice:** No bounds check is emitted at this milestone. Out-of-
-bounds access produces undefined behavior at the assembly level (load/store at
-wrong address). This is a known deviation; the check is deferred until a panic
-infrastructure is in place.
+**Resolution (Claim 4p):** Every array and slice index emits a runtime bounds
+check before the address computation:
+- `cmp x{idx}, #{len}` compares the (zero-extended) index against the array length.
+- `b.hs _galvanic_panic` branches if `idx >= len` (unsigned ≥, so negative signed
+  indices also trigger the guard via wraparound).
+- The `_galvanic_panic` trampoline executes `exit(101)`.
+This matches Rust's debug-mode behavior: out-of-bounds indexing panics.
 
-**Source:** `src/ir.rs:730`, `src/codegen.rs:926`, `src/lower.rs:17880`
+**Source:** `src/ir.rs` (`IrInstr::BoundsCheck`), `src/codegen.rs` (bounds-check emission), `src/lower.rs` (lower_index_expr)
 
 ---
 

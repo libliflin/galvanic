@@ -1285,6 +1285,60 @@ fn claim_4q_srem_emits_min_neg_one_guard() {
     );
 }
 
+/// Claim 4q: `x / y` emits both the cbz zero-guard AND the cmn overflow-guard,
+/// and they appear in the correct order relative to `sdiv`.
+///
+/// FLS §6.23: Galvanic must guard against both divide-by-zero (cbz) and
+/// MIN/-1 signed overflow (cmn). This test confirms both guards are present
+/// and ordered correctly: cbz < cmn < sdiv.
+#[test]
+fn runtime_sdiv_emits_both_zero_and_overflow_guards() {
+    let asm = compile_to_asm("fn f(a: i32, b: i32) -> i32 { a / b }\nfn main() -> i32 { f(1, 1) }\n");
+    assert!(asm.contains("cbz"), "expected cbz div-by-zero guard");
+    assert!(asm.contains("cmn"), "expected cmn overflow guard");
+    assert!(asm.contains("_galvanic_panic"), "expected panic trampoline");
+    // Verify ordering: cbz before cmn before sdiv.
+    // Use "    cbz ", "    cmn ", "    sdiv " to match instruction spellings
+    // rather than label substrings (`.Lsdiv_ok_*` also contains "sdiv").
+    let cbz_pos = asm.find("    cbz ").unwrap();
+    let cmn_pos = asm.find("    cmn ").unwrap();
+    let sdiv_pos = asm.find("    sdiv ").unwrap();
+    assert!(cbz_pos < cmn_pos, "cbz must precede cmn");
+    assert!(cmn_pos < sdiv_pos, "cmn must precede sdiv");
+}
+
+/// Claim 4q: `i32::MIN / -1` passed as function arguments panics (exit 101).
+///
+/// FLS §6.23: Signed integer overflow panics at runtime (debug mode).
+/// This exercises the guard via a function call so the arguments are unknown
+/// at compile time — proving the guard fires at runtime, not compile time.
+#[test]
+fn claim_4q_runtime_min_div_neg_one_via_param_exits_101() {
+    let exit = compile_and_run(
+        "fn div(a: i32, b: i32) -> i32 { a / b }\nfn main() -> i32 { div(-2147483648, -1) }\n",
+    );
+    let Some(code) = exit else { return };
+    assert_eq!(code, 101, "expected exit 101 for i32::MIN / -1 via param, got {code}");
+}
+
+/// Claim 4q: unsigned division (`udiv`) does NOT emit the `cmn` overflow guard.
+///
+/// FLS §6.23: Unsigned division cannot produce an unrepresentable result —
+/// the MIN/-1 guard is only needed for signed `sdiv`. The `udiv` codegen path
+/// must have `cbz` (zero guard) but must NOT have `cmn` (overflow guard).
+#[test]
+fn claim_4q_udiv_no_overflow_guard() {
+    let asm = compile_to_asm(
+        "fn f(a: u32, b: u32) -> u32 { a / b }\nfn main() -> i32 { 0 }\n",
+    );
+    assert!(asm.contains("udiv"), "expected udiv instruction");
+    // Locate the fn f section (before fn main)
+    let f_start = asm.find("// fn f").unwrap_or(0);
+    let main_start = asm.find("// fn main").unwrap_or(asm.len());
+    let f_section = &asm[f_start..main_start];
+    assert!(!f_section.contains("cmn"), "udiv must not emit cmn overflow guard");
+}
+
 // ── Milestone 11: lazy boolean operators && and || ───────────────────────────
 //
 // FLS §6.5.8: Lazy boolean operator expressions. Both `&&` and `||` use

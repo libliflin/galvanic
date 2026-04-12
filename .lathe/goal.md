@@ -1,284 +1,164 @@
-# Goal: Claim 4q — §6.23 Signed Integer MIN/-1 Overflow Guard
+# Goal: Claim 4r — §6.5.9 Shift Overflow Guard (Invalid Shift Amount)
 
 ## What
 
-Two complementary changes that close the remaining §6.23 gap and correct stale
-documentation left over from Claims 4o and 4p. This goal has been set twice
-(cycle 1 and cycle 3) because the builder has not yet implemented it. The
-implementation is fully specified below — follow it exactly.
+Add a runtime panic guard before every `lsl` and `asr`/`lsr` instruction
+for shift amounts that are invalid per Rust's debug-mode semantics:
+1. **Negative shift amount** — shift by any value where bit 63 is set (sign bit).
+2. **Shift amount ≥ 64** — shift that exceeds the register width.
+
+Both cases must branch to `_galvanic_panic` (exit 101).
 
 ---
 
-### 1. Thread a label counter through `emit_instr` in `src/codegen.rs`
+### 1. Add a shift-guard helper in `src/codegen.rs`
 
-`emit_instr` (line ~377) currently has this signature:
-
-```rust
-fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, fn_name: &str) -> Result<(), CodegenError>
-```
-
-Add a `label_ctr: &mut usize` parameter at the end:
+Directly before emitting `lsl`/`asr`/`lsr`, emit two guards:
 
 ```rust
-fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, fn_name: &str, label_ctr: &mut usize) -> Result<(), CodegenError>
+// FLS §6.5.9: Shift amount must be in [0, 63]; negative or >= 64 panics.
+// Guard 1: negative shift amount — test bit 63 (sign bit of rhs).
+writeln!(out, "    tbnz    x{rhs}, #63, _galvanic_panic  // FLS §6.5.9: negative shift → panic")?;
+// Guard 2: shift amount >= 64.
+writeln!(out, "    cmp     x{rhs}, #64                   // FLS §6.5.9: shift >= 64?")?;
+writeln!(out, "    b.ge    _galvanic_panic                // FLS §6.5.9: shift >= 64 → panic")?;
 ```
 
-Add a `let mut label_ctr: usize = 0;` local in `emit_fn` and pass `&mut label_ctr`
-at the one call site where `emit_instr` is called. No other callers exist.
+Apply this guard to `IrBinOp::Shl`, `IrBinOp::Shr`, and `IrBinOp::UShr`
+(left shift, signed right shift, unsigned right shift).
+
+**AMBIGUOUS (§6.5.9):** Rust panics for `i32 << 32` (shift ≥ type width, not
+register width). Galvanic operates on 64-bit registers throughout and has no
+type system to distinguish i32 from i64 at this milestone. The guard fires for
+shift ≥ 64 (register width), which is a false negative for i32 (shifts 32–63
+are not caught). This is acceptable and must be documented in
+`refs/fls-ambiguities.md`.
 
 ---
 
-### 2. Add the MIN/-1 overflow guard to `IrBinOp::Div`
+### 2. Update `needs_panic` in `emit_asm`
 
-The current `IrBinOp::Div` arm (line ~545) emits:
-
-```asm
-    cbz     x{rhs}, _galvanic_panic         // div-by-zero guard
-    sdiv    x{dst}, x{lhs}, x{rhs}
-```
-
-Replace it with (increment `label_ctr` to get a unique `n`):
+The `needs_panic` predicate (line ~159) currently checks for `Div | Rem | UDiv`
+and indexed loads/stores. Extend it to also return `true` for shift operations:
 
 ```rust
-IrBinOp::Div => {
-    writeln!(out, "    cbz     x{rhs}, _galvanic_panic         // FLS §6.23: div-by-zero guard")?;
-    // FLS §6.23: AMBIGUOUS — signed overflow: i32::MIN / -1 panics in Rust debug mode.
-    // ARM64 sdiv returns i32::MIN for this input (CONSTRAINED UNPREDICTABLE).
-    // Guard fires for i64::MIN / -1 too (false positive); galvanic has no type system
-    // to distinguish — acceptable at this milestone, documented in fls-ambiguities.md.
-    let n = *label_ctr;
-    *label_ctr += 1;
-    writeln!(out, "    cmn     x{rhs}, #1                      // Z=1 if rhs == -1 (sign-extended)")?;
-    writeln!(out, "    b.ne    .Lsdiv_ok_{fn_name}_{n}")?;
-    writeln!(out, "    movz    x9, #0x8000, lsl #16             // x9 = 0x0000_0000_8000_0000")?;
-    writeln!(out, "    sxtw    x9, w9                           // sign-extend: x9 = 0xFFFF_FFFF_8000_0000 = i32::MIN")?;
-    writeln!(out, "    cmp     x{lhs}, x9                       // compare lhs with i32::MIN")?;
-    writeln!(out, "    b.eq    _galvanic_panic                  // FLS §6.23: signed overflow panic")?;
-    writeln!(out, ".Lsdiv_ok_{fn_name}_{n}:")?;
-    writeln!(out, "    sdiv    x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: div (signed)")?;
-}
+Instr::BinOp { op: IrBinOp::Div | IrBinOp::Rem | IrBinOp::UDiv
+             | IrBinOp::Shl | IrBinOp::Shr | IrBinOp::UShr, .. } => true,
 ```
+
+Only add variants that actually exist in `IrBinOp` — check `src/ir.rs` first.
 
 ---
 
-### 3. Add the MIN/-1 overflow guard to `IrBinOp::Rem`
+### 3. Add tests to `tests/e2e.rs`
 
-The current `IrBinOp::Rem` arm (line ~564) emits:
-
-```asm
-    cbz     x{rhs}, _galvanic_panic         // rem-by-zero guard
-    sdiv    x{dst}, x{lhs}, x{rhs}
-    msub    x{dst}, x{dst}, x{rhs}, x{lhs}
-```
-
-Replace it with (same pattern, different label prefix):
-
-```rust
-IrBinOp::Rem => {
-    writeln!(out, "    cbz     x{rhs}, _galvanic_panic         // FLS §6.23: rem-by-zero guard")?;
-    // FLS §6.23: signed overflow guard — i32::MIN % -1 also panics (same as div).
-    let n = *label_ctr;
-    *label_ctr += 1;
-    writeln!(out, "    cmn     x{rhs}, #1")?;
-    writeln!(out, "    b.ne    .Lsrem_ok_{fn_name}_{n}")?;
-    writeln!(out, "    movz    x9, #0x8000, lsl #16")?;
-    writeln!(out, "    sxtw    x9, w9")?;
-    writeln!(out, "    cmp     x{lhs}, x9")?;
-    writeln!(out, "    b.eq    _galvanic_panic")?;
-    writeln!(out, ".Lsrem_ok_{fn_name}_{n}:")?;
-    writeln!(out, "    sdiv    x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: rem step 1: quotient")?;
-    writeln!(out, "    msub    x{dst}, x{dst}, x{rhs}, x{lhs}  // FLS §6.5.5: rem step 2: lhs - q*rhs")?;
-}
-```
-
-`IrBinOp::UDiv` does NOT get this guard — unsigned division cannot overflow.
-
----
-
-### 4. Update stale tests in `tests/e2e.rs`
-
-**4a. Rename the gap-marker test.**
-
-Find:
-```rust
-fn runtime_sdiv_no_min_neg_one_guard() {
-```
-
-This test currently asserts the guard is ABSENT. Delete the entire test body and
-replace with a POSITIVE assertion that the guard IS present:
-
-```rust
-fn runtime_sdiv_emits_both_zero_and_overflow_guards() {
-    let asm = compile_to_asm("fn f(a: i32, b: i32) -> i32 { a / b }\nfn main() -> i32 { f(1, 1) }\n");
-    assert!(asm.contains("cbz"), "expected cbz div-by-zero guard");
-    assert!(asm.contains("cmn"), "expected cmn overflow guard");
-    assert!(asm.contains("_galvanic_panic"), "expected panic trampoline");
-    // Verify ordering: cbz before cmn before sdiv
-    let cbz_pos = asm.find("cbz").unwrap();
-    let cmn_pos = asm.find("cmn").unwrap();
-    let sdiv_pos = asm.find("sdiv").unwrap();
-    assert!(cbz_pos < cmn_pos, "cbz must precede cmn");
-    assert!(cmn_pos < sdiv_pos, "cmn must precede sdiv");
-}
-```
-
-**4b. Remove a stale negative assertion.**
-
-Find the test `claim_4o_sdiv_emits_cbz_guard`. It contains a line:
-```rust
-assert!(!asm.contains("0x80000000"), ...);
-```
-Remove ONLY that one assertion (and its associated string if any). The rest of
-the test stays.
-
----
-
-### 5. Add new Claim 4q tests to `tests/e2e.rs`
-
-Add a `// --- Claim 4q: §6.23 signed MIN/-1 overflow ---` section with these tests:
+Add a `// --- Claim 4r: §6.5.9 shift overflow ---` section with these tests:
 
 ```rust
 #[test]
-fn claim_4q_sdiv_emits_cmn_overflow_guard() {
-    let asm = compile_to_asm("fn f(a: i32, b: i32) -> i32 { a / b }\nfn main() -> i32 { f(1, 1) }\n");
-    assert!(asm.contains("cmn"), "expected cmn guard for signed overflow");
-    assert!(asm.contains("sdiv"), "expected sdiv instruction");
-    let cmn_pos = asm.find("cmn").unwrap();
-    let sdiv_pos = asm.find("sdiv").unwrap();
-    assert!(cmn_pos < sdiv_pos, "cmn must appear before sdiv");
+fn claim_4r_shl_emits_tbnz_and_cmp_guards() {
+    let asm = compile_to_asm("fn f(a: i32, b: i32) -> i32 { a << b }\nfn main() -> i32 { f(1, 1) }\n");
+    assert!(asm.contains("tbnz"), "expected tbnz negative-shift guard");
+    assert!(asm.contains("lsl"), "expected lsl instruction");
+    let tbnz_pos = asm.find("tbnz").unwrap();
+    let lsl_pos = asm.find("    lsl ").unwrap();
+    assert!(tbnz_pos < lsl_pos, "tbnz must precede lsl");
 }
 
 #[test]
-fn claim_4q_rem_emits_cmn_overflow_guard() {
-    let asm = compile_to_asm("fn f(a: i32, b: i32) -> i32 { a % b }\nfn main() -> i32 { f(1, 1) }\n");
-    assert!(asm.contains("cmn"), "expected cmn guard in rem path");
-    assert!(asm.contains("msub"), "expected msub in rem path");
-    let cmn_pos = asm.find("cmn").unwrap();
-    let msub_pos = asm.find("msub").unwrap();
-    assert!(cmn_pos < msub_pos, "cmn must appear before msub");
+fn claim_4r_shr_emits_tbnz_guard() {
+    let asm = compile_to_asm("fn f(a: i32, b: i32) -> i32 { a >> b }\nfn main() -> i32 { f(4, 1) }\n");
+    assert!(asm.contains("tbnz"), "expected tbnz negative-shift guard in shr path");
+    assert!(asm.contains("asr"), "expected asr instruction");
 }
 
 #[test]
-fn claim_4q_runtime_min_div_neg_one_exits_101() {
-    // i32::MIN / -1 overflows — must panic
+fn claim_4r_runtime_negative_shift_exits_101() {
+    // shift by -1 (negative) must panic
     let exit = compile_and_run(
-        "fn main() -> i32 { let a: i32 = -2147483648; let b: i32 = -1; a / b }\n",
+        "fn main() -> i32 { let a: i32 = 1; let b: i32 = -1; a << b }\n",
     );
     assert_eq!(exit, Some(101));
 }
 
 #[test]
-fn claim_4q_runtime_min_rem_neg_one_exits_101() {
-    // i32::MIN % -1 overflows — must panic
+fn claim_4r_runtime_shift_by_64_exits_101() {
+    // shift by 64 must panic (>= register width)
     let exit = compile_and_run(
-        "fn main() -> i32 { let a: i32 = -2147483648; let b: i32 = -1; a % b }\n",
+        "fn main() -> i32 { let a: i32 = 1; let b: i32 = 64; a << b }\n",
     );
     assert_eq!(exit, Some(101));
 }
 
 #[test]
-fn claim_4q_runtime_min_div_neg_one_via_param_exits_101() {
+fn claim_4r_runtime_shift_by_1_succeeds() {
+    // shift by 1 is valid — guard must NOT fire
     let exit = compile_and_run(
-        "fn div(a: i32, b: i32) -> i32 { a / b }\nfn main() -> i32 { div(-2147483648, -1) }\n",
+        "fn main() -> i32 { let a: i32 = 1; let b: i32 = 1; a << b }\n",
+    );
+    assert_eq!(exit, Some(2));
+}
+
+#[test]
+fn claim_4r_runtime_negative_shr_exits_101() {
+    let exit = compile_and_run(
+        "fn f(a: i32, b: i32) -> i32 { a >> b }\nfn main() -> i32 { f(8, -1) }\n",
     );
     assert_eq!(exit, Some(101));
 }
 
 #[test]
-fn claim_4q_runtime_non_min_div_neg_one_succeeds() {
-    // -100 / -1 = 100 — guard must NOT fire
+fn claim_4r_runtime_valid_shl_via_param_succeeds() {
+    // 3 << 2 = 12; guard must not fire for valid params
     let exit = compile_and_run(
-        "fn main() -> i32 { let a: i32 = -100; let b: i32 = -1; a / b }\n",
+        "fn f(a: i32, b: i32) -> i32 { a << b }\nfn main() -> i32 { f(3, 2) }\n",
     );
-    assert_eq!(exit, Some(100));
-}
-
-#[test]
-fn claim_4q_udiv_no_overflow_guard() {
-    // udiv path must NOT contain cmn (unsigned division cannot overflow)
-    let asm = compile_to_asm(
-        "fn f(a: u32, b: u32) -> u32 { a / b }\nfn main() -> i32 { 0 }\n",
-    );
-    // udiv section should have cbz (zero guard) but not cmn (overflow guard)
-    assert!(asm.contains("udiv"), "expected udiv instruction");
-    // Find the udiv and check no cmn appears between cbz and udiv
-    // (simple check: udiv path should not contain cmn at all in the asm for this fn)
-    let f_start = asm.find("// fn f").unwrap_or(0);
-    let main_start = asm.find("// fn main").unwrap_or(asm.len());
-    let f_section = &asm[f_start..main_start];
-    assert!(!f_section.contains("cmn"), "udiv must not emit cmn overflow guard");
+    assert_eq!(exit, Some(12));
 }
 ```
 
 ---
 
-### 6. Update `refs/fls-ambiguities.md`
+### 4. Update `refs/fls-ambiguities.md`
 
-**Entry §4.9 — Bounds Checking Mechanism:**
-
-Find the current text that says something like "No bounds check is emitted at
-this milestone" and replace it with:
+Add a new entry for §6.5.9 (insert after the §6.5 section or near the §6.9/§6.23 entry):
 
 ```markdown
-**Resolution (Claim 4p):** Every array and slice index emits a runtime bounds
-check before the address computation:
-- `cmp x{idx}, #{len}` compares the (zero-extended) index against the array length.
-- `b.hs _galvanic_panic` branches if `idx >= len` (unsigned ≥, so negative signed
-  indices also trigger the guard via wraparound).
-- The `_galvanic_panic` trampoline executes `exit(101)`.
-This matches Rust's debug-mode behavior: out-of-bounds indexing panics.
-```
+## §6.5.9 — Shift Operator Overflow
 
-**Entry §6.9/§6.23 — Panic Mechanism:**
+**Gap:** The FLS requires that shifting by a negative amount or an amount ≥ the
+type's bit width panics at runtime (debug mode).
 
-Find the current text that says something like "Non-literal zero divisors...are
-not checked" and replace it with a complete description of all guards:
+**Resolution (Claim 4r):** Two guards are emitted before every `lsl`/`asr`/`lsr`
+instruction:
+- `tbnz x{rhs}, #63, _galvanic_panic` — fires if rhs is negative (bit 63 set).
+- `cmp x{rhs}, #64; b.ge _galvanic_panic` — fires if rhs ≥ 64 (register width).
 
-```markdown
-**Resolution (Claims 4m, 4o, 4q):** Three distinct division-panic guards are
-implemented:
+**AMBIGUOUS (§6.5.9):** Rust panics for `i32 << 32` (shift ≥ 32, the i32 type
+width). Galvanic uses 64-bit registers throughout and has no type system at this
+milestone. The guard fires for shift ≥ 64 (false negative for i32: shifts 32–63
+escape detection). This is a known limitation.
 
-1. **Literal-zero divisors (Claim 4m):** Caught at compile time. Dividing by a
-   literal `0` produces a compile error before codegen.
-
-2. **Runtime zero divisors (Claim 4o):** Guarded by `cbz x{rhs}, _galvanic_panic`
-   immediately before every `sdiv` and `udiv` instruction.
-
-3. **Signed overflow — MIN/-1 (Claim 4q):** Guarded by `cmn x{rhs}, #1` +
-   `cmp x{lhs}, x9` (where x9 = i32::MIN sign-extended) before every `sdiv`.
-   Fires when `rhs == -1` AND `lhs == i32::MIN`. ARM64 `sdiv` returns i32::MIN
-   for this input (CONSTRAINED UNPREDICTABLE); Rust debug mode panics.
-
-4. **Unsigned division overflow:** Not applicable — unsigned division cannot
-   produce an unrepresentable result.
-
-**AMBIGUOUS (§6.23):** The MIN/-1 guard also fires for i64::MIN / -1 (false
-positive), since galvanic lacks a full type system. At this milestone, the test
-suite exercises only i32, so this is acceptable. Documented as a limitation.
-
-**Integer overflow in `+`, `-`, `*`:** No trap is emitted. Arithmetic wraps
-in 64-bit registers; narrow-type masking (AND / SXTB / SXTH) happens but does
-not detect overflow. This is a known gap — a separate goal.
-
-`_galvanic_panic`: bare `mov x8, #93; mov x0, #101; svc #0` — `exit(101)`.
+**Source:** `src/codegen.rs` (shift guard emission)
 ```
 
 ---
 
 ## Scope constraints
 
-- Do NOT add overflow traps for `+`, `-`, `*`.
-- Do NOT add i64-specific MIN/-1 detection — always-emit is correct and documented.
-- Do NOT change `IrBinOp::UDiv` — no guard needed.
+- Do NOT add guards for shift variants that don't exist in `IrBinOp`.
 - Do NOT change the zero-divisor `cbz` guard.
-- Do NOT change the bounds-check guard (Claim 4p).
+- Do NOT change the MIN/-1 `cmn`/`cmp` guard.
+- Do NOT change the bounds-check guard.
+- Do NOT add overflow traps for `+`, `-`, `*`.
 
 ## Acceptance criteria
 
 - `cargo build` passes with no warnings.
-- `cargo test` passes — all 1772 existing tests pass; 7 new tests added (1779 total).
-- Test `runtime_sdiv_no_min_neg_one_guard` is deleted/renamed to `runtime_sdiv_emits_both_zero_and_overflow_guards`.
-- Stale `!asm.contains("0x80000000")` assertion removed from `claim_4o_sdiv_emits_cbz_guard`.
+- `cargo test` passes — all 1779 existing tests pass; 7 new tests added (1786 total).
 - `cargo clippy -- -D warnings` passes.
-- `refs/fls-ambiguities.md` §4.9 entry describes Claim 4p bounds-check behavior.
-- `refs/fls-ambiguities.md` §6.9/§6.23 entry describes all three division guards.
+- `refs/fls-ambiguities.md` has a new §6.5.9 entry describing the shift guard
+  and the i32 false-negative ambiguity.
+- Assembly inspection test confirms `tbnz` precedes `lsl` in shift output.
+- Runtime tests confirm negative shift and shift ≥ 64 both exit 101.
+- Runtime test confirms valid shift succeeds (exit 2 for `1 << 1`).
