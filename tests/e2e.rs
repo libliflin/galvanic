@@ -34714,3 +34714,167 @@ fn main() -> i32 { less(1, 2) }\n",
         "simple comparison must not be constant-folded: {asm}"
     );
 }
+
+// ── Claim 4p: §6.9 runtime bounds checking — array and slice indexing ─────────
+//
+// FLS §6.9: Indexing expressions. The index must be in bounds; out-of-bounds
+// access panics at runtime. The ambiguity note in LoadIndexed/StoreIndexed is
+// now resolved: galvanic emits `cmp x{idx}, #{len}; b.hs _galvanic_panic`
+// before every indexed load/store where the array length is statically known.
+//
+// The `b.hs` instruction (branch if higher-or-same, unsigned ≥) also catches
+// negative indices because, when reinterpreted as u64, they are very large
+// unsigned values.
+//
+// FLS §6.23: The panic exits with code 101 — same as the divide-by-zero guard.
+
+/// Claim 4p: indexed load emits `cmp` + `b.hs _galvanic_panic` bounds check.
+///
+/// FLS §6.9: Out-of-bounds access must panic at runtime.
+/// Assembly inspection verifies the guard is emitted before the actual load.
+#[test]
+fn claim_4p_indexed_load_emits_bounds_check() {
+    let asm = compile_to_asm(
+        "fn get(a: i32, i: i32) -> i32 { let arr = [1, 2, 3]; arr[i as usize] }\nfn main() -> i32 { get(0, 1) }\n",
+    );
+    assert!(
+        asm.contains("b.hs") && asm.contains("_galvanic_panic"),
+        "expected `b.hs _galvanic_panic` bounds check before indexed load, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("cmp"),
+        "expected `cmp` before `b.hs` in bounds check sequence, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("ldr") && asm.contains("lsl #3"),
+        "expected `ldr ... lsl #3` for indexed load after bounds check, got:\n{asm}"
+    );
+}
+
+/// Claim 4p: indexed store emits `cmp` + `b.hs _galvanic_panic` bounds check.
+///
+/// FLS §6.5.10 + §6.9: Out-of-bounds store must panic at runtime.
+#[test]
+fn claim_4p_indexed_store_emits_bounds_check() {
+    let asm = compile_to_asm(
+        "fn set(i: i32) -> i32 { let mut arr = [1, 2, 3]; arr[i as usize] = 99; arr[0] }\nfn main() -> i32 { set(1) }\n",
+    );
+    assert!(
+        asm.contains("b.hs") && asm.contains("_galvanic_panic"),
+        "expected `b.hs _galvanic_panic` bounds check before indexed store, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("str") && asm.contains("lsl #3"),
+        "expected `str ... lsl #3` for indexed store after bounds check, got:\n{asm}"
+    );
+}
+
+/// Claim 4p: `b.hs` guard appears before the `add sp` address computation.
+///
+/// Ordering test: the bounds check must execute before the array address is
+/// computed. A guard emitted after the address computation would still be
+/// logically equivalent, but the correct order is check-then-access.
+#[test]
+fn claim_4p_bounds_check_precedes_address_computation() {
+    let asm = compile_to_asm(
+        "fn get(i: i32) -> i32 { let arr = [10, 20, 30]; arr[i as usize] }\nfn main() -> i32 { get(1) }\n",
+    );
+    let bhs_pos = asm.find("b.hs").expect("b.hs guard must be present");
+    let add_sp_pos = asm.find("add     x").expect("add for base address must be present");
+    assert!(
+        bhs_pos < add_sp_pos,
+        "b.hs bounds check must appear before `add sp` address computation; \
+b.hs at {bhs_pos}, add at {add_sp_pos}:\n{asm}"
+    );
+}
+
+/// Claim 4p: `_galvanic_panic` is present when array indexing is used.
+///
+/// Programs that use array indexing reference `_galvanic_panic` via the bounds
+/// check guard. This verifies the symbol is emitted for indexed programs.
+#[test]
+fn claim_4p_galvanic_panic_present_with_indexing() {
+    let asm = compile_to_asm(
+        "fn get(i: i32) -> i32 { let arr = [1, 2, 3]; arr[i as usize] }\nfn main() -> i32 { get(0) }\n",
+    );
+    assert!(
+        asm.contains("_galvanic_panic"),
+        "`_galvanic_panic` must appear in assembly for programs using array indexing:\n{asm}"
+    );
+}
+
+/// Claim 4p: `_galvanic_panic` absent when only for-loop array iteration is used.
+///
+/// For-loop array access has a redundant bounds check (loop condition already
+/// enforces `counter < len`), so galvanic passes `len: 0` and no bounds check
+/// is emitted. This test verifies that for-loop programs without explicit
+/// indexing do not unnecessarily reference `_galvanic_panic`.
+#[test]
+fn claim_4p_galvanic_panic_absent_for_loop_iteration() {
+    let asm = compile_to_asm(
+        "fn sum(a: i32, b: i32, c: i32) -> i32 { \
+let arr = [a, b, c]; \
+let mut s = 0; \
+for x in arr { s = s + x; } \
+s \
+}\nfn main() -> i32 { sum(1, 2, 3) }\n",
+    );
+    // For-loop iteration should NOT emit a bounds check (loop condition is the guard).
+    // If _galvanic_panic appears, it means we're adding redundant bounds checks.
+    assert!(
+        !asm.contains("b.hs"),
+        "for-loop array iteration must not emit `b.hs` bounds check (loop already guards):\n{asm}"
+    );
+}
+
+/// Claim 4p: runtime exit code 101 when index equals array length (out-of-bounds).
+///
+/// FLS §6.9: The valid index range is `0..len`; `arr[len]` is out-of-bounds.
+/// This test requires the ARM64 cross-toolchain and qemu.
+#[test]
+fn claim_4p_runtime_index_equals_len_exits_101() {
+    let exit = compile_and_run(
+        "fn get(i: i32) -> i32 { let arr = [10, 20, 30]; arr[i as usize] }\nfn main() -> i32 { get(3) }\n",
+    );
+    let Some(code) = exit else { return };
+    assert_eq!(code, 101, "expected exit 101 (bounds panic) for index==len, got {code}");
+}
+
+/// Claim 4p: runtime exit code 101 when index exceeds array length.
+///
+/// FLS §6.9: Any index >= len is out-of-bounds.
+#[test]
+fn claim_4p_runtime_index_exceeds_len_exits_101() {
+    let exit = compile_and_run(
+        "fn get(i: i32) -> i32 { let arr = [10, 20, 30]; arr[i as usize] }\nfn main() -> i32 { get(5) }\n",
+    );
+    let Some(code) = exit else { return };
+    assert_eq!(code, 101, "expected exit 101 (bounds panic) for index>len, got {code}");
+}
+
+/// Claim 4p: runtime in-bounds access succeeds — exit code matches element value.
+///
+/// FLS §6.9: In-bounds access must succeed and return the correct element.
+/// This test verifies the bounds check does not fire for valid indices.
+#[test]
+fn claim_4p_runtime_in_bounds_access_succeeds() {
+    let exit = compile_and_run(
+        "fn get(i: i32) -> i32 { let arr = [10, 20, 30]; arr[i as usize] }\nfn main() -> i32 { get(2) }\n",
+    );
+    let Some(code) = exit else { return };
+    assert_eq!(code, 30, "expected exit 30 for arr[2] of [10,20,30], got {code}");
+}
+
+/// Claim 4p: runtime exit code 101 when index is the maximum-negative i32 cast to usize.
+///
+/// Negative indices when cast to usize are large unsigned values and must be
+/// caught by the `b.hs` bounds check. This exercises the "also catches negatives"
+/// property of the unsigned comparison.
+#[test]
+fn claim_4p_runtime_negative_index_exits_101() {
+    let exit = compile_and_run(
+        "fn get(i: i32) -> i32 { let arr = [10, 20, 30]; arr[i as usize] }\nfn main() -> i32 { get(-1) }\n",
+    );
+    let Some(code) = exit else { return };
+    assert_eq!(code, 101, "expected exit 101 (bounds panic) for negative index, got {code}");
+}

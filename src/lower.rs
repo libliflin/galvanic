@@ -8232,6 +8232,7 @@ impl<'src> LowerCtx<'src> {
                                                 dst,
                                                 base_slot: src_slot,
                                                 index_reg: idx_reg,
+                                                len: arr_len as u32,
                                             });
                                             let elem_slot = self.alloc_slot()?;
                                             self.instrs.push(Instr::Store { src: dst, slot: elem_slot });
@@ -14600,6 +14601,7 @@ impl<'src> LowerCtx<'src> {
                                         "variable `{var_name}` is not a 2D array"
                                     ))
                                 })?;
+                            let outer_len = self.local_array_lens.get(&base_slot).copied().unwrap_or(0);
                             // Lower RHS first.
                             let rhs_val = self.lower_expr(rhs, &IrTy::I32)?;
                             let src_reg = self.val_to_reg(rhs_val)?;
@@ -14626,11 +14628,13 @@ impl<'src> LowerCtx<'src> {
                                 rhs: j_reg,
                             });
                             let scratch = self.alloc_reg()?;
+                            // FLS §6.9: bounds check against total element count (outer * inner).
                             self.instrs.push(Instr::StoreIndexed {
                                 src: src_reg,
                                 base_slot,
                                 index_reg: linear_reg,
                                 scratch,
+                                len: (outer_len * inner_len) as u32,
                             });
                             return Ok(IrValue::Unit);
                         }
@@ -14671,11 +14675,14 @@ impl<'src> LowerCtx<'src> {
                         // Allocate scratch for base-address computation.
                         let scratch = self.alloc_reg()?;
 
+                        // FLS §6.9: look up array length for bounds check at runtime.
+                        let arr_len = self.local_array_lens.get(&base_slot).copied().unwrap_or(0);
                         self.instrs.push(Instr::StoreIndexed {
                             src: src_reg,
                             base_slot,
                             index_reg,
                             scratch,
+                            len: arr_len as u32,
                         });
 
                         // FLS §6.5.10: assignment expressions have type `()`.
@@ -16228,6 +16235,7 @@ impl<'src> LowerCtx<'src> {
                             dst: elem_reg,
                             base_slot: arr_base,
                             index_reg: counter_reg,
+                            len: 0, // loop condition counter < arr_len already enforces bounds
                         });
                         self.instrs.push(Instr::StoreF64 { src: elem_reg, slot: elem_slot });
                     } else if is_f32_arr_loop {
@@ -16236,6 +16244,7 @@ impl<'src> LowerCtx<'src> {
                             dst: elem_reg,
                             base_slot: arr_base,
                             index_reg: counter_reg,
+                            len: 0, // loop condition counter < arr_len already enforces bounds
                         });
                         self.instrs.push(Instr::StoreF32 { src: elem_reg, slot: elem_slot });
                     } else {
@@ -16244,6 +16253,7 @@ impl<'src> LowerCtx<'src> {
                             dst: elem_reg,
                             base_slot: arr_base,
                             index_reg: counter_reg,
+                            len: 0, // loop condition counter < arr_len already enforces bounds
                         });
                         self.instrs.push(Instr::Store { src: elem_reg, slot: elem_slot });
                     }
@@ -18116,6 +18126,7 @@ impl<'src> LowerCtx<'src> {
                                 "variable `{var_name}` is not a 2D array (nested indexing requires [[T; M]; N])"
                             ))
                         })?;
+                    let outer_len = self.local_array_lens.get(&base_slot).copied().unwrap_or(0);
                     // Lower outer (row) index i.
                     let i_val = self.lower_expr(i_expr, &IrTy::I32)?;
                     let i_reg = self.val_to_reg(i_val)?;
@@ -18140,10 +18151,12 @@ impl<'src> LowerCtx<'src> {
                         rhs: j_reg,
                     });
                     let dst = self.alloc_reg()?;
+                    // FLS §6.9: bounds check against total element count (outer * inner).
                     self.instrs.push(Instr::LoadIndexed {
                         dst,
                         base_slot,
                         index_reg: linear_reg,
+                        len: (outer_len * inner_len) as u32,
                     });
                     return Ok(IrValue::Reg(dst));
                 }
@@ -18234,18 +18247,20 @@ impl<'src> LowerCtx<'src> {
 
                 // FLS §4.5, §4.2: Emit float-typed indexed load for f64/f32 arrays.
                 // The base slot's element type was recorded during array literal lowering.
+                // FLS §6.9: look up array length for runtime bounds check.
+                let arr_len = self.local_array_lens.get(&base_slot).copied().unwrap_or(0);
                 let dst = self.alloc_reg()?;
                 if self.local_f64_array_slots.contains(&base_slot) {
                     // FLS §4.5: `[f64; N]` — load element into a d-register.
-                    self.instrs.push(Instr::LoadIndexedF64 { dst, base_slot, index_reg });
+                    self.instrs.push(Instr::LoadIndexedF64 { dst, base_slot, index_reg, len: arr_len as u32 });
                     Ok(IrValue::FReg(dst))
                 } else if self.local_f32_array_slots.contains(&base_slot) {
                     // FLS §4.5: `[f32; N]` — load element into an s-register.
-                    self.instrs.push(Instr::LoadIndexedF32 { dst, base_slot, index_reg });
+                    self.instrs.push(Instr::LoadIndexedF32 { dst, base_slot, index_reg, len: arr_len as u32 });
                     Ok(IrValue::F32Reg(dst))
                 } else {
                     // Integer/boolean array: load into an x-register.
-                    self.instrs.push(Instr::LoadIndexed { dst, base_slot, index_reg });
+                    self.instrs.push(Instr::LoadIndexed { dst, base_slot, index_reg, len: arr_len as u32 });
                     Ok(IrValue::Reg(dst))
                 }
             }
