@@ -104,12 +104,13 @@ For `&[T]`, length is the element count.
 not specify the panic mechanism — whether it is a library call, a trap
 instruction, or something else.
 
-**Galvanic's choice:** No bounds check is emitted at this milestone. Out-of-
-bounds access produces undefined behavior at the assembly level (load/store at
-wrong address). This is a known deviation; the check is deferred until a panic
-infrastructure is in place.
+**Galvanic's choice (Claim 4p):** Bounds checks are now emitted. Every array
+and slice indexed load/store emits `cmp x{index}, #{len}` / `b.hs _galvanic_panic`
+before the access. The `_galvanic_panic` symbol exits with code 101, matching
+the divide-by-zero convention. Negative indices (i64 with sign bit set) are
+≥ 2^63 as u64 and are caught by the unsigned `b.hs` branch.
 
-**Source:** `src/ir.rs:730`, `src/codegen.rs:926`, `src/lower.rs:17880`
+**Source:** `src/codegen.rs` (`LoadIndexed`, `StoreIndexed`), `tests/e2e.rs` (`claim_4p_*`)
 
 ---
 
@@ -297,10 +298,14 @@ specify the panic mechanism — library call, trap instruction, signal handler.
   the overflow case, branching to `_galvanic_panic`. (Claim 4q)
 - Out-of-bounds indexing: `cmp`/`b.hs` bounds check before every array/slice
   load and store; out-of-bounds branches to `_galvanic_panic`. (Claim 4p)
-- `+`, `-`, `*` overflow: no overflow check; arithmetic wraps per 64-bit
-  hardware. This is a known deviation from debug-mode Rust semantics.
-  FLS §6.23 AMBIGUOUS — spec requires debug-mode panic but galvanic uses 64-bit
-  arithmetic throughout and does not insert overflow checks for these operators.
+- `+`, `-`, `*` overflow: guarded via Claim 4s. Each operation now emits
+  `sxtw x9, w{dst}` / `cmp x{dst}, x9` / `b.ne _galvanic_panic` after the
+  64-bit instruction. The guard fires when the 64-bit result does not equal
+  its own sign-extended 32-bit self (i.e., the result overflowed i32 range).
+  FLS §6.23 AMBIGUOUS — guard is applied to all `IrBinOp::Add/Sub/Mul`
+  regardless of the source type. For `u32`/`i64`/`usize` operands with values
+  above `i32::MAX`, the guard would incorrectly fire. Existing tests use small
+  values so this does not affect them; a type-tagged BinOp IR would fix this.
 
 The panic primitive `_galvanic_panic` calls `sys_exit(101)` directly. No stack
 unwinding, no panic message. This matches the FLS requirement (panics terminate
