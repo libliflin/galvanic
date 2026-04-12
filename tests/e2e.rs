@@ -1910,6 +1910,42 @@ fn claim_4r_shr_emits_cmp_shift_guard() {
         cmp_pos < asr_pos,
         "cmp guard must appear before asr, but cmp={cmp_pos} asr={asr_pos}:\n{asm}"
     );
+    // Must NOT constant-fold shr(16, 2) = 4.
+    assert!(
+        !asm.contains("mov     x0, #4"),
+        "must not constant-fold `shr(16, 2)` to #4:\n{asm}"
+    );
+}
+
+/// Claim 4r: assembly inspection — lsr must be preceded by `cmp` shift guard.
+///
+/// FLS §6.5.9: The same `cmp x{rhs}, #64; b.hs _galvanic_panic` guard must
+/// appear before every `lsr` instruction (unsigned right shift), not just
+/// signed shifts. This verifies the UShr codegen path is guarded.
+#[test]
+fn claim_4r_ushr_emits_cmp_shift_guard() {
+    let src =
+        "fn ushr(x: u32, n: u32) -> u32 { x >> n }\nfn main() -> i32 { ushr(84, 1) as i32 }\n";
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("cmp") && asm.contains("b.hs"),
+        "expected shift guard (cmp + b.hs) before lsr, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("lsr"),
+        "expected `lsr` instruction after guard, got:\n{asm}"
+    );
+    let cmp_pos = asm.find("cmp").unwrap();
+    let lsr_pos = asm.find("    lsr").unwrap();
+    assert!(
+        cmp_pos < lsr_pos,
+        "cmp guard must appear before lsr, but cmp={cmp_pos} lsr={lsr_pos}:\n{asm}"
+    );
+    // Must NOT constant-fold ushr(84, 1) = 42.
+    assert!(
+        !asm.contains("mov     x0, #42"),
+        "must not constant-fold `ushr(84, 1)` to #42:\n{asm}"
+    );
 }
 
 // ── Milestone 13: compound assignment operators ───────────────────────────────
