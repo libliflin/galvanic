@@ -104,12 +104,21 @@ For `&[T]`, length is the element count.
 not specify the panic mechanism — whether it is a library call, a trap
 instruction, or something else.
 
-**Galvanic's choice:** No bounds check is emitted at this milestone. Out-of-
-bounds access produces undefined behavior at the assembly level (load/store at
-wrong address). This is a known deviation; the check is deferred until a panic
-infrastructure is in place.
+**Galvanic's choice (updated — Claim 4p):**
+- Every array and slice index expression emits a `cmp x{index}, #{len}` +
+  `b.hs _galvanic_panic` guard before the address computation. ARM64 `b.hs`
+  ("branch if higher or same") is an unsigned comparison: if the index ≥ len
+  (or, equivalently, if the index is negative when interpreted as unsigned and
+  thus ≥ 0x8000_0000), the branch fires and `_galvanic_panic` is called.
+- Negative indices (when the index register holds a negative signed value with
+  bit 63 set) trigger the guard via the unsigned comparison — they appear as
+  very large unsigned values, always ≥ any valid array length.
+- `_galvanic_panic` exits with code 101 (bare Linux `exit` syscall, no libc).
+- The FLS does not specify how the panic is signalled (library call, trap,
+  signal). Galvanic's `exit(101)` is an implementation-defined choice.
 
-**Source:** `src/ir.rs:730`, `src/codegen.rs:926`, `src/lower.rs:17880`
+**Source:** `src/codegen.rs` (`LoadIndexed`/`StoreIndexed`/`LoadIndexedF64`/
+`LoadIndexedF32` cases), `src/lower.rs` (array/slice indexing lowering).
 
 ---
 
@@ -284,23 +293,44 @@ Rust's de-facto behavior.
 indexing (§6.9), and integer overflow in debug mode (§6.23), but does not
 specify the panic mechanism — library call, trap instruction, signal handler.
 
-**Galvanic's choice (updated — Claim 4m):**
-- Divide-by-zero with a literal 0 divisor: **caught at compile time** in
+**Galvanic's choice (updated — Claims 4m, 4o, 4p, 4q):**
+
+*Division and remainder:*
+- **Literal zero divisor** (e.g. `x / 0`): caught at compile time in
   `src/lower.rs`. The lowering pass rejects integer `/` and `%` expressions
-  whose RHS is `LitInt(0)` before emitting any IR. This covers the common
-  programming error (e.g. `x / 0`) without requiring panic infrastructure.
-  Non-literal zero divisors (e.g. `x / y` where `y` may be zero at runtime)
-  are not checked — they emit `sdiv`/`udiv` without a guard.
-- Out-of-bounds: no bounds check before load/store.
-- Overflow: no overflow check; arithmetic wraps per the hardware.
+  whose RHS is `LitInt(0)` before emitting any IR (Claim 4m).
+- **Runtime zero divisor** (e.g. `x / y` where `y` may be 0): guarded by
+  `cbz x{rhs}, _galvanic_panic` before every `sdiv`/`udiv` and before the
+  `sdiv` inside the `msub`-based `%` path (Claim 4o).
+- **Signed MIN/-1 overflow** (i32::MIN / -1 and i32::MIN % -1): guarded by a
+  `cmn x{rhs}, #1` (sets Z if rhs == -1) followed by `movz x16, #0x8000,
+  lsl #16` + `sxtw x16, w16` + `cmp x{lhs}, x16` + `b.eq _galvanic_panic`
+  sequence after the zero-divisor guard (Claim 4q). This covers the only i32
+  division case where the mathematical result exceeds i32 range.
+  **Limitation:** the same guard fires for i64::MIN / -1, but galvanic's test
+  suite only exercises i32. A future type-system-aware implementation could
+  restrict the guard to 32-bit operands only.
+- **Unsigned MIN/-1:** not applicable — unsigned division cannot overflow.
 
-The literal-divisor check and the §6.18 exhaustiveness check (Claim 4l)
-form a consistent methodology: conservatively reject the statically-obvious
-UB case at compile time; defer the general case to when panic infrastructure
-is available.
+*Out-of-bounds indexing:*
+- Guarded by `cmp x{index}, #{len}` + `b.hs _galvanic_panic` before every
+  indexed load/store (Claim 4p). See §4.9 entry above.
 
-**Source:** `src/lower.rs` (literal zero check in binary op lowering),
-`src/codegen.rs:496`, `src/codegen.rs:514`
+*Integer overflow (non-division):*
+- `+`, `-`, `*` do NOT trap. Galvanic uses 64-bit ARM64 registers for i32
+  values; arithmetic wraps at 2^64, not at 2^31. This diverges from Rust's
+  debug-mode panic-on-overflow semantics. The divergence is intentional at
+  this milestone; trapping arithmetic is a separate future claim.
+
+*Panic mechanism:*
+- `_galvanic_panic` is a bare `exit(101)` Linux syscall. No stack unwind, no
+  destructors, no error message. The FLS does not specify the mechanism; this
+  is galvanic's implementation-defined choice. Exit code 101 is galvanic's
+  internal panic sentinel, distinct from program return values (0–255 normal)
+  and from SIGABRT-based crashes (exit code 134 under libc).
+
+**Source:** `src/lower.rs` (literal zero check), `src/codegen.rs`
+(`IrBinOp::Div`, `IrBinOp::Rem`, `IrBinOp::UDiv`, `LoadIndexed`/`StoreIndexed`).
 
 ---
 
