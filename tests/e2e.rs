@@ -34462,6 +34462,83 @@ fn claim_4n_chained_eq_lt_rejected() {
     );
 }
 
+/// Claim 4n: `a <= b <= c` (chained `<=`) rejected at compile time.
+///
+/// FLS §6.21: Non-associativity covers all six comparison operators.
+#[test]
+fn claim_4n_chained_le_le_rejected() {
+    let src = "fn main() -> i32 { let a = 1; let b = 2; let c = 3; if a <= b <= c { 1 } else { 0 } }\n";
+    let tokens = galvanic::lexer::tokenize(src).expect("lex failed");
+    let sf = galvanic::parser::parse(&tokens, src).expect("parse failed");
+    let result = galvanic::lower::lower(&sf, src);
+    assert!(
+        result.is_err(),
+        "expected compile-time error for chained `<=`, but lower() returned Ok"
+    );
+    let msg = result.err().unwrap().to_string();
+    assert!(
+        msg.contains("chained comparison"),
+        "expected error mentioning 'chained comparison', got: {msg}"
+    );
+}
+
+/// Claim 4n: `a >= b >= c` (chained `>=`) rejected at compile time.
+///
+/// FLS §6.21: Non-associativity covers all six comparison operators.
+#[test]
+fn claim_4n_chained_ge_ge_rejected() {
+    let src = "fn main() -> i32 { let a = 3; let b = 2; let c = 1; if a >= b >= c { 1 } else { 0 } }\n";
+    let tokens = galvanic::lexer::tokenize(src).expect("lex failed");
+    let sf = galvanic::parser::parse(&tokens, src).expect("parse failed");
+    let result = galvanic::lower::lower(&sf, src);
+    assert!(
+        result.is_err(),
+        "expected compile-time error for chained `>=`, but lower() returned Ok"
+    );
+    let msg = result.err().unwrap().to_string();
+    assert!(
+        msg.contains("chained comparison"),
+        "expected error mentioning 'chained comparison', got: {msg}"
+    );
+}
+
+/// Claim 4n: `a != b != c` (chained `!=`) rejected at compile time.
+///
+/// FLS §6.21: Non-associativity covers all six comparison operators.
+#[test]
+fn claim_4n_chained_ne_ne_rejected() {
+    let src = "fn main() -> i32 { let a = 1; let b = 2; let c = 3; if a != b != c { 1 } else { 0 } }\n";
+    let tokens = galvanic::lexer::tokenize(src).expect("lex failed");
+    let sf = galvanic::parser::parse(&tokens, src).expect("parse failed");
+    let result = galvanic::lower::lower(&sf, src);
+    assert!(
+        result.is_err(),
+        "expected compile-time error for chained `!=`, but lower() returned Ok"
+    );
+    let msg = result.err().unwrap().to_string();
+    assert!(
+        msg.contains("chained comparison"),
+        "expected error mentioning 'chained comparison', got: {msg}"
+    );
+}
+
+/// Claim 4n: `a < b && c < d` (two comparisons joined by `&&`) accepted — not a chain.
+///
+/// The chained-comparison check must NOT fire when comparisons are combined
+/// with logical operators; only direct nesting of comparison as LHS is rejected.
+#[test]
+fn claim_4n_and_joined_comparisons_accepted() {
+    let src = "fn check(a: i32, b: i32, c: i32, d: i32) -> i32 { if a < b && c < d { 1 } else { 0 } }\nfn main() -> i32 { check(1, 2, 3, 4) }\n";
+    let tokens = galvanic::lexer::tokenize(src).expect("lex failed");
+    let sf = galvanic::parser::parse(&tokens, src).expect("parse failed");
+    let result = galvanic::lower::lower(&sf, src);
+    assert!(
+        result.is_ok(),
+        "expected `a < b && c < d` to compile successfully, got: {:?}",
+        result.err()
+    );
+}
+
 /// Claim 4n: simple (non-chained) comparison accepted and emits runtime `cmp`+`cset`.
 ///
 /// The chained-comparison check must NOT fire for ordinary comparisons.
