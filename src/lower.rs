@@ -18092,9 +18092,18 @@ impl<'src> LowerCtx<'src> {
             // the base to a simple variable path whose type is a known array
             // (registered in `local_array_lens`).
             //
-            // FLS §6.9 AMBIGUOUS: Out-of-bounds access must panic, but the panic
-            // mechanism without the standard library is not specified. No bounds
-            // check is emitted at this milestone.
+            // FLS §6.9: Out-of-bounds access panics at runtime. Galvanic emits
+            // `cmp x{idx}, #{len}; b.hs _galvanic_panic` before each
+            // `LoadIndexed` / `StoreIndexed` when `local_array_lens` contains
+            // the array's static length (i.e., for all locally-declared arrays).
+            //
+            // FLS §6.9 AMBIGUOUS: Slice parameters (`&[T]`) carry a runtime
+            // length in their fat pointer, but galvanic does not yet thread that
+            // length into the `LoadIndexed` IR instruction. Slice indexing via
+            // a fat-pointer base (local_slice_slots path below) currently emits
+            // no bounds check. The FLS requires a panic; the mechanism is
+            // implementation-defined. Deferred until fat-pointer len extraction
+            // is plumbed through the IR.
             //
             // FLS §6.1.2:37–45: All instructions are runtime (no constant folding).
             //

@@ -34878,3 +34878,59 @@ fn claim_4p_runtime_negative_index_exits_101() {
     let Some(code) = exit else { return };
     assert_eq!(code, 101, "expected exit 101 (bounds panic) for negative index, got {code}");
 }
+
+/// Claim 4p: `cmp` instruction encodes the correct array length literal.
+///
+/// The bounds check must use the actual array length, not a wrong constant.
+/// This verifies that `local_array_lens` lookup produces the right value and
+/// it is encoded literally in the `cmp` instruction (e.g., `cmp x{n}, #3`
+/// for a 3-element array).
+///
+/// Also confirms the indexed load uses `ldr ... lsl #3` (runtime load) not
+/// a constant-folded immediate for the element value.
+#[test]
+fn claim_4p_cmp_uses_correct_array_length_literal() {
+    let asm = compile_to_asm(
+        "fn get(i: i32) -> i32 { let arr = [10, 20, 30]; arr[i as usize] }\nfn main() -> i32 { get(1) }\n",
+    );
+    // The cmp instruction must encode length 3 as an immediate.
+    assert!(
+        asm.contains("cmp") && (asm.contains("#3 ") || asm.contains("#3\n") || asm.contains(", #3")),
+        "expected `cmp x{{n}}, #3` for 3-element array bounds check, got:\n{asm}"
+    );
+    // The indexed read must be a runtime ldr, not a mov-immediate for the value 20.
+    assert!(
+        asm.contains("ldr") && asm.contains("lsl #3"),
+        "indexed load must emit `ldr ... lsl #3` (runtime), not a constant-folded immediate; got:\n{asm}"
+    );
+    // The final return must not be a direct immediate of the element value (no constant folding).
+    assert!(
+        !asm.contains("mov     x0, #20"),
+        "indexed access must not constant-fold to `mov x0, #20`; got:\n{asm}"
+    );
+}
+
+/// Claim 4p: 2D array out-of-bounds access exits 101 at runtime.
+///
+/// FLS §6.9: The linearized bounds check `cmp x{linear}, #{outer*inner}` must
+/// catch row-overflow in a 2D array (e.g., `grid[2][0]` in `[[i32; 3]; 2]`).
+#[test]
+fn claim_4p_2d_array_oob_exits_101() {
+    let exit = compile_and_run(
+        "fn get(r: i32) -> i32 { let grid = [[1, 2, 3], [4, 5, 6]]; grid[r as usize][0] }\nfn main() -> i32 { get(2) }\n",
+    );
+    let Some(code) = exit else { return };
+    assert_eq!(code, 101, "expected exit 101 for row index 2 in [[i32;3];2], got {code}");
+}
+
+/// Claim 4p: 2D array in-bounds access returns correct element.
+///
+/// Verifies that the linearized bounds check does not incorrectly fire for valid 2D accesses.
+#[test]
+fn claim_4p_2d_array_in_bounds_returns_correct_element() {
+    let exit = compile_and_run(
+        "fn get(r: i32, c: i32) -> i32 { let grid = [[1, 2, 3], [4, 5, 6]]; grid[r as usize][c as usize] }\nfn main() -> i32 { get(1, 2) }\n",
+    );
+    let Some(code) = exit else { return };
+    assert_eq!(code, 6, "expected element 6 at grid[1][2], got {code}");
+}
