@@ -284,7 +284,7 @@ Rust's de-facto behavior.
 indexing (§6.9), and integer overflow in debug mode (§6.23), but does not
 specify the panic mechanism — library call, trap instruction, signal handler.
 
-**Galvanic's choice (updated — Claims 4m, 4o, 4p, 4q):**
+**Galvanic's choice (updated — Claims 4m, 4o, 4p, 4q, 4s):**
 - Divide-by-zero with a literal 0 divisor: **caught at compile time** in
   `src/lower.rs`. The lowering pass rejects integer `/` and `%` expressions
   whose RHS is `LitInt(0)` before emitting any IR. (Claim 4m)
@@ -297,10 +297,14 @@ specify the panic mechanism — library call, trap instruction, signal handler.
   the overflow case, branching to `_galvanic_panic`. (Claim 4q)
 - Out-of-bounds indexing: `cmp`/`b.hs` bounds check before every array/slice
   load and store; out-of-bounds branches to `_galvanic_panic`. (Claim 4p)
-- `+`, `-`, `*` overflow: no overflow check; arithmetic wraps per 64-bit
-  hardware. This is a known deviation from debug-mode Rust semantics.
-  FLS §6.23 AMBIGUOUS — spec requires debug-mode panic but galvanic uses 64-bit
-  arithmetic throughout and does not insert overflow checks for these operators.
+- `+`, `-`, `*` overflow (Claim 4s): guarded by `sxtw x9, w{dst}` + `cmp x{dst}, x9`
+  + `b.ne _galvanic_panic` after every `add`, `sub`, and `mul` instruction.
+  Fires when the 64-bit result does not equal its own sign-extended 32-bit self
+  (i.e., the result does not fit in i32).
+  FLS §6.23 AMBIGUOUS: the guard treats all arithmetic as i32 because galvanic
+  has no type system. False positives for i64 values outside i32 range; false
+  negatives for u32 arithmetic that wraps within [0, 2^32) but outside i32 range.
+  At this milestone, the test suite exercises i32; documented as a limitation.
 
 The panic primitive `_galvanic_panic` calls `sys_exit(101)` directly. No stack
 unwinding, no panic message. This matches the FLS requirement (panics terminate
