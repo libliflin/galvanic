@@ -297,17 +297,24 @@ specify the panic mechanism — library call, trap instruction, signal handler.
   the overflow case, branching to `_galvanic_panic`. (Claim 4q)
 - Out-of-bounds indexing: `cmp`/`b.hs` bounds check before every array/slice
   load and store; out-of-bounds branches to `_galvanic_panic`. (Claim 4p)
-- `+`, `-`, `*` overflow: no overflow check; arithmetic wraps per 64-bit
-  hardware. This is a known deviation from debug-mode Rust semantics.
-  FLS §6.23 AMBIGUOUS — spec requires debug-mode panic but galvanic uses 64-bit
-  arithmetic throughout and does not insert overflow checks for these operators.
+- `+`, `-`, `*` overflow: a 4-instruction guard is emitted after each
+  `add`/`sub`/`mul` instruction: `sxtw x9, w{dst}` (sign-extend low 32 bits),
+  `cmp x{dst}, x9`, `b.ne _galvanic_panic`. If the 64-bit result differs from
+  its 32-bit sign-extension, the i32 range was exceeded and the program panics.
+  (Claim 4s)
+  FLS §6.23 AMBIGUOUS — galvanic always panics on overflow (debug semantics);
+  it does not implement the release-mode wrapping behaviour. Also: the guard
+  uses 64-bit comparison after a 64-bit operation, which could produce false
+  positives for i64 operands or false negatives for u32 operands if those types
+  are ever widened through the same code path (not yet an issue since only i32
+  arithmetic is lowered by this guard path).
 
 The panic primitive `_galvanic_panic` calls `sys_exit(101)` directly. No stack
 unwinding, no panic message. This matches the FLS requirement (panics terminate
 the program) while keeping the implementation simple.
 
 **Source:** `src/lower.rs` (literal zero check),
-`src/codegen.rs` (cbz, MIN/-1 guard, bounds check, `_galvanic_panic`)
+`src/codegen.rs` (cbz, MIN/-1 guard, bounds check, i32 overflow guard, `_galvanic_panic`)
 
 ---
 

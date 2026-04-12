@@ -1147,11 +1147,11 @@ fn claim_4o_udiv_emits_cbz_guard() {
 /// assembly inspection tests for unrelated operations.
 #[test]
 fn claim_4o_galvanic_panic_absent_without_division() {
-    // Pure arithmetic with no division
-    let asm = compile_to_asm("fn main() -> i32 { 2 + 3 * 4 - 1 }\n");
+    // Bare literal return — no division, no +/-/* operations that need guards.
+    let asm = compile_to_asm("fn main() -> i32 { 42 }\n");
     assert!(
         !asm.contains("_galvanic_panic"),
-        "`_galvanic_panic` must not appear in assembly for programs with no division:\n{asm}"
+        "`_galvanic_panic` must not appear in assembly for programs with no guarded operations:\n{asm}"
     );
 }
 
@@ -1945,6 +1945,152 @@ fn claim_4r_ushr_emits_cmp_shift_guard() {
     assert!(
         !asm.contains("mov     x0, #42"),
         "must not constant-fold `ushr(84, 1)` to #42:\n{asm}"
+    );
+}
+
+// ── Claim 4s: §6.23 arithmetic overflow guard for i32 +, -, * ───────────────
+//
+// FLS §6.23: Integer overflow panics in debug mode. Galvanic implements this
+// by emitting a 4-instruction guard after each add/sub/mul:
+//   add/sub/mul x{dst}, x{lhs}, x{rhs}
+//   sxtw x9, w{dst}      — sign-extend low 32 bits
+//   cmp  x{dst}, x9      — overflow iff they differ
+//   b.ne _galvanic_panic — overflow → exit 101
+//
+// The assembly inspection tests verify the guard sequence is emitted at runtime
+// (not constant-folded). The runtime tests verify overflow actually panics.
+
+/// Claim 4s: `add` emits guard sequence (sxtw + cmp + b.ne) after the add instruction.
+///
+/// FLS §6.23: Claim 4s — i32 overflow guard for +.
+#[test]
+fn claim_4s_add_emits_overflow_guard() {
+    let src = "fn add(a: i32, b: i32) -> i32 { a + b }\nfn main() -> i32 { add(1, 2) }\n";
+    let asm = compile_to_asm(src);
+    assert!(asm.contains("add"), "expected `add` instruction:\n{asm}");
+    assert!(asm.contains("sxtw"), "expected `sxtw` sign-extend after add:\n{asm}");
+    assert!(asm.contains("b.ne    _galvanic_panic"), "expected `b.ne _galvanic_panic` overflow branch:\n{asm}");
+    let add_pos = asm.find("    add     x").unwrap();
+    let sxtw_pos = asm.find("    sxtw").unwrap();
+    let bne_pos = asm.find("    b.ne    _galvanic_panic").unwrap();
+    assert!(add_pos < sxtw_pos, "sxtw must follow add:\n{asm}");
+    assert!(sxtw_pos < bne_pos, "b.ne must follow sxtw:\n{asm}");
+    // Must not constant-fold add(1, 2) = 3.
+    assert!(!asm.contains("mov     x0, #3"), "must not constant-fold `add(1, 2)` to #3:\n{asm}");
+}
+
+/// Claim 4s: `sub` emits guard sequence (sxtw + cmp + b.ne) after the sub instruction.
+///
+/// FLS §6.23: Claim 4s — i32 overflow guard for -.
+#[test]
+fn claim_4s_sub_emits_overflow_guard() {
+    let src = "fn sub(a: i32, b: i32) -> i32 { a - b }\nfn main() -> i32 { sub(5, 3) }\n";
+    let asm = compile_to_asm(src);
+    assert!(asm.contains("sub"), "expected `sub` instruction:\n{asm}");
+    assert!(asm.contains("sxtw"), "expected `sxtw` sign-extend after sub:\n{asm}");
+    assert!(asm.contains("b.ne    _galvanic_panic"), "expected overflow branch:\n{asm}");
+    let sub_pos = asm.find("    sub     x").unwrap();
+    let sxtw_pos = asm.find("    sxtw").unwrap();
+    assert!(sub_pos < sxtw_pos, "sxtw must follow sub:\n{asm}");
+    // Must not constant-fold sub(5, 3) = 2.
+    assert!(!asm.contains("mov     x0, #2"), "must not constant-fold `sub(5, 3)` to #2:\n{asm}");
+}
+
+/// Claim 4s: `mul` emits guard sequence (sxtw + cmp + b.ne) after the mul instruction.
+///
+/// FLS §6.23: Claim 4s — i32 overflow guard for *.
+#[test]
+fn claim_4s_mul_emits_overflow_guard() {
+    let src = "fn mul(a: i32, b: i32) -> i32 { a * b }\nfn main() -> i32 { mul(3, 4) }\n";
+    let asm = compile_to_asm(src);
+    assert!(asm.contains("mul"), "expected `mul` instruction:\n{asm}");
+    assert!(asm.contains("sxtw"), "expected `sxtw` sign-extend after mul:\n{asm}");
+    assert!(asm.contains("b.ne    _galvanic_panic"), "expected overflow branch:\n{asm}");
+    let mul_pos = asm.find("    mul     x").unwrap();
+    let sxtw_pos = asm.find("    sxtw").unwrap();
+    assert!(mul_pos < sxtw_pos, "sxtw must follow mul:\n{asm}");
+    // Must not constant-fold mul(3, 4) = 12.
+    assert!(!asm.contains("mov     x0, #12"), "must not constant-fold `mul(3, 4)` to #12:\n{asm}");
+}
+
+/// Claim 4s: i32::MAX + 1 panics at runtime (exit 101).
+///
+/// FLS §6.23: i32 overflow panics in debug mode.
+/// This test requires the ARM64 cross-toolchain and qemu — it is a no-op on macOS.
+#[test]
+fn claim_4s_runtime_add_overflow_exits_101() {
+    let src = "fn add(a: i32, b: i32) -> i32 { a + b }\nfn main() -> i32 { add(2147483647, 1) }\n";
+    let Some(code) = compile_and_run(src) else { return };
+    assert_eq!(code, 101, "i32::MAX + 1 must panic with exit 101, got {code}");
+}
+
+/// Claim 4s: i32::MIN - 1 panics at runtime (exit 101).
+///
+/// FLS §6.23: i32 overflow panics in debug mode.
+/// This test requires the ARM64 cross-toolchain and qemu — it is a no-op on macOS.
+#[test]
+fn claim_4s_runtime_sub_overflow_exits_101() {
+    let src = "fn sub(a: i32, b: i32) -> i32 { a - b }\nfn main() -> i32 { sub(-2147483648, 1) }\n";
+    let Some(code) = compile_and_run(src) else { return };
+    assert_eq!(code, 101, "i32::MIN - 1 must panic with exit 101, got {code}");
+}
+
+/// Claim 4s: i32::MAX * 2 panics at runtime (exit 101).
+///
+/// FLS §6.23: i32 overflow panics in debug mode.
+/// This test requires the ARM64 cross-toolchain and qemu — it is a no-op on macOS.
+#[test]
+fn claim_4s_runtime_mul_overflow_exits_101() {
+    let src = "fn mul(a: i32, b: i32) -> i32 { a * b }\nfn main() -> i32 { mul(2147483647, 2) }\n";
+    let Some(code) = compile_and_run(src) else { return };
+    assert_eq!(code, 101, "i32::MAX * 2 must panic with exit 101, got {code}");
+}
+
+/// Claim 4s: non-overflowing add succeeds (exit code = result).
+///
+/// FLS §6.23: Overflow guard must not fire for normal values.
+/// This test requires the ARM64 cross-toolchain and qemu — it is a no-op on macOS.
+#[test]
+fn claim_4s_runtime_add_no_overflow_succeeds() {
+    let src = "fn add(a: i32, b: i32) -> i32 { a + b }\nfn main() -> i32 { add(10, 5) }\n";
+    let Some(code) = compile_and_run(src) else { return };
+    assert_eq!(code, 15, "10 + 5 must return 15, got {code}");
+}
+
+/// Claim 4s: non-overflowing mul succeeds (exit code = result).
+///
+/// FLS §6.23: Overflow guard must not fire for normal values.
+/// This test requires the ARM64 cross-toolchain and qemu — it is a no-op on macOS.
+#[test]
+fn claim_4s_runtime_mul_no_overflow_succeeds() {
+    let src = "fn mul(a: i32, b: i32) -> i32 { a * b }\nfn main() -> i32 { mul(6, 7) }\n";
+    let Some(code) = compile_and_run(src) else { return };
+    assert_eq!(code, 42, "6 * 7 must return 42, got {code}");
+}
+
+/// Claim 4s: overflow guard present for add with parameter operands (not constant-foldable).
+///
+/// FLS §6.23: The litmus test — replacing literals with parameters must not break the guard.
+#[test]
+fn claim_4s_add_param_variant_emits_guard() {
+    let src = "fn add(a: i32, b: i32) -> i32 { a + b }\nfn main() -> i32 { add(1, 2) }\n";
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("b.ne    _galvanic_panic"),
+        "overflow guard must be present for parameter-based add:\n{asm}"
+    );
+}
+
+/// Claim 4s: _galvanic_panic symbol present whenever +/-/* operations appear.
+///
+/// FLS §6.23: The panic infrastructure must be emitted for guarded programs.
+#[test]
+fn claim_4s_galvanic_panic_present_with_arithmetic() {
+    let src = "fn add(a: i32, b: i32) -> i32 { a + b }\nfn main() -> i32 { add(1, 2) }\n";
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("_galvanic_panic"),
+        "`_galvanic_panic` must appear in assembly when +/-/* operations are present:\n{asm}"
     );
 }
 
