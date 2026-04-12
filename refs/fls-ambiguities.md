@@ -104,10 +104,12 @@ For `&[T]`, length is the element count.
 not specify the panic mechanism — whether it is a library call, a trap
 instruction, or something else.
 
-**Galvanic's choice:** No bounds check is emitted at this milestone. Out-of-
-bounds access produces undefined behavior at the assembly level (load/store at
-wrong address). This is a known deviation; the check is deferred until a panic
-infrastructure is in place.
+**Galvanic's choice (updated — Claim 4p):** A `cmp x{index}, x{len}; b.hs
+_galvanic_panic` bounds check is emitted before every array and slice load/store.
+The `b.hs` ("branch if higher or same", unsigned ≥) catches both negative and
+overly-large indices in a single comparison because negative signed values
+become large unsigned values when reinterpreted. Bounds checks are NOT emitted
+for for-loop array iteration (the loop counter already enforces the bound).
 
 **Source:** `src/ir.rs:730`, `src/codegen.rs:926`, `src/lower.rs:17880`
 
@@ -297,10 +299,14 @@ specify the panic mechanism — library call, trap instruction, signal handler.
   the overflow case, branching to `_galvanic_panic`. (Claim 4q)
 - Out-of-bounds indexing: `cmp`/`b.hs` bounds check before every array/slice
   load and store; out-of-bounds branches to `_galvanic_panic`. (Claim 4p)
-- `+`, `-`, `*` overflow: no overflow check; arithmetic wraps per 64-bit
-  hardware. This is a known deviation from debug-mode Rust semantics.
-  FLS §6.23 AMBIGUOUS — spec requires debug-mode panic but galvanic uses 64-bit
-  arithmetic throughout and does not insert overflow checks for these operators.
+- `+`, `-`, `*` overflow guard (Claim 4s): after every `add`/`sub`/`mul`
+  instruction galvanic emits `sxtw x9, w{dst}; cmp x{dst}, x9; b.ne
+  _galvanic_panic`. The sign-extension test detects i32 overflow by checking
+  whether the 64-bit result equals its own 32-bit sign-extension.
+  FLS §6.23 AMBIGUOUS — for narrow types (u16, i16) whose product can exceed
+  i32::MAX (e.g. 65535_u16 * 65535_u16 = 4,294,836,225 > i32::MAX), the guard
+  will incorrectly panic even though wrapping semantics apply. Current tests do
+  not exercise this edge case; it is a known gap pending type-aware codegen.
 
 The panic primitive `_galvanic_panic` calls `sys_exit(101)` directly. No stack
 unwinding, no panic message. This matches the FLS requirement (panics terminate
