@@ -104,12 +104,11 @@ For `&[T]`, length is the element count.
 not specify the panic mechanism — whether it is a library call, a trap
 instruction, or something else.
 
-**Galvanic's choice:** No bounds check is emitted at this milestone. Out-of-
-bounds access produces undefined behavior at the assembly level (load/store at
-wrong address). This is a known deviation; the check is deferred until a panic
-infrastructure is in place.
+**Galvanic's choice (updated — Claim 4p):** A `cmp`/`b.hs` bounds check is
+emitted before every array/slice indexed load and store. Out-of-bounds access
+branches to `_galvanic_panic`, which exits with code 101.
 
-**Source:** `src/ir.rs:730`, `src/codegen.rs:926`, `src/lower.rs:17880`
+**Source:** `src/ir.rs`, `src/codegen.rs`, `src/lower.rs`
 
 ---
 
@@ -284,7 +283,7 @@ Rust's de-facto behavior.
 indexing (§6.9), and integer overflow in debug mode (§6.23), but does not
 specify the panic mechanism — library call, trap instruction, signal handler.
 
-**Galvanic's choice (updated — Claims 4m, 4o, 4p, 4q):**
+**Galvanic's choice (updated — Claims 4m, 4o, 4p, 4q, 4s):**
 - Divide-by-zero with a literal 0 divisor: **caught at compile time** in
   `src/lower.rs`. The lowering pass rejects integer `/` and `%` expressions
   whose RHS is `LitInt(0)` before emitting any IR. (Claim 4m)
@@ -297,10 +296,13 @@ specify the panic mechanism — library call, trap instruction, signal handler.
   the overflow case, branching to `_galvanic_panic`. (Claim 4q)
 - Out-of-bounds indexing: `cmp`/`b.hs` bounds check before every array/slice
   load and store; out-of-bounds branches to `_galvanic_panic`. (Claim 4p)
-- `+`, `-`, `*` overflow: no overflow check; arithmetic wraps per 64-bit
-  hardware. This is a known deviation from debug-mode Rust semantics.
-  FLS §6.23 AMBIGUOUS — spec requires debug-mode panic but galvanic uses 64-bit
-  arithmetic throughout and does not insert overflow checks for these operators.
+- `+`, `-`, `*` overflow: a 4-instruction guard is emitted after each op:
+  `sxtw x9, w{dst}` sign-extends the lower 32 bits; `cmp x{dst}, x9` checks
+  if the 64-bit result equals its own sign-extended 32-bit self; `b.ne
+  _galvanic_panic` branches to panic if not. (Claim 4s)
+  FLS §6.23 AMBIGUOUS — this guard fires for all Add/Sub/Mul regardless of
+  operand type (i64, u32 also get it). Galvanic does not track types at codegen
+  time. Correct behavior would require per-type guards or type-aware codegen.
 
 The panic primitive `_galvanic_panic` calls `sys_exit(101)` directly. No stack
 unwinding, no panic message. This matches the FLS requirement (panics terminate
