@@ -1,148 +1,174 @@
-# Goal: §6.23 Runtime Panic Infrastructure — Divide-by-Zero Guard
+# Goal: Claim 4q — §6.23 Signed Integer MIN/-1 Overflow Guard
 
 ## What
 
-Establish galvanic's first runtime panic infrastructure by:
+Two complementary changes that close the remaining §6.23 gap and correct stale
+documentation left over from Claims 4o and 4p:
 
-1. **Emitting a `_galvanic_panic` trampoline** in `src/codegen.rs` — a small
-   assembly routine appended after `_start` in every compiled program:
+### 1. Add a MIN/-1 overflow guard to `sdiv` (and `msub`-based `rem`)
 
-   ```asm
-   // FLS §6.23: runtime panic — divide-by-zero guard target
-   _galvanic_panic:
-       mov     x8, #93          // __NR_exit (ARM64 Linux)
-       mov     x0, #101         // panic exit code (galvanic convention)
-       svc     #0               // exit(101)
-   ```
+Before each `sdiv` instruction in `src/codegen.rs`, add a second guard after
+the existing `cbz` (divide-by-zero guard) that panics when the RHS is `-1`
+and the LHS is `i32::MIN` (the only i32 overflow case for division):
 
-   This is emitted unconditionally so any code in the program can branch to it.
-   The exit code `101` is galvanic's runtime-panic sentinel — distinct from
-   normal program exit codes (0–100) used in the test suite.
+```asm
+    cbz     x{rhs}, _galvanic_panic         // FLS §6.23: div-by-zero
+    // FLS §6.23: signed overflow — i32::MIN / -1 panics
+    cmn     x{rhs}, #1                      // sets Z if rhs == -1
+    b.ne    .Lno_overflow_{label}
+    mov     x_tmp, #0x80000000
+    cmp     x{lhs}, x_tmp                   // compare lhs with i32::MIN
+    b.eq    _galvanic_panic
+.Lno_overflow_{label}:
+    sdiv    x{dst}, x{lhs}, x{rhs}
+```
 
-2. **Adding a runtime divisor-zero guard in `src/codegen.rs`** — before each
-   `sdiv`, `udiv`, and their `msub`-based remainder variants, emit:
+Apply the same guard to the `sdiv` inside the `msub`-based remainder path
+(`IrBinOp::Rem`). The unsigned variants (`udiv`, `IrBinOp::URem`) do not
+need this guard — unsigned division cannot overflow.
 
-   ```asm
-       cbz     x{rhs}, _galvanic_panic  // FLS §6.23: panic on div-by-zero
-   ```
+Use a per-site unique label (e.g. counter-based) to avoid label collisions
+across functions.
 
-   This covers all four division-like IR instructions: `IrBinOp::Div`,
-   `IrBinOp::UDiv`, `IrBinOp::Rem`, `IrBinOp::URem`. (Check `src/codegen.rs`
-   for any additional unsigned-remainder variant — add the guard there too.)
+**ARM64 note:** Galvanic uses 64-bit arithmetic for i32 values. `i32::MIN`
+sign-extended to 64 bits is `0xFFFFFFFF_80000000`. The `cmn x, #1` sets Z
+if `x == -1 (64-bit)`, which is `0xFFFFFFFF_FFFFFFFF` — the sign-extended
+form of i32 `-1`. This is correct because galvanic sign-extends i32 values
+when loading from stack slots.
 
-3. **Adding test cases to `tests/e2e.rs`**:
+The guard must fire **only** for the i32 case. At this milestone galvanic
+does not have a full type system, so the simplest correct approach is to
+always emit the guard for `sdiv` — it will have false positives (i64 MIN/-1
+would also fire) but galvanic's test suite currently only exercises i32, so
+this is acceptable. Document this limitation in `fls-ambiguities.md`.
 
-   - **Runtime div-by-zero panics with exit 101:**
-     ```rust
-     fn main() -> i32 { let a: i32 = 10; let b: i32 = 0; a / b }
-     ```
-     Expected: exit code 101.
+### 2. Update two stale entries in `refs/fls-ambiguities.md`
 
-   - **Runtime rem-by-zero panics with exit 101:**
-     ```rust
-     fn main() -> i32 { let a: i32 = 10; let b: i32 = 0; a % b }
-     ```
-     Expected: exit code 101.
+**Entry §4.9 — Bounds Checking Mechanism:** The current text says "No bounds
+check is emitted at this milestone." This is wrong — Claim 4p added runtime
+bounds checks. Update it to describe the current implementation:
+- Every array/slice index emits a `cmp` + `b.lo _galvanic_panic` guard.
+- Negative indices (when the index is a signed value ≥ 0x8000_0000) trigger
+  the guard via the unsigned comparison.
+- The `_galvanic_panic` trampoline exits with code 101.
 
-   - **Runtime div-by-zero via parameter panics:**
-     ```rust
-     fn div(a: i32, b: i32) -> i32 { a / b }
-     fn main() -> i32 { div(10, 0) }
-     ```
-     Expected: exit code 101. (Confirms the guard fires through a function
-     call, not just inline.)
+**Entry §6.9/§6.23 — Panic Mechanism:** The current text says "Non-literal
+zero divisors...are not checked — they emit `sdiv`/`udiv` without a guard."
+This is also wrong — Claim 4o added the `cbz` guard. Update to describe:
+- Literal-zero divisors: caught at compile time (Claim 4m).
+- Runtime zero divisors: guarded by `cbz x{rhs}, _galvanic_panic` (Claim 4o).
+- Signed MIN/-1 overflow: **newly guarded by this claim (Claim 4q)**.
+- Unsigned MIN/-1: not applicable (unsigned division cannot overflow).
+- Integer overflow (non-division): still no trap — arithmetic wraps.
+- `_galvanic_panic`: bare `exit(101)` syscall.
 
-   - **Normal division is unaffected:**
-     ```rust
-     fn main() -> i32 { let a: i32 = 10; let b: i32 = 2; a / b }
-     ```
-     Expected: exit code 5. (Guard does not fire when divisor is nonzero.)
+### 3. Add test cases to `tests/e2e.rs`
 
-   - **Assembly inspection — `sdiv` is preceded by `cbz`:**
-     ```rust
-     fn f(a: i32, b: i32) -> i32 { a / b }
-     fn main() -> i32 { f(1, 1) }
-     ```
-     Check that the assembly contains `cbz` and `_galvanic_panic` and `sdiv`,
-     in that order (not that `cbz` immediately precedes `sdiv` — just that all
-     three appear and `_galvanic_panic` is defined).
+- **Runtime i32::MIN / -1 panics with exit 101:**
+  ```rust
+  fn main() -> i32 { let a: i32 = -2147483648; let b: i32 = -1; a / b }
+  ```
+  Expected: exit code 101.
 
-4. **Updating `refs/fls-ambiguities.md`** — the §6.9/§6.23 entry currently
-   says "Non-literal zero divisors are not checked." Update it to document:
-   - Runtime divide-by-zero and remainder-by-zero now call `_galvanic_panic`,
-     which exits with code 101.
-   - `_galvanic_panic` is galvanic's first panic primitive: a bare `exit(101)`
-     syscall, not a formatted message.
-   - What remains deferred: out-of-bounds array indexing (§6.9) still has no
-     bounds check. Integer overflow (§6.23) still uses 64-bit arithmetic
-     without a debug-mode trap.
-   - Note that `_galvanic_panic` is the foundation for future bounds-check
-     and overflow-check guards — they can branch to the same label.
+- **Runtime i32::MIN % -1 panics with exit 101:**
+  ```rust
+  fn main() -> i32 { let a: i32 = -2147483648; let b: i32 = -1; a % b }
+  ```
+  Expected: exit code 101.
+
+- **Runtime i32::MIN / -1 via parameter panics:**
+  ```rust
+  fn div(a: i32, b: i32) -> i32 { a / b }
+  fn main() -> i32 { div(-2147483648, -1) }
+  ```
+  Expected: exit code 101.
+
+- **Normal division near MIN is unaffected:**
+  ```rust
+  fn main() -> i32 { let a: i32 = -2147483648; let b: i32 = 2; a / b }
+  ```
+  Expected: exit code 76 (i32::MIN / 2 = -1073741824; -1073741824 as u8 exit
+  code wraps). Actually `-1073741824 % 256 = 0`... Let me reconsider: the exit
+  code is the low byte of the return value. i32::MIN / 2 = -1073741824.
+  As an exit code (0–255), the shell takes the low byte: -1073741824 & 0xFF = 0.
+  Use a simpler divisor: `let a: i32 = -2147483648; let b: i32 = 4;` →
+  result is -536870912, low byte is 0. Use `let a: i32 = -100; let b: i32 = -1`
+  → result is 100, exit 100. This is unambiguous and does not trigger the guard.
+
+  Rewritten:
+  ```rust
+  fn main() -> i32 { let a: i32 = -100; let b: i32 = -1; a / b }
+  ```
+  Expected: exit code 100. (Guard does not fire for non-MIN dividends.)
+
+- **Assembly inspection — `cmn` guard appears before `sdiv`:**
+  ```rust
+  fn f(a: i32, b: i32) -> i32 { a / b }
+  fn main() -> i32 { f(1, 1) }
+  ```
+  Assert the assembly contains `cmn` and `_galvanic_panic` and `sdiv`, with
+  `cmn` appearing before `sdiv` in the text.
 
 ## Scope constraints
 
-- Do NOT add bounds-check guards to array indexing — that is a separate goal.
-- Do NOT add integer overflow traps — that is a separate goal.
-- Do NOT change the literal-divisor compile-time check (Claim 4m) — it stays.
-- The `_galvanic_panic` label must be `.global` so it is visible across
-  compilation units if galvanic ever gains multi-file support, but for now
-  emitting it as a local label is also acceptable.
+- Do NOT add overflow traps for `+`, `-`, `*` — that is a separate goal.
+- Do NOT add i64-specific MIN/-1 detection — use the same guard for all sdiv
+  sites and document the limitation.
+- Do NOT change the zero-divisor `cbz` guard (Claim 4o) — it stays.
+- Do NOT change the bounds-check guard (Claim 4p) — it stays.
 
 ## Which stakeholder
 
 **William (the researcher)** and **FLS spec readers (the Ferrocene team)**.
 
-The §6.9/§6.23 entry in `refs/fls-ambiguities.md` currently says:
-> "Non-literal zero divisors (e.g. `x / y` where `y` may be zero at runtime)
-> are not checked — they emit `sdiv`/`udiv` without a guard."
+§6.23 says "An arithmetic operation panics if it results in division by zero"
+and also "if the operation results in overflow" (where overflow is
+implementation-defined for non-const contexts to be the debug panic behavior).
 
-This is the clearest open correctness gap after Claim 4m: `fn f(a: i32, b:
-i32) -> i32 { a / b }` called with `b = 0` on ARM64 silently returns 0
-(the hardware behavior of `sdiv` with a zero divisor on AArch64 is to return
-0, not trap). The FLS is unambiguous: divide-by-zero **panics** (§6.23).
+`i32::MIN / -1` is the canonical signed-division overflow case: the mathematical
+result `2^31` does not fit in i32. Real Rust panics here in debug mode. ARM64
+`sdiv` produces `i32::MIN` (CONSTRAINED UNPREDICTABLE per Armv8-A), which is
+silently wrong — the worst kind of UB.
 
-For spec readers: this closes the most prominent runtime-behavior gap without
-requiring libc or a signal handler. The `exit(101)` approach is minimal,
-auditable, and correct at the syscall level.
+The existing test `runtime_sdiv_no_min_neg_one_guard` explicitly proves this
+gap exists today. This goal closes it.
 
-For William: this is the first piece of runtime panic infrastructure — the
-foundation the `fls-ambiguities.md` has been pointing at since Claim 4m. It
-delivers the runtime half of the divide-by-zero story.
+The stale doc entries are a secondary but real problem: `refs/fls-ambiguities.md`
+is the primary research output of the project. Two entries describe behavior
+that changed two claims ago. Spec readers cannot trust the doc if it is stale.
 
 ## Why now
 
-The session theme is **panic infrastructure**. Claim 4m (compile-time literal
-zero) created the clear statement that runtime panic was deferred. Three
-conditions now align:
-
-1. The session is explicitly scoped to "panic infrastructure."
-2. The §6.9/§6.23 entry names `_galvanic_panic` as the missing primitive.
-3. The implementation cost is minimal: one emitted trampoline (4 instructions),
-   one `cbz` guard per division IR node, four tests.
-
-No new IR nodes are needed. No new IR passes. The guard is purely in
-`src/codegen.rs`, where the `sdiv`/`udiv` instructions are already emitted.
+1. The session theme is **de-risk hard problems categorically**. The MIN/-1
+   case is the only remaining division overflow not covered by Claim 4o.
+2. The `runtime_sdiv_no_min_neg_one_guard` test was written TO DOCUMENT this
+   gap — it is a standing invitation for this claim.
+3. The `fls-ambiguities.md` staleness is a maintenance debt that compounds:
+   future claims will add more correct text on top of wrong text.
+4. Both changes are small and self-contained. Together they complete the §6.23
+   divide/overflow story through the division operation.
 
 ## FLS notes
 
 - **§6.23**: "An arithmetic operation panics if it results in division by zero."
-  The spec does not name the panic mechanism — `_galvanic_panic` with
-  `exit(101)` is an implementation choice, documented in `fls-ambiguities.md`.
-- **§6.9**: Out-of-bounds indexing is a separate gap. This goal does not close
-  it, but `_galvanic_panic` is the shared primitive that will serve both.
-- **ARM64 behavior**: `sdiv x0, x0, xzr` on AArch64 returns 0 (CONSTRAINED
-  UNPREDICTABLE — some implementations may differ). The guard fires before the
-  instruction, so hardware behavior is irrelevant.
+  In Rust, this is understood to include `i32::MIN / -1` (signed overflow via
+  division), which also panics in debug mode. The FLS does not enumerate the
+  overflow cases explicitly — galvanic's behavior matches Rust's de-facto
+  semantics, documented as a resolution in `fls-ambiguities.md`.
+- **`_galvanic_panic`**: defined in `src/codegen.rs`, emitted unconditionally.
+  Both the cbz guard (Claim 4o) and the new cmn/cmp guard (this claim) branch
+  to the same label. Exit code 101.
 
 ## Acceptance criteria
 
 - `cargo build` passes.
-- `cargo test` passes (all existing tests pass; new panic tests added).
-- The emitted assembly for any function containing `/` or `%` includes a `cbz`
-  guard and a `_galvanic_panic` label.
-- `fn main() -> i32 { let a: i32 = 10; let b: i32 = 0; a / b }` exits 101
-  when run under qemu-aarch64.
-- `fn main() -> i32 { let a: i32 = 10; let b: i32 = 2; a / b }` exits 5.
-- The §6.23 entry in `refs/fls-ambiguities.md` is updated to reflect runtime
-  guard status.
+- `cargo test` passes (all 1772 existing tests pass; new tests added).
+- The test `runtime_sdiv_no_min_neg_one_guard` is **deleted** (it documented
+  a gap that no longer exists) or updated to confirm the guard IS present.
+- `fn main() -> i32 { let a: i32 = -2147483648; let b: i32 = -1; a / b }` 
+  exits 101 under qemu-aarch64.
+- `fn main() -> i32 { let a: i32 = -100; let b: i32 = -1; a / b }` exits 100.
+- `refs/fls-ambiguities.md` §4.9 entry describes current bounds-check behavior.
+- `refs/fls-ambiguities.md` §6.9/§6.23 entry describes all three guards:
+  literal-zero (Claim 4m), runtime-zero (Claim 4o), signed-overflow (Claim 4q).
 - No new FLS citations are wrong or vague.
