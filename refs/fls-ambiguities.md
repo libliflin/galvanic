@@ -104,12 +104,11 @@ For `&[T]`, length is the element count.
 not specify the panic mechanism — whether it is a library call, a trap
 instruction, or something else.
 
-**Galvanic's choice:** No bounds check is emitted at this milestone. Out-of-
-bounds access produces undefined behavior at the assembly level (load/store at
-wrong address). This is a known deviation; the check is deferred until a panic
-infrastructure is in place.
+**Galvanic's choice (Claim 4p):** A `cmp`/`b.hs` bounds check is emitted
+before every array and slice load and store. Out-of-bounds access (index ≥
+length) branches to `_galvanic_panic`, which exits with code 101.
 
-**Source:** `src/ir.rs:730`, `src/codegen.rs:926`, `src/lower.rs:17880`
+**Source:** `src/ir.rs`, `src/codegen.rs`, `src/lower.rs`
 
 ---
 
@@ -297,10 +296,13 @@ specify the panic mechanism — library call, trap instruction, signal handler.
   the overflow case, branching to `_galvanic_panic`. (Claim 4q)
 - Out-of-bounds indexing: `cmp`/`b.hs` bounds check before every array/slice
   load and store; out-of-bounds branches to `_galvanic_panic`. (Claim 4p)
-- `+`, `-`, `*` overflow: no overflow check; arithmetic wraps per 64-bit
-  hardware. This is a known deviation from debug-mode Rust semantics.
-  FLS §6.23 AMBIGUOUS — spec requires debug-mode panic but galvanic uses 64-bit
-  arithmetic throughout and does not insert overflow checks for these operators.
+- `+`, `-`, `*` overflow: a 4-instruction guard is emitted after each operation
+  (primary instruction → `sxtw x9, w{dst}` → `cmp x{dst}, x9` → `b.ne _galvanic_panic`).
+  If the 64-bit result does not equal its 32-bit sign-extended form, i32 overflow
+  occurred and the program panics. (Claim 4s)
+  FLS §6.23 AMBIGUOUS — the spec requires debug-mode panic but does not specify
+  the detection mechanism; galvanic uses the sxtw/cmp approach to detect i32
+  overflow in 64-bit registers.
 
 The panic primitive `_galvanic_panic` calls `sys_exit(101)` directly. No stack
 unwinding, no panic message. This matches the FLS requirement (panics terminate
