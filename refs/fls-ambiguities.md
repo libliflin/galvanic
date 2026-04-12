@@ -104,12 +104,18 @@ For `&[T]`, length is the element count.
 not specify the panic mechanism — whether it is a library call, a trap
 instruction, or something else.
 
-**Galvanic's choice:** No bounds check is emitted at this milestone. Out-of-
-bounds access produces undefined behavior at the assembly level (load/store at
-wrong address). This is a known deviation; the check is deferred until a panic
-infrastructure is in place.
+**Galvanic's choice (updated — Claim 4p):** A runtime bounds check is emitted
+before every array and slice index operation. The check sequence is:
+- `cmp x{index}, #{len}` — unsigned comparison of index against array length.
+- `b.hs _galvanic_panic` — branch if index ≥ len (higher-or-same, unsigned).
+The `b.hs` condition also catches negative signed indices because they are large
+unsigned values when reinterpreted as 64-bit. The `_galvanic_panic` trampoline
+exits the process with code 101.
 
-**Source:** `src/ir.rs:730`, `src/codegen.rs:926`, `src/lower.rs:17880`
+This matches the FLS §6.9 requirement and the Rust debug-mode behavior.
+
+**Source:** `src/codegen.rs` (LoadIndexed, StoreIndexed, LoadIndexedF64,
+LoadIndexedF32 emission paths)
 
 ---
 
@@ -284,23 +290,34 @@ Rust's de-facto behavior.
 indexing (§6.9), and integer overflow in debug mode (§6.23), but does not
 specify the panic mechanism — library call, trap instruction, signal handler.
 
-**Galvanic's choice (updated — Claim 4m):**
-- Divide-by-zero with a literal 0 divisor: **caught at compile time** in
-  `src/lower.rs`. The lowering pass rejects integer `/` and `%` expressions
-  whose RHS is `LitInt(0)` before emitting any IR. This covers the common
-  programming error (e.g. `x / 0`) without requiring panic infrastructure.
-  Non-literal zero divisors (e.g. `x / y` where `y` may be zero at runtime)
-  are not checked — they emit `sdiv`/`udiv` without a guard.
-- Out-of-bounds: no bounds check before load/store.
-- Overflow: no overflow check; arithmetic wraps per the hardware.
+**Galvanic's choice (updated — Claim 4q):**
+- **Literal-zero divisors (Claim 4m):** Caught at compile time in `src/lower.rs`.
+  Integer `/` and `%` expressions whose RHS is `LitInt(0)` are rejected before
+  emitting any IR.
+- **Runtime zero divisors (Claim 4o):** Guarded by `cbz x{rhs}, _galvanic_panic`
+  emitted before every `sdiv` and `udiv` instruction.
+- **Signed MIN/-1 overflow (Claim 4q):** Guarded by a `cmn`/`cmp` sequence
+  emitted after the zero guard and before every `sdiv` (and the `sdiv` step
+  inside `msub`-based remainder). Sequence: `cmn x{rhs}, #1` (Z if rhs==-1);
+  `b.ne .Lsdiv_ok`; `movz x9, #0x8000, lsl #16`; `sxtw x9, w9`;
+  `cmp x{lhs}, x9`; `b.eq _galvanic_panic`. Fires when lhs==i32::MIN and
+  rhs==-1.
+  **AMBIGUOUS (i64 limitation):** Galvanic uses 64-bit registers for all integer
+  types. The guard fires when lhs==0xFFFFFFFF_80000000, which is i32::MIN
+  sign-extended. For i64 operands, i64::MIN / -1 would also trigger this guard
+  (false positive). Galvanic's test suite only exercises i32; the false-positive
+  case is documented but not yet distinguished.
+- **Unsigned division (no overflow guard):** Unsigned division cannot overflow;
+  the MIN/-1 guard is not emitted for `udiv`.
+- **Out-of-bounds indexing (Claim 4p):** Guarded by `cmp`/`b.hs _galvanic_panic`
+  before every indexed load and store (see §4.9 entry above).
+- **Non-division arithmetic overflow:** No trap emitted; arithmetic wraps per the
+  hardware (two's complement). This is a known deviation — a future claim will
+  add overflow traps for `+`, `-`, `*`.
+- **`_galvanic_panic`:** A bare `exit(101)` syscall. No unwinding, no stack trace.
 
-The literal-divisor check and the §6.18 exhaustiveness check (Claim 4l)
-form a consistent methodology: conservatively reject the statically-obvious
-UB case at compile time; defer the general case to when panic infrastructure
-is available.
-
-**Source:** `src/lower.rs` (literal zero check in binary op lowering),
-`src/codegen.rs:496`, `src/codegen.rs:514`
+**Source:** `src/lower.rs` (literal zero check), `src/codegen.rs`
+(IrBinOp::Div, IrBinOp::Rem, IrBinOp::UDiv, LoadIndexed/StoreIndexed paths)
 
 ---
 
