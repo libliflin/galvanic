@@ -34990,6 +34990,27 @@ fn claim_4q_rem_emits_min_neg_one_guard() {
     );
 }
 
+/// Claim 4q: ordering check — `cmn` MIN/-1 guard precedes `sdiv` in the instruction stream.
+///
+/// Verifies that the guard executes BEFORE the division. A future refactor that swapped
+/// guard and division would still pass the presence-only test in
+/// `claim_4q_sdiv_emits_min_neg_one_guard` — this test catches that regression.
+///
+/// FLS §6.23: The overflow guard must execute before `sdiv`; otherwise a MIN/-1 input
+/// reaches the division instruction and silently wraps instead of panicking.
+#[test]
+fn claim_4q_cmn_guard_precedes_sdiv_in_stream() {
+    let asm = compile_to_asm(
+        "fn f(x: i32, y: i32) -> i32 { x / y }\nfn main() -> i32 { f(10, 2) }\n",
+    );
+    let cmn_pos = asm.find("cmn").expect("cmn guard must be present in division asm");
+    let sdiv_pos = asm.find("sdiv").expect("sdiv must be present in division asm");
+    assert!(
+        cmn_pos < sdiv_pos,
+        "cmn guard (pos {cmn_pos}) must appear before sdiv (pos {sdiv_pos}) in:\n{asm}"
+    );
+}
+
 /// Claim 4q: normal signed division (non-MIN/-1) is not affected by the guard.
 ///
 /// Verify that `10 / 2` still produces exit code 5 — the guard must not fire
