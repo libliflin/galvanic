@@ -104,12 +104,25 @@ For `&[T]`, length is the element count.
 not specify the panic mechanism — whether it is a library call, a trap
 instruction, or something else.
 
-**Galvanic's choice:** No bounds check is emitted at this milestone. Out-of-
-bounds access produces undefined behavior at the assembly level (load/store at
-wrong address). This is a known deviation; the check is deferred until a panic
-infrastructure is in place.
+**Galvanic's choice (updated — Claim 4p):** Every array/slice index emits a
+runtime bounds check:
+1. `cmp x{index}, #{len}` — compare index against the array/slice length.
+2. `b.hs _galvanic_panic` — branch-if-higher-or-same (unsigned ≥), catching
+   both index ≥ len and negative signed indices (which appear large under
+   unsigned comparison via two's complement).
+3. `_galvanic_panic` is a bare `exit(101)` syscall.
 
-**Source:** `src/ir.rs:730`, `src/codegen.rs:926`, `src/lower.rs:17880`
+This covers one-dimensional and multi-dimensional arrays (each dimension is
+checked independently). The length literal is known at compile time for
+fixed-size arrays; for slices, the length is loaded from the fat-pointer slot
+at runtime.
+
+**Remaining gap:** The spec does not specify whether the panic must include
+a message, a stack trace, or a source location. Galvanic emits a bare exit
+with code 101 — no message or source info.
+
+**Source:** `src/codegen.rs` (IndexedLoad/IndexedStore/IndexedAddr emission),
+`src/lower.rs` (bounds-check IR instruction emission)
 
 ---
 
@@ -284,23 +297,41 @@ Rust's de-facto behavior.
 indexing (§6.9), and integer overflow in debug mode (§6.23), but does not
 specify the panic mechanism — library call, trap instruction, signal handler.
 
-**Galvanic's choice (updated — Claim 4m):**
-- Divide-by-zero with a literal 0 divisor: **caught at compile time** in
+**Galvanic's choice (updated — Claims 4m, 4o, 4p, 4q):**
+
+- **Literal-zero divisors** (e.g. `x / 0`): **caught at compile time** in
   `src/lower.rs`. The lowering pass rejects integer `/` and `%` expressions
-  whose RHS is `LitInt(0)` before emitting any IR. This covers the common
-  programming error (e.g. `x / 0`) without requiring panic infrastructure.
-  Non-literal zero divisors (e.g. `x / y` where `y` may be zero at runtime)
-  are not checked — they emit `sdiv`/`udiv` without a guard.
-- Out-of-bounds: no bounds check before load/store.
-- Overflow: no overflow check; arithmetic wraps per the hardware.
+  whose RHS is `LitInt(0)` before emitting any IR (Claim 4m).
 
-The literal-divisor check and the §6.18 exhaustiveness check (Claim 4l)
-form a consistent methodology: conservatively reject the statically-obvious
-UB case at compile time; defer the general case to when panic infrastructure
-is available.
+- **Runtime zero divisors** (e.g. `x / y` where `y` is a variable): guarded
+  by `cbz x{rhs}, _galvanic_panic` immediately before the `sdiv`/`udiv`
+  instruction (Claim 4o). `_galvanic_panic` is a bare `exit(101)` syscall.
 
-**Source:** `src/lower.rs` (literal zero check in binary op lowering),
-`src/codegen.rs:496`, `src/codegen.rs:514`
+- **Signed MIN/-1 overflow** (e.g. `i32::MIN / -1`): guarded by the sequence
+  `cmn x{rhs}, #1` → `b.ne .Lsdiv_ok_N` → `movz x9, #0x8000, lsl #16` →
+  `sxtw x9, w9` → `cmp x{lhs}, x9` → `b.eq _galvanic_panic` → `.Lsdiv_ok_N:`
+  immediately after the zero-divisor `cbz` and before `sdiv` (Claim 4q).
+  Applied to both `IrBinOp::Div` and `IrBinOp::Rem`.
+
+  AMBIGUOUS §6.23: Galvanic uses 64-bit registers for i32 values; the `cmn`
+  check catches x{rhs} == -1 in 64-bit sense, and the `cmp` checks x{lhs}
+  == 0xFFFFFFFF_80000000 (i32::MIN sign-extended). This guard would also fire
+  for i64::MIN / -1 (false positive), but i64 is not yet exercised by the test
+  suite. Documented as a limitation.
+
+- **Unsigned MIN/-1**: not applicable — unsigned division cannot overflow.
+  `udiv` emits only the zero-divisor `cbz` guard; no `cmn` guard.
+
+- **Out-of-bounds indexing**: runtime `cmp` + `b.hs _galvanic_panic` guard
+  before each indexed load/store (Claim 4p). See §4.9 entry.
+
+- **Non-division arithmetic overflow** (`+`, `-`, `*`): still no trap at this
+  milestone — arithmetic wraps per the hardware. This is a known deviation
+  from debug-mode Rust behavior.
+
+**Source:** `src/lower.rs` (literal zero check in binary op lowering);
+`src/codegen.rs` (cbz and cmn guards in IrBinOp::Div/Rem, cbz in IrBinOp::UDiv,
+b.hs in IndexedLoad/IndexedStore/IndexedAddr)
 
 ---
 
