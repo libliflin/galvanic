@@ -104,12 +104,12 @@ For `&[T]`, length is the element count.
 not specify the panic mechanism — whether it is a library call, a trap
 instruction, or something else.
 
-**Galvanic's choice:** No bounds check is emitted at this milestone. Out-of-
-bounds access produces undefined behavior at the assembly level (load/store at
-wrong address). This is a known deviation; the check is deferred until a panic
-infrastructure is in place.
+**Galvanic's choice (Claim 4p):** A `cmp x{idx}, #{len}` + `b.hs _galvanic_panic`
+bounds check is emitted before every array/slice load and store. Out-of-bounds
+accesses branch to the `_galvanic_panic` handler (exit 101). This implements
+the spec-required panic with galvanic's custom panic infrastructure.
 
-**Source:** `src/ir.rs:730`, `src/codegen.rs:926`, `src/lower.rs:17880`
+**Source:** `src/codegen.rs` (bounds check in `IrInstr::ArrayLoad`/`ArrayStore`)
 
 ---
 
@@ -297,10 +297,10 @@ specify the panic mechanism — library call, trap instruction, signal handler.
   the overflow case, branching to `_galvanic_panic`. (Claim 4q)
 - Out-of-bounds indexing: `cmp`/`b.hs` bounds check before every array/slice
   load and store; out-of-bounds branches to `_galvanic_panic`. (Claim 4p)
-- `+`, `-`, `*` overflow: no overflow check; arithmetic wraps per 64-bit
-  hardware. This is a known deviation from debug-mode Rust semantics.
-  FLS §6.23 AMBIGUOUS — spec requires debug-mode panic but galvanic uses 64-bit
-  arithmetic throughout and does not insert overflow checks for these operators.
+- `+`, `-`, `*` overflow: guarded (Claim 4s). After each instruction, galvanic
+  emits `sxtw x9, w{dst}` + `cmp x{dst}, x9` + `b.ne _galvanic_panic` to detect
+  i32 overflow. FLS §6.23 AMBIGUOUS — spec requires debug-mode panic vs release-mode
+  wrap; galvanic always panics (debug-mode semantics only, no release-mode path).
 
 The panic primitive `_galvanic_panic` calls `sys_exit(101)` directly. No stack
 unwinding, no panic message. This matches the FLS requirement (panics terminate
