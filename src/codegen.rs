@@ -531,25 +531,39 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
         // Signed comparison (signed integers are the only type at this milestone).
         Instr::BinOp { op, dst, lhs, rhs } => {
             match op {
-                // FLS §6.23: ARM64 integer arithmetic uses 64-bit registers (xN),
-                // so these instructions wrap at 2^64, not at i32::MAX (2^31-1).
-                // This means i32 overflow produces a large positive 64-bit value
-                // rather than wrapping to i32::MIN (two's complement 32-bit wrap).
-                // FLS §6.23 AMBIGUOUS: the spec requires debug-mode panic and
-                // release-mode 32-bit wrap; galvanic emits neither — it uses 64-bit
-                // arithmetic throughout. Cache-line: one 4-byte instruction per op.
-                IrBinOp::Add => writeln!(
-                    out,
-                    "    add     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: add; §6.23: 64-bit, no i32 wrap"
-                )?,
-                IrBinOp::Sub => writeln!(
-                    out,
-                    "    sub     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: sub; §6.23: 64-bit, no i32 wrap"
-                )?,
-                IrBinOp::Mul => writeln!(
-                    out,
-                    "    mul     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: mul; §6.23: 64-bit, no i32 wrap"
-                )?,
+                // FLS §6.23: Claim 4s — i32 arithmetic overflow guard for +, -, *.
+                // ARM64 operates on 64-bit registers, so the primary instruction
+                // cannot overflow at the 64-bit level. After the instruction, we
+                // sign-extend the low 32 bits back to 64 bits (`sxtw x9, w{dst}`)
+                // and compare with the full 64-bit result. If they differ, the
+                // value exceeded the i32 range and we branch to `_galvanic_panic`.
+                //
+                // FLS §6.23 AMBIGUOUS: this guard fires for all 64-bit integer
+                // computations, including i64 (false positive) and u32 wrap-around
+                // (false negative, since u32 arithmetic should wrap, not panic).
+                // Galvanic does not thread type information into IrBinOp; the guard
+                // is applied uniformly. The same limitation exists for the MIN/-1
+                // guard on sdiv/srem. Documented as a known limitation.
+                //
+                // Cache-line note: 4 instructions × 4 bytes = 16 bytes per op.
+                IrBinOp::Add => {
+                    writeln!(out, "    add     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: add")?;
+                    writeln!(out, "    sxtw    x9, w{dst}                      // FLS §6.23: sign-extend low 32 bits")?;
+                    writeln!(out, "    cmp     x{dst}, x9                      // FLS §6.23: overflow if 64-bit ≠ sext(32-bit)")?;
+                    writeln!(out, "    b.ne    _galvanic_panic                 // FLS §6.23: i32 overflow → panic")?;
+                }
+                IrBinOp::Sub => {
+                    writeln!(out, "    sub     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: sub")?;
+                    writeln!(out, "    sxtw    x9, w{dst}                      // FLS §6.23: sign-extend low 32 bits")?;
+                    writeln!(out, "    cmp     x{dst}, x9                      // FLS §6.23: overflow if 64-bit ≠ sext(32-bit)")?;
+                    writeln!(out, "    b.ne    _galvanic_panic                 // FLS §6.23: i32 overflow → panic")?;
+                }
+                IrBinOp::Mul => {
+                    writeln!(out, "    mul     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: mul")?;
+                    writeln!(out, "    sxtw    x9, w{dst}                      // FLS §6.23: sign-extend low 32 bits")?;
+                    writeln!(out, "    cmp     x{dst}, x9                      // FLS §6.23: overflow if 64-bit ≠ sext(32-bit)")?;
+                    writeln!(out, "    b.ne    _galvanic_panic                 // FLS §6.23: i32 overflow → panic")?;
+                }
                 // FLS §6.5.5: Signed integer division.
                 // ARM64: `sdiv x{dst}, x{lhs}, x{rhs}` — signed division.
                 // FLS §6.23: Division by zero panics at runtime.
