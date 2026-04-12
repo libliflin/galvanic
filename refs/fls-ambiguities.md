@@ -384,6 +384,33 @@ and silently accepted. Full usefulness/completeness analysis is future work.
 
 ---
 
+## §6.21 — Comparison Non-Associativity: Chained Comparisons
+
+**Gap:** The FLS (§6.21:1) states that comparison operators (`<`, `<=`, `>`,
+`>=`, `==`, `!=`) are non-associative, meaning `a < b < c` is not a valid
+expression. However, the spec does not specify whether non-associativity is
+enforced at the parser level (syntax error) or at the semantic level (type
+error), nor does it describe the diagnostic.
+
+In real Rust, `a < b < c` is a **parse error** — the parser itself rejects it.
+Galvanic's recursive-descent parser does not yet enforce non-associativity at
+the grammar level; it silently parses `a < b < c` as `(a < b) < c`, producing
+an expression that compares a boolean (0 or 1) against `c`.
+
+**Galvanic's choice (Claim 4n):** Enforce non-associativity at the lowering
+stage (`src/lower.rs`) by detecting when the LHS of any comparison operator is
+itself a comparison operator. Such expressions are rejected at compile time with
+the diagnostic "chained comparison: FLS §6.21 — comparison operators are
+non-associative". This matches the FLS requirement without requiring parser
+changes. It catches the common case (`a < b < c`) but not explicitly
+parenthesized forms (`a < (b < c)`), which would require type checking to
+detect.
+
+**Source:** `src/lower.rs` (comparison operator lowering, check added before
+the f64/f32/i32 dispatch path)
+
+---
+
 ## §7.1 — Const Evaluation Step Limit and Item Order
 
 **Two gaps:**

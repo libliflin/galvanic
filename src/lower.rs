@@ -15051,6 +15051,27 @@ impl<'src> LowerCtx<'src> {
                     BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne
                 ) =>
             {
+                // FLS §6.21: Comparison operators are non-associative.
+                //
+                // `a < b < c` is parsed as `(a < b) < c` by the left-associative
+                // parser, comparing a boolean result (0 or 1) against `c`. This
+                // produces silently wrong results — e.g., `1 < 2 < 3` becomes
+                // `true < 3` i.e. `1 < 3` which happens to be true, but
+                // `3 > 2 > 1` becomes `true > 1` i.e. `1 > 1` which is false.
+                //
+                // The FLS (§6.21:1) is explicit: comparison operators are
+                // non-associative. Galvanic catches this at compile time by
+                // detecting when the LHS of a comparison is itself a comparison.
+                if let ExprKind::Binary { op: inner_op, .. } = &lhs.kind
+                    && matches!(
+                        inner_op,
+                        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne
+                    )
+                {
+                    return Err(LowerError::Unsupported(
+                        "chained comparison: FLS §6.21 — comparison operators are non-associative; use `&&` to combine comparisons".into(),
+                    ));
+                }
                 // FLS §6.5.3: Comparison operator expressions.
                 //
                 // Dispatch: if both operands are f64, emit FCmpF64 (fcmp + cset);
