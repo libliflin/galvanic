@@ -18,10 +18,11 @@ Do not use this to compile anything you care about.
 
 ## Platform targets
 
-Galvanic targets **ARM64** on both **macOS (Apple Silicon)** and **Linux**. The instruction set is identical across platforms; only the syscall ABI and binary format differ. See `refs/arm64-platform-abi.md` for the full comparison.
+Galvanic targets **ARM64** across **macOS**, **Linux**, and the **BSDs** (FreeBSD, OpenBSD, NetBSD). The instruction set is identical; only the syscall ABI and binary format differ per OS. See `refs/arm64-platform-abi.md` for the full comparison.
 
 - **macOS**: local development and testing on Apple Silicon, also tested on CI
 - **Linux**: tested on CI (x86_64 with QEMU, or native ARM64)
+- **BSDs**: same ELF format and syscall instruction as Linux, different syscall numbers
 
 ## Building
 
