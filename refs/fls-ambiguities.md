@@ -104,12 +104,16 @@ For `&[T]`, length is the element count.
 not specify the panic mechanism — whether it is a library call, a trap
 instruction, or something else.
 
-**Galvanic's choice:** No bounds check is emitted at this milestone. Out-of-
-bounds access produces undefined behavior at the assembly level (load/store at
-wrong address). This is a known deviation; the check is deferred until a panic
-infrastructure is in place.
+**Resolution (Claim 4p):** Every array and slice index emits a runtime bounds
+check before the address computation:
+- `cmp x{idx}, #len` / `b.hs _galvanic_panic` for array literals (length known at compile time).
+- `cmp x{idx}, x{len}` / `b.hs _galvanic_panic` for slice parameters (length loaded at runtime).
+- The `b.hs` (branch if higher or same, unsigned) also catches negative indices
+  (indices also trigger the guard via wraparound).
+- The `_galvanic_panic` trampoline executes `exit(101)`.
+This matches Rust's debug-mode behavior: out-of-bounds indexing panics.
 
-**Source:** `src/ir.rs:730`, `src/codegen.rs:926`, `src/lower.rs:17880`
+**Source:** `src/codegen.rs` (bounds check emission), `src/lower.rs` (IndexAccess IR)
 
 ---
 
@@ -297,10 +301,15 @@ specify the panic mechanism — library call, trap instruction, signal handler.
   the overflow case, branching to `_galvanic_panic`. (Claim 4q)
 - Out-of-bounds indexing: `cmp`/`b.hs` bounds check before every array/slice
   load and store; out-of-bounds branches to `_galvanic_panic`. (Claim 4p)
-- `+`, `-`, `*` overflow: no overflow check; arithmetic wraps per 64-bit
-  hardware. This is a known deviation from debug-mode Rust semantics.
-  FLS §6.23 AMBIGUOUS — spec requires debug-mode panic but galvanic uses 64-bit
-  arithmetic throughout and does not insert overflow checks for these operators.
+- `+`, `-`, `*` overflow (Claim 4s): guarded by `sxtw x9, w{dst}` + `cmp x{dst}, x9`
+  + `b.ne _galvanic_panic` after every `add`, `sub`, and `mul` instruction.
+  Fires when the 64-bit result does not equal its own sign-extended 32-bit self
+  (i.e., the result does not fit in i32).
+  FLS §6.23 AMBIGUOUS: the guard treats all arithmetic as i32 because galvanic
+  has no type system at the codegen level. False positives for i64 values outside
+  i32 range; false negatives for u32 arithmetic that wraps within [0, 2^32) but
+  outside i32 range. At this milestone, the test suite exercises i32; documented
+  as a limitation.
 
 The panic primitive `_galvanic_panic` calls `sys_exit(101)` directly. No stack
 unwinding, no panic message. This matches the FLS requirement (panics terminate
