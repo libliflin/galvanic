@@ -279,8 +279,8 @@ pub enum IrBinOp {
     ///
     /// ARM64: `sdiv x{dst}, x{lhs}, x{rhs}`.
     /// FLS §6.23: Division by zero panics at runtime (debug mode). Galvanic
-    /// does not yet insert a divide-by-zero check — this is FLS §6.23 AMBIGUOUS:
-    /// the spec requires a panic but the mechanism is unspecified.
+    /// inserts a `cbz` zero-divisor guard (Claim 4o) and a `cmn`/`cmp` signed-
+    /// overflow guard for i32::MIN / -1 (Claim 4q) before every `sdiv`.
     Div,
     /// Signed integer remainder `%`. FLS §6.5.5.
     ///

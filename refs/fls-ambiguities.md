@@ -104,12 +104,17 @@ For `&[T]`, length is the element count.
 not specify the panic mechanism — whether it is a library call, a trap
 instruction, or something else.
 
-**Galvanic's choice:** No bounds check is emitted at this milestone. Out-of-
-bounds access produces undefined behavior at the assembly level (load/store at
-wrong address). This is a known deviation; the check is deferred until a panic
-infrastructure is in place.
+**Galvanic's choice (updated — Claim 4p):** Every array/slice index emits a
+`cmp x{index}, #{len}` + `b.hs _galvanic_panic` guard before the load or
+store. The `b.hs` (branch if higher-or-same, unsigned ≥) also catches negative
+indices because negative signed values are large unsigned values when
+reinterpreted as u64. `_galvanic_panic` exits with code 101 via Linux syscall
+(same mechanism as divide-by-zero). Slice parameters with runtime-determined
+lengths use `ldr x{len_reg}, [sp, #len_slot*8]` to load the length; the
+subsequent `cmp` is not constant-folded.
 
-**Source:** `src/ir.rs:730`, `src/codegen.rs:926`, `src/lower.rs:17880`
+**Source:** `src/codegen.rs` (`Instr::LoadIndexed`, `Instr::StoreIndexed`,
+`Instr::SliceLoad`, `Instr::SliceStore`)
 
 ---
 
@@ -284,23 +289,45 @@ Rust's de-facto behavior.
 indexing (§6.9), and integer overflow in debug mode (§6.23), but does not
 specify the panic mechanism — library call, trap instruction, signal handler.
 
-**Galvanic's choice (updated — Claim 4m):**
-- Divide-by-zero with a literal 0 divisor: **caught at compile time** in
-  `src/lower.rs`. The lowering pass rejects integer `/` and `%` expressions
-  whose RHS is `LitInt(0)` before emitting any IR. This covers the common
-  programming error (e.g. `x / 0`) without requiring panic infrastructure.
-  Non-literal zero divisors (e.g. `x / y` where `y` may be zero at runtime)
-  are not checked — they emit `sdiv`/`udiv` without a guard.
-- Out-of-bounds: no bounds check before load/store.
-- Overflow: no overflow check; arithmetic wraps per the hardware.
+**Galvanic's choice (updated — Claims 4m, 4o, 4p, 4q):**
 
-The literal-divisor check and the §6.18 exhaustiveness check (Claim 4l)
-form a consistent methodology: conservatively reject the statically-obvious
-UB case at compile time; defer the general case to when panic infrastructure
-is available.
+- **Literal-zero divisors (Claim 4m):** caught at compile time in `src/lower.rs`.
+  Integer `/` and `%` with `RHS = LitInt(0)` are rejected before emitting any IR.
 
-**Source:** `src/lower.rs` (literal zero check in binary op lowering),
-`src/codegen.rs:496`, `src/codegen.rs:514`
+- **Runtime zero divisors (Claim 4o):** every `sdiv`, `udiv`, and rem-`sdiv`
+  emits `cbz x{rhs}, _galvanic_panic` before the division instruction. If the
+  divisor register is zero at runtime, `_galvanic_panic` fires.
+
+- **Signed MIN/-1 overflow (Claim 4q):** every `sdiv` (and the `sdiv`-step of
+  `%`) emits a second guard after the `cbz`:
+  ```
+  cmn  x{rhs}, #1           // sets Z if rhs == -1 (64-bit)
+  b.ne .Lsdiv_ok_N          // skip if rhs != -1
+  movz x9, #0x8000, lsl #16
+  sxtw x9, w9               // x9 = i32::MIN sign-extended to 64 bits
+  cmp  x{lhs}, x9           // compare lhs with i32::MIN
+  b.eq _galvanic_panic      // panic if lhs == i32::MIN and rhs == -1
+  .Lsdiv_ok_N:
+  sdiv ...
+  ```
+  FLS §6.23 AMBIGUOUS: galvanic lacks a type system, so this guard is emitted
+  for all `sdiv` sites. For i64 operands, this would fire a false positive on
+  i64::MIN / -1 — but the test suite does not yet exercise i64 division.
+
+- **Out-of-bounds indexing (Claim 4p):** every array/slice index emits a
+  `cmp x{index}, #{len}` + `b.hs _galvanic_panic` guard. See §4.9 entry.
+
+- **Non-division arithmetic overflow:** no trap — arithmetic wraps per the
+  hardware (two's complement). This deviates from the FLS debug-mode panic
+  requirement for `+`, `-`, `*`; that check is deferred.
+
+- **`_galvanic_panic`:** bare `exit(101)` via Linux `sys_exit` syscall.
+  The FLS does not specify the panic mechanism; galvanic chose exit code 101
+  as a sentinel distinct from normal exit values (0–100) and SIGABRT (134).
+
+**Source:** `src/lower.rs` (literal zero check), `src/codegen.rs`
+(`IrBinOp::Div`, `IrBinOp::Rem`, `IrBinOp::UDiv`, `Instr::LoadIndexed`,
+`Instr::StoreIndexed`)
 
 ---
 
@@ -797,4 +824,4 @@ phase; all fields are currently accessible regardless of visibility.
 
 ---
 
-*Last updated: 2026-04-11. Source annotation count at time of writing: ~155 `AMBIGUOUS` markers across 6 source files. Covers all sections with annotations; three previously missing sections (§13, §14, §19) added in this revision.*
+*Last updated: 2026-04-12. Source annotation count at time of writing: ~155 `AMBIGUOUS` markers across 6 source files. §4.9 updated to reflect Claim 4p bounds-check implementation; §6.9/§6.23 updated to reflect Claims 4m/4o/4p/4q runtime panic guards.*
