@@ -34334,3 +34334,65 @@ fn main() -> i32 { divide(10, 2) }\n",
         "result must not be constant-folded to #5: {asm}"
     );
 }
+
+/// Verify: i8 literal zero divisor is caught at compile time.
+///
+/// The check in lower.rs covers IrTy::I8 as well as I32/U32. This test
+/// ensures narrow signed types are not silently passed through.
+#[test]
+fn claim_4m_literal_zero_div_i8_rejected() {
+    let src = "fn main() -> i32 { let x: i8 = 5i8; let y: i8 = x / 0i8; y as i32 }\n";
+    let tokens = galvanic::lexer::tokenize(src).expect("lex failed");
+    let sf = galvanic::parser::parse(&tokens, src).expect("parse failed");
+    let result = galvanic::lower::lower(&sf, src);
+    assert!(
+        result.is_err(),
+        "expected compile-time error for i8 `x / 0i8`, but lower() returned Ok"
+    );
+    let msg = result.err().unwrap().to_string();
+    assert!(
+        msg.contains("divide by zero"),
+        "expected error mentioning 'divide by zero', got: {msg}"
+    );
+}
+
+/// Verify: u8 literal zero divisor is caught at compile time.
+///
+/// The check in lower.rs covers IrTy::U8. This test ensures narrow unsigned
+/// types are not silently passed through.
+#[test]
+fn claim_4m_literal_zero_div_u8_rejected() {
+    let src = "fn main() -> i32 { let x: u8 = 5u8; let y: u8 = x / 0u8; y as i32 }\n";
+    let tokens = galvanic::lexer::tokenize(src).expect("lex failed");
+    let sf = galvanic::parser::parse(&tokens, src).expect("parse failed");
+    let result = galvanic::lower::lower(&sf, src);
+    assert!(
+        result.is_err(),
+        "expected compile-time error for u8 `x / 0u8`, but lower() returned Ok"
+    );
+    let msg = result.err().unwrap().to_string();
+    assert!(
+        msg.contains("divide by zero"),
+        "expected error mentioning 'divide by zero', got: {msg}"
+    );
+}
+
+/// Verify: literal / literal non-zero division emits runtime `sdiv`, not a
+/// constant-folded immediate.
+///
+/// FLS §6.23 + project constraint (refs/fls-constraints.md §Constraint 1):
+/// Even when both operands are literals, a non-const `fn` must emit runtime
+/// instructions. This test confirms `10 / 2` in `main` produces `sdiv`, not
+/// `mov x0, #5`.
+#[test]
+fn claim_4m_literal_literal_div_emits_sdiv_not_folded() {
+    let asm = compile_to_asm("fn main() -> i32 { 10 / 2 }\n");
+    assert!(
+        asm.contains("sdiv"),
+        "expected 'sdiv' for literal/literal division, got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #5"),
+        "literal/literal division must not constant-fold to #5: {asm}"
+    );
+}
