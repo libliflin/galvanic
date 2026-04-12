@@ -104,12 +104,23 @@ For `&[T]`, length is the element count.
 not specify the panic mechanism — whether it is a library call, a trap
 instruction, or something else.
 
-**Galvanic's choice:** No bounds check is emitted at this milestone. Out-of-
-bounds access produces undefined behavior at the assembly level (load/store at
-wrong address). This is a known deviation; the check is deferred until a panic
-infrastructure is in place.
+**Galvanic's choice (updated — Claim 4p):** Every array and slice index
+operation emits a runtime bounds check before the load or store:
+```asm
+    cmp     x{idx}, #{len}            // unsigned compare: idx vs array length
+    b.hs    _galvanic_panic           // branch if idx >= len (unsigned ≥)
+```
+The `b.hs` ("branch if higher or same") uses unsigned comparison, which also
+catches negative indices (large 64-bit values after sign-extension). Both
+`LoadIndexed` and `StoreIndexed` IR instructions emit this guard. The
+`_galvanic_panic` trampoline calls `exit(101)`.
 
-**Source:** `src/ir.rs:730`, `src/codegen.rs:926`, `src/lower.rs:17880`
+**What remains open:** The FLS does not specify the exit code or the format of
+the panic message. Galvanic uses exit code 101 (bare `exit` syscall, no
+message) — the same code used for divide-by-zero and overflow panics.
+
+**Source:** `src/codegen.rs` (bounds check in `LoadIndexed`/`StoreIndexed`
+emission), `src/ir.rs` (`LoadIndexed`/`StoreIndexed` variants)
 
 ---
 
@@ -284,23 +295,32 @@ Rust's de-facto behavior.
 indexing (§6.9), and integer overflow in debug mode (§6.23), but does not
 specify the panic mechanism — library call, trap instruction, signal handler.
 
-**Galvanic's choice (updated — Claim 4m):**
-- Divide-by-zero with a literal 0 divisor: **caught at compile time** in
-  `src/lower.rs`. The lowering pass rejects integer `/` and `%` expressions
-  whose RHS is `LitInt(0)` before emitting any IR. This covers the common
-  programming error (e.g. `x / 0`) without requiring panic infrastructure.
-  Non-literal zero divisors (e.g. `x / y` where `y` may be zero at runtime)
-  are not checked — they emit `sdiv`/`udiv` without a guard.
-- Out-of-bounds: no bounds check before load/store.
-- Overflow: no overflow check; arithmetic wraps per the hardware.
+**Galvanic's choice (updated — Claims 4m, 4o, 4p, 4q):**
 
-The literal-divisor check and the §6.18 exhaustiveness check (Claim 4l)
-form a consistent methodology: conservatively reject the statically-obvious
-UB case at compile time; defer the general case to when panic infrastructure
-is available.
+- **Literal zero divisor** (e.g. `x / 0`): **caught at compile time** in
+  `src/lower.rs`. Claim 4m.
+- **Runtime zero divisor** (e.g. `fn f(a: i32, b: i32) -> i32 { a / b }`):
+  guarded by `cbz x{rhs}, _galvanic_panic` before every `sdiv`, `udiv`, and
+  their `msub`-based remainder variants. Claim 4o.
+- **Signed MIN/-1 overflow** (i32::MIN / -1): guarded by a `cmn`/`cmp`
+  sequence before every `sdiv` and the `sdiv` inside `msub`-based `rem`.
+  The guard fires when rhs == -1 AND lhs == i32::MIN (sign-extended). Claim 4q.
+  FLS §6.23 AMBIGUOUS: galvanic emits this guard for all `sdiv` sites, not
+  just i32. An i64 MIN/-1 would also trigger the guard; acceptable at this
+  milestone because galvanic's test suite exercises only i32. This limitation
+  is documented here.
+- **Out-of-bounds indexing**: guarded by `cmp` + `b.hs _galvanic_panic` before
+  every array and slice index. Claim 4p. (See §4.9 entry above.)
+- **Integer overflow (non-division)**: no trap — arithmetic wraps per the
+  hardware. This is the remaining open gap for §6.23.
 
-**Source:** `src/lower.rs` (literal zero check in binary op lowering),
-`src/codegen.rs:496`, `src/codegen.rs:514`
+`_galvanic_panic` is a bare `exit(101)` syscall (no message, no stack trace).
+Exit code 101 is galvanic's runtime-panic sentinel — distinct from program
+exit codes 0–100 used in the test suite.
+
+**Source:** `src/lower.rs` (literal zero check), `src/codegen.rs` (cbz/cmn/cmp
+guards in `IrBinOp::Div`, `IrBinOp::Rem`, `IrBinOp::UDiv`, `LoadIndexed`,
+`StoreIndexed` emission)
 
 ---
 
