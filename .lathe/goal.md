@@ -1,224 +1,227 @@
-# Goal: Claim 4q — §6.23 Signed Integer MIN/-1 Overflow Guard
+# Goal: Claim 4s — §6.23 Arithmetic Overflow Guard for i32 +, -, *
 
 ## What
 
-Two complementary changes that close the remaining §6.23 gap and correct stale
-documentation left over from Claims 4o and 4p. This goal has been set twice
-(cycle 1 and cycle 3) because the builder has not yet implemented it. The
-implementation is fully specified below — follow it exactly.
+Add runtime overflow guards for `BinOp::Add`, `BinOp::Sub`, and `BinOp::Mul`
+in `src/codegen.rs`, and fix one stale entry in `refs/fls-ambiguities.md`.
+
+Claims 4m through 4r completed the division and shift safety stories. The only
+remaining §6.23 gap in galvanic's implemented subset is arithmetic overflow for
++, -, and *. FLS §6.23 requires debug-mode panic on signed integer overflow;
+galvanic currently uses 64-bit arithmetic throughout and emits no check.
 
 ---
 
-### 1. Thread a label counter through `emit_instr` in `src/codegen.rs`
+## Implementation: post-instruction i32 range check
 
-`emit_instr` (line ~377) currently has this signature:
+The guard uses a 3-instruction sequence appended after the primary arithmetic
+instruction. No type information is available at the codegen level (same
+constraint as the MIN/-1 guard). The guard is calibrated to i32 semantics
+and documented as AMBIGUOUS for i64/u32 — consistent with the established
+project pattern.
 
-```rust
-fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, fn_name: &str) -> Result<(), CodegenError>
+**Pattern for Add, Sub, Mul:**
+
+After the primary instruction (`add x{dst}`, `sub x{dst}`, or `mul x{dst}`):
+```
+    sxtw    x9, w{dst}             // sign-extend low 32 bits of result
+    cmp     x{dst}, x9             // if 64-bit result != sign-extended 32-bit, i32 overflow
+    b.ne    _galvanic_panic        // FLS §6.23: signed arithmetic overflow panic
 ```
 
-Add a `label_ctr: &mut usize` parameter at the end:
+`sxtw` replicates bit 31 of the result across bits 32–63. If the 64-bit result
+equals its own sign-extended 32-bit self, the result is representable as i32 and
+no overflow occurred. Otherwise, overflow → panic.
 
-```rust
-fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, fn_name: &str, label_ctr: &mut usize) -> Result<(), CodegenError>
-```
+**Why this works for i32:**
+- `i32::MAX + 1 = 2147483648` (0x80000000 in 32 bits → sxtw = -2147483648 ≠ 2147483648) → panic ✓
+- `i32::MIN - 1 = -2147483649` (low32 = 0x7FFFFFFF → sxtw = 2147483647 ≠ -2147483649) → panic ✓
+- `i32::MAX * 2 = 4294967294` (low32 = 0xFFFFFFFE → sxtw = -2 ≠ 4294967294) → panic ✓
+- `100 + 200 = 300` (sxtw(300) = 300) → no panic ✓
+- Narrow types (u8, i8, u16, i16): wrapping arithmetic stays within 32-bit range,
+  so sxtw matches the 64-bit value — no false panic ✓
 
-Add a `let mut label_ctr: usize = 0;` local in `emit_fn` and pass `&mut label_ctr`
-at the one call site where `emit_instr` is called. No other callers exist.
+**AMBIGUOUS (document, don't fix):**
+- i64 values > i32::MAX stored in 64-bit registers will false-positive. The test
+  suite exercises i64 with small values; galvanic has no type system to distinguish.
+- u32 addition of two large u32 values (each > i32::MAX) may false-positive.
+  No u32 wrap tests exist; existing u32 tests use small values. Documented.
 
 ---
 
-### 2. Add the MIN/-1 overflow guard to `IrBinOp::Div`
+## Code changes in `src/codegen.rs`
 
-The current `IrBinOp::Div` arm (line ~545) emits:
-
-```asm
-    cbz     x{rhs}, _galvanic_panic         // div-by-zero guard
-    sdiv    x{dst}, x{lhs}, x{rhs}
-```
-
-Replace it with (increment `label_ctr` to get a unique `n`):
+Find the `IrBinOp::Add`, `IrBinOp::Sub`, and `IrBinOp::Mul` arms (lines ~537–552)
+in the `emit_instr` match block. The current code has an AMBIGUOUS comment followed
+by a single `writeln!` for each. Replace each arm with the guarded version:
 
 ```rust
-IrBinOp::Div => {
-    writeln!(out, "    cbz     x{rhs}, _galvanic_panic         // FLS §6.23: div-by-zero guard")?;
-    // FLS §6.23: AMBIGUOUS — signed overflow: i32::MIN / -1 panics in Rust debug mode.
-    // ARM64 sdiv returns i32::MIN for this input (CONSTRAINED UNPREDICTABLE).
-    // Guard fires for i64::MIN / -1 too (false positive); galvanic has no type system
-    // to distinguish — acceptable at this milestone, documented in fls-ambiguities.md.
-    let n = *label_ctr;
-    *label_ctr += 1;
-    writeln!(out, "    cmn     x{rhs}, #1                      // Z=1 if rhs == -1 (sign-extended)")?;
-    writeln!(out, "    b.ne    .Lsdiv_ok_{fn_name}_{n}")?;
-    writeln!(out, "    movz    x9, #0x8000, lsl #16             // x9 = 0x0000_0000_8000_0000")?;
-    writeln!(out, "    sxtw    x9, w9                           // sign-extend: x9 = 0xFFFF_FFFF_8000_0000 = i32::MIN")?;
-    writeln!(out, "    cmp     x{lhs}, x9                       // compare lhs with i32::MIN")?;
-    writeln!(out, "    b.eq    _galvanic_panic                  // FLS §6.23: signed overflow panic")?;
-    writeln!(out, ".Lsdiv_ok_{fn_name}_{n}:")?;
-    writeln!(out, "    sdiv    x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: div (signed)")?;
+IrBinOp::Add => {
+    writeln!(out, "    add     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: add")?;
+    // FLS §6.23: AMBIGUOUS — signed overflow: i32 overflow panics in debug mode.
+    // Guard fires for i64 values outside i32 range (false positive) and does NOT
+    // fire for u32 wrap (unsigned overflow is a different concern). Acceptable at
+    // this milestone: test suite exercises i32; documented in fls-ambiguities.md.
+    writeln!(out, "    sxtw    x9, w{dst}                          // sign-extend low 32 bits")?;
+    writeln!(out, "    cmp     x{dst}, x9                          // i32 overflow check")?;
+    writeln!(out, "    b.ne    _galvanic_panic                     // FLS §6.23: overflow panic")?;
+}
+IrBinOp::Sub => {
+    writeln!(out, "    sub     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: sub")?;
+    // FLS §6.23: AMBIGUOUS — same as Add guard above.
+    writeln!(out, "    sxtw    x9, w{dst}")?;
+    writeln!(out, "    cmp     x{dst}, x9")?;
+    writeln!(out, "    b.ne    _galvanic_panic")?;
+}
+IrBinOp::Mul => {
+    writeln!(out, "    mul     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: mul")?;
+    // FLS §6.23: AMBIGUOUS — same as Add guard above.
+    writeln!(out, "    sxtw    x9, w{dst}")?;
+    writeln!(out, "    cmp     x{dst}, x9")?;
+    writeln!(out, "    b.ne    _galvanic_panic")?;
 }
 ```
 
----
-
-### 3. Add the MIN/-1 overflow guard to `IrBinOp::Rem`
-
-The current `IrBinOp::Rem` arm (line ~564) emits:
-
-```asm
-    cbz     x{rhs}, _galvanic_panic         // rem-by-zero guard
-    sdiv    x{dst}, x{lhs}, x{rhs}
-    msub    x{dst}, x{dst}, x{rhs}, x{lhs}
-```
-
-Replace it with (same pattern, different label prefix):
-
-```rust
-IrBinOp::Rem => {
-    writeln!(out, "    cbz     x{rhs}, _galvanic_panic         // FLS §6.23: rem-by-zero guard")?;
-    // FLS §6.23: signed overflow guard — i32::MIN % -1 also panics (same as div).
-    let n = *label_ctr;
-    *label_ctr += 1;
-    writeln!(out, "    cmn     x{rhs}, #1")?;
-    writeln!(out, "    b.ne    .Lsrem_ok_{fn_name}_{n}")?;
-    writeln!(out, "    movz    x9, #0x8000, lsl #16")?;
-    writeln!(out, "    sxtw    x9, w9")?;
-    writeln!(out, "    cmp     x{lhs}, x9")?;
-    writeln!(out, "    b.eq    _galvanic_panic")?;
-    writeln!(out, ".Lsrem_ok_{fn_name}_{n}:")?;
-    writeln!(out, "    sdiv    x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: rem step 1: quotient")?;
-    writeln!(out, "    msub    x{dst}, x{dst}, x{rhs}, x{lhs}  // FLS §6.5.5: rem step 2: lhs - q*rhs")?;
-}
-```
-
-`IrBinOp::UDiv` does NOT get this guard — unsigned division cannot overflow.
+**Important:** Keep the existing AMBIGUOUS comment that precedes these arms. Remove
+only the `// FLS §6.23: 64-bit, no i32 wrap` suffix from the primary instruction
+comments (replaced by the full guard above). Do NOT change `IrBinOp::Div`,
+`IrBinOp::Rem`, `IrBinOp::UDiv`, or any other op.
 
 ---
 
-### 4. Update stale tests in `tests/e2e.rs`
+## Update stale test in `tests/e2e.rs`
 
-**4a. Rename the gap-marker test.**
+There are existing assembly inspection tests that look for `"add"` in the assembly.
+These should still pass because the guard uses `add` then `sxtw`/`cmp`/`b.ne` —
+`add` is still present. No existing tests need modification.
 
-Find:
-```rust
-fn runtime_sdiv_no_min_neg_one_guard() {
-```
-
-This test currently asserts the guard is ABSENT. Delete the entire test body and
-replace with a POSITIVE assertion that the guard IS present:
-
-```rust
-fn runtime_sdiv_emits_both_zero_and_overflow_guards() {
-    let asm = compile_to_asm("fn f(a: i32, b: i32) -> i32 { a / b }\nfn main() -> i32 { f(1, 1) }\n");
-    assert!(asm.contains("cbz"), "expected cbz div-by-zero guard");
-    assert!(asm.contains("cmn"), "expected cmn overflow guard");
-    assert!(asm.contains("_galvanic_panic"), "expected panic trampoline");
-    // Verify ordering: cbz before cmn before sdiv
-    let cbz_pos = asm.find("cbz").unwrap();
-    let cmn_pos = asm.find("cmn").unwrap();
-    let sdiv_pos = asm.find("sdiv").unwrap();
-    assert!(cbz_pos < cmn_pos, "cbz must precede cmn");
-    assert!(cmn_pos < sdiv_pos, "cmn must precede sdiv");
-}
-```
-
-**4b. Remove a stale negative assertion.**
-
-Find the test `claim_4o_sdiv_emits_cbz_guard`. It contains a line:
-```rust
-assert!(!asm.contains("0x80000000"), ...);
-```
-Remove ONLY that one assertion (and its associated string if any). The rest of
-the test stays.
+However, update the comment `// §6.23: 64-bit, no i32 wrap` references in any
+existing tests that assert the guard is ABSENT for add/sub/mul. Search for
+`no i32 wrap` in tests/e2e.rs; if found, remove those negative assertions.
 
 ---
 
-### 5. Add new Claim 4q tests to `tests/e2e.rs`
+## Add new Claim 4s tests to `tests/e2e.rs`
 
-Add a `// --- Claim 4q: §6.23 signed MIN/-1 overflow ---` section with these tests:
+Add a `// --- Claim 4s: §6.23 arithmetic overflow guard ---` section:
 
 ```rust
 #[test]
-fn claim_4q_sdiv_emits_cmn_overflow_guard() {
-    let asm = compile_to_asm("fn f(a: i32, b: i32) -> i32 { a / b }\nfn main() -> i32 { f(1, 1) }\n");
-    assert!(asm.contains("cmn"), "expected cmn guard for signed overflow");
-    assert!(asm.contains("sdiv"), "expected sdiv instruction");
-    let cmn_pos = asm.find("cmn").unwrap();
-    let sdiv_pos = asm.find("sdiv").unwrap();
-    assert!(cmn_pos < sdiv_pos, "cmn must appear before sdiv");
+fn claim_4s_add_emits_overflow_guard() {
+    let asm = compile_to_asm("fn f(a: i32, b: i32) -> i32 { a + b }\nfn main() -> i32 { f(1, 1) }\n");
+    assert!(asm.contains("add"), "expected add instruction");
+    assert!(asm.contains("sxtw"), "expected sxtw overflow guard");
+    assert!(asm.contains("b.ne"), "expected b.ne to _galvanic_panic");
+    // Verify ordering: add before sxtw before b.ne
+    let add_pos = asm.find("    add ").unwrap_or_else(|| asm.find("add").unwrap());
+    let sxtw_pos = asm.find("sxtw").unwrap();
+    let bne_pos = asm.find("b.ne").unwrap();
+    assert!(add_pos < sxtw_pos, "add must precede sxtw");
+    assert!(sxtw_pos < bne_pos, "sxtw must precede b.ne");
 }
 
 #[test]
-fn claim_4q_rem_emits_cmn_overflow_guard() {
-    let asm = compile_to_asm("fn f(a: i32, b: i32) -> i32 { a % b }\nfn main() -> i32 { f(1, 1) }\n");
-    assert!(asm.contains("cmn"), "expected cmn guard in rem path");
-    assert!(asm.contains("msub"), "expected msub in rem path");
-    let cmn_pos = asm.find("cmn").unwrap();
-    let msub_pos = asm.find("msub").unwrap();
-    assert!(cmn_pos < msub_pos, "cmn must appear before msub");
+fn claim_4s_sub_emits_overflow_guard() {
+    let asm = compile_to_asm("fn f(a: i32, b: i32) -> i32 { a - b }\nfn main() -> i32 { f(2, 1) }\n");
+    assert!(asm.contains("sub"), "expected sub instruction");
+    assert!(asm.contains("sxtw"), "expected sxtw overflow guard");
+    assert!(asm.contains("b.ne"), "expected b.ne to _galvanic_panic");
 }
 
 #[test]
-fn claim_4q_runtime_min_div_neg_one_exits_101() {
-    // i32::MIN / -1 overflows — must panic
+fn claim_4s_mul_emits_overflow_guard() {
+    let asm = compile_to_asm("fn f(a: i32, b: i32) -> i32 { a * b }\nfn main() -> i32 { f(2, 3) }\n");
+    assert!(asm.contains("mul"), "expected mul instruction");
+    assert!(asm.contains("sxtw"), "expected sxtw overflow guard");
+    assert!(asm.contains("b.ne"), "expected b.ne to _galvanic_panic");
+    // Guard must precede any use of result
+    let mul_pos = asm.find("    mul ").unwrap_or_else(|| asm.find("mul").unwrap());
+    let sxtw_pos = asm.find("sxtw").unwrap();
+    assert!(mul_pos < sxtw_pos, "mul must precede sxtw guard");
+}
+
+#[test]
+fn claim_4s_runtime_i32_max_plus_one_exits_101() {
+    // i32::MAX + 1 overflows — must panic
     let exit = compile_and_run(
-        "fn main() -> i32 { let a: i32 = -2147483648; let b: i32 = -1; a / b }\n",
+        "fn main() -> i32 { let a: i32 = 2147483647; let b: i32 = 1; a + b }\n",
     );
     assert_eq!(exit, Some(101));
 }
 
 #[test]
-fn claim_4q_runtime_min_rem_neg_one_exits_101() {
-    // i32::MIN % -1 overflows — must panic
+fn claim_4s_runtime_i32_min_minus_one_exits_101() {
+    // i32::MIN - 1 overflows — must panic
     let exit = compile_and_run(
-        "fn main() -> i32 { let a: i32 = -2147483648; let b: i32 = -1; a % b }\n",
+        "fn main() -> i32 { let a: i32 = -2147483648; let b: i32 = 1; a - b }\n",
     );
     assert_eq!(exit, Some(101));
 }
 
 #[test]
-fn claim_4q_runtime_min_div_neg_one_via_param_exits_101() {
+fn claim_4s_runtime_i32_max_mul_two_exits_101() {
+    // i32::MAX * 2 overflows — must panic
     let exit = compile_and_run(
-        "fn div(a: i32, b: i32) -> i32 { a / b }\nfn main() -> i32 { div(-2147483648, -1) }\n",
+        "fn main() -> i32 { let a: i32 = 2147483647; let b: i32 = 2; a * b }\n",
     );
     assert_eq!(exit, Some(101));
 }
 
 #[test]
-fn claim_4q_runtime_non_min_div_neg_one_succeeds() {
-    // -100 / -1 = 100 — guard must NOT fire
+fn claim_4s_runtime_i32_max_plus_one_via_param_exits_101() {
+    // via function parameters — proves runtime execution, not compile-time folding
     let exit = compile_and_run(
-        "fn main() -> i32 { let a: i32 = -100; let b: i32 = -1; a / b }\n",
+        "fn add(a: i32, b: i32) -> i32 { a + b }\nfn main() -> i32 { add(2147483647, 1) }\n",
     );
-    assert_eq!(exit, Some(100));
+    assert_eq!(exit, Some(101));
 }
 
 #[test]
-fn claim_4q_udiv_no_overflow_guard() {
-    // udiv path must NOT contain cmn (unsigned division cannot overflow)
-    let asm = compile_to_asm(
-        "fn f(a: u32, b: u32) -> u32 { a / b }\nfn main() -> i32 { 0 }\n",
+fn claim_4s_runtime_normal_add_succeeds() {
+    // 100 + 200 = 300 — guard must NOT fire
+    let exit = compile_and_run(
+        "fn main() -> i32 { let a: i32 = 100; let b: i32 = 200; a + b }\n",
     );
-    // udiv section should have cbz (zero guard) but not cmn (overflow guard)
-    assert!(asm.contains("udiv"), "expected udiv instruction");
-    // Find the udiv and check no cmn appears between cbz and udiv
-    // (simple check: udiv path should not contain cmn at all in the asm for this fn)
-    let f_start = asm.find("// fn f").unwrap_or(0);
-    let main_start = asm.find("// fn main").unwrap_or(asm.len());
-    let f_section = &asm[f_start..main_start];
-    assert!(!f_section.contains("cmn"), "udiv must not emit cmn overflow guard");
+    assert_eq!(exit, Some(300 % 256));  // 300 > 255 so exit code is 300 mod 256 = 44
+}
+
+#[test]
+fn claim_4s_runtime_normal_sub_succeeds() {
+    // 10 - 3 = 7 — guard must NOT fire
+    let exit = compile_and_run(
+        "fn main() -> i32 { let a: i32 = 10; let b: i32 = 3; a - b }\n",
+    );
+    assert_eq!(exit, Some(7));
+}
+
+#[test]
+fn claim_4s_runtime_normal_mul_succeeds() {
+    // 6 * 7 = 42 — guard must NOT fire
+    let exit = compile_and_run(
+        "fn main() -> i32 { let a: i32 = 6; let b: i32 = 7; a * b }\n",
+    );
+    assert_eq!(exit, Some(42));
 }
 ```
 
 ---
 
-### 6. Update `refs/fls-ambiguities.md`
+## Fix stale `refs/fls-ambiguities.md` §4.9 entry
 
-**Entry §4.9 — Bounds Checking Mechanism:**
+The §4.9 entry still says "No bounds check is emitted at this milestone" — this
+has been wrong since Claim 4p was implemented. Replace the entire §4.9 section:
 
-Find the current text that says something like "No bounds check is emitted at
-this milestone" and replace it with:
+**Find:**
+```markdown
+**Galvanic's choice:** No bounds check is emitted at this milestone. Out-of-
+bounds access produces undefined behavior at the assembly level (load/store at
+wrong address). This is a known deviation; the check is deferred until a panic
+infrastructure is in place.
 
+**Source:** `src/ir.rs:730`, `src/codegen.rs:926`, `src/lower.rs:17880`
+```
+
+**Replace with:**
 ```markdown
 **Resolution (Claim 4p):** Every array and slice index emits a runtime bounds
 check before the address computation:
@@ -227,58 +230,52 @@ check before the address computation:
   indices also trigger the guard via wraparound).
 - The `_galvanic_panic` trampoline executes `exit(101)`.
 This matches Rust's debug-mode behavior: out-of-bounds indexing panics.
+
+**Source:** `src/codegen.rs` (bounds check emission), `src/lower.rs` (IndexAccess IR)
 ```
 
-**Entry §6.9/§6.23 — Panic Mechanism:**
+Also update the §6.9/§6.23 entry to add a fourth bullet describing the new
+arithmetic overflow guard:
 
-Find the current text that says something like "Non-literal zero divisors...are
-not checked" and replace it with a complete description of all guards:
+Find the line:
+```
+- `+`, `-`, `*` overflow: no overflow check; arithmetic wraps per 64-bit
+  hardware. This is a known deviation from debug-mode Rust semantics.
+  FLS §6.23 AMBIGUOUS — spec requires debug-mode panic but galvanic uses 64-bit
+  arithmetic throughout and does not insert overflow checks for these operators.
+```
 
-```markdown
-**Resolution (Claims 4m, 4o, 4q):** Three distinct division-panic guards are
-implemented:
-
-1. **Literal-zero divisors (Claim 4m):** Caught at compile time. Dividing by a
-   literal `0` produces a compile error before codegen.
-
-2. **Runtime zero divisors (Claim 4o):** Guarded by `cbz x{rhs}, _galvanic_panic`
-   immediately before every `sdiv` and `udiv` instruction.
-
-3. **Signed overflow — MIN/-1 (Claim 4q):** Guarded by `cmn x{rhs}, #1` +
-   `cmp x{lhs}, x9` (where x9 = i32::MIN sign-extended) before every `sdiv`.
-   Fires when `rhs == -1` AND `lhs == i32::MIN`. ARM64 `sdiv` returns i32::MIN
-   for this input (CONSTRAINED UNPREDICTABLE); Rust debug mode panics.
-
-4. **Unsigned division overflow:** Not applicable — unsigned division cannot
-   produce an unrepresentable result.
-
-**AMBIGUOUS (§6.23):** The MIN/-1 guard also fires for i64::MIN / -1 (false
-positive), since galvanic lacks a full type system. At this milestone, the test
-suite exercises only i32, so this is acceptable. Documented as a limitation.
-
-**Integer overflow in `+`, `-`, `*`:** No trap is emitted. Arithmetic wraps
-in 64-bit registers; narrow-type masking (AND / SXTB / SXTH) happens but does
-not detect overflow. This is a known gap — a separate goal.
-
-`_galvanic_panic`: bare `mov x8, #93; mov x0, #101; svc #0` — `exit(101)`.
+Replace with:
+```
+- `+`, `-`, `*` overflow (Claim 4s): guarded by `sxtw x9, w{dst}` + `cmp x{dst}, x9`
+  + `b.ne _galvanic_panic` after every `add`, `sub`, and `mul` instruction.
+  Fires when the 64-bit result does not equal its own sign-extended 32-bit self
+  (i.e., the result does not fit in i32).
+  FLS §6.23 AMBIGUOUS: the guard treats all arithmetic as i32 because galvanic
+  has no type system. False positives for i64 values outside i32 range; false
+  negatives for u32 arithmetic that wraps within [0, 2^32) but outside i32 range.
+  At this milestone, the test suite exercises i32; documented as a limitation.
 ```
 
 ---
 
 ## Scope constraints
 
-- Do NOT add overflow traps for `+`, `-`, `*`.
-- Do NOT add i64-specific MIN/-1 detection — always-emit is correct and documented.
-- Do NOT change `IrBinOp::UDiv` — no guard needed.
-- Do NOT change the zero-divisor `cbz` guard.
-- Do NOT change the bounds-check guard (Claim 4p).
+- Do NOT add guards for `BitAnd`, `BitOr`, `BitXor`, `Shl`, `Shr`, `UShr` — these
+  already have their own guards (Claim 4r) or have defined wrap behavior.
+- Do NOT change `IrBinOp::Div`, `IrBinOp::Rem`, `IrBinOp::UDiv` — already guarded.
+- Do NOT add type info to `BinOp` or `IrBinOp` — out of scope for this claim.
+- Do NOT add guards for comparison operators (`Lt`, `Le`, `Gt`, `Ge`, `Eq`, `Ne`).
+- The `x9` scratch register is already used by the MIN/-1 guard. Using it here too
+  is fine — `x9` is caller-saved and not preserved across instructions.
+
+---
 
 ## Acceptance criteria
 
 - `cargo build` passes with no warnings.
-- `cargo test` passes — all 1772 existing tests pass; 7 new tests added (1779 total).
-- Test `runtime_sdiv_no_min_neg_one_guard` is deleted/renamed to `runtime_sdiv_emits_both_zero_and_overflow_guards`.
-- Stale `!asm.contains("0x80000000")` assertion removed from `claim_4o_sdiv_emits_cbz_guard`.
+- `cargo test` passes — all 1784 existing tests pass; 10 new tests added (1794 total).
 - `cargo clippy -- -D warnings` passes.
+- Assembly for `fn f(a: i32, b: i32) -> i32 { a + b }` contains `sxtw`, `cmp`, `b.ne`.
 - `refs/fls-ambiguities.md` §4.9 entry describes Claim 4p bounds-check behavior.
-- `refs/fls-ambiguities.md` §6.9/§6.23 entry describes all three division guards.
+- `refs/fls-ambiguities.md` §6.9/§6.23 entry mentions Claim 4s arithmetic overflow guard.
