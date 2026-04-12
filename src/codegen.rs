@@ -158,7 +158,16 @@ pub fn emit_asm(module: &Module) -> Result<String, CodegenError> {
     // Cache-line note: 3 instructions × 4 bytes = 12 bytes — fits in one cache line.
     let needs_panic = module.fns.iter().any(|f| {
         f.body.iter().any(|instr| match instr {
-            Instr::BinOp { op: IrBinOp::Div | IrBinOp::Rem | IrBinOp::UDiv, .. } => true,
+            Instr::BinOp {
+                op:
+                    IrBinOp::Div
+                    | IrBinOp::Rem
+                    | IrBinOp::UDiv
+                    | IrBinOp::Shl
+                    | IrBinOp::Shr
+                    | IrBinOp::UShr,
+                ..
+            } => true,
             Instr::LoadIndexed { len, .. }
             | Instr::LoadIndexedF64 { len, .. }
             | Instr::LoadIndexedF32 { len, .. } => *len > 0,
@@ -681,20 +690,51 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
                 )?,
 
                 // FLS §6.5.7: Shift operator expressions.
-                // ARM64: `lsl` (logical shift left) and `asr` (arithmetic shift right).
-                // Signed integers use arithmetic right shift (sign-extending) per FLS §6.5.7.
-                // FLS §6.5.7 AMBIGUOUS: shift amount is taken modulo bit width; ARM64
-                // variable-shift instructions use the low 6 bits of the shift register
-                // for 64-bit shifts (mod 64). This matches the FLS description for i32/i64.
-                // Cache-line note: one 4-byte instruction per shift.
-                IrBinOp::Shl => writeln!(
-                    out,
-                    "    lsl     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.7: shift left"
-                )?,
-                IrBinOp::Shr => writeln!(
-                    out,
-                    "    asr     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.7: arithmetic shift right (signed)"
-                )?,
+                // FLS §6.5.9: A shift with a negative or overly large shift amount panics
+                // at runtime. Valid range: [0, bit_width). Galvanic guards all shifts with:
+                //   cmp  x{rhs}, #64   — compare shift amount with 64 (unsigned)
+                //   b.hs _galvanic_panic — branch if rhs >= 64 (unsigned; also catches negative)
+                // Negative shift amounts (i64 sign bit set) are ≥ 2^63 when cast to u64,
+                // which is far above 64, so `b.hs` catches them without a separate check.
+                //
+                // FLS §6.5.9 AMBIGUOUS: The spec requires panic when shift amount ≥ bit width
+                // of the type. For i32 the valid range is [0, 31], but galvanic uses 64-bit
+                // registers for all integers and checks against 64. Shifts of 32..63 on i32
+                // values are a false negative — galvanic does not panic, but rustc debug mode
+                // would. Documented as a known spec gap; the gap is analogous to the i64
+                // MIN/-1 false positive in Claim 4q.
+                //
+                // ARM64: `lsl` (logical shift left), `asr` (arithmetic shift right, signed),
+                // `lsr` (logical shift right, unsigned).
+                // Cache-line note: 3 instructions (cmp + b.hs + shift) = 12 bytes per shift.
+                IrBinOp::Shl => {
+                    writeln!(
+                        out,
+                        "    cmp     x{rhs}, #64                    // FLS §6.5.9: shift amount must be < 64"
+                    )?;
+                    writeln!(
+                        out,
+                        "    b.hs    _galvanic_panic                // FLS §6.5.9: panic if shift >= 64 or negative"
+                    )?;
+                    writeln!(
+                        out,
+                        "    lsl     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.7: shift left"
+                    )?;
+                }
+                IrBinOp::Shr => {
+                    writeln!(
+                        out,
+                        "    cmp     x{rhs}, #64                    // FLS §6.5.9: shift amount must be < 64"
+                    )?;
+                    writeln!(
+                        out,
+                        "    b.hs    _galvanic_panic                // FLS §6.5.9: panic if shift >= 64 or negative"
+                    )?;
+                    writeln!(
+                        out,
+                        "    asr     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.7: arithmetic shift right (signed)"
+                    )?;
+                }
 
                 // FLS §4.1: Unsigned integer division.
                 // ARM64: `udiv x{dst}, x{lhs}, x{rhs}` — unsigned division.
@@ -714,14 +754,25 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
                 }
 
                 // FLS §4.1: Unsigned (logical) right shift.
+                // FLS §6.5.9: Same shift-amount guard as signed shifts.
                 // ARM64: `lsr x{dst}, x{lhs}, x{rhs}` — logical shift right,
                 // zero-extends from the right (vs `asr` which sign-extends).
                 // Used when the operand type is unsigned (IrTy::U32).
-                // Cache-line note: one 4-byte instruction per unsigned shift.
-                IrBinOp::UShr => writeln!(
-                    out,
-                    "    lsr     x{dst}, x{lhs}, x{rhs}          // FLS §4.1: logical shift right (unsigned)"
-                )?,
+                // Cache-line note: 3 instructions (cmp + b.hs + lsr) = 12 bytes.
+                IrBinOp::UShr => {
+                    writeln!(
+                        out,
+                        "    cmp     x{rhs}, #64                    // FLS §6.5.9: shift amount must be < 64"
+                    )?;
+                    writeln!(
+                        out,
+                        "    b.hs    _galvanic_panic                // FLS §6.5.9: panic if shift >= 64 or negative"
+                    )?;
+                    writeln!(
+                        out,
+                        "    lsr     x{dst}, x{lhs}, x{rhs}          // FLS §4.1: logical shift right (unsigned)"
+                    )?;
+                }
             }
         }
 
