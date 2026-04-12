@@ -104,10 +104,10 @@ For `&[T]`, length is the element count.
 not specify the panic mechanism — whether it is a library call, a trap
 instruction, or something else.
 
-**Galvanic's choice:** No bounds check is emitted at this milestone. Out-of-
-bounds access produces undefined behavior at the assembly level (load/store at
-wrong address). This is a known deviation; the check is deferred until a panic
-infrastructure is in place.
+**Galvanic's choice (updated — Claim 4p):** A `cmp`/`b.hs` bounds check is
+emitted before every array/slice load and store. Out-of-bounds access branches
+to `_galvanic_panic` which exits with code 101. Negative indices are caught
+because the index is compared as an unsigned value against the array length.
 
 **Source:** `src/ir.rs:730`, `src/codegen.rs:926`, `src/lower.rs:17880`
 
@@ -297,10 +297,12 @@ specify the panic mechanism — library call, trap instruction, signal handler.
   the overflow case, branching to `_galvanic_panic`. (Claim 4q)
 - Out-of-bounds indexing: `cmp`/`b.hs` bounds check before every array/slice
   load and store; out-of-bounds branches to `_galvanic_panic`. (Claim 4p)
-- `+`, `-`, `*` overflow: no overflow check; arithmetic wraps per 64-bit
-  hardware. This is a known deviation from debug-mode Rust semantics.
-  FLS §6.23 AMBIGUOUS — spec requires debug-mode panic but galvanic uses 64-bit
-  arithmetic throughout and does not insert overflow checks for these operators.
+- `+`, `-`, `*` overflow: a 4-instruction guard is emitted after each add, sub,
+  and mul: `sxtw x9, w{dst}` + `cmp x{dst}, x9` + `b.ne _galvanic_panic`.
+  The check fires when the 64-bit result does not fit in i32 range. (Claim 4s)
+  FLS §6.23 AMBIGUOUS (two gaps): (1) the guard fires based on i32 range even
+  for u32/i64 operands — no type-aware overflow check yet; (2) release-mode
+  wrapping semantics are not implemented — galvanic always panics on overflow.
 
 The panic primitive `_galvanic_panic` calls `sys_exit(101)` directly. No stack
 unwinding, no panic message. This matches the FLS requirement (panics terminate
