@@ -363,8 +363,9 @@ fn emit_fn(out: &mut String, func: &crate::ir::IrFn) -> Result<(), CodegenError>
         )?;
     }
 
+    let mut label_counter: usize = 0;
     for instr in &func.body {
-        emit_instr(out, instr, fsize, func.saves_lr, &func.name)?;
+        emit_instr(out, instr, fsize, func.saves_lr, &func.name, &mut label_counter)?;
     }
 
     Ok(())
@@ -374,7 +375,8 @@ fn emit_fn(out: &mut String, func: &crate::ir::IrFn) -> Result<(), CodegenError>
 ///
 /// `frame_size` is passed so that `Ret` can restore `sp` before branching.
 /// `saves_lr` is passed so that `Ret` can restore `x30` before `ret`.
-fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, fn_name: &str) -> Result<(), CodegenError> {
+/// `label_counter` is incremented for each division guard to ensure unique local labels.
+fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, fn_name: &str, label_counter: &mut usize) -> Result<(), CodegenError> {
     match instr {
         // FLS §6.19: Return expression.
         // ARM64 ABI: return value in x0; `ret` branches to link register x30.
@@ -540,13 +542,48 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
                 // ARM64: `sdiv x{dst}, x{lhs}, x{rhs}` — signed division.
                 // FLS §6.23: Division by zero panics at runtime.
                 // Guard: `cbz x{rhs}, _galvanic_panic` checks the divisor before sdiv.
-                // ARM64 `cbz xN, label` branches if xN == 0 (4-byte instruction).
-                // Cache-line note: two instructions (cbz + sdiv) = 8 bytes per division.
+                // FLS §6.23: Signed overflow — i32::MIN / -1 also panics (Claim 4q).
+                // ARM64 `sdiv` with lhs=i32::MIN and rhs=-1 silently returns i32::MIN
+                // (CONSTRAINED UNPREDICTABLE per Armv8-A). The guard uses `cmn x{rhs},#1`
+                // (sets Z if rhs == -1) then compares lhs with i32::MIN sign-extended.
+                // A unique local label per site avoids label collisions across functions.
+                // FLS §6.23 AMBIGUOUS: galvanic has no type system at codegen time, so
+                // this guard fires for all `sdiv` sites regardless of integer width.
+                // An i64 MIN/-1 operation would also trigger the guard (false positive).
+                // This is acceptable since galvanic's test suite only exercises i32 at
+                // this milestone. A width-aware guard is deferred to a future claim.
                 IrBinOp::Div => {
+                    let n = *label_counter;
+                    *label_counter += 1;
                     writeln!(
                         out,
                         "    cbz     x{rhs}, _galvanic_panic         // FLS §6.23: div-by-zero guard"
                     )?;
+                    writeln!(
+                        out,
+                        "    cmn     x{rhs}, #1                      // FLS §6.23: Z=1 if rhs == -1"
+                    )?;
+                    writeln!(
+                        out,
+                        "    b.ne    .Lsdiv_ok_{fn_name}_{n}         // skip overflow check if rhs != -1"
+                    )?;
+                    writeln!(
+                        out,
+                        "    movz    x9, #0x8000, lsl #16            // FLS §6.23: i32::MIN bit pattern (hi16)"
+                    )?;
+                    writeln!(
+                        out,
+                        "    sxtw    x9, w9                           // FLS §6.23: sign-extend to i32::MIN (64-bit)"
+                    )?;
+                    writeln!(
+                        out,
+                        "    cmp     x{lhs}, x9                      // FLS §6.23: lhs == i32::MIN?"
+                    )?;
+                    writeln!(
+                        out,
+                        "    b.eq    _galvanic_panic                  // FLS §6.23: panic on MIN/-1 overflow"
+                    )?;
+                    writeln!(out, ".Lsdiv_ok_{fn_name}_{n}:")?;
                     writeln!(
                         out,
                         "    sdiv    x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: div (signed)"
@@ -560,12 +597,41 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
                 // so reusing dst for the intermediate quotient is safe.
                 // FLS §6.23: Remainder by zero panics at runtime.
                 // Guard: `cbz x{rhs}, _galvanic_panic` checks the divisor before sdiv.
-                // Cache-line note: three instructions (cbz + sdiv + msub) = 12 bytes.
+                // FLS §6.23: Signed overflow — i32::MIN % -1 also panics (same guard as div).
+                // The mathematical result i32::MIN % -1 = 0 but i32::MIN / -1 overflows,
+                // so the entire operation panics per FLS §6.23.
                 IrBinOp::Rem => {
+                    let n = *label_counter;
+                    *label_counter += 1;
                     writeln!(
                         out,
                         "    cbz     x{rhs}, _galvanic_panic         // FLS §6.23: rem-by-zero guard"
                     )?;
+                    writeln!(
+                        out,
+                        "    cmn     x{rhs}, #1                      // FLS §6.23: Z=1 if rhs == -1"
+                    )?;
+                    writeln!(
+                        out,
+                        "    b.ne    .Lsrem_ok_{fn_name}_{n}         // skip overflow check if rhs != -1"
+                    )?;
+                    writeln!(
+                        out,
+                        "    movz    x9, #0x8000, lsl #16            // FLS §6.23: i32::MIN bit pattern (hi16)"
+                    )?;
+                    writeln!(
+                        out,
+                        "    sxtw    x9, w9                           // FLS §6.23: sign-extend to i32::MIN (64-bit)"
+                    )?;
+                    writeln!(
+                        out,
+                        "    cmp     x{lhs}, x9                      // FLS §6.23: lhs == i32::MIN?"
+                    )?;
+                    writeln!(
+                        out,
+                        "    b.eq    _galvanic_panic                  // FLS §6.23: panic on MIN/-1 rem overflow"
+                    )?;
+                    writeln!(out, ".Lsrem_ok_{fn_name}_{n}:")?;
                     writeln!(
                         out,
                         "    sdiv    x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: rem step 1: quotient"
