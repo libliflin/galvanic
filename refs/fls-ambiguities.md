@@ -284,16 +284,23 @@ Rust's de-facto behavior.
 indexing (§6.9), and integer overflow in debug mode (§6.23), but does not
 specify the panic mechanism — library call, trap instruction, signal handler.
 
-**Galvanic's choice:** No panic infrastructure is emitted at this milestone.
-- Divide-by-zero: `sdiv`/`udiv` emit no guard; behavior is undefined on ARM64
-  (division by zero produces zero for `udiv`, undefined for `sdiv`).
+**Galvanic's choice (updated — Claim 4m):**
+- Divide-by-zero with a literal 0 divisor: **caught at compile time** in
+  `src/lower.rs`. The lowering pass rejects integer `/` and `%` expressions
+  whose RHS is `LitInt(0)` before emitting any IR. This covers the common
+  programming error (e.g. `x / 0`) without requiring panic infrastructure.
+  Non-literal zero divisors (e.g. `x / y` where `y` may be zero at runtime)
+  are not checked — they emit `sdiv`/`udiv` without a guard.
 - Out-of-bounds: no bounds check before load/store.
 - Overflow: no overflow check; arithmetic wraps per the hardware.
 
-All three are tracked as deferred work requiring a panic runtime.
+The literal-divisor check and the §6.18 exhaustiveness check (Claim 4l)
+form a consistent methodology: conservatively reject the statically-obvious
+UB case at compile time; defer the general case to when panic infrastructure
+is available.
 
-**Source:** `src/ir.rs:282`, `src/codegen.rs:496`, `src/codegen.rs:514`,
-`src/lower.rs:10618`
+**Source:** `src/lower.rs` (literal zero check in binary op lowering),
+`src/codegen.rs:496`, `src/codegen.rs:514`
 
 ---
 

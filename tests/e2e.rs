@@ -34246,3 +34246,91 @@ fn main() -> i32 { to_int(true) }\n",
         "result must not be constant-folded to #5: {asm}"
     );
 }
+
+// ── Claim 4m: §6.23 divide-by-zero literal divisor check ─────────────────────
+
+/// Claim 4m: literal zero divisor for i32 `/` rejected at compile time.
+///
+/// FLS §6.23: Division by zero panics at runtime. Galvanic catches the
+/// obvious case — a literal `0` divisor — at compile time during lowering.
+/// This test calls `lower()` directly and asserts it returns an error.
+#[test]
+fn claim_4m_literal_zero_div_i32_rejected() {
+    let src = "fn main() -> i32 { 10 / 0 }\n";
+    let tokens = galvanic::lexer::tokenize(src).expect("lex failed");
+    let sf = galvanic::parser::parse(&tokens, src).expect("parse failed");
+    let result = galvanic::lower::lower(&sf, src);
+    assert!(
+        result.is_err(),
+        "expected compile-time error for `10 / 0`, but lower() returned Ok"
+    );
+    let msg = result.err().unwrap().to_string();
+    assert!(
+        msg.contains("divide by zero"),
+        "expected error mentioning 'divide by zero', got: {msg}"
+    );
+}
+
+/// Claim 4m: literal zero divisor for i32 `%` rejected at compile time.
+///
+/// FLS §6.23: Remainder with a zero divisor panics. Galvanic catches the
+/// literal case at compile time.
+#[test]
+fn claim_4m_literal_zero_rem_i32_rejected() {
+    let src = "fn main() -> i32 { 10 % 0 }\n";
+    let tokens = galvanic::lexer::tokenize(src).expect("lex failed");
+    let sf = galvanic::parser::parse(&tokens, src).expect("parse failed");
+    let result = galvanic::lower::lower(&sf, src);
+    assert!(
+        result.is_err(),
+        "expected compile-time error for `10 % 0`, but lower() returned Ok"
+    );
+    let msg = result.err().unwrap().to_string();
+    assert!(
+        msg.contains("divide by zero"),
+        "expected error mentioning 'divide by zero', got: {msg}"
+    );
+}
+
+/// Claim 4m: literal zero divisor for u32 `/` rejected at compile time.
+///
+/// The check applies to unsigned integer types as well as signed.
+#[test]
+fn claim_4m_literal_zero_div_u32_rejected() {
+    let src = "fn main() -> i32 { let x: u32 = 10; let y: u32 = x / 0u32; y as i32 }\n";
+    let tokens = galvanic::lexer::tokenize(src).expect("lex failed");
+    let sf = galvanic::parser::parse(&tokens, src).expect("parse failed");
+    let result = galvanic::lower::lower(&sf, src);
+    assert!(
+        result.is_err(),
+        "expected compile-time error for `x / 0u32`, but lower() returned Ok"
+    );
+    let msg = result.err().unwrap().to_string();
+    assert!(
+        msg.contains("divide by zero"),
+        "expected error mentioning 'divide by zero', got: {msg}"
+    );
+}
+
+/// Claim 4m: non-literal divisor accepted — emits runtime `sdiv`.
+///
+/// FLS §6.23: When the divisor is a variable (not a literal 0), galvanic
+/// must emit a runtime `sdiv` instruction. The compile-time check must NOT
+/// fire for non-literal divisors.
+/// Assembly inspection verifies the instruction is emitted at runtime.
+#[test]
+fn claim_4m_nonzero_literal_divisor_accepted_emits_sdiv() {
+    let asm = compile_to_asm(
+        "fn divide(a: i32, b: i32) -> i32 { a / b }\n\
+fn main() -> i32 { divide(10, 2) }\n",
+    );
+    assert!(
+        asm.contains("sdiv"),
+        "expected 'sdiv' instruction for runtime division, got:\n{asm}"
+    );
+    // divide(10, 2) = 5 at runtime — must not be constant-folded.
+    assert!(
+        !asm.contains("mov     x0, #5"),
+        "result must not be constant-folded to #5: {asm}"
+    );
+}
