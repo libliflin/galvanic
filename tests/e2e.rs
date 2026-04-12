@@ -1181,6 +1181,41 @@ fn claim_4o_runtime_rem_zero_exits_101() {
     assert_eq!(code, 101, "expected exit 101 (galvanic panic) for `5 % 0`, got {code}");
 }
 
+/// Claim 4o: runtime exit code 101 on unsigned divide-by-zero via function parameter.
+///
+/// FLS §6.23: Division by zero panics regardless of signedness.
+/// ARM64 `udiv` with zero divisor returns 0 without an exception — the cbz guard
+/// is required to intercept this case and call `_galvanic_panic`.
+#[test]
+fn claim_4o_runtime_udiv_zero_exits_101() {
+    let exit = compile_and_run(
+        "fn udiv(x: u32, y: u32) -> u32 { x / y }\nfn main() -> i32 { udiv(5, 0) as i32 }\n",
+    );
+    let Some(code) = exit else { return }; // skip if toolchain unavailable
+    assert_eq!(code, 101, "expected exit 101 (galvanic panic) for unsigned `5 / 0`, got {code}");
+}
+
+/// Claim 4o: cbz guard appears immediately before sdiv in the instruction stream.
+///
+/// This test verifies ordering, not just presence. A future refactor that accidentally
+/// swapped the guard and the division instruction would still pass the existence
+/// checks in `claim_4o_sdiv_emits_cbz_guard` — this test catches that regression.
+///
+/// FLS §6.23: The guard must execute before the division; otherwise a zero divisor
+/// would silently produce 0 (ARM64 architectural behavior for sdiv with xM=0).
+#[test]
+fn claim_4o_cbz_guard_precedes_sdiv_in_stream() {
+    let asm = compile_to_asm(
+        "fn f(x: i32, y: i32) -> i32 { x / y }\nfn main() -> i32 { f(10, 2) }\n",
+    );
+    let cbz_pos = asm.find("cbz").expect("cbz guard must be present in division asm");
+    let sdiv_pos = asm.find("sdiv").expect("sdiv must be present in division asm");
+    assert!(
+        cbz_pos < sdiv_pos,
+        "cbz guard must appear before sdiv in the instruction stream; cbz at {cbz_pos}, sdiv at {sdiv_pos}:\n{asm}"
+    );
+}
+
 // ── Milestone 11: lazy boolean operators && and || ───────────────────────────
 //
 // FLS §6.5.8: Lazy boolean operator expressions. Both `&&` and `||` use
