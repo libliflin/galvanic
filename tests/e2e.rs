@@ -957,19 +957,21 @@ fn runtime_div_emits_sdiv() {
     );
 }
 
-/// Assembly inspection: `x / y` with parameters emits `sdiv` with NO overflow guard.
+/// Assembly inspection: `x / y` with parameters emits a `cbz` zero guard + `sdiv`.
 ///
-/// FLS §6.23: `i32::MIN / -1` must panic (signed overflow outside i32 range).
-/// FLS §6.23 AMBIGUOUS: galvanic does NOT insert a MIN/-1 guard before `sdiv`.
+/// FLS §6.23: Division by zero must panic at runtime. Galvanic implements this
+/// with a `cbz xRHS, _galvanic_panic` guard before every `sdiv`.
+///
+/// FLS §6.23 AMBIGUOUS: `i32::MIN / -1` signed overflow is a SEPARATE case.
 /// ARM64 `sdiv` with lhs=i32::MIN and rhs=-1 returns 2147483648 (a positive 64-bit
-/// value outside i32 range) rather than panicking — an architectural difference from
-/// x86 `idiv` which raises SIGFPE on the equivalent operation.
+/// value outside i32 range) rather than panicking. Galvanic does NOT insert a
+/// MIN/-1 overflow guard — only the zero-divisor guard is present.
 ///
-/// This test pins the documented divergence at the assembly level. If galvanic adds
-/// an overflow guard in the future (a cmp+branch before sdiv), this test will fail
-/// and claims.md C8 must be updated to reflect the narrowed divergence.
+/// This test verifies:
+/// 1. A `cbz` zero-guard IS emitted before `sdiv` (runtime divide-by-zero check).
+/// 2. No MIN/-1 overflow guard (0x80000000) is present (FLS §6.23 AMBIGUOUS).
 ///
-/// Companion to `runtime_div_emits_sdiv` and claim C8.
+/// Companion to `runtime_div_emits_sdiv`.
 #[test]
 fn runtime_sdiv_no_min_neg_one_guard() {
     let asm = compile_to_asm(
@@ -980,29 +982,19 @@ fn runtime_sdiv_no_min_neg_one_guard() {
         asm.contains("sdiv"),
         "expected `sdiv` in `fn f(x: i32, y: i32) -> i32 {{ x / y }}`, got:\n{asm}"
     );
+    // FLS §6.23: cbz zero-guard must be present before sdiv.
+    assert!(
+        asm.contains("cbz") && asm.contains("_galvanic_panic"),
+        "expected `cbz xRHS, _galvanic_panic` div-by-zero guard before `sdiv`, got:\n{asm}"
+    );
     // FLS §6.23 AMBIGUOUS: no MIN/-1 overflow guard.
     // A conforming compiler would emit: cmp x{lhs}, #0x80000000; b.eq <panic>
-    // Galvanic emits bare `sdiv` without this check.
+    // Galvanic emits only the zero guard, not this check.
     // The constant 0x80000000 (i32::MIN) would appear in the assembly if such a
     // guard existed. Its absence confirms the documented divergence from FLS §6.23.
     assert!(
         !asm.contains("0x80000000"),
         "unexpected MIN/-1 overflow guard in `f` — FLS §6.23 divergence narrowed; update claims.md:\n{asm}"
-    );
-    // Confirm no conditional branch in the division function body (no guard of any kind)
-    let f_section: String = asm
-        .lines()
-        .skip_while(|l| !l.trim_start().starts_with("f:"))
-        .take_while(|l| l.trim_start().starts_with("f:") || !l.contains(':') || l.contains("//"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let has_branch = f_section.lines().any(|l| {
-        let t = l.trim_start();
-        t.starts_with("cbz") || t.starts_with("cbnz") || t.starts_with("b.")
-    });
-    assert!(
-        !has_branch,
-        "unexpected conditional branch in division function — no guard expected per FLS §6.23 AMBIGUOUS:\n{f_section}"
     );
 }
 
@@ -1059,6 +1051,134 @@ fn runtime_rem_emits_sdiv_and_msub_not_folded() {
         !asm.contains("mov     x0, #1\n"),
         "remainder must not constant-fold to `mov x0, #1`:\n{asm}"
     );
+}
+
+// ── Claim 4o: §6.23 runtime divide-by-zero guard ─────────────────────────────
+//
+// FLS §6.23: Division and remainder by zero ALWAYS panic, even in release mode.
+// This claim implements galvanic's first runtime panic check: a `cbz` guard
+// before every `sdiv`, `udiv`, and rem-`sdiv` that branches to `_galvanic_panic`
+// if the divisor register is zero.
+//
+// `_galvanic_panic` is galvanic's panic primitive: an immediate exit(101) via
+// Linux syscall. Exit code 101 is galvanic's internal sentinel, distinct from
+// normal exit values and from SIGABRT-from-libc (134). The FLS requires a panic
+// but does not mandate the mechanism (FLS §6.23 AMBIGUOUS).
+//
+// The claim has three parts:
+//   1. Assembly inspection: cbz guard + _galvanic_panic in asm for div programs.
+//   2. Assembly inspection: _galvanic_panic absent for non-division programs.
+//   3. Exit-code test: runtime zero divisor causes exit 101 (Linux/qemu only).
+
+/// Claim 4o: signed division emits `cbz xRHS, _galvanic_panic` before `sdiv`.
+///
+/// FLS §6.23: Division by zero panics at runtime.
+/// ARM64: `cbz xN, label` branches if xN == 0. Placed before `sdiv` to guard
+/// the divisor register before it is consumed by the division instruction.
+///
+/// The assembly inspection test uses function parameters (not literals) so the
+/// divisor is unknown at compile time — this exercises the runtime guard path.
+#[test]
+fn claim_4o_sdiv_emits_cbz_guard() {
+    let asm = compile_to_asm(
+        "fn f(x: i32, y: i32) -> i32 { x / y }\nfn main() -> i32 { f(10, 2) }\n",
+    );
+    assert!(
+        asm.contains("cbz") && asm.contains("_galvanic_panic"),
+        "expected `cbz xRHS, _galvanic_panic` div-by-zero guard before `sdiv`, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("sdiv"),
+        "expected `sdiv` after guard in division function, got:\n{asm}"
+    );
+    // Guard must be a cbz on the RHS register, not a cmp+branch combo
+    assert!(
+        !asm.contains("0x80000000"),
+        "must not emit MIN/-1 overflow guard — only zero-divisor guard expected:\n{asm}"
+    );
+}
+
+/// Claim 4o: remainder emits `cbz xRHS, _galvanic_panic` before the `sdiv` step.
+///
+/// FLS §6.23: Remainder by zero panics at runtime (same rule as division).
+/// The rem sequence is: cbz guard → sdiv (quotient) → msub (lhs - q*rhs).
+#[test]
+fn claim_4o_rem_emits_cbz_guard() {
+    let asm = compile_to_asm(
+        "fn f(x: i32, y: i32) -> i32 { x % y }\nfn main() -> i32 { f(10, 3) }\n",
+    );
+    assert!(
+        asm.contains("cbz") && asm.contains("_galvanic_panic"),
+        "expected `cbz xRHS, _galvanic_panic` rem-by-zero guard, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("sdiv") && asm.contains("msub"),
+        "expected `sdiv` + `msub` after guard in remainder function, got:\n{asm}"
+    );
+}
+
+/// Claim 4o: unsigned division emits `cbz xRHS, _galvanic_panic` before `udiv`.
+///
+/// FLS §6.23: Division by zero panics regardless of signedness.
+/// ARM64 `udiv` with zero divisor returns zero without an exception —
+/// the cbz guard is required to match FLS semantics.
+#[test]
+fn claim_4o_udiv_emits_cbz_guard() {
+    let asm = compile_to_asm(
+        "fn f(x: u32, y: u32) -> u32 { x / y }\nfn main() -> i32 { f(10, 2) as i32 }\n",
+    );
+    assert!(
+        asm.contains("cbz") && asm.contains("_galvanic_panic"),
+        "expected `cbz xRHS, _galvanic_panic` udiv-by-zero guard, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("udiv"),
+        "expected `udiv` after guard in unsigned division function, got:\n{asm}"
+    );
+}
+
+/// Claim 4o: `_galvanic_panic` is NOT emitted for programs with no division.
+///
+/// Programs that do not use div/rem/udiv must not contain `_galvanic_panic`
+/// in their assembly. This prevents the panic handler from contaminating
+/// assembly inspection tests for unrelated operations.
+#[test]
+fn claim_4o_galvanic_panic_absent_without_division() {
+    // Pure arithmetic with no division
+    let asm = compile_to_asm("fn main() -> i32 { 2 + 3 * 4 - 1 }\n");
+    assert!(
+        !asm.contains("_galvanic_panic"),
+        "`_galvanic_panic` must not appear in assembly for programs with no division:\n{asm}"
+    );
+}
+
+/// Claim 4o: runtime exit code 101 on divide-by-zero via function parameter.
+///
+/// FLS §6.23: Division by zero panics. Galvanic's panic exits with code 101.
+/// This test requires the ARM64 cross-toolchain and qemu — it is a no-op on macOS.
+///
+/// The divisor is passed as a parameter so it is unknown at compile time and
+/// the runtime cbz guard is exercised (not the compile-time literal check from
+/// Claim 4m).
+#[test]
+fn claim_4o_runtime_div_zero_exits_101() {
+    let exit = compile_and_run(
+        "fn div(x: i32, y: i32) -> i32 { x / y }\nfn main() -> i32 { div(5, 0) }\n",
+    );
+    let Some(code) = exit else { return }; // skip if toolchain unavailable
+    assert_eq!(code, 101, "expected exit 101 (galvanic panic) for `5 / 0`, got {code}");
+}
+
+/// Claim 4o: runtime exit code 101 on remainder-by-zero via function parameter.
+///
+/// FLS §6.23: Remainder by zero panics. Same guard as division.
+#[test]
+fn claim_4o_runtime_rem_zero_exits_101() {
+    let exit = compile_and_run(
+        "fn rem(x: i32, y: i32) -> i32 { x % y }\nfn main() -> i32 { rem(5, 0) }\n",
+    );
+    let Some(code) = exit else { return }; // skip if toolchain unavailable
+    assert_eq!(code, 101, "expected exit 101 (galvanic panic) for `5 % 0`, got {code}");
 }
 
 // ── Milestone 11: lazy boolean operators && and || ───────────────────────────
