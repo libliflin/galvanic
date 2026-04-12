@@ -104,12 +104,21 @@ For `&[T]`, length is the element count.
 not specify the panic mechanism — whether it is a library call, a trap
 instruction, or something else.
 
-**Galvanic's choice:** No bounds check is emitted at this milestone. Out-of-
-bounds access produces undefined behavior at the assembly level (load/store at
-wrong address). This is a known deviation; the check is deferred until a panic
-infrastructure is in place.
+**Galvanic's choice (updated — Claim 4p):** Every array and slice index
+operation emits a runtime bounds check before the load or store:
 
-**Source:** `src/ir.rs:730`, `src/codegen.rs:926`, `src/lower.rs:17880`
+```asm
+    cmp     x{index}, #{len}      // unsigned compare: index vs length
+    b.hs    _galvanic_panic        // panic if index >= len (unsigned ≥)
+```
+
+The `b.hs` (branch if higher-or-same, unsigned ≥) also catches negative
+indices because sign-negative values are large unsigned integers.
+`_galvanic_panic` exits with code 101. The check is emitted only when `len > 0`
+(zero-length arrays have no bounds to check and no loads to guard).
+
+**Source:** `src/codegen.rs` (Instr::LoadIndexed, StoreIndexed, LoadIndexedF64,
+LoadIndexedF32 emission paths)
 
 ---
 
@@ -284,23 +293,47 @@ Rust's de-facto behavior.
 indexing (§6.9), and integer overflow in debug mode (§6.23), but does not
 specify the panic mechanism — library call, trap instruction, signal handler.
 
-**Galvanic's choice (updated — Claim 4m):**
-- Divide-by-zero with a literal 0 divisor: **caught at compile time** in
-  `src/lower.rs`. The lowering pass rejects integer `/` and `%` expressions
-  whose RHS is `LitInt(0)` before emitting any IR. This covers the common
-  programming error (e.g. `x / 0`) without requiring panic infrastructure.
-  Non-literal zero divisors (e.g. `x / y` where `y` may be zero at runtime)
-  are not checked — they emit `sdiv`/`udiv` without a guard.
-- Out-of-bounds: no bounds check before load/store.
-- Overflow: no overflow check; arithmetic wraps per the hardware.
+**Galvanic's choice (updated — Claims 4m, 4o, 4p, 4q):**
 
-The literal-divisor check and the §6.18 exhaustiveness check (Claim 4l)
-form a consistent methodology: conservatively reject the statically-obvious
-UB case at compile time; defer the general case to when panic infrastructure
-is available.
+- **Literal-zero divisor (Claim 4m):** Caught at compile time in `src/lower.rs`.
+  Integer `/` and `%` expressions whose RHS is `LitInt(0)` are rejected before
+  emitting any IR. Covers `x / 0` statically.
 
-**Source:** `src/lower.rs` (literal zero check in binary op lowering),
-`src/codegen.rs:496`, `src/codegen.rs:514`
+- **Runtime zero divisor (Claim 4o):** Every `sdiv`, `udiv`, and `msub`-based
+  remainder emits a `cbz xRHS, _galvanic_panic` guard before the division
+  instruction. Fires when the divisor is zero at runtime.
+
+- **Signed overflow — i32::MIN / -1 (Claim 4q):** Every `sdiv` and the `sdiv`
+  inside the remainder sequence emits a second guard after the zero check:
+  ```asm
+      cmn     x{rhs}, #1                      // set Z if rhs == -1
+      b.ne    .Lsdiv_ok_N                     // skip if rhs != -1
+      movz    x9, #0x8000, lsl #16            // load i32::MIN high half
+      sxtw    x9, w9                           // sign-extend to 0xFFFFFFFF80000000
+      cmp     x{lhs}, x9                       // compare lhs to i32::MIN
+      b.eq    _galvanic_panic                  // panic on overflow
+  .Lsdiv_ok_N:
+  ```
+  AMBIGUOUS: Galvanic does not track integer width at codegen time, so this
+  guard also fires for i64 MIN / -1 (a false positive). The test suite currently
+  only exercises i32; i64 is a documented limitation.
+
+- **Unsigned division (Claim 4o):** `udiv` and unsigned remainder emit only the
+  `cbz` zero guard. Unsigned division cannot overflow, so no MIN/-1 guard is
+  needed.
+
+- **Out-of-bounds indexing (Claim 4p):** Covered by `cmp`/`b.hs` guards; see
+  §4.9 entry above.
+
+- **Non-division overflow (§6.23):** `+`, `-`, `*` still emit 64-bit arithmetic
+  without overflow traps. Debug-mode wrapping-to-trap is deferred.
+
+**`_galvanic_panic`:** defined in `src/codegen.rs`, emitted unconditionally
+when any panicking instruction appears. Bare `exit(101)` syscall. Exit code 101
+is galvanic's runtime-panic sentinel, distinct from normal exit codes 0–100.
+
+**Source:** `src/lower.rs` (literal zero check), `src/codegen.rs`
+(IrBinOp::Div, IrBinOp::Rem, IrBinOp::UDiv, LoadIndexed/StoreIndexed)
 
 ---
 

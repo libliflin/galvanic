@@ -278,14 +278,15 @@ pub enum IrBinOp {
     /// Signed integer division `/`. FLS §6.5.5.
     ///
     /// ARM64: `sdiv x{dst}, x{lhs}, x{rhs}`.
-    /// FLS §6.23: Division by zero panics at runtime (debug mode). Galvanic
-    /// does not yet insert a divide-by-zero check — this is FLS §6.23 AMBIGUOUS:
-    /// the spec requires a panic but the mechanism is unspecified.
+    /// FLS §6.23: Division by zero panics at runtime. Galvanic emits two guards
+    /// before every `sdiv`: a `cbz` zero-divisor guard (Claim 4o) and a
+    /// `cmn`/`movz`/`sxtw`/`cmp`/`b.eq` MIN/-1 overflow guard (Claim 4q).
     Div,
     /// Signed integer remainder `%`. FLS §6.5.5.
     ///
     /// Computed as `lhs - (lhs / rhs) * rhs` using `sdiv` + `msub`.
-    /// ARM64: two instructions — see codegen for details.
+    /// ARM64: two instructions — see codegen for details. Both `cbz` and
+    /// MIN/-1 guards are emitted before the `sdiv` step (same as `Div`).
     Rem,
 
     /// Bitwise AND `&`. FLS §6.5.6.
@@ -325,8 +326,8 @@ pub enum IrBinOp {
     ///
     /// Used when the operand type is unsigned (`u8`, `u16`, `u32`, `u64`, `usize`).
     /// ARM64: `udiv x{dst}, x{lhs}, x{rhs}`.
-    /// FLS §4.1: Unsigned integers wrap on division by zero — galvanic does not
-    /// yet insert the divide-by-zero check (FLS §6.23 AMBIGUOUS on the mechanism).
+    /// FLS §6.23: Zero divisor panics (Claim 4o); unsigned division cannot
+    /// overflow so no MIN/-1 guard is emitted (unsigned division is exempt).
     UDiv,
 
     /// Logical (unsigned) right shift `>>`. FLS §6.5.7.

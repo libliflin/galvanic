@@ -75,9 +75,10 @@ pub fn emit_asm(module: &Module) -> Result<String, CodegenError> {
 
     writeln!(out, "    .text")?;
 
+    let mut label_ctr: usize = 0;
     for func in &module.fns {
         writeln!(out)?;
-        emit_fn(&mut out, func)?;
+        emit_fn(&mut out, func, &mut label_ctr)?;
     }
 
     // Emit trampoline functions for capturing closures passed as `impl Fn`.
@@ -331,7 +332,7 @@ fn frame_size(stack_slots: u8) -> u32 {
 /// Cache-line note: `sub sp, sp, #N` is one 4-byte instruction — the frame
 /// setup occupies one slot in the first cache line of the function body.
 /// The lr save/restore pair (`str`/`ldr`) each adds one 4-byte instruction.
-fn emit_fn(out: &mut String, func: &crate::ir::IrFn) -> Result<(), CodegenError> {
+fn emit_fn(out: &mut String, func: &crate::ir::IrFn, label_ctr: &mut usize) -> Result<(), CodegenError> {
     writeln!(out, "    // fn {} — FLS §9", func.name)?;
     writeln!(out, "    .global {}", func.name)?;
     writeln!(out, "{}:", func.name)?;
@@ -364,7 +365,7 @@ fn emit_fn(out: &mut String, func: &crate::ir::IrFn) -> Result<(), CodegenError>
     }
 
     for instr in &func.body {
-        emit_instr(out, instr, fsize, func.saves_lr, &func.name)?;
+        emit_instr(out, instr, fsize, func.saves_lr, &func.name, label_ctr)?;
     }
 
     Ok(())
@@ -374,7 +375,7 @@ fn emit_fn(out: &mut String, func: &crate::ir::IrFn) -> Result<(), CodegenError>
 ///
 /// `frame_size` is passed so that `Ret` can restore `sp` before branching.
 /// `saves_lr` is passed so that `Ret` can restore `x30` before `ret`.
-fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, fn_name: &str) -> Result<(), CodegenError> {
+fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, fn_name: &str, label_ctr: &mut usize) -> Result<(), CodegenError> {
     match instr {
         // FLS §6.19: Return expression.
         // ARM64 ABI: return value in x0; `ret` branches to link register x30.
@@ -539,13 +540,58 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
                 // FLS §6.5.5: Signed integer division.
                 // ARM64: `sdiv x{dst}, x{lhs}, x{rhs}` — signed division.
                 // FLS §6.23: Division by zero panics at runtime.
-                // Guard: `cbz x{rhs}, _galvanic_panic` checks the divisor before sdiv.
-                // ARM64 `cbz xN, label` branches if xN == 0 (4-byte instruction).
-                // Cache-line note: two instructions (cbz + sdiv) = 8 bytes per division.
+                // Guard 1: `cbz x{rhs}, _galvanic_panic` — zero divisor.
+                // Guard 2: `cmn x{rhs}, #1` / cmp-with-MIN — signed overflow (i32::MIN / -1).
+                //   cmn xN, #1 sets the Z flag when xN == -1 (all bits set in 64-bit register).
+                //   If rhs == -1, load i32::MIN into x9 via movz+sxtw and compare to lhs.
+                //   If lhs == i32::MIN and rhs == -1, the result overflows — panic.
+                //
+                // ARM64 encoding:
+                //   movz x9, #0x8000, lsl #16  → x9 = 0x0000000080000000
+                //   sxtw x9, w9                → x9 = 0xFFFFFFFF80000000 (i32::MIN sign-ext)
+                //   cmp  x{lhs}, x9            → flags: lhs - i32::MIN (signed)
+                //
+                // FLS §6.23 AMBIGUOUS: galvanic does not track integer width at codegen
+                // time, so this guard also fires for i64 MIN / -1 (a false positive).
+                // All current galvanic tests use i32; i64 is documented as a known
+                // limitation. Source: src/codegen.rs (IrBinOp::Div emission).
+                //
+                // Cache-line note: 9 instructions (cbz + cmn + b.ne + movz + sxtw + cmp +
+                // b.eq + label + sdiv) = 32 bytes per division — fits in a half cache line.
                 IrBinOp::Div => {
+                    let n = *label_ctr;
+                    *label_ctr += 1;
                     writeln!(
                         out,
                         "    cbz     x{rhs}, _galvanic_panic         // FLS §6.23: div-by-zero guard"
+                    )?;
+                    writeln!(
+                        out,
+                        "    cmn     x{rhs}, #1                      // FLS §6.23: check rhs == -1"
+                    )?;
+                    writeln!(
+                        out,
+                        "    b.ne    .Lsdiv_ok_{n:<20} // FLS §6.23: skip overflow guard if rhs != -1"
+                    )?;
+                    writeln!(
+                        out,
+                        "    movz    x9, #0x8000, lsl #16             // FLS §6.23: load i32::MIN high half"
+                    )?;
+                    writeln!(
+                        out,
+                        "    sxtw    x9, w9                           // FLS §6.23: sign-extend to i32::MIN"
+                    )?;
+                    writeln!(
+                        out,
+                        "    cmp     x{lhs}, x9                      // FLS §6.23: check lhs == i32::MIN"
+                    )?;
+                    writeln!(
+                        out,
+                        "    b.eq    _galvanic_panic                  // FLS §6.23: panic on MIN/-1 overflow"
+                    )?;
+                    writeln!(
+                        out,
+                        ".Lsdiv_ok_{n}:                              // FLS §6.23: safe to divide"
                     )?;
                     writeln!(
                         out,
@@ -559,12 +605,43 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
                 // ARM64 `msub xd, xn, xm, xa` reads all sources before writing xd,
                 // so reusing dst for the intermediate quotient is safe.
                 // FLS §6.23: Remainder by zero panics at runtime.
-                // Guard: `cbz x{rhs}, _galvanic_panic` checks the divisor before sdiv.
-                // Cache-line note: three instructions (cbz + sdiv + msub) = 12 bytes.
+                // Guard 1: cbz zero guard. Guard 2: cmn/cmp MIN/-1 overflow guard.
+                // FLS §6.23 AMBIGUOUS: same i64 false-positive limitation as Div above.
+                // Cache-line note: 10 instructions = 40 bytes.
                 IrBinOp::Rem => {
+                    let n = *label_ctr;
+                    *label_ctr += 1;
                     writeln!(
                         out,
                         "    cbz     x{rhs}, _galvanic_panic         // FLS §6.23: rem-by-zero guard"
+                    )?;
+                    writeln!(
+                        out,
+                        "    cmn     x{rhs}, #1                      // FLS §6.23: check rhs == -1"
+                    )?;
+                    writeln!(
+                        out,
+                        "    b.ne    .Lsrem_ok_{n:<20} // FLS §6.23: skip overflow guard if rhs != -1"
+                    )?;
+                    writeln!(
+                        out,
+                        "    movz    x9, #0x8000, lsl #16             // FLS §6.23: load i32::MIN high half"
+                    )?;
+                    writeln!(
+                        out,
+                        "    sxtw    x9, w9                           // FLS §6.23: sign-extend to i32::MIN"
+                    )?;
+                    writeln!(
+                        out,
+                        "    cmp     x{lhs}, x9                      // FLS §6.23: check lhs == i32::MIN"
+                    )?;
+                    writeln!(
+                        out,
+                        "    b.eq    _galvanic_panic                  // FLS §6.23: panic on MIN/-1 overflow"
+                    )?;
+                    writeln!(
+                        out,
+                        ".Lsrem_ok_{n}:                              // FLS §6.23: safe to compute rem"
                     )?;
                     writeln!(
                         out,
