@@ -8,15 +8,17 @@
 //   - At runtime in debug mode: overflow panics.
 //   - At runtime in release mode: overflow wraps (two's complement).
 //
-// Galvanic does not distinguish debug vs release mode. It uses ARM64 64-bit
-// registers (xN) for i32 arithmetic, so integer overflow at the i32 boundary
-// produces a large positive 64-bit value rather than wrapping to i32::MIN.
-// This is non-conforming with Rust's release-mode 32-bit two's complement
-// wrapping semantics and is documented here as a research output.
+// Galvanic does not distinguish debug vs release mode. After each `add`, `sub`,
+// or `mul` instruction, galvanic emits `sxtw x9, w{dst}` + `cmp x{dst}, x9`
+// + `b.ne _galvanic_panic` to detect signed i32 overflow at runtime (Claim 4s).
 //
-// FLS §6.23 AMBIGUOUS: The FLS does not specify the mechanism by which a
-// panic should be raised (there is no standard panic runtime in no_std
-// environments). Galvanic currently omits overflow checks entirely.
+// FLS §6.23 AMBIGUOUS: The FLS does not specify the panic mechanism. Galvanic
+// uses `_galvanic_panic` (sys_exit with code 101), matching the convention
+// established for divide-by-zero (Claim 4o) and bounds checks (Claim 4p).
+//
+// FLS §6.23 AMBIGUOUS: Galvanic's BinOp IR has no type annotations, so the
+// overflow guard also fires for i64/u32 operations — false positives for
+// non-i32 integer types. Documented in refs/fls-ambiguities.md.
 
 fn add_large(x: i32, y: i32) -> i32 {
     x + y
