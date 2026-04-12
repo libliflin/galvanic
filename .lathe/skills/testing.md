@@ -6,11 +6,13 @@
 ## Test files
 
 ### `tests/e2e.rs` — Full pipeline, end-to-end
-Runs the complete lex → parse → lower → codegen → assemble → link → run pipeline and checks exit codes or assembly output. Tests are gated on tool availability (ARM64 cross-toolchain + qemu-aarch64); they skip gracefully on macOS or any machine missing the tools. CI installs the tools explicitly.
+Runs the complete lex -> parse -> lower -> codegen -> assemble -> link -> run pipeline and checks exit codes or assembly output. Tests are gated on tool availability (ARM64 cross-toolchain + qemu-aarch64); they skip on macOS or any machine missing the tools. CI installs the tools explicitly.
+
+**WARNING: On macOS, `compile_and_run()` tests silently skip and the test harness reports them as "passed."** This is dangerously misleading — hundreds of runtime tests appear green but never actually ran. Only `compile_to_asm()` assembly inspection tests truly execute on macOS. See `.lathe/skills/platform-and-abi.md` for why (Linux syscalls, ELF format, no user-mode QEMU on macOS). **CI on Linux is the only authoritative source for runtime test results.**
 
 Two helper functions drive all tests:
-- `compile_and_run(source)` — full pipeline, returns `Option<i32>` exit code (None = tools not available, test skips)
-- `compile_to_asm(source)` — pipeline through codegen only, returns assembly text string. Use this for assembly inspection tests.
+- `compile_and_run(source)` — full pipeline, returns `Option<i32>` exit code (None = tools not available, **test silently skips on macOS**)
+- `compile_to_asm(source)` — pipeline through codegen only, returns assembly text string. **Works on all platforms.** Use this for assembly inspection tests.
 
 **Assembly inspection tests are mandatory for every new e2e feature.** Exit code tests alone cannot prove the project is emitting runtime instructions rather than constant-folding. The pattern:
 

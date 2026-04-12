@@ -56,6 +56,14 @@ cargo test --lib -- --exact lexer::tests::span_is_eight_bytes
 
 If the tests pass, look at the new tests themselves. A test that passes because it tests the wrong thing is worse than no test.
 
+**CRITICAL — macOS gives false confidence on runtime tests:** On macOS, all `compile_and_run()` tests silently skip and report as "passed." This means `cargo test` on macOS shows green even when runtime behavior is completely broken. Only `compile_to_asm()` assembly inspection tests actually execute on macOS. See `.lathe/skills/platform-and-abi.md` for the full explanation (Linux syscalls, ELF format, no user-mode QEMU on macOS).
+
+**If the builder's change touches codegen (src/codegen.rs), you MUST:**
+1. Verify assembly inspection tests check the new instruction patterns
+2. **Explicitly state in your verification** that runtime correctness depends on CI (Linux)
+3. If CI has already run and failed, diagnose the CI failure — do not rubber-stamp based on local results
+4. Be especially suspicious of changes that add guards/checks to ALL operations of an IR type (e.g., all `IrBinOp::Add`) — the IR has no type annotations, so a guard meant for i32 will also fire on pointer arithmetic, index calculations, and loop counters
+
 ### 3. The litmus test — always apply it
 
 This is the project's core constraint. For every new code path the builder added, apply the litmus:

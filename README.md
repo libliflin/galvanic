@@ -16,11 +16,39 @@ This is not a production compiler. It's a sacrificial anode — it exists to fin
 
 Do not use this to compile anything you care about.
 
+## Platform targets
+
+Galvanic targets **ARM64** and supports two platform ABIs:
+
+| | macOS (Apple Silicon) | Linux ARM64 |
+|---|---|---|
+| **Binary format** | Mach-O | ELF |
+| **Syscall ABI** | `svc #0x80`, number in `x16` | `svc #0`, number in `x8` |
+| **Assembler** | `as` (system) | `aarch64-linux-gnu-as` |
+| **Linker** | `ld` (system) | `aarch64-linux-gnu-ld` |
+| **Local testing** | Native on Apple Silicon | Native on ARM64, QEMU on x86_64 |
+| **CI** | `macos-latest` runner | `ubuntu-latest` + cross-tools + QEMU |
+
+The ARM64 instruction set (add, sub, mul, ldr, str, branches, etc.) is identical across both platforms. The differences are in binary format, entry point conventions, and how the program talks to the OS (syscalls).
+
 ## Building
 
 ```
 cargo build
 cargo test
+```
+
+### macOS (Apple Silicon)
+
+Local development environment. Tests that compile and run ARM64 binaries execute natively — no emulation needed.
+
+### Linux
+
+CI environment. On x86_64 Linux, ARM64 binaries are assembled with the cross-toolchain and executed via `qemu-aarch64` (user-mode emulation). On ARM64 Linux, binaries run natively.
+
+```bash
+# Install cross-tools (Debian/Ubuntu x86_64):
+sudo apt-get install binutils-aarch64-linux-gnu qemu-user
 ```
 
 ## License

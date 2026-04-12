@@ -56,14 +56,46 @@ fn tool_available(tool: &str) -> bool {
 }
 
 /// Returns true if all required tools (assembler, linker, QEMU) are available.
+///
+/// NOTE: galvanic emits Linux ARM64 ELF binaries that use Linux syscalls
+/// (`svc #0` with `x8 = __NR_exit`). These binaries CANNOT execute on macOS
+/// even on Apple Silicon — macOS uses Mach-O format and a different syscall ABI.
+/// On macOS, runtime tests are skipped unless the Linux cross-toolchain AND
+/// `qemu-aarch64` (Linux user-mode emulator) are available. `qemu-aarch64`
+/// requires a Linux host kernel — it is NOT available via Homebrew on macOS.
+///
+/// Practical consequence: runtime e2e tests only execute on Linux (bare metal
+/// or CI). Assembly inspection tests (`compile_to_asm()`) work everywhere.
+/// CI is the authoritative source of truth for runtime test results.
 fn tools_available() -> bool {
-    if std::env::consts::OS != "linux" {
-        return false;
-    }
     let as_ok = tool_available("aarch64-linux-gnu-as");
     let ld_ok = tool_available("aarch64-linux-gnu-ld");
-    let run_ok = std::env::consts::ARCH == "aarch64"
+    // On native ARM64 Linux we can execute directly; otherwise need qemu-aarch64.
+    // On macOS ARM64 we still need qemu-aarch64 because the binary is a Linux ELF
+    // with Linux syscalls — native execution would fail silently or crash.
+    let run_ok = (std::env::consts::OS == "linux" && std::env::consts::ARCH == "aarch64")
         || tool_available("qemu-aarch64");
+    if !as_ok || !ld_ok || !run_ok {
+        if !as_ok {
+            eprintln!("e2e: missing aarch64-linux-gnu-as (install binutils-aarch64-linux-gnu)");
+        }
+        if !ld_ok {
+            eprintln!("e2e: missing aarch64-linux-gnu-ld (install binutils-aarch64-linux-gnu)");
+        }
+        if !run_ok {
+            eprintln!(
+                "e2e: no way to run Linux ARM64 binaries — need native ARM64 Linux or qemu-aarch64"
+            );
+            if std::env::consts::OS != "linux" {
+                eprintln!(
+                    "e2e: NOTE — you are on {}; galvanic binaries use Linux syscalls and \
+                     CANNOT run natively on macOS even on Apple Silicon. \
+                     CI (Linux) is the authoritative test environment for runtime tests.",
+                    std::env::consts::OS
+                );
+            }
+        }
+    }
     as_ok && ld_ok && run_ok
 }
 
@@ -92,7 +124,10 @@ fn compile_and_run(source: &str) -> Option<i32> {
         "galvanic failed to compile (exit {status})"
     );
 
-    let run_status = if std::env::consts::ARCH == "aarch64" {
+    // Native execution requires ARM64 Linux (not just ARM64 hardware — macOS
+    // cannot execute Linux ELF binaries even on Apple Silicon because they use
+    // Linux syscalls via `svc #0`).
+    let run_status = if std::env::consts::OS == "linux" && std::env::consts::ARCH == "aarch64" {
         Command::new(&bin_path)
             .status()
             .expect("failed to run binary natively")

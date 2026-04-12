@@ -83,7 +83,12 @@ On Linux with cross-tools installed, also:
 cargo test --test e2e                    # verify the full pipeline
 ```
 
-If the e2e tests require Linux/qemu and you're on macOS, the CI will run them. Note this in the changelog.
+**CRITICAL — macOS runtime test blindness:** On macOS, `compile_and_run()` tests silently skip and the test harness reports them as "passed." This means `cargo test` on macOS gives a misleadingly green result for runtime tests. Only assembly inspection tests (`compile_to_asm()`) actually execute. **You MUST NOT declare your change correct based solely on macOS test results if your change affects runtime behavior** (codegen, panic guards, syscalls, linking). CI on Linux is the authoritative test environment. See `.lathe/skills/platform-and-abi.md` for details on why macOS cannot run galvanic binaries (Linux syscalls, ELF format, no qemu-aarch64 user-mode on macOS).
+
+If your change modifies `src/codegen.rs` in ways that affect emitted instructions (adding guards, changing instruction sequences), you should:
+1. Run assembly inspection tests locally to verify instruction patterns
+2. **Explicitly note in the changelog** that runtime tests are Linux-only and require CI verification
+3. **Not assume CI will pass** just because local tests passed — local tests only checked assembly text, not execution
 
 **The cache-line constraint:** If your change touches `src/lexer.rs` or `src/ir.rs`, run:
 ```

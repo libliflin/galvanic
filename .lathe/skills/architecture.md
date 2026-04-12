@@ -47,7 +47,9 @@ Translates `SourceFile` → `Module`. Each `FnDef` becomes an `IrFn`. Local vari
 **FLS citation discipline:** every `lower_*` function should cite the FLS section it implements. Ambiguities go as `// FLS §X.Y: AMBIGUOUS — <description>` inline.
 
 ### `src/codegen.rs` — FLS §18.1
-Translates `Module` → ARM64 GAS assembly text. Linear traversal of `Vec<Instr>`. Target: Linux ELF, bare `_start` entry point (no libc). Syscall convention: number in `x8`, args in `x0`–`x5`.
+Translates `Module` → ARM64 GAS assembly text. Linear traversal of `Vec<Instr>`. Bare `_start` entry point (no libc).
+
+**Dual-platform target:** Galvanic targets both macOS ARM64 and Linux ARM64. The ARM64 instructions are identical; only the syscall ABI and binary format differ. See `.lathe/skills/platform-and-abi.md` for the full comparison. Currently only Linux is implemented (syscall via `svc #0`, number in `x8`). macOS support (`svc #0x80`, number in `x16`) is needed.
 
 ## ARM64 calling convention (as implemented)
 
@@ -91,7 +93,14 @@ The gap between "parse fixture" and "e2e codegen" is where future claims live.
 ## Build requirements
 
 - Rust stable (edition 2024)
-- For e2e tests: `binutils-aarch64-linux-gnu`, `qemu-user` (Linux only)
-- `cargo build` and `cargo test --lib` work on macOS; e2e tests skip gracefully
+- For e2e runtime tests on Linux: `binutils-aarch64-linux-gnu`, `qemu-user`
+- For e2e runtime tests on macOS: native `as` and `ld` (once macOS codegen is implemented)
+- `cargo build` and `cargo test --lib` work everywhere; assembly inspection tests work everywhere
 
-The binary shells out to `aarch64-linux-gnu-as` and `aarch64-linux-gnu-ld` when given `-o output`. No other external dependencies.
+The binary shells out to platform-appropriate assembler and linker when given `-o output`. No other external dependencies.
+
+## Platform targets
+
+Galvanic targets ARM64 on both macOS and Linux. The instruction set is identical; only the syscall ABI and binary format differ. See `.lathe/skills/platform-and-abi.md` for the full comparison.
+
+**Current state:** Only Linux ARM64 codegen is implemented. macOS codegen (different syscall convention, Mach-O format) is needed so that developers on Apple Silicon can run the full test suite locally. Until then, runtime e2e tests skip on macOS and only CI (Linux) executes them.
