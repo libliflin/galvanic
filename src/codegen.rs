@@ -372,9 +372,10 @@ fn emit_fn(out: &mut String, func: &crate::ir::IrFn) -> Result<(), CodegenError>
         )?;
     }
 
-    // FLS §6.23: label counter for MIN/-1 overflow guards (Claim 4q).
-    // Each `sdiv`/`srem` site needs a unique local label; this counter
-    // generates `.Lsdiv_ok_{fn_name}_{n}` / `.Lsrem_ok_{fn_name}_{n}`.
+    // FLS §6.23: label counter for overflow guards (Claims 4q, 4s).
+    // Each guarded site needs a unique local label; this counter
+    // generates `.Lsdiv_ok_{fn_name}_{n}` / `.Lsrem_ok_{fn_name}_{n}` /
+    // `.Ladd_ok_{fn_name}_{n}` / `.Lsub_ok_{fn_name}_{n}` / `.Lmul_ok_{fn_name}_{n}`.
     let mut label_ctr: usize = 0;
     for instr in &func.body {
         emit_instr(out, instr, fsize, func.saves_lr, &func.name, &mut label_ctr)?;
@@ -531,25 +532,48 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
         // Signed comparison (signed integers are the only type at this milestone).
         Instr::BinOp { op, dst, lhs, rhs } => {
             match op {
-                // FLS §6.23: ARM64 integer arithmetic uses 64-bit registers (xN),
-                // so these instructions wrap at 2^64, not at i32::MAX (2^31-1).
-                // This means i32 overflow produces a large positive 64-bit value
-                // rather than wrapping to i32::MIN (two's complement 32-bit wrap).
-                // FLS §6.23 AMBIGUOUS: the spec requires debug-mode panic and
-                // release-mode 32-bit wrap; galvanic emits neither — it uses 64-bit
-                // arithmetic throughout. Cache-line: one 4-byte instruction per op.
-                IrBinOp::Add => writeln!(
-                    out,
-                    "    add     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: add; §6.23: 64-bit, no i32 wrap"
-                )?,
-                IrBinOp::Sub => writeln!(
-                    out,
-                    "    sub     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: sub; §6.23: 64-bit, no i32 wrap"
-                )?,
-                IrBinOp::Mul => writeln!(
-                    out,
-                    "    mul     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: mul; §6.23: 64-bit, no i32 wrap"
-                )?,
+                // FLS §6.23: ARM64 integer arithmetic uses 64-bit registers (xN).
+                // After each add/sub/mul, galvanic emits an i32 overflow guard:
+                //   sxtw x9, w{dst}   — sign-extend the 32-bit result to 64 bits
+                //   cmp  x{dst}, x9   — compare 64-bit result to sign-extended 32-bit
+                //   b.ne _galvanic_panic — mismatch → the 32-bit result overflowed
+                //
+                // FLS §6.23 AMBIGUOUS: galvanic applies this guard to all BinOp
+                // results regardless of the declared Rust type. For operands that
+                // are truly i64/u32/usize, this check may fire spuriously (false
+                // positive) or fail to fire for unsigned wrap (false negative).
+                // The scope of Claim 4s is i32 +/-/* in non-const contexts.
+                // Cache-line: 4 instructions (16 bytes) per guarded op.
+                IrBinOp::Add => {
+                    let n = *label_ctr;
+                    *label_ctr += 1;
+                    writeln!(out, "    add     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: add")?;
+                    writeln!(out, "    sxtw    x9, w{dst}                      // FLS §6.23: sign-extend 32-bit result")?;
+                    writeln!(out, "    cmp     x{dst}, x9                      // FLS §6.23: 64-bit vs sign-extended 32-bit")?;
+                    writeln!(out, "    b.eq    .Ladd_ok_{fn_name}_{n}          // FLS §6.23: no overflow → continue")?;
+                    writeln!(out, "    b       _galvanic_panic                 // FLS §6.23: i32 overflow → panic")?;
+                    writeln!(out, ".Ladd_ok_{fn_name}_{n}:")?;
+                }
+                IrBinOp::Sub => {
+                    let n = *label_ctr;
+                    *label_ctr += 1;
+                    writeln!(out, "    sub     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: sub")?;
+                    writeln!(out, "    sxtw    x9, w{dst}                      // FLS §6.23: sign-extend 32-bit result")?;
+                    writeln!(out, "    cmp     x{dst}, x9                      // FLS §6.23: 64-bit vs sign-extended 32-bit")?;
+                    writeln!(out, "    b.eq    .Lsub_ok_{fn_name}_{n}          // FLS §6.23: no overflow → continue")?;
+                    writeln!(out, "    b       _galvanic_panic                 // FLS §6.23: i32 overflow → panic")?;
+                    writeln!(out, ".Lsub_ok_{fn_name}_{n}:")?;
+                }
+                IrBinOp::Mul => {
+                    let n = *label_ctr;
+                    *label_ctr += 1;
+                    writeln!(out, "    mul     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: mul")?;
+                    writeln!(out, "    sxtw    x9, w{dst}                      // FLS §6.23: sign-extend 32-bit result")?;
+                    writeln!(out, "    cmp     x{dst}, x9                      // FLS §6.23: 64-bit vs sign-extended 32-bit")?;
+                    writeln!(out, "    b.eq    .Lmul_ok_{fn_name}_{n}          // FLS §6.23: no overflow → continue")?;
+                    writeln!(out, "    b       _galvanic_panic                 // FLS §6.23: i32 overflow → panic")?;
+                    writeln!(out, ".Lmul_ok_{fn_name}_{n}:")?;
+                }
                 // FLS §6.5.5: Signed integer division.
                 // ARM64: `sdiv x{dst}, x{lhs}, x{rhs}` — signed division.
                 // FLS §6.23: Division by zero panics at runtime.
