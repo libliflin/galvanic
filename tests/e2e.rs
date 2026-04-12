@@ -1182,11 +1182,14 @@ fn claim_4o_udiv_emits_cbz_guard() {
 /// assembly inspection tests for unrelated operations.
 #[test]
 fn claim_4o_galvanic_panic_absent_without_division() {
-    // Pure arithmetic with no division
+    // Pure arithmetic with no division — note: _galvanic_panic IS present now
+    // because Claim 4s adds overflow guards for +, -, * (FLS §6.23).
+    // This test is preserved but updated: verify cbz (division guard) is absent,
+    // while sxtw/b.ne (overflow guard) may be present.
     let asm = compile_to_asm("fn main() -> i32 { 2 + 3 * 4 - 1 }\n");
     assert!(
-        !asm.contains("_galvanic_panic"),
-        "`_galvanic_panic` must not appear in assembly for programs with no division:\n{asm}"
+        !asm.contains("cbz"),
+        "`cbz` (divide-by-zero guard) must not appear in assembly for programs with no division:\n{asm}"
     );
 }
 
@@ -1981,6 +1984,112 @@ fn claim_4r_ushr_emits_cmp_shift_guard() {
         !asm.contains("mov     x0, #42"),
         "must not constant-fold `ushr(84, 1)` to #42:\n{asm}"
     );
+}
+
+// --- Claim 4s: §6.23 arithmetic overflow guard ---
+
+#[test]
+fn claim_4s_add_emits_overflow_guard() {
+    let asm = compile_to_asm("fn f(a: i32, b: i32) -> i32 { a + b }\nfn main() -> i32 { f(1, 1) }\n");
+    assert!(asm.contains("add"), "expected add instruction");
+    assert!(asm.contains("sxtw"), "expected sxtw overflow guard");
+    assert!(asm.contains("b.ne"), "expected b.ne to _galvanic_panic");
+    // Verify ordering: add before sxtw before b.ne
+    let add_pos = asm.find("    add ").unwrap_or_else(|| asm.find("add").unwrap());
+    let sxtw_pos = asm.find("sxtw").unwrap();
+    let bne_pos = asm.find("b.ne").unwrap();
+    assert!(add_pos < sxtw_pos, "add must precede sxtw");
+    assert!(sxtw_pos < bne_pos, "sxtw must precede b.ne");
+}
+
+#[test]
+fn claim_4s_sub_emits_overflow_guard() {
+    let asm = compile_to_asm("fn f(a: i32, b: i32) -> i32 { a - b }\nfn main() -> i32 { f(2, 1) }\n");
+    assert!(asm.contains("sub"), "expected sub instruction");
+    assert!(asm.contains("sxtw"), "expected sxtw overflow guard");
+    assert!(asm.contains("b.ne"), "expected b.ne to _galvanic_panic");
+}
+
+#[test]
+fn claim_4s_mul_emits_overflow_guard() {
+    let asm = compile_to_asm("fn f(a: i32, b: i32) -> i32 { a * b }\nfn main() -> i32 { f(2, 3) }\n");
+    assert!(asm.contains("mul"), "expected mul instruction");
+    assert!(asm.contains("sxtw"), "expected sxtw overflow guard");
+    assert!(asm.contains("b.ne"), "expected b.ne to _galvanic_panic");
+    // Guard must precede any use of result
+    let mul_pos = asm.find("    mul ").unwrap_or_else(|| asm.find("mul").unwrap());
+    let sxtw_pos = asm.find("sxtw").unwrap();
+    assert!(mul_pos < sxtw_pos, "mul must precede sxtw guard");
+}
+
+#[test]
+fn claim_4s_runtime_i32_max_plus_one_exits_101() {
+    // i32::MAX + 1 overflows — must panic
+    let exit = compile_and_run(
+        "fn main() -> i32 { let a: i32 = 2147483647; let b: i32 = 1; a + b }\n",
+    );
+    let Some(code) = exit else { return };
+    assert_eq!(code, 101, "expected exit 101 for i32::MAX + 1, got {code}");
+}
+
+#[test]
+fn claim_4s_runtime_i32_min_minus_one_exits_101() {
+    // i32::MIN - 1 overflows — must panic
+    let exit = compile_and_run(
+        "fn main() -> i32 { let a: i32 = (-2147483647 - 1); let b: i32 = 1; a - b }\n",
+    );
+    let Some(code) = exit else { return };
+    assert_eq!(code, 101, "expected exit 101 for i32::MIN - 1, got {code}");
+}
+
+#[test]
+fn claim_4s_runtime_i32_max_mul_two_exits_101() {
+    // i32::MAX * 2 overflows — must panic
+    let exit = compile_and_run(
+        "fn main() -> i32 { let a: i32 = 2147483647; let b: i32 = 2; a * b }\n",
+    );
+    let Some(code) = exit else { return };
+    assert_eq!(code, 101, "expected exit 101 for i32::MAX * 2, got {code}");
+}
+
+#[test]
+fn claim_4s_runtime_i32_max_plus_one_via_param_exits_101() {
+    // via function parameters — proves runtime execution, not compile-time folding
+    let exit = compile_and_run(
+        "fn add(a: i32, b: i32) -> i32 { a + b }\nfn main() -> i32 { add(2147483647, 1) }\n",
+    );
+    let Some(code) = exit else { return };
+    assert_eq!(code, 101, "expected exit 101 for add(i32::MAX, 1), got {code}");
+}
+
+#[test]
+fn claim_4s_runtime_normal_add_succeeds() {
+    // 100 + 200 = 300 — guard must NOT fire
+    let exit = compile_and_run(
+        "fn main() -> i32 { let a: i32 = 100; let b: i32 = 200; a + b }\n",
+    );
+    let Some(code) = exit else { return };
+    assert_eq!(code, 300 % 256, "expected exit 44 (300 mod 256) for 100+200, got {code}");
+}
+
+#[test]
+fn claim_4s_runtime_normal_sub_succeeds() {
+    // 10 - 3 = 7 — guard must NOT fire
+    let exit = compile_and_run(
+        "fn main() -> i32 { let a: i32 = 10; let b: i32 = 3; a - b }\n",
+    );
+    let Some(code) = exit else { return };
+    assert_eq!(code, 7, "expected exit 7 for 10-3, got {code}");
+}
+
+#[test]
+fn claim_4s_runtime_normal_mul_succeeds() {
+    // 6 * 7 = 42 — guard must NOT fire
+    let exit = compile_and_run(
+        "fn main() -> i32 { let a: i32 = 6; let b: i32 = 7; a * b }\n",
+    );
+    let Some(code) = exit else { return };
+    assert_eq!(code, 42, "expected exit 42 for 6*7, got {code}");
 }
 
 // ── Milestone 13: compound assignment operators ───────────────────────────────
