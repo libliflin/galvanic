@@ -1775,6 +1775,143 @@ fn runtime_shr_emits_asr_not_folded() {
     );
 }
 
+// ── Claim 4r: §6.5.9 shift overflow guard ────────────────────────────────────
+//
+// FLS §6.5.9: Shifting with a negative or overly large shift amount panics at
+// runtime. Galvanic emits a `cmp x{rhs}, #64; b.hs _galvanic_panic` guard
+// before every lsl/asr/lsr instruction. Negative amounts map to large unsigned
+// values (≥ 2^63), which are always ≥ 64, so b.hs catches both cases.
+//
+// AMBIGUOUS: FLS §6.5.9 requires panic for shift ≥ type bit-width. For i32
+// the threshold should be 32, but galvanic checks 64 (the register width).
+// Shifts of 32..63 on i32 are a false negative — not caught at runtime.
+// This gap is documented here and in codegen.rs.
+//
+// Exit code convention: _galvanic_panic exits with code 101.
+
+/// Claim 4r: left shift with negative amount exits 101.
+///
+/// FLS §6.5.9: Panic on negative shift amount.
+/// Guard: `cmp x{rhs}, #64; b.hs _galvanic_panic` — negative i64 cast to u64
+/// is ≥ 2^63, which is >> 64, so b.hs branches to panic.
+#[test]
+fn claim_4r_runtime_shl_negative_amount_exits_101() {
+    let src =
+        "fn shl(x: i32, n: i32) -> i32 { x << n }\nfn main() -> i32 { shl(1, -1) }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 101, "expected panic (101) for `1 << -1`, got {exit_code}");
+}
+
+/// Claim 4r: left shift with amount >= 64 exits 101.
+///
+/// FLS §6.5.9: Panic on shift amount >= bit width.
+/// For i32, any amount >= 32 should panic; galvanic checks against 64, so
+/// amounts in [32, 63] are a known false negative. Amount 64 IS caught.
+#[test]
+fn claim_4r_runtime_shl_too_large_exits_101() {
+    let src =
+        "fn shl(x: i32, n: i32) -> i32 { x << n }\nfn main() -> i32 { shl(1, 64) }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 101, "expected panic (101) for `1 << 64`, got {exit_code}");
+}
+
+/// Claim 4r: right shift (signed) with negative amount exits 101.
+///
+/// FLS §6.5.9: Panic on negative shift amount.
+#[test]
+fn claim_4r_runtime_shr_negative_amount_exits_101() {
+    let src =
+        "fn shr(x: i32, n: i32) -> i32 { x >> n }\nfn main() -> i32 { shr(16, -1) }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 101, "expected panic (101) for `16 >> -1`, got {exit_code}");
+}
+
+/// Claim 4r: right shift with amount >= 64 exits 101.
+#[test]
+fn claim_4r_runtime_shr_too_large_exits_101() {
+    let src =
+        "fn shr(x: i32, n: i32) -> i32 { x >> n }\nfn main() -> i32 { shr(16, 64) }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 101, "expected panic (101) for `16 >> 64`, got {exit_code}");
+}
+
+/// Claim 4r: valid left shift still produces the correct result.
+///
+/// FLS §6.5.9: Guard must not affect valid shifts.
+#[test]
+fn claim_4r_valid_shl_still_works() {
+    let src =
+        "fn shl(x: i32, n: i32) -> i32 { x << n }\nfn main() -> i32 { shl(1, 3) }\n";
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(exit_code, 8, "expected `1 << 3 = 8`, got {exit_code}");
+}
+
+/// Claim 4r: assembly inspection — lsl must be preceded by `cmp` shift guard.
+///
+/// FLS §6.5.9: The guard `cmp x{rhs}, #64; b.hs _galvanic_panic` must appear
+/// before every `lsl` instruction. This proves the check is emitted at runtime,
+/// not elided or constant-folded.
+#[test]
+fn claim_4r_shl_emits_cmp_shift_guard() {
+    let src =
+        "fn shl(x: i32, n: i32) -> i32 { x << n }\nfn main() -> i32 { shl(1, 3) }\n";
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("cmp") && asm.contains("b.hs"),
+        "expected shift guard (cmp + b.hs) before lsl, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("lsl"),
+        "expected `lsl` instruction after guard, got:\n{asm}"
+    );
+    // Guard must precede the shift in the instruction stream.
+    let cmp_pos = asm.find("cmp").unwrap();
+    let lsl_pos = asm.find("    lsl").unwrap();
+    assert!(
+        cmp_pos < lsl_pos,
+        "cmp guard must appear before lsl, but cmp={cmp_pos} lsl={lsl_pos}:\n{asm}"
+    );
+    // Must NOT constant-fold shl(1, 3) = 8.
+    assert!(
+        !asm.contains("mov     x0, #8"),
+        "must not constant-fold `shl(1, 3)` to #8:\n{asm}"
+    );
+}
+
+/// Claim 4r: assembly inspection — asr must be preceded by `cmp` shift guard.
+///
+/// FLS §6.5.9: Same guard required for right-shift (signed).
+#[test]
+fn claim_4r_shr_emits_cmp_shift_guard() {
+    let src =
+        "fn shr(x: i32, n: i32) -> i32 { x >> n }\nfn main() -> i32 { shr(16, 2) }\n";
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("cmp") && asm.contains("b.hs"),
+        "expected shift guard (cmp + b.hs) before asr, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("asr"),
+        "expected `asr` instruction after guard, got:\n{asm}"
+    );
+    let cmp_pos = asm.find("cmp").unwrap();
+    let asr_pos = asm.find("    asr").unwrap();
+    assert!(
+        cmp_pos < asr_pos,
+        "cmp guard must appear before asr, but cmp={cmp_pos} asr={asr_pos}:\n{asm}"
+    );
+}
+
 // ── Milestone 13: compound assignment operators ───────────────────────────────
 //
 // FLS §6.5.11: Compound assignment expressions. `x op= e` is equivalent to
