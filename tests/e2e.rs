@@ -34396,3 +34396,89 @@ fn claim_4m_literal_literal_div_emits_sdiv_not_folded() {
         "literal/literal division must not constant-fold to #5: {asm}"
     );
 }
+
+// ── Claim 4n: §6.21 comparison non-associativity ─────────────────────────────
+
+/// Claim 4n: `a < b < c` (chained `<`) rejected at compile time.
+///
+/// FLS §6.21: Comparison operators are non-associative. The parser parses
+/// `a < b < c` as `(a < b) < c`, comparing a bool (0 or 1) against `c`.
+/// Galvanic catches this in `lower.rs` before emitting any IR.
+#[test]
+fn claim_4n_chained_lt_lt_rejected() {
+    let src = "fn main() -> i32 { let a = 1; let b = 2; let c = 3; if a < b < c { 1 } else { 0 } }\n";
+    let tokens = galvanic::lexer::tokenize(src).expect("lex failed");
+    let sf = galvanic::parser::parse(&tokens, src).expect("parse failed");
+    let result = galvanic::lower::lower(&sf, src);
+    assert!(
+        result.is_err(),
+        "expected compile-time error for chained `<`, but lower() returned Ok"
+    );
+    let msg = result.err().unwrap().to_string();
+    assert!(
+        msg.contains("chained comparison"),
+        "expected error mentioning 'chained comparison', got: {msg}"
+    );
+}
+
+/// Claim 4n: `a > b > c` (chained `>`) rejected at compile time.
+///
+/// FLS §6.21: All comparison operators are non-associative, including `>`.
+#[test]
+fn claim_4n_chained_gt_gt_rejected() {
+    let src = "fn main() -> i32 { let a = 3; let b = 2; let c = 1; if a > b > c { 1 } else { 0 } }\n";
+    let tokens = galvanic::lexer::tokenize(src).expect("lex failed");
+    let sf = galvanic::parser::parse(&tokens, src).expect("parse failed");
+    let result = galvanic::lower::lower(&sf, src);
+    assert!(
+        result.is_err(),
+        "expected compile-time error for chained `>`, but lower() returned Ok"
+    );
+    let msg = result.err().unwrap().to_string();
+    assert!(
+        msg.contains("chained comparison"),
+        "expected error mentioning 'chained comparison', got: {msg}"
+    );
+}
+
+/// Claim 4n: mixed chained comparison `a == b < c` rejected at compile time.
+///
+/// FLS §6.21: Non-associativity applies across all comparison operators.
+/// `a == b < c` parses as `(a == b) < c`, silently wrong.
+#[test]
+fn claim_4n_chained_eq_lt_rejected() {
+    let src = "fn main() -> i32 { let a = 1; let b = 1; let c = 2; if a == b < c { 1 } else { 0 } }\n";
+    let tokens = galvanic::lexer::tokenize(src).expect("lex failed");
+    let sf = galvanic::parser::parse(&tokens, src).expect("parse failed");
+    let result = galvanic::lower::lower(&sf, src);
+    assert!(
+        result.is_err(),
+        "expected compile-time error for chained `== <`, but lower() returned Ok"
+    );
+    let msg = result.err().unwrap().to_string();
+    assert!(
+        msg.contains("chained comparison"),
+        "expected error mentioning 'chained comparison', got: {msg}"
+    );
+}
+
+/// Claim 4n: simple (non-chained) comparison accepted and emits runtime `cmp`+`cset`.
+///
+/// The chained-comparison check must NOT fire for ordinary comparisons.
+/// Assembly inspection confirms a runtime `cmp` instruction is emitted.
+#[test]
+fn claim_4n_simple_comparison_accepted_emits_cmp() {
+    let asm = compile_to_asm(
+        "fn less(a: i32, b: i32) -> i32 { if a < b { 1 } else { 0 } }\n\
+fn main() -> i32 { less(1, 2) }\n",
+    );
+    assert!(
+        asm.contains("cmp") || asm.contains("subs"),
+        "expected runtime comparison instruction, got:\n{asm}"
+    );
+    // Must not constant-fold `less(1, 2)` to `mov x0, #1`.
+    assert!(
+        !asm.contains("mov     x0, #1\n\tret"),
+        "simple comparison must not be constant-folded: {asm}"
+    );
+}
