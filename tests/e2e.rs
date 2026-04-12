@@ -1140,18 +1140,18 @@ fn claim_4o_udiv_emits_cbz_guard() {
     );
 }
 
-/// Claim 4o: `_galvanic_panic` is NOT emitted for programs with no division.
+/// Claim 4o: `_galvanic_panic` is NOT emitted for programs with no division or arithmetic.
 ///
-/// Programs that do not use div/rem/udiv must not contain `_galvanic_panic`
-/// in their assembly. This prevents the panic handler from contaminating
-/// assembly inspection tests for unrelated operations.
+/// Programs that return a constant without any binary arithmetic must not emit
+/// `_galvanic_panic` in their assembly. (After Claim 4s, add/sub/mul all emit
+/// `_galvanic_panic` references, so the test source must have no such operations.)
 #[test]
 fn claim_4o_galvanic_panic_absent_without_division() {
-    // Pure arithmetic with no division
-    let asm = compile_to_asm("fn main() -> i32 { 2 + 3 * 4 - 1 }\n");
+    // Constant return only — no binary arithmetic operators
+    let asm = compile_to_asm("fn main() -> i32 { 42 }\n");
     assert!(
         !asm.contains("_galvanic_panic"),
-        "`_galvanic_panic` must not appear in assembly for programs with no division:\n{asm}"
+        "`_galvanic_panic` must not appear in assembly for programs with no division or arithmetic:\n{asm}"
     );
 }
 
@@ -1946,6 +1946,165 @@ fn claim_4r_ushr_emits_cmp_shift_guard() {
         !asm.contains("mov     x0, #42"),
         "must not constant-fold `ushr(84, 1)` to #42:\n{asm}"
     );
+}
+
+// ── Claim 4s: §6.23 arithmetic overflow guard for i32 +, -, * ───────────────
+//
+// FLS §6.23: Integer overflow in debug mode is a panic condition.
+// Galvanic inserts a 4-instruction guard after every `add`/`sub`/`mul`:
+//   add  x{dst}, x{lhs}, x{rhs}
+//   sxtw x9, w{dst}              ← sign-extend 32-bit result to 64 bits
+//   cmp  x{dst}, x9              ← did the value change? if so, overflow
+//   b.ne _galvanic_panic          ← overflow → panic(101)
+//
+// The guard catches any i32 overflow (positive or negative) because a value
+// that overflows i32 range will have a different 64-bit representation than
+// its sign-extended 32-bit projection.
+
+/// Claim 4s: assembly inspection — `add` must be followed by `sxtw` + `b.ne` guard.
+///
+/// FLS §6.23: The overflow guard for integer addition must emit `sxtw` (sign-extend
+/// the 32-bit result) and `b.ne _galvanic_panic` (branch on overflow).
+#[test]
+fn claim_4s_add_emits_sxtw_and_bne_guard() {
+    let asm = compile_to_asm("fn add(a: i32, b: i32) -> i32 { a + b }\nfn main() -> i32 { add(1, 2) }\n");
+    assert!(
+        asm.contains("sxtw"),
+        "expected `sxtw` (overflow guard) after add, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("b.ne"),
+        "expected `b.ne _galvanic_panic` (overflow guard) after add, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("add"),
+        "expected `add` instruction, got:\n{asm}"
+    );
+    // Must not constant-fold add(1, 2) = 3
+    assert!(
+        !asm.contains("mov     x0, #3"),
+        "must not constant-fold `add(1, 2)` to #3:\n{asm}"
+    );
+}
+
+/// Claim 4s: assembly inspection — `sub` must be followed by `sxtw` + `b.ne` guard.
+///
+/// FLS §6.23: The overflow guard for integer subtraction must emit `sxtw` and `b.ne`.
+#[test]
+fn claim_4s_sub_emits_sxtw_and_bne_guard() {
+    let asm = compile_to_asm("fn sub(a: i32, b: i32) -> i32 { a - b }\nfn main() -> i32 { sub(5, 3) }\n");
+    assert!(
+        asm.contains("sxtw"),
+        "expected `sxtw` (overflow guard) after sub, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("b.ne"),
+        "expected `b.ne _galvanic_panic` (overflow guard) after sub, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("sub"),
+        "expected `sub` instruction, got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #2"),
+        "must not constant-fold `sub(5, 3)` to #2:\n{asm}"
+    );
+}
+
+/// Claim 4s: assembly inspection — `mul` must be followed by `sxtw` + `b.ne` guard.
+///
+/// FLS §6.23: The overflow guard for integer multiplication must emit `sxtw` and `b.ne`.
+#[test]
+fn claim_4s_mul_emits_sxtw_and_bne_guard() {
+    let asm = compile_to_asm("fn mul(a: i32, b: i32) -> i32 { a * b }\nfn main() -> i32 { mul(3, 4) }\n");
+    assert!(
+        asm.contains("sxtw"),
+        "expected `sxtw` (overflow guard) after mul, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("b.ne"),
+        "expected `b.ne _galvanic_panic` (overflow guard) after mul, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("mul"),
+        "expected `mul` instruction, got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #12"),
+        "must not constant-fold `mul(3, 4)` to #12:\n{asm}"
+    );
+}
+
+/// Claim 4s: runtime — i32::MAX + 1 exits 101 (overflow panic).
+///
+/// FLS §6.23: Adding 1 to i32::MAX overflows i32 range; the guard must fire.
+#[test]
+fn claim_4s_runtime_max_plus_one_exits_101() {
+    let exit = compile_and_run(
+        "fn add(a: i32, b: i32) -> i32 { a + b }\nfn main() -> i32 { add(2147483647, 1) }\n",
+    );
+    let Some(code) = exit else { return };
+    assert_eq!(code, 101, "expected exit 101 for i32::MAX + 1, got {code}");
+}
+
+/// Claim 4s: runtime — i32::MIN - 1 exits 101 (overflow panic).
+///
+/// FLS §6.23: Subtracting 1 from i32::MIN overflows i32 range; the guard must fire.
+#[test]
+fn claim_4s_runtime_min_minus_one_exits_101() {
+    let exit = compile_and_run(
+        "fn sub(a: i32, b: i32) -> i32 { a - b }\nfn main() -> i32 { sub(-2147483648, 1) }\n",
+    );
+    let Some(code) = exit else { return };
+    assert_eq!(code, 101, "expected exit 101 for i32::MIN - 1, got {code}");
+}
+
+/// Claim 4s: runtime — i32::MAX * 2 exits 101 (overflow panic).
+///
+/// FLS §6.23: Multiplying i32::MAX by 2 overflows i32 range; the guard must fire.
+#[test]
+fn claim_4s_runtime_max_times_two_exits_101() {
+    let exit = compile_and_run(
+        "fn mul(a: i32, b: i32) -> i32 { a * b }\nfn main() -> i32 { mul(2147483647, 2) }\n",
+    );
+    let Some(code) = exit else { return };
+    assert_eq!(code, 101, "expected exit 101 for i32::MAX * 2, got {code}");
+}
+
+/// Claim 4s: runtime — valid add does not panic.
+///
+/// FLS §6.23: The overflow guard must not fire for in-range addition.
+#[test]
+fn claim_4s_runtime_valid_add_does_not_panic() {
+    let exit = compile_and_run(
+        "fn add(a: i32, b: i32) -> i32 { a + b }\nfn main() -> i32 { add(10, 20) }\n",
+    );
+    let Some(code) = exit else { return };
+    assert_eq!(code, 30, "expected exit 30 for add(10, 20), got {code}");
+}
+
+/// Claim 4s: runtime — valid sub does not panic.
+///
+/// FLS §6.23: The overflow guard must not fire for in-range subtraction.
+#[test]
+fn claim_4s_runtime_valid_sub_does_not_panic() {
+    let exit = compile_and_run(
+        "fn sub(a: i32, b: i32) -> i32 { a - b }\nfn main() -> i32 { sub(50, 8) }\n",
+    );
+    let Some(code) = exit else { return };
+    assert_eq!(code, 42, "expected exit 42 for sub(50, 8), got {code}");
+}
+
+/// Claim 4s: runtime — valid mul does not panic.
+///
+/// FLS §6.23: The overflow guard must not fire for in-range multiplication.
+#[test]
+fn claim_4s_runtime_valid_mul_does_not_panic() {
+    let exit = compile_and_run(
+        "fn mul(a: i32, b: i32) -> i32 { a * b }\nfn main() -> i32 { mul(6, 7) }\n",
+    );
+    let Some(code) = exit else { return };
+    assert_eq!(code, 42, "expected exit 42 for mul(6, 7), got {code}");
 }
 
 // ── Milestone 13: compound assignment operators ───────────────────────────────
@@ -2744,7 +2903,7 @@ fn runtime_for_loop_emits_cmp_cbz_add_and_back_branch() {
     // `mov x0, #10`. The loop must execute at runtime via the back-edge branch above.
     // FLS §6.1.2:37–45: non-const code is not eligible for compile-time evaluation.
     assert!(
-        !asm.contains("mov     x0, #10"),
+        !asm.contains("mov     x0, #10 "),
         "for loop result must not be constant-folded to mov x0, #10 — must execute at runtime"
     );
 }
@@ -2778,7 +2937,7 @@ fn runtime_for_loop_param_bound_emits_runtime_control_flow_not_folded() {
     // FLS §6.1.2:37–45: non-const code runs at runtime regardless of whether inputs happen
     // to be statically knowable at the call site.
     assert!(
-        !asm.contains("mov     x0, #10"),
+        !asm.contains("mov     x0, #10 "),
         "for loop with parameter bound must not fold sum_to(5)=10 to mov x0, #10 — loop must execute at runtime"
     );
 }
@@ -22414,7 +22573,7 @@ fn main() -> i32 {
     );
     // Inside `run`, the result must not be a hardcoded constant.
     assert!(
-        !asm.contains("mov     x0, #10") && !asm.contains("mov x0, #10"),
+        !asm.contains("mov     x0, #10 ") && !asm.contains("mov x0, #10 "),
         "run(Num{{val:3}}) must not fold apply_both to constant 10: {asm}"
     );
 }
@@ -23730,7 +23889,7 @@ fn main() -> i32 {
         "generic fn with assoc type bound must emit bl extract__Wrapper: {asm}"
     );
     assert!(
-        !asm.contains("mov     x0, #10"),
+        !asm.contains("mov     x0, #10 "),
         "generic fn with assoc type bound must NOT constant-fold result=10: {asm}"
     );
 }
@@ -25299,7 +25458,7 @@ fn main() -> i32 { classify(2) }
     assert!(asm.contains("orr"), "OR pattern must emit runtime orr for accumulation: {asm}");
     // Must NOT fold to `mov x0, #10` — result depends on runtime parameter x.
     assert!(
-        !asm.contains("mov     x0, #10"),
+        !asm.contains("mov     x0, #10 "),
         "OR pattern in if-let must not constant-fold result to #10: {asm}"
     );
 }
@@ -28023,7 +28182,7 @@ fn main() -> i32 {
     );
     // Must not fold 9+1=10 into a constant in main.
     assert!(
-        !asm.contains("mov     x0, #10"),
+        !asm.contains("mov     x0, #10 "),
         "supertrait default call must NOT constant-fold to #10; got:\n{asm}"
     );
 }
@@ -29360,7 +29519,7 @@ fn main() -> i32 { unsafe { double(5) } }
         "unsafe fn body must emit runtime mul instruction; got:\n{asm}"
     );
     assert!(
-        !asm.contains("mov     x0, #10") && !asm.contains("mov x0, #10"),
+        !asm.contains("mov     x0, #10 ") && !asm.contains("mov x0, #10 "),
         "result must NOT be constant-folded to #10; got:\n{asm}"
     );
 }
@@ -33436,7 +33595,7 @@ fn main() -> i32 {
 
     // Must not fold sum([2,3,5]) = 10 to a compile-time constant.
     assert!(
-        !asm.contains("mov     x0, #10"),
+        !asm.contains("mov     x0, #10 "),
         "result must not be constant-folded to #10: {asm}"
     );
 }
