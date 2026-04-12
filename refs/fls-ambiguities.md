@@ -284,23 +284,30 @@ Rust's de-facto behavior.
 indexing (§6.9), and integer overflow in debug mode (§6.23), but does not
 specify the panic mechanism — library call, trap instruction, signal handler.
 
-**Galvanic's choice (updated — Claim 4m):**
+**Galvanic's choice (updated — Claims 4m, 4o, 4p, 4q):**
 - Divide-by-zero with a literal 0 divisor: **caught at compile time** in
   `src/lower.rs`. The lowering pass rejects integer `/` and `%` expressions
-  whose RHS is `LitInt(0)` before emitting any IR. This covers the common
-  programming error (e.g. `x / 0`) without requiring panic infrastructure.
-  Non-literal zero divisors (e.g. `x / y` where `y` may be zero at runtime)
-  are not checked — they emit `sdiv`/`udiv` without a guard.
-- Out-of-bounds: no bounds check before load/store.
-- Overflow: no overflow check; arithmetic wraps per the hardware.
+  whose RHS is `LitInt(0)` before emitting any IR. (Claim 4m)
+- Non-literal zero divisors (`x / y` where `y` may be zero at runtime):
+  a `cbz xRHS, _galvanic_panic` guard is emitted before every `sdiv`, `srem`,
+  and `udiv` instruction. (Claim 4o)
+- `i32::MIN / -1` and `i32::MIN % -1` overflow guard: emitted before `sdiv`
+  for both division and remainder. Uses `movz`/`sxtw` to materialise
+  `i32::MIN` as a 64-bit sign-extended constant, then `cmp`/`cmn` to detect
+  the overflow case, branching to `_galvanic_panic`. (Claim 4q)
+- Out-of-bounds indexing: `cmp`/`b.hs` bounds check before every array/slice
+  load and store; out-of-bounds branches to `_galvanic_panic`. (Claim 4p)
+- `+`, `-`, `*` overflow: no overflow check; arithmetic wraps per 64-bit
+  hardware. This is a known deviation from debug-mode Rust semantics.
+  FLS §6.23 AMBIGUOUS — spec requires debug-mode panic but galvanic uses 64-bit
+  arithmetic throughout and does not insert overflow checks for these operators.
 
-The literal-divisor check and the §6.18 exhaustiveness check (Claim 4l)
-form a consistent methodology: conservatively reject the statically-obvious
-UB case at compile time; defer the general case to when panic infrastructure
-is available.
+The panic primitive `_galvanic_panic` calls `sys_exit(101)` directly. No stack
+unwinding, no panic message. This matches the FLS requirement (panics terminate
+the program) while keeping the implementation simple.
 
-**Source:** `src/lower.rs` (literal zero check in binary op lowering),
-`src/codegen.rs:496`, `src/codegen.rs:514`
+**Source:** `src/lower.rs` (literal zero check),
+`src/codegen.rs` (cbz, MIN/-1 guard, bounds check, `_galvanic_panic`)
 
 ---
 
