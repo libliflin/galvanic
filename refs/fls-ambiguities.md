@@ -104,12 +104,14 @@ For `&[T]`, length is the element count.
 not specify the panic mechanism — whether it is a library call, a trap
 instruction, or something else.
 
-**Galvanic's choice:** No bounds check is emitted at this milestone. Out-of-
-bounds access produces undefined behavior at the assembly level (load/store at
-wrong address). This is a known deviation; the check is deferred until a panic
-infrastructure is in place.
+**Galvanic's choice (Claim 4p):** A `cmp`/`b.hs` guard is emitted before every
+array and slice index operation. The index is compared to the array length; if
+the index is ≥ length (unsigned comparison, catching negative indices), a branch
+to `_galvanic_panic` fires. For 2D arrays, the linear index (row * cols + col)
+is bounds-checked against the total element count. This fully implements §6.9
+runtime bounds checking.
 
-**Source:** `src/ir.rs:730`, `src/codegen.rs:926`, `src/lower.rs:17880`
+**Source:** `src/ir.rs`, `src/codegen.rs`, `src/lower.rs`
 
 ---
 
@@ -284,7 +286,7 @@ Rust's de-facto behavior.
 indexing (§6.9), and integer overflow in debug mode (§6.23), but does not
 specify the panic mechanism — library call, trap instruction, signal handler.
 
-**Galvanic's choice (updated — Claims 4m, 4o, 4p, 4q):**
+**Galvanic's choice (updated — Claims 4m, 4o, 4p, 4q, 4s):**
 - Divide-by-zero with a literal 0 divisor: **caught at compile time** in
   `src/lower.rs`. The lowering pass rejects integer `/` and `%` expressions
   whose RHS is `LitInt(0)` before emitting any IR. (Claim 4m)
@@ -297,10 +299,12 @@ specify the panic mechanism — library call, trap instruction, signal handler.
   the overflow case, branching to `_galvanic_panic`. (Claim 4q)
 - Out-of-bounds indexing: `cmp`/`b.hs` bounds check before every array/slice
   load and store; out-of-bounds branches to `_galvanic_panic`. (Claim 4p)
-- `+`, `-`, `*` overflow: no overflow check; arithmetic wraps per 64-bit
-  hardware. This is a known deviation from debug-mode Rust semantics.
-  FLS §6.23 AMBIGUOUS — spec requires debug-mode panic but galvanic uses 64-bit
-  arithmetic throughout and does not insert overflow checks for these operators.
+- `+`, `-`, `*` overflow: a 4-instruction guard is emitted after every `add`,
+  `sub`, and `mul` instruction: `sxtw x9, w{dst}` sign-extends the 32-bit
+  result, `cmp x{dst}, x9` compares, `b.ne _galvanic_panic` panics if they
+  differ. This correctly detects i32 overflow in debug mode. (Claim 4s)
+  FLS §6.23 AMBIGUOUS — the spec mandates debug-mode panic but does not specify
+  the detection mechanism. The sxtw/cmp approach is implementation-defined.
 
 The panic primitive `_galvanic_panic` calls `sys_exit(101)` directly. No stack
 unwinding, no panic message. This matches the FLS requirement (panics terminate
