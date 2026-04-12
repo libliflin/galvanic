@@ -143,6 +143,27 @@ pub fn emit_asm(module: &Module) -> Result<String, CodegenError> {
     writeln!(out)?;
     emit_start(&mut out)?;
 
+    // Emit the _galvanic_panic primitive only when needed.
+    //
+    // FLS §6.23: Division by zero panics at runtime. The panic handler is emitted
+    // only if at least one div/rem/udiv instruction appears in the module — programs
+    // without division never reference _galvanic_panic and don't need the symbol.
+    //
+    // This conditional emission also prevents the panic handler's literal constants
+    // from contaminating assembly inspection tests for unrelated operations.
+    //
+    // Cache-line note: 3 instructions × 4 bytes = 12 bytes — fits in one cache line.
+    let needs_panic = module.fns.iter().any(|f| {
+        f.body.iter().any(|instr| matches!(
+            instr,
+            Instr::BinOp { op: IrBinOp::Div | IrBinOp::Rem | IrBinOp::UDiv, .. }
+        ))
+    });
+    if needs_panic {
+        writeln!(out)?;
+        emit_galvanic_panic(&mut out)?;
+    }
+
     // Emit the .data section for static items.
     //
     // FLS §7.2: Static items reside in the data section.
@@ -510,23 +531,34 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
                 )?,
                 // FLS §6.5.5: Signed integer division.
                 // ARM64: `sdiv x{dst}, x{lhs}, x{rhs}` — signed division.
-                // FLS §6.23: Division by zero panics; no check is emitted yet.
-                // FLS §6.23 AMBIGUOUS: the spec requires a panic but the mechanism
-                // (how to raise it without libc) is unspecified at this milestone.
-                // Cache-line note: one 4-byte instruction per division.
-                IrBinOp::Div => writeln!(
-                    out,
-                    "    sdiv    x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: div (signed)"
-                )?,
+                // FLS §6.23: Division by zero panics at runtime.
+                // Guard: `cbz x{rhs}, _galvanic_panic` checks the divisor before sdiv.
+                // ARM64 `cbz xN, label` branches if xN == 0 (4-byte instruction).
+                // Cache-line note: two instructions (cbz + sdiv) = 8 bytes per division.
+                IrBinOp::Div => {
+                    writeln!(
+                        out,
+                        "    cbz     x{rhs}, _galvanic_panic         // FLS §6.23: div-by-zero guard"
+                    )?;
+                    writeln!(
+                        out,
+                        "    sdiv    x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: div (signed)"
+                    )?;
+                }
                 // FLS §6.5.5: Signed integer remainder.
                 // Computed as `lhs - (lhs / rhs) * rhs` using two ARM64 instructions:
                 //   sdiv x{dst}, x{lhs}, x{rhs}        → x{dst} = lhs / rhs (quotient)
                 //   msub x{dst}, x{dst}, x{rhs}, x{lhs} → x{dst} = lhs - dst * rhs
                 // ARM64 `msub xd, xn, xm, xa` reads all sources before writing xd,
                 // so reusing dst for the intermediate quotient is safe.
-                // FLS §6.23: Remainder by zero panics; no check is emitted yet.
-                // Cache-line note: two 4-byte instructions = 8 bytes per remainder.
+                // FLS §6.23: Remainder by zero panics at runtime.
+                // Guard: `cbz x{rhs}, _galvanic_panic` checks the divisor before sdiv.
+                // Cache-line note: three instructions (cbz + sdiv + msub) = 12 bytes.
                 IrBinOp::Rem => {
+                    writeln!(
+                        out,
+                        "    cbz     x{rhs}, _galvanic_panic         // FLS §6.23: rem-by-zero guard"
+                    )?;
                     writeln!(
                         out,
                         "    sdiv    x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: rem step 1: quotient"
@@ -607,13 +639,19 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
                 // FLS §4.1: Unsigned integer division.
                 // ARM64: `udiv x{dst}, x{lhs}, x{rhs}` — unsigned division.
                 // Used when the operand type is unsigned (IrTy::U32).
-                // FLS §6.5.5: Division by zero: galvanic does not yet insert
-                // a divide-by-zero check (FLS §6.23 AMBIGUOUS on mechanism).
-                // Cache-line note: one 4-byte instruction per unsigned division.
-                IrBinOp::UDiv => writeln!(
-                    out,
-                    "    udiv    x{dst}, x{lhs}, x{rhs}          // FLS §4.1: div (unsigned)"
-                )?,
+                // FLS §6.23: Division by zero panics at runtime (same guard as signed).
+                // Guard: `cbz x{rhs}, _galvanic_panic` checks the divisor before udiv.
+                // Cache-line note: two instructions (cbz + udiv) = 8 bytes.
+                IrBinOp::UDiv => {
+                    writeln!(
+                        out,
+                        "    cbz     x{rhs}, _galvanic_panic         // FLS §6.23: udiv-by-zero guard"
+                    )?;
+                    writeln!(
+                        out,
+                        "    udiv    x{dst}, x{lhs}, x{rhs}          // FLS §4.1: div (unsigned)"
+                    )?;
+                }
 
                 // FLS §4.1: Unsigned (logical) right shift.
                 // ARM64: `lsr x{dst}, x{lhs}, x{rhs}` — logical shift right,
@@ -1726,5 +1764,30 @@ fn emit_start(out: &mut String) -> Result<(), CodegenError> {
     writeln!(out, "    // x0 = main()'s return value")?;
     writeln!(out, "    mov     x8, #93         // __NR_exit (ARM64 Linux)")?;
     writeln!(out, "    svc     #0              // exit(x0)")?;
+    Ok(())
+}
+
+/// Emit the `_galvanic_panic` runtime panic primitive.
+///
+/// FLS §6.23: Arithmetic operations that violate runtime invariants (e.g.
+/// division by zero) must panic. Galvanic implements panic as an immediate
+/// `exit(101)` syscall — no unwinding, no stack trace.
+///
+/// Exit code 101 is galvanic's internal panic sentinel. It is distinct from
+/// normal exit (0 or main's return value) and SIGABRT-from-libc (128+6 = 134).
+/// The choice is implementation-defined; FLS §6.23 requires a panic but does
+/// not specify the exit code.
+///
+/// FLS §6.23: AMBIGUOUS — the spec requires a panic but does not specify
+/// whether the panic is unwinding, abort, or exit. Galvanic chooses exit(101).
+///
+/// ARM64 Linux syscall: x8 = __NR_exit (93), x0 = exit code.
+fn emit_galvanic_panic(out: &mut String) -> Result<(), CodegenError> {
+    writeln!(out, "    // FLS §6.23: runtime panic primitive — exit(101)")?;
+    writeln!(out, "    .global _galvanic_panic")?;
+    writeln!(out, "_galvanic_panic:")?;
+    writeln!(out, "    mov     x0, #101        // panic exit code (galvanic sentinel)")?;
+    writeln!(out, "    mov     x8, #93         // __NR_exit (ARM64 Linux)")?;
+    writeln!(out, "    svc     #0              // exit(101) — FLS §6.23: panic")?;
     Ok(())
 }
