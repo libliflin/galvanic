@@ -538,18 +538,30 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
                 // FLS §6.23 AMBIGUOUS: the spec requires debug-mode panic and
                 // release-mode 32-bit wrap; galvanic emits neither — it uses 64-bit
                 // arithmetic throughout. Cache-line: one 4-byte instruction per op.
-                IrBinOp::Add => writeln!(
-                    out,
-                    "    add     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: add; §6.23: 64-bit, no i32 wrap"
-                )?,
-                IrBinOp::Sub => writeln!(
-                    out,
-                    "    sub     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: sub; §6.23: 64-bit, no i32 wrap"
-                )?,
-                IrBinOp::Mul => writeln!(
-                    out,
-                    "    mul     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: mul; §6.23: 64-bit, no i32 wrap"
-                )?,
+                IrBinOp::Add => {
+                    writeln!(out, "    add     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: add")?;
+                    // FLS §6.23 Claim 4s: signed i32 overflow guard.
+                    // Sign-extend low 32 bits of result; if 64-bit value differs, result
+                    // overflowed i32 range → panic. AMBIGUOUS: guard fires for i64 values
+                    // outside i32 range (false positive); does not detect u32 wrap.
+                    writeln!(out, "    sxtw    x9, w{dst}                          // FLS §6.23: sign-extend low 32 bits")?;
+                    writeln!(out, "    cmp     x{dst}, x9                          // FLS §6.23: i32 overflow check")?;
+                    writeln!(out, "    b.ne    _galvanic_panic                     // FLS §6.23: overflow → panic")?;
+                }
+                IrBinOp::Sub => {
+                    writeln!(out, "    sub     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: sub")?;
+                    // FLS §6.23 Claim 4s: same guard as Add.
+                    writeln!(out, "    sxtw    x9, w{dst}")?;
+                    writeln!(out, "    cmp     x{dst}, x9")?;
+                    writeln!(out, "    b.ne    _galvanic_panic")?;
+                }
+                IrBinOp::Mul => {
+                    writeln!(out, "    mul     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: mul")?;
+                    // FLS §6.23 Claim 4s: same guard as Add.
+                    writeln!(out, "    sxtw    x9, w{dst}")?;
+                    writeln!(out, "    cmp     x{dst}, x9")?;
+                    writeln!(out, "    b.ne    _galvanic_panic")?;
+                }
                 // FLS §6.5.5: Signed integer division.
                 // ARM64: `sdiv x{dst}, x{lhs}, x{rhs}` — signed division.
                 // FLS §6.23: Division by zero panics at runtime.
