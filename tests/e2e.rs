@@ -957,23 +957,16 @@ fn runtime_div_emits_sdiv() {
     );
 }
 
-/// Assembly inspection: `x / y` with parameters emits a `cbz` zero guard + `sdiv`.
+/// Assembly inspection: `x / y` with parameters emits cbz zero guard + MIN/-1 guard + `sdiv`.
 ///
-/// FLS §6.23: Division by zero must panic at runtime. Galvanic implements this
-/// with a `cbz xRHS, _galvanic_panic` guard before every `sdiv`.
+/// FLS §6.23: Two panic conditions for signed division (Claim 4o + Claim 4q):
+///   1. Division by zero: `cbz xRHS, _galvanic_panic`
+///   2. Signed overflow (MIN / -1): `cmn`/`movz`/`sxtw`/`ccmp`/`b.eq _galvanic_panic`
 ///
-/// FLS §6.23 AMBIGUOUS: `i32::MIN / -1` signed overflow is a SEPARATE case.
-/// ARM64 `sdiv` with lhs=i32::MIN and rhs=-1 returns 2147483648 (a positive 64-bit
-/// value outside i32 range) rather than panicking. Galvanic does NOT insert a
-/// MIN/-1 overflow guard — only the zero-divisor guard is present.
-///
-/// This test verifies:
-/// 1. A `cbz` zero-guard IS emitted before `sdiv` (runtime divide-by-zero check).
-/// 2. No MIN/-1 overflow guard (0x80000000) is present (FLS §6.23 AMBIGUOUS).
-///
+/// This test verifies both guards are emitted for a parameter-based division.
 /// Companion to `runtime_div_emits_sdiv`.
 #[test]
-fn runtime_sdiv_no_min_neg_one_guard() {
+fn runtime_sdiv_min_neg_one_guard_emitted() {
     let asm = compile_to_asm(
         "fn f(x: i32, y: i32) -> i32 { x / y }\nfn main() -> i32 { f(10, 2) }\n",
     );
@@ -987,14 +980,11 @@ fn runtime_sdiv_no_min_neg_one_guard() {
         asm.contains("cbz") && asm.contains("_galvanic_panic"),
         "expected `cbz xRHS, _galvanic_panic` div-by-zero guard before `sdiv`, got:\n{asm}"
     );
-    // FLS §6.23 AMBIGUOUS: no MIN/-1 overflow guard.
-    // A conforming compiler would emit: cmp x{lhs}, #0x80000000; b.eq <panic>
-    // Galvanic emits only the zero guard, not this check.
-    // The constant 0x80000000 (i32::MIN) would appear in the assembly if such a
-    // guard existed. Its absence confirms the documented divergence from FLS §6.23.
+    // FLS §6.23 (Claim 4q): MIN/-1 overflow guard must be present.
+    // Guard uses: cmn (rhs==-1 check) + movz+sxtw (load i32::MIN) + ccmp + b.eq
     assert!(
-        !asm.contains("0x80000000"),
-        "unexpected MIN/-1 overflow guard in `f` — FLS §6.23 divergence narrowed; update claims.md:\n{asm}"
+        asm.contains("cmn") && asm.contains("ccmp") && asm.contains("b.eq"),
+        "expected MIN/-1 overflow guard (cmn/ccmp/b.eq) in division asm, got:\n{asm}"
     );
 }
 
@@ -1090,11 +1080,6 @@ fn claim_4o_sdiv_emits_cbz_guard() {
     assert!(
         asm.contains("sdiv"),
         "expected `sdiv` after guard in division function, got:\n{asm}"
-    );
-    // Guard must be a cbz on the RHS register, not a cmp+branch combo
-    assert!(
-        !asm.contains("0x80000000"),
-        "must not emit MIN/-1 overflow guard — only zero-divisor guard expected:\n{asm}"
     );
 }
 
@@ -34933,4 +34918,115 @@ fn claim_4p_2d_array_in_bounds_returns_correct_element() {
     );
     let Some(code) = exit else { return };
     assert_eq!(code, 6, "expected element 6 at grid[1][2], got {code}");
+}
+
+// ── Claim 4q: §6.23 signed integer MIN/-1 overflow guard ─────────────────────
+//
+// FLS §6.23: Arithmetic overflow panics in debug mode. For signed division and
+// remainder, the specific case `i32::MIN / -1` (and `i32::MIN % -1`) overflows
+// because the mathematical result (+2147483648) exceeds i32::MAX. ARM64 `sdiv`
+// silently returns the overflowed result (0x80000000 = i32::MIN) rather than
+// trapping — the guard must be emitted explicitly.
+//
+// Claim 4q closes the final gap in galvanic's §6.23 division story:
+//   - Claim 4m: literal zero divisor caught at compile time
+//   - Claim 4o: runtime zero divisor caught by `cbz` guard
+//   - Claim 4q: runtime MIN/-1 overflow caught by `cmn`/`ccmp`/`b.eq` guard
+//
+// Guard sequence (ARM64, using x17 as scratch):
+//   cmn  x{rhs}, #1               — Z flag set iff rhs+1==0 (i.e. rhs==-1)
+//   movz x17, #0x8000, lsl #16    — load 0x80000000 (i32::MIN bit pattern)
+//   sxtw x17, w17                 — sign-extend to 0xFFFFFFFF80000000
+//   ccmp x{lhs}, x17, #0, eq      — if Z: cmp lhs vs i32::MIN; else flags=#0
+//   b.eq _galvanic_panic          — panic if rhs==-1 AND lhs==i32::MIN
+
+/// Claim 4q: signed division emits MIN/-1 overflow guard before `sdiv`.
+///
+/// FLS §6.23: `i32::MIN / -1` overflows and must panic. ARM64 `sdiv` does not
+/// trap on overflow — galvanic emits a `cmn`/`ccmp`/`b.eq` guard sequence.
+///
+/// The assembly inspection uses function parameters so the values are unknown
+/// at compile time and the runtime guard path is exercised.
+#[test]
+fn claim_4q_sdiv_emits_min_neg_one_guard() {
+    let asm = compile_to_asm(
+        "fn f(x: i32, y: i32) -> i32 { x / y }\nfn main() -> i32 { f(10, 2) }\n",
+    );
+    assert!(
+        asm.contains("cmn"),
+        "expected `cmn x{{rhs}}, #1` MIN/-1 guard in division asm, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("ccmp"),
+        "expected `ccmp` MIN/-1 guard in division asm, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("b.eq") && asm.contains("_galvanic_panic"),
+        "expected `b.eq _galvanic_panic` MIN/-1 guard in division asm, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("sdiv"),
+        "expected `sdiv` after guard, got:\n{asm}"
+    );
+}
+
+/// Claim 4q: signed remainder emits MIN/-1 overflow guard before `sdiv`.
+///
+/// FLS §6.23: `i32::MIN % -1` overflows (quotient overflows, remainder is 0 on
+/// ARM64 hardware — but the correct behavior is panic). The same guard sequence
+/// is emitted before the `sdiv` step inside the remainder computation.
+#[test]
+fn claim_4q_rem_emits_min_neg_one_guard() {
+    let asm = compile_to_asm(
+        "fn f(x: i32, y: i32) -> i32 { x % y }\nfn main() -> i32 { f(10, 3) }\n",
+    );
+    assert!(
+        asm.contains("cmn") && asm.contains("ccmp") && asm.contains("b.eq"),
+        "expected MIN/-1 guard (cmn/ccmp/b.eq) in remainder asm, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("sdiv") && asm.contains("msub"),
+        "expected `sdiv` + `msub` after guard in remainder, got:\n{asm}"
+    );
+}
+
+/// Claim 4q: normal signed division (non-MIN/-1) is not affected by the guard.
+///
+/// Verify that `10 / 2` still produces exit code 5 — the guard must not fire
+/// for non-overflow inputs. This is a no-op on macOS (requires qemu).
+#[test]
+fn claim_4q_normal_div_unaffected_by_guard() {
+    let exit = compile_and_run(
+        "fn f(x: i32, y: i32) -> i32 { x / y }\nfn main() -> i32 { f(10, 2) }\n",
+    );
+    let Some(code) = exit else { return };
+    assert_eq!(code, 5, "expected 5 from `10 / 2` (guard must not fire), got {code}");
+}
+
+/// Claim 4q: runtime exit code 101 for `i32::MIN / -1` via function parameters.
+///
+/// FLS §6.23: signed integer overflow panics. `i32::MIN / -1` overflows — the
+/// MIN/-1 guard must branch to `_galvanic_panic` (exit 101).
+/// This test requires the ARM64 cross-toolchain and qemu — no-op on macOS.
+#[test]
+fn claim_4q_runtime_min_div_neg_one_exits_101() {
+    let exit = compile_and_run(
+        "fn f(x: i32, y: i32) -> i32 { x / y }\nfn main() -> i32 { f(-2147483648, -1) }\n",
+    );
+    let Some(code) = exit else { return };
+    assert_eq!(code, 101, "expected exit 101 for `i32::MIN / -1` overflow, got {code}");
+}
+
+/// Claim 4q: runtime exit code 101 for `i32::MIN % -1` via function parameters.
+///
+/// FLS §6.23: `i32::MIN % -1` overflows (the quotient step overflows). The
+/// MIN/-1 guard on the rem-`sdiv` must branch to `_galvanic_panic`.
+/// This test requires the ARM64 cross-toolchain and qemu — no-op on macOS.
+#[test]
+fn claim_4q_runtime_min_rem_neg_one_exits_101() {
+    let exit = compile_and_run(
+        "fn f(x: i32, y: i32) -> i32 { x % y }\nfn main() -> i32 { f(-2147483648, -1) }\n",
+    );
+    let Some(code) = exit else { return };
+    assert_eq!(code, 101, "expected exit 101 for `i32::MIN % -1` overflow, got {code}");
 }
