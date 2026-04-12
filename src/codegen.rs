@@ -145,19 +145,26 @@ pub fn emit_asm(module: &Module) -> Result<String, CodegenError> {
 
     // Emit the _galvanic_panic primitive only when needed.
     //
-    // FLS §6.23: Division by zero panics at runtime. The panic handler is emitted
-    // only if at least one div/rem/udiv instruction appears in the module — programs
-    // without division never reference _galvanic_panic and don't need the symbol.
+    // FLS §6.23: Division by zero panics at runtime.
+    // FLS §6.9: Out-of-bounds array indexing panics at runtime.
+    //
+    // The panic handler is emitted only if at least one instruction that can panic
+    // appears in the module — programs without division or indexed access with bounds
+    // checks never reference _galvanic_panic and don't need the symbol.
     //
     // This conditional emission also prevents the panic handler's literal constants
     // from contaminating assembly inspection tests for unrelated operations.
     //
     // Cache-line note: 3 instructions × 4 bytes = 12 bytes — fits in one cache line.
     let needs_panic = module.fns.iter().any(|f| {
-        f.body.iter().any(|instr| matches!(
-            instr,
-            Instr::BinOp { op: IrBinOp::Div | IrBinOp::Rem | IrBinOp::UDiv, .. }
-        ))
+        f.body.iter().any(|instr| match instr {
+            Instr::BinOp { op: IrBinOp::Div | IrBinOp::Rem | IrBinOp::UDiv, .. } => true,
+            Instr::LoadIndexed { len, .. }
+            | Instr::LoadIndexedF64 { len, .. }
+            | Instr::LoadIndexedF32 { len, .. } => *len > 0,
+            Instr::StoreIndexed { len, .. } => *len > 0,
+            _ => false,
+        })
     });
     if needs_panic {
         writeln!(out)?;
@@ -965,8 +972,29 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
         //
         // Cache-line note: add + ldr = two 4-byte instructions = 8 bytes,
         // fitting in one adjacent instruction slot pair in a 64-byte cache line.
-        Instr::LoadIndexed { dst, base_slot, index_reg } => {
+        // FLS §6.9: Load from a stack-allocated array at a runtime-computed index.
+        //
+        // Bounds check (when len > 0):
+        //   cmp x{index_reg}, #{len}    — set flags: index vs len (unsigned)
+        //   b.hs _galvanic_panic        — branch if index >= len (unsigned ≥)
+        //
+        // The `b.hs` (branch if higher-or-same, i.e. unsigned ≥) also catches negative
+        // indices because they are large unsigned values when reinterpreted as u64.
+        //
+        // FLS §6.23: Out-of-bounds access panics at runtime; galvanic routes to
+        // `_galvanic_panic` (exit code 101) matching the divide-by-zero convention.
+        Instr::LoadIndexed { dst, base_slot, index_reg, len } => {
             let base_offset = *base_slot as u32 * 8;
+            if *len > 0 {
+                writeln!(
+                    out,
+                    "    cmp     x{index_reg}, #{len:<14} // FLS §6.9: bounds check index < {len}"
+                )?;
+                writeln!(
+                    out,
+                    "    b.hs    _galvanic_panic            // FLS §6.9: panic if index >= {len}"
+                )?;
+            }
             writeln!(
                 out,
                 "    add     x{dst}, sp, #{base_offset:<15} // FLS §6.9: address of arr[0]"
@@ -986,13 +1014,25 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
         // The `lsl #3` scales the index by 8 (bytes per slot), matching the
         // element layout established by array literal stores.
         //
-        // FLS §6.9 AMBIGUOUS: No bounds check emitted at this milestone.
+        // FLS §6.5.10 + §6.9: Store to an indexed array element `arr[index] = src`.
         //
-        // Cache-line note: add + str = two 4-byte instructions = 8 bytes,
-        // mirroring LoadIndexed. The pair fits in one adjacent instruction
-        // slot pair in a 64-byte cache line.
-        Instr::StoreIndexed { src, base_slot, index_reg, scratch } => {
+        // Bounds check (when len > 0): cmp + b.hs before the store.
+        // FLS §6.9: Out-of-bounds store must panic at runtime.
+        //
+        // Cache-line note: bounds check adds 2 instructions (8 bytes) when present.
+        // add + str = two 4-byte instructions = 8 bytes baseline.
+        Instr::StoreIndexed { src, base_slot, index_reg, scratch, len } => {
             let base_offset = *base_slot as u32 * 8;
+            if *len > 0 {
+                writeln!(
+                    out,
+                    "    cmp     x{index_reg}, #{len:<14} // FLS §6.9: bounds check index < {len}"
+                )?;
+                writeln!(
+                    out,
+                    "    b.hs    _galvanic_panic            // FLS §6.9: panic if index >= {len}"
+                )?;
+            }
             writeln!(
                 out,
                 "    add     x{scratch}, sp, #{base_offset:<15} // FLS §6.9: address of arr[0]"
@@ -1017,8 +1057,20 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
         //
         // Cache-line note: add + ldr = two 4-byte instructions = 8 bytes,
         // identical footprint to integer `LoadIndexed`.
-        Instr::LoadIndexedF64 { dst, base_slot, index_reg } => {
+        // FLS §6.9 + §4.5 + §4.2: Load an f64 element from a `[f64; N]` array.
+        // Bounds check (when len > 0): cmp + b.hs before the load.
+        Instr::LoadIndexedF64 { dst, base_slot, index_reg, len } => {
             let base_offset = *base_slot as u32 * 8;
+            if *len > 0 {
+                writeln!(
+                    out,
+                    "    cmp     x{index_reg}, #{len:<14} // FLS §6.9: bounds check index < {len}"
+                )?;
+                writeln!(
+                    out,
+                    "    b.hs    _galvanic_panic            // FLS §6.9: panic if index >= {len}"
+                )?;
+            }
             writeln!(
                 out,
                 "    add     x9, sp, #{base_offset:<15} // FLS §6.9: address of f64 arr[0]"
@@ -1044,8 +1096,20 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
         //
         // FLS §4.2: f32 values are in s-registers (IEEE 754 single-precision).
         // Cache-line note: add + add + ldr = three 4-byte instructions = 12 bytes.
-        Instr::LoadIndexedF32 { dst, base_slot, index_reg } => {
+        // FLS §6.9 + §4.5 + §4.2: Load an f32 element from a `[f32; N]` array.
+        // Bounds check (when len > 0): cmp + b.hs before the load.
+        Instr::LoadIndexedF32 { dst, base_slot, index_reg, len } => {
             let base_offset = *base_slot as u32 * 8;
+            if *len > 0 {
+                writeln!(
+                    out,
+                    "    cmp     x{index_reg}, #{len:<14} // FLS §6.9: bounds check index < {len}"
+                )?;
+                writeln!(
+                    out,
+                    "    b.hs    _galvanic_panic            // FLS §6.9: panic if index >= {len}"
+                )?;
+            }
             writeln!(
                 out,
                 "    add     x9, sp, #{base_offset:<15} // FLS §6.9: address of f32 arr[0]"

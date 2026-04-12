@@ -745,6 +745,10 @@ pub enum Instr {
         base_slot: u8,
         /// Register holding the runtime array index (0-based).
         index_reg: u8,
+        /// Number of elements in the array; used to emit a bounds check.
+        /// `0` means no bounds check (e.g., for-loop accesses already guarded by loop condition).
+        /// FLS §6.9: Out-of-bounds access must panic at runtime.
+        len: u32,
     },
 
     /// Store a value into an array element: `arr[index] = src`.
@@ -777,6 +781,10 @@ pub enum Instr {
         index_reg: u8,
         /// Scratch register for base address computation (must not alias src or index_reg).
         scratch: u8,
+        /// Number of elements in the array; used to emit a bounds check.
+        /// `0` means no bounds check.
+        /// FLS §6.9: Out-of-bounds store must panic at runtime.
+        len: u32,
     },
 
     /// Load an f64 element from a float array: `dst = arr[index]` where arr is `[f64; N]`.
@@ -797,6 +805,10 @@ pub enum Instr {
         base_slot: u8,
         /// Register holding the runtime array index (0-based).
         index_reg: u8,
+        /// Number of elements in the array; used to emit a bounds check.
+        /// `0` means no bounds check (e.g., for-loop accesses already guarded by loop condition).
+        /// FLS §6.9: Out-of-bounds access must panic at runtime.
+        len: u32,
     },
 
     /// Load an f32 element from a float array: `dst = arr[index]` where arr is `[f32; N]`.
@@ -816,6 +828,10 @@ pub enum Instr {
         base_slot: u8,
         /// Register holding the runtime array index (0-based).
         index_reg: u8,
+        /// Number of elements in the array; used to emit a bounds check.
+        /// `0` means no bounds check (e.g., for-loop accesses already guarded by loop condition).
+        /// FLS §6.9: Out-of-bounds access must panic at runtime.
+        len: u32,
     },
 
     /// Load from a static variable in the data section.
