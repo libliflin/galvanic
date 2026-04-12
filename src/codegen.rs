@@ -531,25 +531,35 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
         // Signed comparison (signed integers are the only type at this milestone).
         Instr::BinOp { op, dst, lhs, rhs } => {
             match op {
-                // FLS §6.23: ARM64 integer arithmetic uses 64-bit registers (xN),
-                // so these instructions wrap at 2^64, not at i32::MAX (2^31-1).
-                // This means i32 overflow produces a large positive 64-bit value
-                // rather than wrapping to i32::MIN (two's complement 32-bit wrap).
-                // FLS §6.23 AMBIGUOUS: the spec requires debug-mode panic and
-                // release-mode 32-bit wrap; galvanic emits neither — it uses 64-bit
-                // arithmetic throughout. Cache-line: one 4-byte instruction per op.
-                IrBinOp::Add => writeln!(
-                    out,
-                    "    add     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: add; §6.23: 64-bit, no i32 wrap"
-                )?,
-                IrBinOp::Sub => writeln!(
-                    out,
-                    "    sub     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: sub; §6.23: 64-bit, no i32 wrap"
-                )?,
-                IrBinOp::Mul => writeln!(
-                    out,
-                    "    mul     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: mul; §6.23: 64-bit, no i32 wrap"
-                )?,
+                // FLS §6.23: Claim 4s — i32 overflow guard for +, -, *.
+                // ARM64 integer arithmetic uses 64-bit registers (xN). To detect
+                // i32 overflow, galvanic uses the sxtw/cmp technique:
+                //   1. Perform the operation in 64-bit: result in x{dst}
+                //   2. sxtw x9, w{dst}  — sign-extend the low 32 bits to 64 bits
+                //   3. cmp  x{dst}, x9  — if result fits in i32, these are equal
+                //   4. b.ne _galvanic_panic — they differ → overflow → panic
+                // FLS §6.23 AMBIGUOUS: spec requires debug-mode panic and
+                // release-mode 32-bit wrap. Galvanic implements debug-mode panic
+                // via sxtw/cmp. Release mode (no guard) is not yet implemented.
+                // Cache-line note: 4 instructions = 16 bytes per arithmetic op.
+                IrBinOp::Add => {
+                    writeln!(out, "    add     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: add")?;
+                    writeln!(out, "    sxtw    x9, w{dst}                      // FLS §6.23: sign-extend low 32 bits")?;
+                    writeln!(out, "    cmp     x{dst}, x9                      // FLS §6.23: overflow if 64-bit ≠ sext(32-bit)")?;
+                    writeln!(out, "    b.ne    _galvanic_panic                  // FLS §6.23: i32 overflow → panic")?;
+                }
+                IrBinOp::Sub => {
+                    writeln!(out, "    sub     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: sub")?;
+                    writeln!(out, "    sxtw    x9, w{dst}                      // FLS §6.23: sign-extend low 32 bits")?;
+                    writeln!(out, "    cmp     x{dst}, x9                      // FLS §6.23: overflow if 64-bit ≠ sext(32-bit)")?;
+                    writeln!(out, "    b.ne    _galvanic_panic                  // FLS §6.23: i32 overflow → panic")?;
+                }
+                IrBinOp::Mul => {
+                    writeln!(out, "    mul     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: mul")?;
+                    writeln!(out, "    sxtw    x9, w{dst}                      // FLS §6.23: sign-extend low 32 bits")?;
+                    writeln!(out, "    cmp     x{dst}, x9                      // FLS §6.23: overflow if 64-bit ≠ sext(32-bit)")?;
+                    writeln!(out, "    b.ne    _galvanic_panic                  // FLS §6.23: i32 overflow → panic")?;
+                }
                 // FLS §6.5.5: Signed integer division.
                 // ARM64: `sdiv x{dst}, x{lhs}, x{rhs}` — signed division.
                 // FLS §6.23: Division by zero panics at runtime.
