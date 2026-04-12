@@ -162,7 +162,78 @@ because they never execute at compile time.
 | 5. Variables are memory locations | **Satisfied** (`runtime_let_binding_emits_str_and_ldr`) |
 | 6. `const` substituted; `static` has identity | **Satisfied** (`runtime_const_emits_load_imm_not_stack_load`, `runtime_static_emits_adrp_add_ldr`) |
 | 7. No spec-mandated iteration limit | **N/A** (non-const loops are runtime code) |
+| 8. Use Rust types to prevent invalid IR states | **Not satisfied** (bare `u8`, untyped `BinOp`) |
 
 The one genuine gap — panic infrastructure for overflow and bounds checking — is
 tracked in `refs/fls-ambiguities.md` (§6.9/§6.23). Everything else is verified
 at the assembly level.
+
+---
+
+## Constraint 8: Use Rust's type system to make invalid IR states unrepresentable
+
+**Source:** Project design principle (not FLS — this is about compiler correctness).
+
+Galvanic is written in Rust. We should use Rust's type system to prevent classes
+of bugs at compile time, not catch them at runtime or in CI.
+
+### Problem: untyped IR lost semantic information
+
+The IR currently uses `u8` for register indices, slot indices, and array lengths
+interchangeably. `BinOp` carries no type tag — the same `IrBinOp::Add` is used
+for i32 user arithmetic AND for internal pointer/index calculations. This caused
+a real incident: an overflow guard meant for i32 arithmetic fired on address
+calculations, breaking 24 tests. The bug was invisible on macOS (tests skipped)
+and produced a 75-PR failure loop in CI.
+
+### Required: newtype wrappers and type-tagged operations
+
+**Register newtypes** — distinguish register kinds at the type level:
+
+```rust
+pub struct GpReg(pub u8);   // general-purpose register x0-x30
+pub struct FpReg(pub u8);   // float/SIMD register d0-d31 / s0-s31
+pub struct Slot(pub u16);   // stack slot index
+```
+
+Cannot pass a `Slot` where a `GpReg` is expected. Cannot mix float and integer
+registers. The compiler catches this at build time.
+
+**Type-tagged BinOp** — codegen knows what guards to emit:
+
+```rust
+BinOp {
+    op: IrBinOp,
+    ty: IrTy,       // ← what type is this operation on?
+    dst: GpReg,
+    lhs: GpReg,
+    rhs: GpReg,
+}
+```
+
+With a `ty` field, codegen can match: emit overflow guard for `IrTy::I32`,
+skip it for address arithmetic (which would use a distinct type or a dedicated
+`AddAddr` instruction).
+
+**Dedicated address arithmetic** — alternatively, separate instructions:
+
+```rust
+// User arithmetic — may need overflow guards
+BinOp { op, ty, dst, lhs, rhs }
+
+// Internal address calculation — never guarded
+AddrAdd { dst: GpReg, base: GpReg, offset: GpReg }
+```
+
+### Status: Not yet satisfied
+
+The IR still uses bare `u8` and untyped `BinOp`. This is the next structural
+improvement needed before adding more runtime guards.
+
+### Principle
+
+Every time you add a field or variant to the IR, ask: **can the type system
+prevent misuse?** If two things should never be confused (registers vs slots,
+user arithmetic vs address math, signed vs unsigned), they should be different
+types. The cost is a few newtype wrappers. The benefit is that entire classes
+of codegen bugs become compile errors.

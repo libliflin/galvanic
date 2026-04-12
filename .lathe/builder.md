@@ -154,6 +154,11 @@ The FLS Notes section is the research output. Fill it honestly even if it's empt
 
 **Pipeline order matters.** A new expression form needs to be implemented in three places in sequence: `src/ast.rs` (AST node), `src/lower.rs` (lowering to IR), `src/codegen.rs` (IR to ARM64). Don't add IR instructions that codegen doesn't handle — the compiler will panic at runtime.
 
+**Use Rust's type system to prevent IR misuse.** See `refs/fls-constraints.md` Constraint 8. When adding fields or variants to the IR:
+- Use newtype wrappers (`GpReg(u8)`, `FpReg(u8)`, `Slot(u16)`) so register kinds and slot indices can't be confused at the type level.
+- Tag operations with their semantic type — `BinOp` must carry an `IrTy` so codegen knows whether to emit overflow guards (i32 user arithmetic) or skip them (address calculations).
+- If two things should never be confused, make them different types. The compiler catches the misuse at build time instead of CI catching it as a 25-test failure.
+
 **IR is flat and explicit.** `src/ir.rs` has no SSA, no phi nodes. Stack slots are indexed integers. When lowering a new construct, allocate a stack slot if you need a temporary. Study how existing constructs (e.g., `if/else`, `while`, `match`) use stack slots and branch targets before adding new IR instructions.
 
 **ARM64 conventions.** Arguments in `x0`–`x{n-1}`. Return value in `x0`. Callee spills to stack immediately. Syscall: number in `x8`, args in `x0`–`x5`. This is a simplified convention — not full AAPCS64. Match what `src/codegen.rs` already does.
