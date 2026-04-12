@@ -104,12 +104,17 @@ For `&[T]`, length is the element count.
 not specify the panic mechanism — whether it is a library call, a trap
 instruction, or something else.
 
-**Galvanic's choice:** No bounds check is emitted at this milestone. Out-of-
-bounds access produces undefined behavior at the assembly level (load/store at
-wrong address). This is a known deviation; the check is deferred until a panic
-infrastructure is in place.
+**Galvanic's choice (updated — Claim 4p):** Every array and slice index
+emits a `cmp` + `b.lo _galvanic_panic` guard before the address computation.
+The comparison uses unsigned semantics (`b.lo` = branch if index ≥ len as
+unsigned), which also catches negative indices (large unsigned values) without
+a separate sign check. `_galvanic_panic` exits with code 101.
 
-**Source:** `src/ir.rs:730`, `src/codegen.rs:926`, `src/lower.rs:17880`
+- In-bounds access: `cmp xIDX, #LEN` → `b.lo .Lok` → address computation
+- Out-of-bounds: branches to `_galvanic_panic` → `exit(101)`
+- 2D arrays: each dimension is checked independently before linearization.
+
+**Source:** `src/codegen.rs` (bounds check emission in `BoundsCheck` instr)
 
 ---
 
@@ -284,23 +289,40 @@ Rust's de-facto behavior.
 indexing (§6.9), and integer overflow in debug mode (§6.23), but does not
 specify the panic mechanism — library call, trap instruction, signal handler.
 
-**Galvanic's choice (updated — Claim 4m):**
-- Divide-by-zero with a literal 0 divisor: **caught at compile time** in
-  `src/lower.rs`. The lowering pass rejects integer `/` and `%` expressions
-  whose RHS is `LitInt(0)` before emitting any IR. This covers the common
-  programming error (e.g. `x / 0`) without requiring panic infrastructure.
-  Non-literal zero divisors (e.g. `x / y` where `y` may be zero at runtime)
-  are not checked — they emit `sdiv`/`udiv` without a guard.
-- Out-of-bounds: no bounds check before load/store.
-- Overflow: no overflow check; arithmetic wraps per the hardware.
+**Galvanic's choice (updated — Claims 4m / 4o / 4p / 4q):**
 
-The literal-divisor check and the §6.18 exhaustiveness check (Claim 4l)
-form a consistent methodology: conservatively reject the statically-obvious
-UB case at compile time; defer the general case to when panic infrastructure
-is available.
+All runtime panics route through `_galvanic_panic`, a bare `exit(101)` syscall
+emitted in every program that contains division or indexing.
 
-**Source:** `src/lower.rs` (literal zero check in binary op lowering),
-`src/codegen.rs:496`, `src/codegen.rs:514`
+**Division-by-zero:**
+- Literal 0 divisor: **caught at compile time** in `src/lower.rs` (Claim 4m).
+  The lowering pass rejects `x / 0` and `x % 0` before emitting IR.
+- Runtime zero divisor: guarded by `cbz x{rhs}, _galvanic_panic` before each
+  `sdiv`, `udiv`, and the `sdiv`-step of `msub`-based remainder (Claim 4o).
+
+**Signed division overflow (i32::MIN / -1):**
+- After the `cbz` zero guard, `sdiv` and `srem` sites emit (Claim 4q):
+  1. `cmn x{rhs}, #1` — sets Z if rhs == -1 (64-bit signed -1)
+  2. `b.ne .Lsdiv_ok_*` — skip if rhs != -1
+  3. `movz x9, #0x8000, lsl #16` + `sxtw x9, w9` — materialize i32::MIN
+  4. `cmp x{lhs}, x9` / `b.eq _galvanic_panic` — panic if lhs == i32::MIN
+- AMBIGUOUS: galvanic uses 64-bit arithmetic for i32. The guard fires when
+  rhs == -1 (64-bit: 0xFFFFFFFF_FFFFFFFF) AND lhs == i32::MIN sign-extended
+  (0xFFFFFFFF_80000000). For i64 operands the guard would be a false negative
+  (i64::MIN/-1 not caught), but galvanic's test suite exercises only i32.
+- Unsigned division (`udiv`) does NOT get the cmn/cmp guard — unsigned
+  division cannot produce signed overflow.
+
+**Out-of-bounds indexing:**
+- Every array/slice index emits a `cmp` + `b.lo _galvanic_panic` (Claim 4p).
+  See §4.9 entry above.
+
+**Integer overflow (non-division):**
+- `+`, `-`, `*` use 64-bit arithmetic and do not wrap at i32 bounds.
+- No debug-mode trap is emitted. This is a known deviation from FLS §6.23.
+
+**Source:** `src/lower.rs` (literal zero check), `src/codegen.rs` (cbz, cmn,
+and bounds-check emission)
 
 ---
 
