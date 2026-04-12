@@ -10845,6 +10845,29 @@ impl<'src> LowerCtx<'src> {
                 }
                 spine.reverse(); // now in left-to-right evaluation order
 
+                // FLS §6.23: Compile-time literal zero divisor check.
+                // Integer division or remainder with a literal 0 as the divisor
+                // is always a compile-time error. FLS §6.23 requires a panic at
+                // runtime; galvanic catches the obvious literal case at compile
+                // time. Non-literal zero divisors are deferred to runtime (panic
+                // infrastructure is not yet implemented).
+                // Float division by 0.0 is IEEE 754 (infinity/NaN), not a panic
+                // (FLS §6.23 AMBIGUOUS for floats), so this check is integer-only.
+                if matches!(
+                    ret_ty,
+                    IrTy::I32 | IrTy::I8 | IrTy::I16 | IrTy::U32 | IrTy::U8 | IrTy::U16
+                ) {
+                    for (step_op, step_rhs) in &spine {
+                        if matches!(step_op, BinOp::Div | BinOp::Rem)
+                            && let ExprKind::LitInt(0) = &step_rhs.kind
+                        {
+                            return Err(LowerError::Unsupported(
+                                "divide by zero: literal 0 as divisor (FLS §6.23)".into(),
+                            ));
+                        }
+                    }
+                }
+
                 match ret_ty {
                     // FLS §4.1: i8 uses the same signed arithmetic as i32.
                     // SextI8 is emitted at return boundaries, not per-operation.
