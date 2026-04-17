@@ -110,3 +110,38 @@ fn succeed() -> i32 {{
     );
     assert!(!output.status.success(), "expected non-zero exit");
 }
+
+#[test]
+fn no_main_prints_lowered_note() {
+    // When lowering succeeds but no fn main is present, galvanic must print
+    // a human-readable note so the compiler contributor knows the file was
+    // processed correctly — not silently dropped.
+    // Format: "galvanic: lowered N function(s) — no fn main, no assembly emitted"
+    let mut tmp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
+    write!(
+        tmp,
+        r#"
+fn helper(x: i32) -> i32 {{
+    x + 1
+}}
+"#
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_galvanic"))
+        .arg(tmp.path())
+        .output()
+        .expect("failed to run galvanic");
+
+    assert!(
+        output.status.success(),
+        "expected exit 0 for library-only file, got {:?}",
+        output.status
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("lowered") && stdout.contains("function(s)") && stdout.contains("no fn main"),
+        "expected no-main note in stdout, got: {stdout}"
+    );
+}

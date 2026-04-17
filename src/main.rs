@@ -106,6 +106,10 @@ fn compile(args: Vec<String>) -> i32 {
 
     // Nothing to compile if there is no entry point.
     if !module.fns.iter().any(|f| f.name == "main") {
+        println!(
+            "galvanic: lowered {} function(s) — no fn main, no assembly emitted",
+            module.fns.len()
+        );
         return 0;
     }
 
