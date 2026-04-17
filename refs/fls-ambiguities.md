@@ -73,6 +73,13 @@ practice but is not mandated by the spec.
 
 **Source:** `src/lower.rs` (search `MOVZ+MOVK`)
 
+**Minimal reproducer:**
+```rust
+fn main() -> i32 { 65536 }
+```
+Assembly signature: look for `movz x0, #1, lsl #16` (a 32-bit value that cannot
+be encoded in a single 16-bit immediate — requires `movz` with a shift).
+
 ---
 
 ## §2.4.4.2 — Float Literals: NaN, Infinity, Hex Floats
@@ -85,6 +92,15 @@ suffix are supported. NaN/infinity are not expressible as literals. Hex floats
 are rejected at the lexer level.
 
 **Source:** `src/lower.rs:3968`
+
+**Minimal reproducer:**
+```rust
+fn add(a: f64, b: f64) -> f64 { a + b }
+fn main() -> i32 { let _ = add(1.0_f64, 3.14_f64); 0 }
+```
+Assembly signature: look for `fadd d0, d0, d1` — confirms decimal f64 literals
+are loaded and operated on via D-registers. NaN/infinity/hex-float are not valid
+Rust literal forms at any version; their absence is not galvanic-specific.
 
 ---
 
@@ -104,6 +120,10 @@ are rejected at the lexer level.
 
 **Source:** `src/lexer.rs:185`, `src/lexer.rs:234`
 
+**Minimal reproducer:** Not demonstrable via assembly — lexer token-stream
+distinctions (`Underscore` vs `Ident`) are not reflected in ARM64 machine code.
+The finding is observable in the token stream, not the emitted output.
+
 ---
 
 ## §4.1 — Built-in Associated Constants (MIN, MAX, BITS)
@@ -116,6 +136,14 @@ integer and float types as compile-time constants resolved during lowering.
 The set is chosen to match observed Rust usage, not a spec-defined list.
 
 **Source:** `src/lower.rs:1335`
+
+**Minimal reproducer:**
+```rust
+fn main() -> i32 { i32::MAX }
+```
+Assembly signature: look for `movz`/`movk` sequence or `mov x0, #...` loading
+`2147483647` (0x7FFF_FFFF) — confirms `i32::MAX` is resolved to its value at
+compile time rather than requiring a runtime lookup.
 
 ---
 
@@ -130,6 +158,13 @@ main TOC.
 `u32` (4 bytes). Stored and loaded as 32-bit integers on the stack.
 
 **Source:** `src/lower.rs:4000`
+
+**Minimal reproducer:**
+```rust
+fn main() -> i32 { 'A' as i32 }
+```
+Assembly signature: look for `mov w0, #65` — confirms `'A'` is the Unicode
+code point U+0041 = 65, stored as a 32-bit integer (not a wider type).
 
 ---
 
@@ -146,6 +181,15 @@ For `&[T]`, length is the element count.
 
 **Source:** `src/lower.rs:3572`, `src/lower.rs:3636`, `src/lower.rs:4692`
 
+**Minimal reproducer:**
+```rust
+fn byte_len(s: &str) -> usize { s.len() }
+fn main() -> i32 { byte_len("hi") as i32 }
+```
+Assembly signature: look for x0 holding the string pointer and x1 holding the
+byte count (`#2` for "hi") arriving as separate register arguments — confirms
+the two-slot fat pointer (base, length) ABI.
+
 ---
 
 ## §4.9 — Bounds Checking Mechanism
@@ -160,6 +204,15 @@ wrong address). This is a known deviation; the check is deferred until a panic
 infrastructure is in place.
 
 **Source:** `src/ir.rs:730`, `src/codegen.rs:926`, `src/lower.rs:17880`
+
+**Minimal reproducer:**
+```rust
+fn get(arr: [i32; 3], i: usize) -> i32 { arr[i] }
+```
+Assembly signature: look for `cmp`/`b.hs` before the `ldr` — bounds checks
+**are** now emitted (see §6.9/§6.23 entry for the full mechanism added in
+later claims). The §4.9 entry documents the original decision before the panic
+infrastructure was added.
 
 ---
 
@@ -184,6 +237,18 @@ infrastructure is in place.
 **Source:** `src/ir.rs:984`, `src/codegen.rs:119`, `src/codegen.rs:252`,
 `src/lower.rs:3281`, `src/lower.rs:9784`
 
+**Minimal reproducer:**
+```rust
+trait Sound { fn call(&self) -> i32; }
+struct Dog;
+impl Sound for Dog { fn call(&self) -> i32 { 1 } }
+fn dispatch(a: &dyn Sound) -> i32 { a.call() }
+fn main() -> i32 { let d = Dog; dispatch(&d) }
+```
+Assembly signature: look for `ldr x8, [x1]` (load vtable pointer from second
+slot of fat pointer) followed by `blr x8` (indirect dispatch) — confirms
+vtable at offset 0 with no destructor slot preceding it.
+
 ---
 
 ## §4.14 — Where-Clause Bounds: When Are They Checked?
@@ -204,6 +269,11 @@ availability is resolved for concrete types at call sites.
 **Source:** `src/parser.rs:719`, `src/parser.rs:744`, `src/parser.rs:858`,
 `src/parser.rs:1133`, `src/parser.rs:1226`
 
+**Minimal reproducer:** Not yet demonstrable — where-clause bound checking is
+not implemented; `fls_4_14_where_clauses_on_types.rs` is parse-only at this
+milestone. The enforcement mechanism (or its absence) is not observable in
+assembly output.
+
 ---
 
 ## §5.1.4 — Pattern Binding and Or-Patterns: Evaluation Order
@@ -217,6 +287,16 @@ Each alternative that matches stores to the same binding slot (identified by
 name). Type consistency is not verified at this milestone.
 
 **Source:** `src/ast.rs:1733`, `src/lower.rs:7821`, `src/parser.rs:3409`
+
+**Minimal reproducer:**
+```rust
+fn classify(x: i32) -> i32 {
+    match x { 1 | 2 => 10, _ => 0 }
+}
+```
+Assembly signature: look for two separate comparisons (`cmp x0, #1` then
+`cmp x0, #2`) before the `mov x0, #10` branch — confirms left-to-right
+alternative evaluation with a separate branch for each alternative.
 
 ---
 
@@ -232,6 +312,11 @@ elements (a + b positions). No elements are bound from the rest.
 
 **Source:** `src/parser.rs:3612`
 
+**Minimal reproducer:** Not yet demonstrable — rest patterns inside slice
+patterns are parsed but not compiled end-to-end at this milestone. The
+behavior (element count check + head/tail loads) is not observable in
+assembly output until full slice pattern lowering is implemented.
+
 ---
 
 ## §6.1.2 — Overflow in Const Contexts
@@ -246,6 +331,16 @@ rather than rejected. This is a pragmatic choice for FLS-faithful runtime
 codegen rather than full const-eval diagnostics.
 
 **Source:** `src/lower.rs:414`
+
+**Minimal reproducer:**
+```rust
+const C: i32 = 1 + 2;
+fn main() -> i32 { C }
+```
+Assembly signature: look for `mov x0, #3` in `main` — confirms the const
+expression was evaluated at compile time and the result emitted as an
+immediate. Contrast with `fn add(a: i32, b: i32) -> i32 { a + b }` which
+emits runtime `add w0, w0, w1` instead.
 
 ---
 
@@ -263,6 +358,14 @@ calls are permitted if the callee was declared `const`.
 
 **Source:** `src/lower.rs:613`, `src/lower.rs:627`
 
+**Minimal reproducer:**
+```rust
+fn main() -> i32 { const { 2 + 3 } }
+```
+Assembly signature: look for `mov x0, #5` — confirms the const block is
+evaluated at compile time and the result (`5`) is emitted as an immediate
+rather than a runtime `add` instruction.
+
 ---
 
 ## §6.4.4 — Unsafe Block: Permitted vs Required Operations
@@ -277,6 +380,14 @@ the `unsafe` keyword affects parse/type-checking only. No warning is emitted
 for unnecessary `unsafe`.
 
 **Source:** `src/lower.rs:16418`, `src/ast.rs:1459`
+
+**Minimal reproducer:**
+```rust
+fn main() -> i32 { unsafe { 42 } }
+```
+Assembly signature: identical to `fn main() -> i32 { 42 }` — emits `mov x0, #42`
+with no safety overhead. No warning is produced, confirming the `unsafe` keyword
+is a no-op for assembly output when the block contains only safe operations.
 
 ---
 
@@ -293,6 +404,18 @@ behavior rather than a spec guarantee.
 
 **Source:** `src/ir.rs:1445`, `src/lower.rs:14875`
 
+**Minimal reproducer:**
+```rust
+fn main() -> i32 {
+    let x: f64 = 0.0_f64 / 0.0_f64;
+    if x != x { 1 } else { 0 }
+}
+```
+Assembly signature: look for `fdiv d0, d0, d1` (runtime divide producing NaN)
+followed by `fcmp d0, d0` then `cset w0, ne` — confirms NaN != NaN yields 1
+because `fcmp` raises the unordered flag, and ARM64 `ne` condition is true when
+the unordered flag is set.
+
 ---
 
 ## §6.5.5 — Floating-Point: IEEE 754 Reference Without Encoding Details
@@ -307,6 +430,15 @@ ARM64 rounding mode (round-to-nearest, ties-to-even) is used. Subnormals are
 passed through unchanged.
 
 **Source:** `src/ir.rs:1265`
+
+**Minimal reproducer:**
+```rust
+fn add_f64(a: f64, b: f64) -> f64 { a + b }
+fn add_f32(a: f32, b: f32) -> f32 { a + b }
+```
+Assembly signature: `add_f64` emits `fadd d0, d0, d1` (D-registers = binary64);
+`add_f32` emits `fadd s0, s0, s1` (S-registers = binary32) — confirms the
+encoding choice (binary64 vs binary32) is implicit in the register width.
 
 ---
 
@@ -323,6 +455,14 @@ hardware behavior (implicit mod 64) satisfies the spec requirement for
 this could produce surprising results — not yet addressed.
 
 **Source:** `src/codegen.rs:594`, `src/lower.rs:10639`
+
+**Minimal reproducer:**
+```rust
+fn shl(x: i64, n: i64) -> i64 { x << n }
+```
+Assembly signature: look for `lsl x0, x0, x1` with **no** preceding
+`and x1, x1, #63` — confirms the shift amount is not explicitly masked and
+the ARM64 hardware's implicit mod-64 is relied upon.
 
 ---
 
@@ -345,6 +485,21 @@ uses `AND`/`SXTB`/`SXTH` for integer truncation/sign-extension. Matches
 Rust's de-facto behavior.
 
 **Source:** `src/ir.rs:1337`, `src/codegen.rs:1392`, `src/lower.rs:16898`
+
+**Minimal reproducer (integer narrowing):**
+```rust
+fn narrow(x: i32) -> i32 { (x as u8) as i32 }
+```
+Assembly signature: look for `and w0, w0, #255` — confirms low-8-bit truncation
+for `as u8` (the `AND` instruction masks off the upper 24 bits).
+
+**Minimal reproducer (float-to-int):**
+```rust
+fn f2i(x: f64) -> i32 { x as i32 }
+```
+Assembly signature: look for `fcvtzs w0, d0` — confirms saturating conversion
+(out-of-range values clamp to INT_MIN/INT_MAX per ARM64 `FCVTZS` semantics,
+not the FLS-specified truncation behavior).
 
 ---
 
@@ -379,6 +534,21 @@ the program) while keeping the implementation simple.
 **Source:** `src/lower.rs` (literal zero check),
 `src/codegen.rs` (cbz, MIN/-1 guard, bounds check, `_galvanic_panic`)
 
+**Minimal reproducer (divide-by-zero guard):**
+```rust
+fn div(x: i32, y: i32) -> i32 { x / y }
+```
+Assembly signature: look for `cbz x1, _galvanic_panic` immediately before
+`sdiv x0, x0, x1` — confirms the runtime zero-divisor guard.
+
+**Minimal reproducer (MIN/-1 overflow guard):**
+```rust
+fn div_min(y: i32) -> i32 { i32::MIN / y }
+```
+Assembly signature: look for `movz`/`sxtw` loading `i32::MIN` then `cmp`/`cmn`
+followed by a conditional `b _galvanic_panic` before `sdiv` — confirms the
+signed overflow guard.
+
 ---
 
 ## §6.10 — Tuple Return Calling Convention
@@ -394,6 +564,14 @@ supported. This is consistent with the general struct-return convention but is
 not mandated by the spec.
 
 **Source:** `src/lower.rs:1923`, `src/lower.rs:3824`
+
+**Minimal reproducer:**
+```rust
+fn pair() -> (i32, i32) { (10, 20) }
+```
+Assembly signature: look for `mov x0, #10` and `mov x1, #20` in the function
+body — confirms element[0] in x0 and element[1] in x1, following the
+"element[i] in register x{i}" convention.
 
 ---
 
@@ -411,6 +589,15 @@ not mandated by the spec.
 
 **Source:** `src/ast.rs:1093`, `src/ast.rs:1272`
 
+**Minimal reproducer:**
+```rust
+struct Point { x: i32, y: i32 }
+fn make(x: i32, y: i32) -> Point { Point { x, y } }
+```
+Assembly signature: look for two consecutive stores to the Point stack slot —
+the x field stored before the y field — confirming shorthand fields are
+evaluated in source order.
+
 ---
 
 ## §6.12.2 — Method Auto-Deref Step Limit
@@ -424,6 +611,17 @@ the correct struct type. Method calls on references require explicit
 dereferencing. Auto-deref is deferred to a future type-checking phase.
 
 **Source:** `src/lower.rs:17388`, `src/ast.rs:1127`
+
+**Minimal reproducer:**
+```rust
+struct Wrap(i32);
+impl Wrap { fn val(&self) -> i32 { self.0 } }
+fn main() -> i32 { let w = Wrap(7); w.val() }
+```
+Assembly signature: look for `add x0, sp, #N` (address of `w` passed in x0)
+before `bl Wrap__val` — confirms the receiver is the struct itself (no
+auto-deref step). Calling `w.val()` on `&Wrap` without explicit `*w` would
+require the auto-deref that is not yet implemented.
 
 ---
 
@@ -440,6 +638,11 @@ caller must assign to a named binding first.
 
 **Source:** `src/lower.rs:17213`
 
+**Minimal reproducer:** Not demonstrable via assembly — the finding manifests as
+a compile error, not assembly output. `fn make() -> Point { ... }; make().x`
+is rejected by the lowering stage before any code is emitted. Assign to a
+binding first: `let p = make(); p.x` works correctly.
+
 ---
 
 ## §6.14 — Inner Function Name Visibility
@@ -455,6 +658,17 @@ within the enclosing function body. Closures use trampoline dispatch (`blr`);
 inner functions use direct call (`bl`).
 
 **Source:** `src/lower.rs:10101`, `src/parser.rs:3061`
+
+**Minimal reproducer:**
+```rust
+fn outer() -> i32 {
+    fn inner() -> i32 { 7 }
+    inner()
+}
+```
+Assembly signature: look for `bl inner` (direct call, not `blr`) in `outer`'s
+body and a separate `inner:` function label — confirms inner functions use
+direct-call dispatch, not the closure trampoline (`blr xN`).
 
 ---
 
@@ -476,6 +690,18 @@ observable behavior but deviates from the spec's type-level model.
 
 **Source:** `src/lower.rs:4710`, `src/lower.rs:15675`, `src/lower.rs:15830`
 
+**Minimal reproducer:**
+```rust
+fn sum(arr: [i32; 3]) -> i32 {
+    let mut s = 0;
+    for x in arr { s = s + x; }
+    s
+}
+```
+Assembly signature: look for a loop counter increment and element `ldr` without
+any `bl IntoIterator__into_iter` call — confirms special-cased desugaring that
+bypasses the trait dispatch the FLS prescribes.
+
 ---
 
 ## §6.15.6 — Break-with-Value: Syntactic or Semantic Restriction?
@@ -491,6 +717,15 @@ successfully but has unspecified runtime behavior.
 
 **Source:** `src/ast.rs:1242`
 
+**Minimal reproducer:**
+```rust
+fn main() -> i32 { loop { break 42; } }
+```
+Assembly signature: look for `mov x0, #42` followed by `b` to the function
+epilogue — confirms break-with-value in `loop` sets the loop result and exits.
+For the ambiguity: `while true { break 42; }` also compiles without error,
+demonstrating that the syntactic restriction is not enforced.
+
 ---
 
 ## §6.16 — Range Expressions: Value or Type?
@@ -504,6 +739,19 @@ in `for` loops (desugared inline). They are not supported as standalone values
 that can be stored or passed. The parse fixture accepts them; codegen does not.
 
 **Source:** `src/ast.rs:1148`
+
+**Minimal reproducer:**
+```rust
+fn sum_to_five() -> i32 {
+    let mut s = 0;
+    for i in 0..5 { s = s + i; }
+    s
+}
+```
+Assembly signature: look for loop counter starting at 0 and a `cmp x0, #5`
+(upper bound comparison) — confirms `0..5` is desugared inline as loop bounds.
+Attempting `let r = 0..5` (standalone range value) emits a compile error,
+confirming ranges are not supported as first-class values.
 
 ---
 
@@ -519,6 +767,10 @@ syntax is rejected to avoid ambiguity with block delimiters. This matches
 observed Rust behavior but the spec does not state it explicitly.
 
 **Source:** `src/parser.rs:99`
+
+**Minimal reproducer:** Not demonstrable via assembly — enforced at the parser
+level as a syntax error. `if Foo { x: 1 } { bar() }` emits a parse error
+before any code is generated, confirming the `restrict_struct_lit` flag fires.
 
 ---
 
@@ -550,6 +802,18 @@ and silently accepted. Full usefulness/completeness analysis is future work.
 **Source:** `src/lower.rs` — `check_match_exhaustiveness` (inserted before the
 `LowerCtx` impl block); called at all four match-lowering sites.
 
+**Minimal reproducer:**
+```rust
+fn classify(x: i32) -> i32 {
+    match x { 0 => 1, _ => 2 }
+}
+```
+Assembly signature: look for `cmp x0, #0` + conditional branch to two arms —
+confirms runtime match dispatch. The wildcard arm (`_`) triggers the
+exhaustiveness heuristic's rule 1. A match on integer with no wildcard
+(e.g. `match x { 0 => 1, 1 => 2 }`) emits a compile error: "match may not
+be exhaustive".
+
 ---
 
 ## §6.21 — Comparison Non-Associativity: Chained Comparisons
@@ -577,6 +841,14 @@ detect.
 **Source:** `src/lower.rs` (comparison operator lowering, check added before
 the f64/f32/i32 dispatch path)
 
+**Minimal reproducer:**
+```rust
+fn bad(a: i32, b: i32, c: i32) -> bool { a < b < c }
+```
+Assembly signature: no assembly is emitted — the compiler exits with error
+"chained comparison: FLS §6.21 — comparison operators are non-associative".
+Run `cargo run -- /tmp/bad.rs` and observe the error on stderr.
+
 ---
 
 ## §6.22 — Closure Capture ABI
@@ -592,6 +864,19 @@ closure parameters). Mutable captures (`FnMut`) are passed by address;
 immutable captures are passed by value.
 
 **Source:** `src/lower.rs:18078`, `src/lower.rs:18173`
+
+**Minimal reproducer:**
+```rust
+fn apply(f: impl Fn() -> i32) -> i32 { f() }
+fn main() -> i32 {
+    let x = 5;
+    apply(|| x)
+}
+```
+Assembly signature: look for a trampoline function label (e.g.
+`__closure_trampoline_0:`) in the assembly and `x` passed as a hidden leading
+register argument before the closure dispatch — confirms captured values are
+hidden leading parameters, not heap-allocated.
 
 ---
 
@@ -609,6 +894,17 @@ immutable captures are passed by value.
 
 **Source:** `src/lower.rs:565`, `src/lower.rs:1236`
 
+**Minimal reproducer:**
+```rust
+const A: i32 = 1 + 2;
+const B: i32 = A * 3;
+fn main() -> i32 { B }
+```
+Assembly signature: look for `mov x0, #9` in `main` — confirms lazy const
+evaluation (B resolved to 9 by referencing A at compile time). No step-limit
+guard is emitted; a const item that would loop infinitely would hang the
+compiler.
+
 ---
 
 ## §7.2 — Static Data-Section Alignment
@@ -622,6 +918,15 @@ output binary.
 all supported types but is not mandated by the spec.
 
 **Source:** `src/ast.rs:182`, `src/codegen.rs:156`
+
+**Minimal reproducer:**
+```rust
+static X: i32 = 42;
+fn main() -> i32 { X }
+```
+Assembly signature: look for `.align 3` immediately before the `X:` label in
+the `.data` section of the emitted `.s` file — confirms 8-byte alignment
+regardless of the static's natural alignment (i32 only requires 4 bytes).
 
 ---
 
@@ -641,6 +946,19 @@ all supported types but is not mandated by the spec.
 
 **Source:** `src/lower.rs:7634`, `src/lower.rs:9910`, `src/lower.rs:9999`
 
+**Minimal reproducer:**
+```rust
+fn foo(cond: bool) -> i32 {
+    let x;
+    if cond { x = 1; } else { x = 2; }
+    x
+}
+```
+Assembly signature: look for a stack slot allocated in the prologue
+(`sub sp, sp, #N`) with **no** initializing store before the conditional
+branches — confirms the slot is allocated but not zeroed, matching the
+"uninit" choice.
+
 ---
 
 ## §9 — Function Qualifier Ordering
@@ -654,6 +972,12 @@ combination. Semantic restrictions (e.g., `const async` being invalid) are
 not enforced at this milestone.
 
 **Source:** `src/ast.rs:242`, `src/parser.rs:338`
+
+**Minimal reproducer:** Not directly observable via assembly — the finding is
+parser-level permissiveness. To verify: a file containing
+`const unsafe fn add(a: i32, b: i32) -> i32 { a + b }` (unusual ordering,
+normally written `unsafe const fn`) compiles without a parse error and emits
+normal function assembly.
 
 ---
 
@@ -670,6 +994,15 @@ position are not yet supported. Nested patterns in parameter position are
 future work.
 
 **Source:** `src/ast.rs:489`
+
+**Minimal reproducer:**
+```rust
+fn add((a, b): (i32, i32)) -> i32 { a + b }
+```
+Assembly signature: look for the two input integers arriving in x0 and x1
+being stored to separate named stack slots (`a` and `b`) before
+`add w0, w0, w1` — confirms tuple destructuring in parameter position maps
+to the standard two-argument calling convention.
 
 ---
 
@@ -690,6 +1023,16 @@ future work.
 **Source:** `src/ast.rs:311`, `src/lower.rs:3675`, `src/codegen.rs:878`,
 `src/lower.rs:17800`
 
+**Minimal reproducer:**
+```rust
+struct Point { x: i32, y: i32 }
+impl Point { fn sum(&self) -> i32 { self.x + self.y } }
+fn main() -> i32 { let p = Point { x: 3, y: 4 }; p.sum() }
+```
+Assembly signature: look for `add x0, sp, #N` (address of `p` loaded into x0)
+before `bl Point__sum` — confirms `&self` is passed as a pointer in x0, not
+a copy of the struct value.
+
 ---
 
 ## §10.2 — `Self::X` Projection Resolution in Default Methods
@@ -705,6 +1048,10 @@ Resolution is deferred until monomorphization; if no concrete type is known,
 the projection fails at codegen.
 
 **Source:** `src/parser.rs:1786`
+
+**Minimal reproducer:** Not yet demonstrable — requires generic trait machinery
+with associated types, which is not compiled end-to-end at this milestone
+(`fls_12_1_generic_trait_impl.rs` is parse-only).
 
 ---
 
@@ -724,6 +1071,10 @@ the projection fails at codegen.
 
 **Source:** `src/ast.rs:384`, `src/ast.rs:388`
 
+**Minimal reproducer:** Not yet demonstrable — generic `impl<T>` disambiguation
+and `unsafe impl` enforcement both involve features not compiled end-to-end
+at this milestone.
+
 ---
 
 ## §12.1 — Generic `>>` Token Disambiguation
@@ -738,6 +1089,11 @@ generic, the second `>` is re-examined by the outer context. This is tracked
 via a "pending GT" flag in the parser.
 
 **Source:** `src/parser.rs:367`, `src/parser.rs:394`, `src/parser.rs:518`
+
+**Minimal reproducer:** Not yet demonstrable — nested generic type arguments
+are parsed but `fls_12_1_generic_trait_impl.rs` is parse-only at this
+milestone. The `>>` split is observable at the parse level but not in emitted
+assembly.
 
 ---
 
@@ -760,6 +1116,17 @@ via a "pending GT" flag in the parser.
 
 **Source:** `src/ast.rs:437`, `src/parser.rs:695`
 
+**Minimal reproducer:**
+```rust
+trait Animal { fn sound(&self) -> i32; }
+struct Cat;
+impl Animal for Cat { fn sound(&self) -> i32 { 2 } }
+fn main() -> i32 { let c = Cat; c.sound() }
+```
+Assembly signature: look for `bl Cat__sound` — confirms trait method dispatch
+resolves to the concrete impl. To test definition order: place `impl Animal for
+Cat` before `trait Animal` in the file; galvanic accepts it without error.
+
 ---
 
 ## §14 — Visibility and Name Resolution
@@ -773,6 +1140,12 @@ annotations in the AST but defers enforcement to a future name-resolution
 phase; all fields are currently accessible regardless of visibility.
 
 **Source:** `src/ast.rs:576`, `src/ast.rs:661`
+
+**Minimal reproducer:** Not demonstrable via assembly — visibility is not
+enforced; a `pub(crate)` field accessed from outside its module compiles
+identically to a `pub` field, producing no behavioral difference in output.
+The finding is that the enforcement mechanism is absent, which cannot be
+confirmed by inspecting assembly.
 
 ---
 
@@ -793,6 +1166,18 @@ that return mutable references) are not supported at this milestone.
 
 **Source:** `src/lower.rs:14302`, `src/lower.rs:14393`, `src/lower.rs:14604`
 
+**Minimal reproducer:**
+```rust
+fn swap(arr: &mut [i32; 2]) {
+    let t = arr[0];
+    arr[0] = arr[1];
+    arr[1] = t;
+}
+```
+Assembly signature: look for `str w1, [x0]` and `str w2, [x0, #4]` — confirms
+array index (`arr[0]`, `arr[1]`) is a valid place expression on the LHS of
+assignment, emitting `str` instructions to the computed element address.
+
 ---
 
 ## §15 — Discriminant Default Values and Drop Order
@@ -809,6 +1194,15 @@ that return mutable references) are not supported at this milestone.
    of scope. Galvanic emits no drop calls (no destructor support).
 
 **Source:** `src/lower.rs:10564`, `src/lower.rs:3782`
+
+**Minimal reproducer (discriminant defaults):**
+```rust
+enum Dir { North, South, East, West }
+fn main() -> i32 { Dir::South as i32 }
+```
+Assembly signature: look for `mov x0, #1` — confirms South = 1 (implicit
+default: North = 0, South = 0 + 1 = 1). Drop order is not demonstrable since
+galvanic emits no destructor calls.
 
 ---
 
@@ -836,6 +1230,12 @@ that return mutable references) are not supported at this milestone.
 **Source:** `src/ast.rs:266`, `src/ast.rs:388`, `src/ast.rs:442`,
 `src/parser.rs:229`, `src/parser.rs:243`, `src/parser.rs:255`
 
+**Minimal reproducer:** Not demonstrable via assembly — enforcement is deferred;
+an `unsafe fn foo() -> i32 { 0 }` called from a safe context (without
+`unsafe { foo() }`) compiles without error and emits identical assembly to a
+safe function call. The absence of enforcement is the finding, which cannot be
+confirmed by assembly content alone.
+
 ---
 
-*Last updated: 2026-04-17. Source annotation count at time of writing: ~155 `AMBIGUOUS` markers across 6 source files. 46 entries, sorted by FLS section number, with linked table of contents.*
+*Last updated: 2026-04-17. Source annotation count at time of writing: ~155 `AMBIGUOUS` markers across 6 source files. 46 entries, sorted by FLS section number, with linked table of contents. Minimal reproducers added 2026-04-17.*

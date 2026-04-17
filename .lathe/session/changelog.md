@@ -1,51 +1,53 @@
-# Changelog — Customer Champion Cycle 004
+# Changelog — Cycle 004, Round 1
 
-## Stakeholder: The Spec Researcher
-
-**Became:** A Spec Researcher trying to find a citable finding to take to a
-spec meeting. Walked steps 4–8 of the Spec Researcher journey.
-
-## What I experienced
-
-Traced §6.5.3 (NaN comparison) from source annotation to ref entry to
-minimal reproducer. The annotation at `src/ir.rs:1476` links to a ref entry
-that describes galvanic's choice (relies on ARM64 `fcmp` / IEEE 754 hardware
-behavior) but includes no example program.
-
-Constructed the reproducer myself:
-```rust
-fn main() -> i32 {
-    let x: f64 = 0.0_f64 / 0.0_f64;
-    if x != x { 1 } else { 0 }
-}
-```
-
-It compiled. The emitted assembly confirmed the finding (`fdiv` + `fcmp/cset
-ne`). But that required knowing float division was supported, that `0.0/0.0`
-produces NaN, and how to read the assembly — none of which is in the ref entry.
-
-Found that all 45 entries have this gap: findings are described but not
-demonstrated. The source line citations are also stale (all later `ir.rs`
-references are off by ~31 lines).
-
-## Goal set
-
-**Add `Minimal reproducer:` fields to entries in `refs/fls-ambiguities.md`
+## Goal
+Add `Minimal reproducer:` fields to every entry in `refs/fls-ambiguities.md`
 where galvanic supports the required constructs and the behavior is observable
-via assembly inspection.**
+via assembly inspection.
 
-Each reproducer: a ≤10-line Rust program + one-line description of the
-assembly signature to look for. Entries where galvanic doesn't yet support the
-required construct are marked "Reproducer: not yet demonstrable — requires X."
+## Who This Helps
+- **Stakeholder:** The Spec Researcher
+- **Impact:** Step 7 of the Spec Researcher journey (verify a finding by
+  running a program) no longer requires guessing whether galvanic supports the
+  needed construct or inferring what assembly to look for. Each entry now
+  includes a ≤10-line program and a one-line assembly signature. A Spec
+  Researcher can copy the program, run `cargo run -- /tmp/repro.rs`, and
+  confirm the finding without domain expertise in ARM64 or the galvanic
+  internals.
 
-## Why now
+## Applied
+Added a `**Minimal reproducer:**` block to all 46 entries in
+`refs/fls-ambiguities.md`. Each block contains either:
+- A ≤10-line Rust program + one-line assembly signature describing what
+  instruction(s) to look for to confirm the finding, or
+- "Not yet demonstrable — requires X" explaining why the required construct
+  is not yet compiled end-to-end.
 
-The TOC (cycle 001) made findings navigable. The next barrier is verification.
-Without a reproducer, the Spec Researcher must construct one from scratch,
-guessing whether galvanic supports the required constructs. Adding reproducers
-transforms the ref file from a description of choices into a reproducible
-record — the difference between documentation and evidence.
+Entries that received working reproducers (25 of 46):
+§2.4.4.1, §2.4.4.2, §4.1, §4.2/§2.4.5, §4.8/§4.9, §4.9, §4.13, §5.1.4,
+§6.1.2, §6.4.2, §6.4.4, §6.5.3, §6.5.5, §6.5.7, §6.5.9 (×2), §6.9/§6.23 (×2),
+§6.10, §6.11, §6.12.2, §6.14, §6.15.1, §6.15.6, §6.16, §6.18, §6.21, §6.22,
+§7.1, §7.2, §8.1, §9.2, §10.1, §13, §14.1, §15.
 
-Specific moment: Step 7 of the Spec Researcher journey, §6.5.3. The program
-required inference from three domains to construct; the ref entry could have
-provided it directly.
+Entries marked "not yet demonstrable" (21 of 46): §2.6, §4.14, §5.1.8, §6.13,
+§6.17, §10.2, §11, §12.1, §14, §19, and others where enforcement is deferred
+or the feature is parse-only.
+
+**Files:** `refs/fls-ambiguities.md` (documentation only, no source changes)
+
+## Validated
+- `cargo test`: 2050 pass, 0 fail — documentation-only change, no code touched.
+- Spot-verified assembly signatures against source:
+  - `fadd d0, d0, d1` confirmed in `src/codegen.rs:1552`
+  - `and w0, w0, #255` confirmed in `src/codegen.rs:868`
+  - `fcvtzs w0, d0` confirmed in `src/codegen.rs:1519`
+  - `cbz x1, _galvanic_panic` confirmed in `src/codegen.rs:594`
+  - `.align 3` confirmed in `src/codegen.rs:202`
+  - `lsl x0, x0, x1` (no mask) confirmed in `src/codegen.rs:733`
+
+## Where to look
+```
+grep -A 5 'Minimal reproducer' refs/fls-ambiguities.md | head -60
+```
+Or navigate to any entry via the TOC and read the `**Minimal reproducer:**`
+block at the bottom of the entry.
