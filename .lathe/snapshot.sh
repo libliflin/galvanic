@@ -124,8 +124,22 @@ if [[ -f "refs/fls-ambiguities.md" ]]; then
   AMBIG_IN_REF=$(grep -c '^## §' refs/fls-ambiguities.md 2>/dev/null || true)
 fi
 echo "AMBIGUOUS annotations in source: $AMBIG_IN_SOURCE | Documented entries in refs/fls-ambiguities.md: $AMBIG_IN_REF"
-if [[ "$AMBIG_IN_SOURCE" -gt "$AMBIG_IN_REF" ]]; then
-  echo "WARNING: $((AMBIG_IN_SOURCE - AMBIG_IN_REF)) annotation(s) in source may not be documented in refs/"
+
+# Check which unique section numbers from source annotations are missing from refs.
+# (Compare unique sections, not raw line count — many annotations share a section.)
+if [[ -f "refs/fls-ambiguities.md" ]]; then
+  MISSING=$(grep -rn 'AMBIGUOUS' src/ 2>/dev/null \
+    | grep -oE '§[0-9]+(\.[0-9]+)?' \
+    | sort -u \
+    | while read sec; do
+        grep -qE "^## ${sec}( |—|-)" refs/fls-ambiguities.md || echo "  $sec"
+      done)
+  if [[ -n "$MISSING" ]]; then
+    echo "WARNING: sections annotated in source but missing from refs/fls-ambiguities.md:"
+    echo "$MISSING"
+  else
+    echo "OK — all annotated sections have entries in refs/fls-ambiguities.md"
+  fi
 fi
 echo ""
 
