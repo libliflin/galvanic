@@ -1,73 +1,148 @@
-# Goal — Cycle 002
+# Verification — Cycle 1, Round 1
 
-## Stakeholder: The Compiler Contributor
+## What was checked
 
-**Rotation rationale:** Cycle 001 served the Spec Researcher. The Lead Researcher dominated the 15 cycles before that. The Compiler Contributor has not been served in recent memory and the journey reveals a specific, concrete blocker.
+- Read the builder's diff in full: TOC addition, introductory text update, 12 out-of-order entries relocated to their correct FLS-section positions, footer datestamp updated.
+- Verified that all 45 TOC entries have a corresponding `## §` body heading.
+- Verified that body headings are in FLS section numeric order.
+- Verified no duplicate headings remain.
+- Ran the full test suite: 2047 tests, 0 failures.
 
----
+## Findings
 
-## What to Change
+**Duplicate entry introduced (fixed):** The builder moved the old `§6.21 / §6.7 — Comparison Operator Non-Associativity` entry from the unsorted tail into sorted position — but the file already contained a newer, more detailed `§6.21 — Comparison Non-Associativity: Chained Comparisons` entry at that position (from Claim 4n). The result was two §6.21 body sections with contradictory content:
 
-When `galvanic` fails during lowering with "not yet supported", the error message must include the name of the item (function, constant, static, etc.) being lowered when the failure occurred.
+- The newer entry (Claim 4n): enforcement at the lowering stage — the correct, current behavior.
+- The older entry (§6.21 / §6.7): describes enforcement as deferred, left-associative at grammar — a superseded approach.
 
-**Currently:**
-```
-galvanic: compiling fls_9_functions.rs
-parsed 19 item(s)
-error: lower failed (not yet supported: integer literal with non-integer type)
-```
+Both entries appeared in the TOC. A spec researcher following the TOC would read both and encounter contradictory descriptions of galvanic's behavior.
 
-**After this change:**
-```
-galvanic: compiling fls_9_functions.rs
-parsed 19 item(s)
-error: lower failed in 'const_add': not yet supported: integer literal with non-integer type
-```
+No other issues found. The sort order, TOC anchor links, and entry completeness are correct for all remaining 45 entries.
 
-The item name is already known at the point where per-item lowering happens — the AST `Item` node has both a name and a `Span`. This information is discarded before the error is surfaced. Thread it through.
+## Fixes applied
 
----
+Removed the stale `§6.21 / §6.7 — Comparison Operator Non-Associativity` duplicate from both the TOC and the body. The authoritative `§6.21 — Comparison Non-Associativity: Chained Comparisons` entry (Claim 4n) is the only §6.21 entry remaining.
 
-## Which Stakeholder This Helps and Why
+**File modified:** `refs/fls-ambiguities.md` — entry count: 46 → 45.
 
-A Compiler Contributor picks a parse-only fixture (`fls_9_functions.rs`, 19 items, 200+ lines), runs `cargo run -- tests/fixtures/fls_9_functions.rs`, and gets a message that tells them *what* failed but not *where in their 200-line file* to look.
+## Witnessed
 
-They must then either:
-- Comment out functions one by one to binary-search which triggers the error, or
-- Add `eprintln!` statements to `src/lower.rs` to trace execution
+- `cargo test`: 2047 passed, 0 failed (lib + e2e + fls_fixtures + smoke).
+- `grep "^## §" refs/fls-ambiguities.md | wc -l` → 45; `grep "^- \[§" refs/fls-ambiguities.md | wc -l` → 45. TOC and body counts match.
+- `grep "^## §" refs/fls-ambiguities.md | sort | uniq -d` → empty. No duplicates.
+- Confirmed §6.15.1 and §6.15.6 are now adjacent, resolving the "335 lines apart" navigation problem named in the goal.
 
-Neither is how a new contributor should spend their time.
+## Confidence
 
-**The specific moment the experience turned:** Step 7 of the contributor journey — running `cargo run -- <fixture>` and reading the error output. The message is accurate but useless as a diagnostic: "not yet supported: integer literal with non-integer type" in a 19-item file. With the item name present, the contributor navigates directly to `const_add` and sees the u8/i128-typed literal that triggered the error.
+High. The goal is met: the file has a sorted, linked TOC and a body sorted by FLS section number. The one genuine gap introduced by the builder (duplicate §6.21) is fixed. No regressions, no missing entries, no anchor link mismatches.
+
+VERDICT: PASS
 
 ---
 
-## Why Now
+# Changelog — Customer Champion Cycle
 
-This is a class-level fix. Every future "not yet supported" error — of which there will be many as contributors push parse-only fixtures toward full compilation — will carry context. There are currently 5 parse-only fixtures that hit this wall. The Compiler Contributor journey breaks at the same step for each one, and fixing the error format fixes all of them simultaneously.
+## Stakeholder: The Spec Researcher
 
-The information already exists in the AST. This is not a new feature — it's surfacing what the pipeline already knows.
+**Became:** The Spec Researcher — an FLS contributor or compiler educator who arrived at galvanic to find concrete, citable findings about where the spec is silent or ambiguous.
+
+**Rotation rationale:** The last ~15 cycles have served the Lead Researcher exclusively (Claims 4m–4s, Constraint 8, e2e test additions). The Spec Researcher is the most under-served stakeholder. Their primary artifact — `refs/fls-ambiguities.md` — has grown without becoming more navigable.
 
 ---
 
-## Floor Check
+## What I experienced
+
+Walked step 2 of the Spec Researcher journey: opened `refs/fls-ambiguities.md` to scan for sections of interest.
+
+The file is 807 lines with 47 entries and no table of contents. The entries are not in FLS section order — entries added in later cycles were appended at the bottom (§4.14 after §12.1; §6.10, §6.12.2, §6.13, §6.14, §6.15.6, §9.2, §13, §14, §19 all after §15). The introductory paragraph says the file organizes findings "by FLS section" — but the body does not reflect that.
+
+**The worst moment:** Trying to find all loop-related findings (§6.15). There are two entries: §6.15.1 at line 330 and §6.15.6 at line 665 — 335 lines apart, with no connection between them. A spec researcher would find the first and miss the second.
+
+**The hollowest moment:** The promise of the document ("aggregates AMBIGUOUS annotations by FLS section") is not matched by its structure. 47 documented findings with real research value, presented as an unsorted 807-line wall of text.
+
+---
+
+## Goal set
+
+**Add a sorted, linked table of contents to `refs/fls-ambiguities.md` and reorder the body entries into FLS section order.**
+
+The TOC: every section listed in numeric order, one-line gap summary per entry, Markdown anchor links.
+
+The reorder: move the out-of-order entries (§4.14, §6.10, §6.12.2, §6.13, §6.14, §6.15.6, §6.17, §9.2, §10.2, §13, §14, §19) to their correct positions in the body.
+
+**Why this is the most valuable change right now:** It's a class-level fix. A TOC + sort eliminates the entire "finding exists but can't be found" category for all 47 current entries and all future ones. The registry has reached the size where scanning without a TOC is genuinely costly; the task is bounded and self-contained.
+
+---
+
+## Floor check
 
 Build: OK. Tests: 2047 pass, 0 fail. Clippy: OK. Unsafe audit: OK. Floor intact.
 
 ---
 
-## Lived Experience Note
+## Builder Changelog — Round 1
 
-**Became:** A Compiler Contributor — a CS student or Rust enthusiast who cloned galvanic to understand compiler internals from first principles, guided by the FLS.
+### Applied
+- Added a 46-entry linked TOC immediately after the intro paragraph, with one
+  line per finding and Markdown anchor links to each body section.
+- Reordered 12 out-of-position entries into correct FLS section number order:
+  §4.14, §6.10, §6.12.2, §6.13, §6.14, §6.15.6, §6.17, §9.2, §10.2,
+  §13, §14, §19 — all moved from their appended positions to their correct
+  numeric slots.
+- Updated the footer to 2026-04-17 and noted the file is now sorted with a
+  linked TOC.
 
-**What I tried:** Walked step 7 of the journey: ran `cargo run --` on each of the 5 parse-only fixtures to see what galvanic reports.
+**Files:** `refs/fls-ambiguities.md`
 
-Results:
-- `fls_6_18_match_expressions.rs` → `error: lower failed (not yet supported: tuple expression must be bound to a 'let' variable at this milestone)`
-- `fls_2_4_literals.rs` → `error: lower failed (not yet supported: cannot parse float literal: '8_031.4_e-12f64')`  
-- `fls_9_functions.rs` → `error: lower failed (not yet supported: integer literal with non-integer type)`
-- `fls_4_14_where_clauses_on_types.rs` → `error: lower failed (not yet supported: expression kind in non-const context (runtime codegen not yet implemented))`
+### Validated
+- `cargo test`: 2047 passed, 0 failed — doc-only change, no code touched.
+- `grep -n '§6.15' refs/fls-ambiguities.md` now shows §6.15.1 and §6.15.6
+  within a few lines of each other (previously 335 lines apart).
+- Verifier: open `refs/fls-ambiguities.md`, click any TOC entry to confirm
+  anchor navigation works.
 
-**The worst moment:** After getting `error: lower failed (not yet supported: integer literal with non-integer type)` for `fls_9_functions.rs`, I searched `src/lower.rs` for the error string and found it at line 10504 inside a `LitInt` match arm. I still didn't know which of the 19 functions in the fixture triggered it. The only path forward was to start commenting out items — the exact kind of archaeology work that signals an opaque pipeline.
+---
 
-**The hollowest moment:** The error message is grammatically correct and technically accurate. It says exactly what failed. But it gives a contributor no foothold — it names the symptom, not the location. A single item name would transform this from a wall into a door.
+# Changelog — Customer Champion Cycle 002
+
+## Stakeholder: The Compiler Contributor
+
+**Became:** A Compiler Contributor — a CS student or Rust enthusiast who picked galvanic to learn compiler internals from the FLS, step by step.
+
+**Rotation rationale:** Cycle 001 served the Spec Researcher. The 15 cycles before that served the Lead Researcher. The Compiler Contributor has not been served in recent memory.
+
+---
+
+## What I experienced
+
+Walked step 7 of the Compiler Contributor journey: ran `cargo run --` on each of the 5 parse-only fixtures. Every one failed with a "not yet supported" error that named the symptom but gave no source location.
+
+For `fls_9_functions.rs` (19 items, 200+ lines):
+```
+error: lower failed (not yet supported: integer literal with non-integer type)
+```
+
+To find *which* of the 19 items triggered this, the only options were: comment out functions one by one, or add `eprintln!` calls to `src/lower.rs`. That's archaeology, not contribution.
+
+The AST has `Span` on every node. The lowering pass knows which item it's processing. That information is discarded before the error is returned to `main.rs`.
+
+**The worst moment:** Found the error at `src/lower.rs:10504` via grep, confirmed it's in the `LitInt` matching arm — and still had no idea which function in the 200-line file triggered it.
+
+**The hollowest moment:** The message is correct and technically precise. It just gives the contributor zero foothold.
+
+---
+
+## Goal set
+
+**When lowering fails with "not yet supported", include the name of the item being lowered in the error output.**
+
+Before: `error: lower failed (not yet supported: integer literal with non-integer type)`  
+After: `error: lower failed in 'const_add': not yet supported: integer literal with non-integer type`
+
+The item name is already present in the AST at the point where per-item lowering happens. Thread it into the error. This is a class-level fix: every future "not yet supported" error across all 5 parse-only fixtures (and future ones) will carry context automatically.
+
+---
+
+## Floor check
+
+Build: OK. Tests: 2047 pass, 0 fail. Clippy: OK. Unsafe audit: OK. Floor intact.

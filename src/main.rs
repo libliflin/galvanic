@@ -85,7 +85,7 @@ fn compile(args: Vec<String>) -> i32 {
     let module = match galvanic::lower::lower(&source_file, &source) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("error: lower failed ({e})");
+            eprintln!("error: lower failed {e}");
             return 1;
         }
     };
