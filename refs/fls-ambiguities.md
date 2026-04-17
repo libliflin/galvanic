@@ -23,6 +23,7 @@ annotations for full context.
 - [§4.9 — Bounds Checking Mechanism](#49--bounds-checking-mechanism)
 - [§4.13 — `dyn Trait` Vtable Layout and Fat Pointer Return ABI](#413--dyn-trait-vtable-layout-and-fat-pointer-return-abi)
 - [§4.14 — Where-Clause Bounds: When Are They Checked?](#414--where-clause-bounds-when-are-they-checked)
+- [§4.14 — Parenthesized Trait Bound Syntax: Restricted to Fn Traits?](#414--parenthesized-trait-bound-syntax-restricted-to-fn-traits)
 - [§5.1.4 — Pattern Binding and Or-Patterns: Evaluation Order](#514--pattern-binding-and-or-patterns-evaluation-order)
 - [§5.1.8 — Rest Patterns (`..`) Inside Slice Patterns](#518--rest-patterns--inside-slice-patterns)
 - [§6.1.2 — Overflow in Const Contexts](#612--overflow-in-const-contexts)
@@ -313,6 +314,35 @@ exercises where-clause-bounded structs, enums, and trait impls. At this mileston
 file partially compiles (struct literal args in enum variant constructors are now
 lowered). The enforcement mechanism for where-clause bounds (or its absence) is not
 observable in assembly output.
+
+---
+
+## §4.14 — Parenthesized Trait Bound Syntax: Restricted to Fn Traits?
+
+**Gap:** FLS §4.14 introduces parenthesized trait bound syntax (`Fn(T) -> R`,
+`FnMut(T) -> R`, `FnOnce(T) -> R`) as a shorthand for angle-bracket generics
+on the `Fn`/`FnMut`/`FnOnce` traits. The spec does not state whether this
+parenthesized syntax is restricted to those three traits or is syntactically
+valid for any trait name followed by `(...)`.
+
+**Galvanic's choice:** Accept parenthesized syntax for any trait name at the
+parse level. Semantic restriction to `Fn`/`FnMut`/`FnOnce` is deferred to a
+future type-checking phase. This matches rustc's grammar, which treats
+`TraitName(Args) -> Ret` as a `TraitObjectBound` regardless of the trait name,
+and rejects non-Fn uses in a later semantic pass rather than the parser.
+
+**Source:** `src/parser.rs` — `'bound_loop` in `parse_fn_def`,
+`'impl_bound_loop` in `parse_impl_def`, and the bound loop in
+`parse_where_clause` (all annotated `AMBIGUOUS: §4.14`).
+
+**Minimal reproducer:**
+```rust
+fn apply<F: Fn(i32) -> i32>(f: F, x: i32) -> i32 { f(x) }
+fn main() -> i32 { apply(|x| x * 2, 5) }
+```
+Both the inline bound `F: Fn(i32) -> i32` and a `where F: Fn(i32) -> i32`
+form parse successfully. The assembly contains a `blr` indirect call,
+confirming the closure dispatch path is exercised at runtime.
 
 ---
 

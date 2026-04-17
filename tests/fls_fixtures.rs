@@ -158,6 +158,13 @@ fn fls_4_14_supertrait_bounds() {
 }
 
 #[test]
+fn fls_4_14_fn_bounds() {
+    // FLS §4.14: Parenthesized trait bounds `Fn(T) -> R` in inline and
+    // where-clause positions.
+    assert_galvanic_accepts("fls_4_14_fn_bounds.rs");
+}
+
+#[test]
 fn fls_10_2_where_clause_proj() {
     assert_galvanic_accepts("fls_10_2_where_clause_proj.rs");
 }

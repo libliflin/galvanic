@@ -399,7 +399,31 @@ impl<'src> Parser<'src> {
                     'bound_loop: loop {
                         if self.peek_kind() == TokenKind::Ident {
                             self.advance(); // skip bound trait name
-                            // Consume optional type args: `Trait<AssocType = Ty>`.
+                            // FLS §4.14: Parenthesized bound `Fn(T) -> R`.
+                            // When `(` follows the trait name, consume the balanced
+                            // paren list and optional `-> RetType` tail.
+                            // AMBIGUOUS: §4.14 — The FLS does not specify whether
+                            // parenthesized syntax is restricted to `Fn`/`FnMut`/
+                            // `FnOnce` or is syntactically valid for any trait name.
+                            // Galvanic accepts it for any trait name at the parse
+                            // level and defers semantic restriction to later phases.
+                            if self.peek_kind() == TokenKind::OpenParen {
+                                self.advance(); // eat `(`
+                                let mut depth = 1usize;
+                                while depth > 0 && self.peek_kind() != TokenKind::Eof {
+                                    match self.peek_kind() {
+                                        TokenKind::OpenParen => { self.advance(); depth += 1; }
+                                        TokenKind::CloseParen => { self.advance(); depth -= 1; }
+                                        _ => { self.advance(); }
+                                    }
+                                }
+                                // Optional `-> RetType`.
+                                if self.peek_kind() == TokenKind::RArrow {
+                                    self.advance(); // eat `->`
+                                    self.parse_ty().ok(); // consume return type; discard result
+                                }
+                            }
+                            // Consume optional angle-bracket type args: `Trait<AssocType = Ty>`.
                             if self.peek_kind() == TokenKind::Lt {
                                 self.advance(); // eat `<`
                                 let mut depth = 1usize;
@@ -522,7 +546,25 @@ impl<'src> Parser<'src> {
                     'impl_bound_loop: loop {
                         if self.peek_kind() == TokenKind::Ident {
                             self.advance(); // skip bound trait name
-                            // Consume optional type args: `Trait<AssocType = Ty>`.
+                            // FLS §4.14: Parenthesized bound `Fn(T) -> R`.
+                            // Same handling as in parse_fn_def's bound loop.
+                            // AMBIGUOUS: §4.14 — see annotation in parse_fn_def.
+                            if self.peek_kind() == TokenKind::OpenParen {
+                                self.advance(); // eat `(`
+                                let mut depth = 1usize;
+                                while depth > 0 && self.peek_kind() != TokenKind::Eof {
+                                    match self.peek_kind() {
+                                        TokenKind::OpenParen => { self.advance(); depth += 1; }
+                                        TokenKind::CloseParen => { self.advance(); depth -= 1; }
+                                        _ => { self.advance(); }
+                                    }
+                                }
+                                if self.peek_kind() == TokenKind::RArrow {
+                                    self.advance(); // eat `->`
+                                    self.parse_ty().ok(); // consume return type; discard result
+                                }
+                            }
+                            // Consume optional angle-bracket type args: `Trait<AssocType = Ty>`.
                             if self.peek_kind() == TokenKind::Lt {
                                 self.advance(); // eat `<`
                                 let mut depth = 1usize;
@@ -910,6 +952,38 @@ impl<'src> Parser<'src> {
                     // Consume a bound identifier (plain trait name, e.g. `Scalable`).
                     if self.peek_kind() == TokenKind::Ident {
                         self.advance(); // skip bound trait name
+                        // FLS §4.14: Parenthesized bound `Fn(T) -> R` in where clauses.
+                        // e.g. `where F: Fn(i32) -> i32`.
+                        // AMBIGUOUS: §4.14 — see annotation in parse_fn_def.
+                        if self.peek_kind() == TokenKind::OpenParen {
+                            self.advance(); // eat `(`
+                            let mut depth = 1usize;
+                            while depth > 0 && self.peek_kind() != TokenKind::Eof {
+                                match self.peek_kind() {
+                                    TokenKind::OpenParen => { self.advance(); depth += 1; }
+                                    TokenKind::CloseParen => { self.advance(); depth -= 1; }
+                                    _ => { self.advance(); }
+                                }
+                            }
+                            // Optional `-> RetType`: consume a simple type token or `()`.
+                            if self.peek_kind() == TokenKind::RArrow {
+                                self.advance(); // eat `->`
+                                if self.peek_kind() == TokenKind::OpenParen {
+                                    // Unit `()` or tuple return type.
+                                    self.advance(); // eat `(`
+                                    let mut d = 1usize;
+                                    while d > 0 && self.peek_kind() != TokenKind::Eof {
+                                        match self.peek_kind() {
+                                            TokenKind::OpenParen => { self.advance(); d += 1; }
+                                            TokenKind::CloseParen => { self.advance(); d -= 1; }
+                                            _ => { self.advance(); }
+                                        }
+                                    }
+                                } else if self.peek_kind() == TokenKind::Ident {
+                                    self.advance(); // eat return type name (e.g. `i32`)
+                                }
+                            }
+                        }
                         // Consume type args on the bound: `Iterator<Item = i32>`.
                         if self.peek_kind() == TokenKind::Lt {
                             self.advance(); // eat `<`
