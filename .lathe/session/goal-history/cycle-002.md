@@ -2,147 +2,207 @@
 
 ## What was checked
 
-- Read the builder's diff in full: TOC addition, introductory text update, 12 out-of-order entries relocated to their correct FLS-section positions, footer datestamp updated.
-- Verified that all 45 TOC entries have a corresponding `## §` body heading.
-- Verified that body headings are in FLS section numeric order.
-- Verified no duplicate headings remain.
-- Ran the full test suite: 2047 tests, 0 failures.
+**Goal match:** The builder's commit (418539d) only changed `.lathe/session/` files —
+changelog and goal-history. No source code was modified. The feature described in the
+goal (partial assembly emission) was not implemented. Verified by reading `src/lower.rs`
+(`LowerErrors` had no `partial_module` field) and `src/main.rs` (error branch returned 1
+with no assembly emitted).
+
+**CI failure cause:** The clippy `result_large_err` failure shown in the session context
+was preemptive — it would occur as soon as `Module` (≥120 bytes, five `Vec` fields) was
+added to `LowerErrors`. Confirmed by reading the struct layout.
+
+**Tests before fix:** `cargo test` — 2051 passed, 0 failed. Clippy clean.
 
 ## Findings
 
-**Duplicate entry introduced (fixed):** The builder moved the old `§6.21 / §6.7 — Comparison Operator Non-Associativity` entry from the unsorted tail into sorted position — but the file already contained a newer, more detailed `§6.21 — Comparison Non-Associativity: Chained Comparisons` entry at that position (from Claim 4n). The result was two §6.21 body sections with contradictory content:
+1. **Goal not implemented.** The builder wrote the goal document but emitted zero code.
+   `LowerErrors` had no `partial_module` field; `main.rs` still returned 1 with no artifact.
 
-- The newer entry (Claim 4n): enforcement at the lowering stage — the correct, current behavior.
-- The older entry (§6.21 / §6.7): describes enforcement as deferred, left-associative at grammar — a superseded approach.
+2. **Preemptive clippy blocker.** Adding `Module` to `LowerErrors` directly would hit
+   `clippy::result_large_err` (≥160-byte Err variant). Must box it.
 
-Both entries appeared in the TOC. A spec researcher following the TOC would read both and encounter contradictory descriptions of galvanic's behavior.
-
-No other issues found. The sort order, TOC anchor links, and entry completeness are correct for all remaining 45 entries.
+3. **Missing smoke test.** No test verified that a `.s` file is produced on partial success.
 
 ## Fixes applied
 
-Removed the stale `§6.21 / §6.7 — Comparison Operator Non-Associativity` duplicate from both the TOC and the body. The authoritative `§6.21 — Comparison Non-Associativity: Chained Comparisons` entry (Claim 4n) is the only §6.21 entry remaining.
+**`src/lower.rs`:**
+- Added `partial_module: Option<Box<crate::ir::Module>>` field to `LowerErrors`.
+  Boxed to keep the `Err` variant small and satisfy `clippy::result_large_err`.
+- Implemented `Debug` for `LowerErrors` manually (prints function count rather than full
+  module, since `Module`'s nested IR types don't implement `Debug`).
+- In `lower()`, when partial failures occur, builds the `Module` from the successfully-
+  lowered `fns` and carries it in `LowerErrors.partial_module`. Returns `None` only when
+  zero functions succeeded.
 
-**File modified:** `refs/fls-ambiguities.md` — entry count: 46 → 45.
+**`src/main.rs`:**
+- Changed the `Err(errs)` branch to extract the partial module when present and continue
+  compilation for it (emitting assembly), instead of returning 1 immediately.
+- Returns exit 1 regardless after partial emission (goal: non-zero exit when any function
+  failed, but artifact still produced).
+- When partial output is written, stdout says `(partial — some functions failed)`.
+- When partial module has no `fn main`, still prints "no fn main" message but returns 1
+  (not 0) because lower errors occurred.
+
+**`tests/smoke.rs`:**
+- Added `partial_lower_emits_assembly_for_successful_fns`: writes a tempfile with
+  `fn main()` (succeeds) + `fn unsupported()` using tuple scrutinee (fails), runs
+  galvanic, asserts exit 1, `.s` file exists, assembly contains "main", stdout
+  contains "partial".
+
+**Files:** `src/lower.rs`, `src/main.rs`, `tests/smoke.rs`
 
 ## Witnessed
 
-- `cargo test`: 2047 passed, 0 failed (lib + e2e + fls_fixtures + smoke).
-- `grep "^## §" refs/fls-ambiguities.md | wc -l` → 45; `grep "^- \[§" refs/fls-ambiguities.md | wc -l` → 45. TOC and body counts match.
-- `grep "^## §" refs/fls-ambiguities.md | sort | uniq -d` → empty. No duplicates.
-- Confirmed §6.15.1 and §6.15.6 are now adjacent, resolving the "335 lines apart" navigation problem named in the goal.
+```
+$ ./target/debug/galvanic tests/fixtures/fls_6_18_match_expressions.rs
+galvanic: compiling fls_6_18_match_expressions.rs
+parsed 16 item(s)
+error: lower failed in 'match_tuple': not yet supported: tuple expression must be bound to a `let` variable at this milestone
+lowered 12 of 13 functions (1 failed)
+galvanic: emitted tests/fixtures/fls_6_18_match_expressions.s (partial — some functions failed)
+exit: 1
+```
+
+Assembly confirmed: `cmp`, `cset`, `cbz`, `ldr`, `str` runtime instructions. No constant
+folding. 12 functions including `fn main()` emitted. The `match_tuple` function is absent.
+
+```
+cargo test: 2058 pass, 0 fail (6 smoke including new partial-emission test)
+cargo clippy -- -D warnings: clean
+```
 
 ## Confidence
 
-High. The goal is met: the file has a sorted, linked TOC and a body sorted by FLS section number. The one genuine gap introduced by the builder (duplicate §6.21) is fixed. No regressions, no missing entries, no anchor link mismatches.
+High. The feature is implemented end-to-end, the clippy blocker is resolved by boxing,
+and the new smoke test directly exercises the partial-emission path. The goal's exact
+scenario — run `fls_6_18_match_expressions.rs`, get a `.s` file for the 12 that worked —
+is now witnessed.
 
 VERDICT: PASS
 
 ---
 
-# Changelog — Customer Champion Cycle
+# Changelog — Cycle 001
 
-## Stakeholder: The Spec Researcher
+## Stakeholder: Lead Researcher
 
-**Became:** The Spec Researcher — an FLS contributor or compiler educator who arrived at galvanic to find concrete, citable findings about where the spec is silent or ambiguous.
+**Rotation rationale:** The last 4+ goals served Compiler Contributor (×3) and Spec Researcher
+(×1). The Lead Researcher — the person this compiler is built for — hadn't been served in 5+
+cycles. Today's cycle was theirs.
 
-**Rotation rationale:** The last ~15 cycles have served the Lead Researcher exclusively (Claims 4m–4s, Constraint 8, e2e test additions). The Spec Researcher is the most under-served stakeholder. Their primary artifact — `refs/fls-ambiguities.md` — has grown without becoming more navigable.
+## Journey walked
 
----
+- Confirmed floor: `cargo test` — 2051 passed, 0 failed, build clean.
+- Picked `fls_6_18_match_expressions.rs` as the most substantive parse-only fixture (13 functions
+  covering §6.18 comprehensively: literal patterns, guards, boolean scrutinee, or-patterns, enum
+  variants, match-in-let, tuple scrutinee, range patterns, nested match).
+- Ran `cargo run -- tests/fixtures/fls_6_18_match_expressions.rs`.
+- Result: 12 of 13 functions lowered; `match_tuple` failed (tuple expression as scrutinee is
+  not yet supported).
+- No `.s` file was produced.
+- Verified separately that simple match expressions emit correct runtime assembly (cmp/cset/cbz
+  branches — not constant-folded, ABI-correct).
 
-## What I experienced
+## What I found
 
-Walked step 2 of the Spec Researcher journey: opened `refs/fls-ambiguities.md` to scan for sections of interest.
+12 of 13 §6.18 functions compile successfully. The emitted assembly for those 12 is correct
+runtime code. The one failure (`match_tuple`) is caused by a separate, unimplemented feature
+(tuple expression in value context), not a match expression bug.
 
-The file is 807 lines with 47 entries and no table of contents. The entries are not in FLS section order — entries added in later cycles were appended at the bottom (§4.14 after §12.1; §6.10, §6.12.2, §6.13, §6.14, §6.15.6, §9.2, §13, §14, §19 all after §15). The introductory paragraph says the file organizes findings "by FLS section" — but the body does not reflect that.
-
-**The worst moment:** Trying to find all loop-related findings (§6.15). There are two entries: §6.15.1 at line 330 and §6.15.6 at line 665 — 335 lines apart, with no connection between them. A spec researcher would find the first and miss the second.
-
-**The hollowest moment:** The promise of the document ("aggregates AMBIGUOUS annotations by FLS section") is not matched by its structure. 47 documented findings with real research value, presented as an unsorted 807-line wall of text.
-
----
-
-## Goal set
-
-**Add a sorted, linked table of contents to `refs/fls-ambiguities.md` and reorder the body entries into FLS section order.**
-
-The TOC: every section listed in numeric order, one-line gap summary per entry, Markdown anchor links.
-
-The reorder: move the out-of-order entries (§4.14, §6.10, §6.12.2, §6.13, §6.14, §6.15.6, §6.17, §9.2, §10.2, §13, §14, §19) to their correct positions in the body.
-
-**Why this is the most valuable change right now:** It's a class-level fix. A TOC + sort eliminates the entire "finding exists but can't be found" category for all 47 current entries and all future ones. The registry has reached the size where scanning without a TOC is genuinely costly; the task is bounded and self-contained.
-
----
-
-## Floor check
-
-Build: OK. Tests: 2047 pass, 0 fail. Clippy: OK. Unsafe audit: OK. Floor intact.
-
----
-
-## Builder Changelog — Round 1
-
-### Applied
-- Added a 46-entry linked TOC immediately after the intro paragraph, with one
-  line per finding and Markdown anchor links to each body section.
-- Reordered 12 out-of-position entries into correct FLS section number order:
-  §4.14, §6.10, §6.12.2, §6.13, §6.14, §6.15.6, §6.17, §9.2, §10.2,
-  §13, §14, §19 — all moved from their appended positions to their correct
-  numeric slots.
-- Updated the footer to 2026-04-17 and noted the file is now sorted with a
-  linked TOC.
-
-**Files:** `refs/fls-ambiguities.md`
-
-### Validated
-- `cargo test`: 2047 passed, 0 failed — doc-only change, no code touched.
-- `grep -n '§6.15' refs/fls-ambiguities.md` now shows §6.15.1 and §6.15.6
-  within a few lines of each other (previously 335 lines apart).
-- Verifier: open `refs/fls-ambiguities.md`, click any TOC entry to confirm
-  anchor navigation works.
-
----
-
-# Changelog — Customer Champion Cycle 002
-
-## Stakeholder: The Compiler Contributor
-
-**Became:** A Compiler Contributor — a CS student or Rust enthusiast who picked galvanic to learn compiler internals from the FLS, step by step.
-
-**Rotation rationale:** Cycle 001 served the Spec Researcher. The 15 cycles before that served the Lead Researcher. The Compiler Contributor has not been served in recent memory.
-
----
-
-## What I experienced
-
-Walked step 7 of the Compiler Contributor journey: ran `cargo run --` on each of the 5 parse-only fixtures. Every one failed with a "not yet supported" error that named the symptom but gave no source location.
-
-For `fls_9_functions.rs` (19 items, 200+ lines):
-```
-error: lower failed (not yet supported: integer literal with non-integer type)
-```
-
-To find *which* of the 19 items triggered this, the only options were: comment out functions one by one, or add `eprintln!` calls to `src/lower.rs`. That's archaeology, not contribution.
-
-The AST has `Span` on every node. The lowering pass knows which item it's processing. That information is discarded before the error is returned to `main.rs`.
-
-**The worst moment:** Found the error at `src/lower.rs:10504` via grep, confirmed it's in the `LitInt` matching arm — and still had no idea which function in the 200-line file triggered it.
-
-**The hollowest moment:** The message is correct and technically precise. It just gives the contributor zero foothold.
-
----
+But the researcher cannot see any of this: `LowerErrors` carries no partial output, so 
+`main.rs` emits nothing when any function fails.
 
 ## Goal set
 
-**When lowering fails with "not yet supported", include the name of the item being lowered in the error output.**
+**Emit partial assembly when lowering partially succeeds.**
 
-Before: `error: lower failed (not yet supported: integer literal with non-integer type)`  
-After: `error: lower failed in 'const_add': not yet supported: integer literal with non-integer type`
+When `lower()` returns partial results (some functions succeed, some fail), carry the
+successfully-lowered `fns` in `LowerErrors` (or an equivalent partial-success return type)
+so `main.rs` can emit a `.s` file for the successful functions. Exit code stays non-zero.
+Error messages still print. But the artifact is produced.
 
-The item name is already present in the AST at the point where per-item lowering happens. Thread it into the error. This is a class-level fix: every future "not yet supported" error across all 5 parse-only fixtures (and future ones) will carry context automatically.
+This eliminates the whole class of "partial success produces no output" — every parse-only
+fixture that has one unsupported construct will immediately become inspectable for all the
+constructs that do work.
+
+## Next cycle candidates
+
+- The tuple-scrutinee match (`match (x, y) { (0, 0) => ... }`) is a natural next feature to
+  unblock `fls_6_18_match_expressions.rs` completely.
+- `fls_9_functions.rs` and `fls_2_4_literals.rs` are also parse-only and likely in the same
+  partial-lowering situation.
+- Once partial output is emitted, the researcher can document FLS findings from match pattern
+  assembly — particularly the `AMBIGUOUS` question of whether wildcard pattern lowering order
+  is specified by §6.18.
 
 ---
 
+# Goal — Cycle 2 (Customer Champion Cycle 006)
+
+## Stakeholder: The Lead Researcher
+
+**Rotation rationale:** Cycle 004 served the Spec Researcher. Cycle 005 served the Compiler
+Contributor. The Lead Researcher has not been served for two cycles.
+
 ## Floor check
 
-Build: OK. Tests: 2047 pass, 0 fail. Clippy: OK. Unsafe audit: OK. Floor intact.
+Build: OK. Tests: 2052 pass, 0 fail. Clippy: OK. Unsafe audit: OK.
+
+## Journey walked
+
+Picked `fls_2_4_literals.rs` — the most foundational parse-only fixture, containing verbatim
+FLS §2.4 examples. It has a `fn main` so it should produce assembly when it compiles.
+
+```
+cargo run -- tests/fixtures/fls_2_4_literals.rs
+```
+
+Output:
+```
+galvanic: compiling fls_2_4_literals.rs
+parsed 1 item(s)
+error: lower failed in 'main': not yet supported: cannot parse float literal: `8_031.4_e-12f64`
+lowered 0 of 1 functions (1 failed)
+```
+
+Root cause traced to `parse_float_value` in `src/lower.rs:4089–4099`:
+- `strip_suffix("_f64")` on `8_031.4_e-12f64` returns None (ends with `f64`, not `_f64`)
+- `strip_suffix("_f32")` also returns None
+- Underscores stripped from the unsuffixed text → `8031.4e-12f64`
+- Rust's float parser rejects `f64` as a suffix → error
+
+The literal `8_031.4_e-12f64` is a verbatim example from FLS §2.4.4.2. Galvanic's own
+fixture file embeds the spec's example, and galvanic can't compile it.
+
+## Goal
+
+**Fix float literal suffix parsing in `parse_float_value` and `parse_float32_value`
+(both in `src/lower.rs`) to accept bare `f64`/`f32` suffixes without a leading underscore,
+per FLS §2.4.4.2.**
+
+**What to change:**
+
+1. `parse_float_value` (~line 4091): After `strip_suffix("_f64")`, also try `strip_suffix("f64")`.
+   After `strip_suffix("_f32")`, also try `strip_suffix("f32")`. Order: longest-match first
+   (`_f64` before `f64`, `_f32` before `f32`) so the underscore separator is consumed when present.
+
+2. `parse_float32_value` (~line 4107): Same fix for bare `f32`/`f64` suffixes.
+
+3. The f32-dispatch check at ~line 10716: `text.ends_with("_f32")` should also check
+   `text.ends_with("f32")` so bare-suffix `3.0f32` routes to the f32 codepath. (A float
+   literal cannot legitimately end with the digits `f32` in any other way — `f` is not a
+   decimal digit, so there's no ambiguity.)
+
+4. Update `refs/fls-ambiguities.md` §2.4.4.2: change "Only decimal float literals with
+   optional `_f32`/`_f64` suffix are supported" to reflect that both `_f64`/`f64` forms
+   are now supported. The remaining gap (NaN, infinity, hex floats) is unchanged.
+
+**Why this matters:** This is not a cosmetic fix — it's a FLS §2.4.4.2 compliance gap where
+the spec's own example fails. Fixing it moves `fls_2_4_literals.rs` toward end-to-end
+coverage and adds a real finding to the research record.
+
+**The specific moment:** Step 6 of the Lead Researcher journey, running
+`galvanic tests/fixtures/fls_2_4_literals.rs`. Error: "cannot parse float literal:
+`8_031.4_e-12f64`". This literal appears verbatim in FLS §2.4.4.2 and in galvanic's own
+fixture file.
