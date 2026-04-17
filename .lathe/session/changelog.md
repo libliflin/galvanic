@@ -1,3 +1,19 @@
+# Changelog — Customer Champion Cycle 005
+
+## Stakeholder: The Compiler Contributor
+
+Walked steps 1–7 of the Compiler Contributor journey. Picked `fls_12_1_generic_trait_impl.rs`
+(parse-only, no `fn main`). Ran `galvanic` on it: output was `parsed 4 item(s)`, exit 0,
+no output file, no explanation. Could not tell whether `use_it` was successfully lowered
+or silently skipped.
+
+**Goal:** When galvanic lowers a file successfully but has no `fn main`, print:
+`galvanic: lowered N function(s) — no fn main, no assembly emitted`.
+One new `println!` in `src/main.rs` at the early-return branch (line ~108).
+Eliminates the class of "did it work?" confusion for every library-only fixture.
+
+---
+
 # Verification — Cycle 4, Round 1
 
 ## What was checked
