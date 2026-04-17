@@ -84,8 +84,22 @@ fn compile(args: Vec<String>) -> i32 {
     // ── Lower AST → IR ────────────────────────────────────────────────────────
     let module = match galvanic::lower::lower(&source_file, &source) {
         Ok(m) => m,
-        Err(e) => {
-            eprintln!("error: lower failed {e}");
+        Err(errs) => {
+            // Print every per-function error so the researcher sees the full
+            // error landscape in a single run (not just the first failure).
+            for e in &errs.errors {
+                eprintln!("error: lower failed {e}");
+            }
+            // Summary line: how many succeeded vs how many were attempted.
+            // Omitted when fn_count == 0 (e.g. file with only struct/enum defs).
+            if errs.fn_count > 0 {
+                eprintln!(
+                    "lowered {} of {} functions ({} failed)",
+                    errs.success_count,
+                    errs.fn_count,
+                    errs.errors.len()
+                );
+            }
             return 1;
         }
     };

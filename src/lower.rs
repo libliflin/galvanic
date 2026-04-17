@@ -82,6 +82,39 @@ impl std::fmt::Display for LowerError {
     }
 }
 
+/// All lowering errors from a compilation unit, with success/failure counts.
+///
+/// Returned when one or more function items fail to lower. Carrying the counts
+/// here lets the caller report the full error landscape in a single pass —
+/// "lowered 10 of 11 functions (1 failed)" — without forcing the caller to
+/// re-scan the source.
+///
+/// FLS §18.1: A source file may define multiple functions; errors in one do
+/// not prevent reporting errors in others.
+///
+/// Cache-line note: diagnostic-only type; not on any hot compilation path.
+#[derive(Debug)]
+pub struct LowerErrors {
+    /// All errors that occurred, one per failing item.
+    pub errors: Vec<LowerError>,
+    /// Number of functions successfully lowered.
+    pub success_count: usize,
+    /// Total number of functions attempted (success + fail).
+    pub fn_count: usize,
+}
+
+impl std::fmt::Display for LowerErrors {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (i, e) in self.errors.iter().enumerate() {
+            if i > 0 {
+                writeln!(f)?;
+            }
+            write!(f, "{e}")?;
+        }
+        Ok(())
+    }
+}
+
 // ── Call-detection helpers ────────────────────────────────────────────────────
 
 /// Return `true` if the expression tree contains at least one `Call` node.
@@ -746,7 +779,7 @@ fn eval_f32_const_expr(
 /// and field-access expressions. Enum items with unit variants (FLS §15)
 /// are collected into an enum definition table for path-expression and
 /// path-pattern lowering.
-pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
+pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerErrors> {
     // First pass: collect struct and enum definitions.
     //
     // FLS §14: Struct definitions declare the field names and their types.
@@ -2026,6 +2059,11 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
     let mut fns = Vec::new();
     let mut trampolines: Vec<crate::ir::ClosureTrampoline> = Vec::new();
     let mut label_base: u32 = 0;
+    // Accumulated per-function errors and counters for diagnostic reporting.
+    // FLS §18.1: errors in one function do not prevent attempting others.
+    let mut lower_errors: Vec<LowerError> = Vec::new();
+    let mut fn_success_count: usize = 0;
+    let mut fn_count: usize = 0;
     // FLS §4.13: Accumulated vtable requirements from dyn Trait call sites.
     // Each entry is (trait_name, concrete_type_name). Deduplicated by seen_vtables.
     let mut pending_vtable_reqs: Vec<(String, String)> = Vec::new();
@@ -2049,14 +2087,23 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                     continue;
                 }
                 let fn_name = fn_def.name.text(source).to_owned();
-                let (ir_fn, closure_fns, fn_trampolines, next_label, needed, vtable_reqs) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &tuple_struct_float_field_types, &tuple_struct_narrow_field_types, &enum_defs, &enum_variant_float_field_types, &enum_variant_narrow_field_types, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &const_f64_vals, &const_f32_vals, &assoc_const_vals, &static_names, &static_f64_names, &static_f32_names, &fn_names, &struct_raw_field_types, &struct_generic_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, &struct_narrow_field_types, &generic_fn_param_counts, &HashMap::new(), &HashMap::new(), &trait_method_order, &fn_dyn_param_traits, &fn_dyn_return_traits, None, label_base)
-                    .map_err(|e| LowerError::InItem { item: fn_name, inner: Box::new(e) })?;
-                label_base = next_label;
-                fns.push(ir_fn);
-                fns.extend(closure_fns);
-                trampolines.extend(fn_trampolines);
-                pending_monos.extend(needed);
-                pending_vtable_reqs.extend(vtable_reqs);
+                fn_count += 1;
+                match lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &tuple_struct_float_field_types, &tuple_struct_narrow_field_types, &enum_defs, &enum_variant_float_field_types, &enum_variant_narrow_field_types, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &const_f64_vals, &const_f32_vals, &assoc_const_vals, &static_names, &static_f64_names, &static_f32_names, &fn_names, &struct_raw_field_types, &struct_generic_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, &struct_narrow_field_types, &generic_fn_param_counts, &HashMap::new(), &HashMap::new(), &trait_method_order, &fn_dyn_param_traits, &fn_dyn_return_traits, None, label_base)
+                    .map_err(|e| LowerError::InItem { item: fn_name, inner: Box::new(e) })
+                {
+                    Ok((ir_fn, closure_fns, fn_trampolines, next_label, needed, vtable_reqs)) => {
+                        fn_success_count += 1;
+                        label_base = next_label;
+                        fns.push(ir_fn);
+                        fns.extend(closure_fns);
+                        trampolines.extend(fn_trampolines);
+                        pending_monos.extend(needed);
+                        pending_vtable_reqs.extend(vtable_reqs);
+                    }
+                    Err(e) => {
+                        lower_errors.push(e);
+                    }
+                }
             }
             ItemKind::Impl(impl_def) => {
                 // FLS §11: Inherent impl and trait impl. Each method becomes a
@@ -2151,7 +2198,8 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         mangled_name: &mangled,
                         self_kind: method.self_param,
                     });
-                    let (ir_fn, closure_fns, fn_trampolines, next_label, needed, vtable_reqs) = lower_fn(
+                    fn_count += 1;
+                    match lower_fn(
                         method,
                         source,
                         &struct_defs,
@@ -2194,13 +2242,21 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         mctx,
                         label_base,
                     )
-                    .map_err(|e| LowerError::InItem { item: mangled.clone(), inner: Box::new(e) })?;
-                    label_base = next_label;
-                    fns.push(ir_fn);
-                    fns.extend(closure_fns);
-                    trampolines.extend(fn_trampolines);
-                    pending_monos.extend(needed);
-                    pending_vtable_reqs.extend(vtable_reqs);
+                    .map_err(|e| LowerError::InItem { item: mangled.clone(), inner: Box::new(e) })
+                    {
+                        Ok((ir_fn, closure_fns, fn_trampolines, next_label, needed, vtable_reqs)) => {
+                            fn_success_count += 1;
+                            label_base = next_label;
+                            fns.push(ir_fn);
+                            fns.extend(closure_fns);
+                            trampolines.extend(fn_trampolines);
+                            pending_monos.extend(needed);
+                            pending_vtable_reqs.extend(vtable_reqs);
+                        }
+                        Err(e) => {
+                            lower_errors.push(e);
+                        }
+                    }
                 }
                 // FLS §10.1.1: Emit default trait methods that are not overridden.
                 //
@@ -2230,7 +2286,8 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                                 mangled_name: &mangled,
                                 self_kind: default_method.self_param,
                             });
-                            let (ir_fn, closure_fns, fn_trampolines, next_label, needed, vtable_reqs) = lower_fn(
+                            fn_count += 1;
+                            match lower_fn(
                                 default_method,
                                 source,
                                 &struct_defs,
@@ -2273,13 +2330,21 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                                 mctx,
                                 label_base,
                             )
-                            .map_err(|e| LowerError::InItem { item: mangled.clone(), inner: Box::new(e) })?;
-                            label_base = next_label;
-                            fns.push(ir_fn);
-                            fns.extend(closure_fns);
-                            trampolines.extend(fn_trampolines);
-                            pending_monos.extend(needed);
-                            pending_vtable_reqs.extend(vtable_reqs);
+                            .map_err(|e| LowerError::InItem { item: mangled.clone(), inner: Box::new(e) })
+                            {
+                                Ok((ir_fn, closure_fns, fn_trampolines, next_label, needed, vtable_reqs)) => {
+                                    fn_success_count += 1;
+                                    label_base = next_label;
+                                    fns.push(ir_fn);
+                                    fns.extend(closure_fns);
+                                    trampolines.extend(fn_trampolines);
+                                    pending_monos.extend(needed);
+                                    pending_vtable_reqs.extend(vtable_reqs);
+                                }
+                                Err(e) => {
+                                    lower_errors.push(e);
+                                }
+                            }
                         }
                     }
                 }
@@ -2414,7 +2479,8 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
             self_kind: fn_def.self_param,
         });
 
-        let (ir_fn, closure_fns, fn_trampolines, next_label, more_needed, vtable_reqs) = lower_fn(
+        fn_count += 1;
+        match lower_fn(
             fn_def,
             source,
             &struct_defs,
@@ -2457,13 +2523,21 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
             mctx,
             label_base,
         )
-        .map_err(|e| LowerError::InItem { item: mangled.clone(), inner: Box::new(e) })?;
-        label_base = next_label;
-        fns.push(ir_fn);
-        fns.extend(closure_fns);
-        trampolines.extend(fn_trampolines);
-        pending_monos.extend(more_needed);
-        pending_vtable_reqs.extend(vtable_reqs);
+        .map_err(|e| LowerError::InItem { item: mangled.clone(), inner: Box::new(e) })
+        {
+            Ok((ir_fn, closure_fns, fn_trampolines, next_label, more_needed, vtable_reqs)) => {
+                fn_success_count += 1;
+                label_base = next_label;
+                fns.push(ir_fn);
+                fns.extend(closure_fns);
+                trampolines.extend(fn_trampolines);
+                pending_monos.extend(more_needed);
+                pending_vtable_reqs.extend(vtable_reqs);
+            }
+            Err(e) => {
+                lower_errors.push(e);
+            }
+        }
     }
 
     // FLS §4.13: Build vtable shims and vtable data sections from accumulated requirements.
@@ -2504,6 +2578,16 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
             }
         }
         vtables.push(crate::ir::VtableSpec { label: vtable_label, method_shim_labels: shim_labels });
+    }
+
+    // FLS §18.1: If any function failed to lower, return all errors together
+    // with the success/total counts so the caller can report the full picture.
+    if !lower_errors.is_empty() {
+        return Err(LowerErrors {
+            errors: lower_errors,
+            success_count: fn_success_count,
+            fn_count,
+        });
     }
 
     Ok(Module { fns, statics: static_data, trampolines, vtable_shims, vtables })
