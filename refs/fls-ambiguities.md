@@ -43,7 +43,6 @@ annotations for full context.
 - [§6.17 — Struct Literal Restriction in Condition Positions](#617--struct-literal-restriction-in-condition-positions)
 - [§6.18 — Match Exhaustiveness](#618--match-exhaustiveness)
 - [§6.21 — Comparison Non-Associativity: Chained Comparisons](#621--comparison-non-associativity-chained-comparisons)
-- [§6.21 / §6.7 — Comparison Operator Non-Associativity](#621--67--comparison-operator-non-associativity)
 - [§6.22 — Closure Capture ABI](#622--closure-capture-abi)
 - [§7.1 — Const Evaluation Step Limit and Item Order](#71--const-evaluation-step-limit-and-item-order)
 - [§7.2 — Static Data-Section Alignment](#72--static-data-section-alignment)
@@ -577,22 +576,6 @@ detect.
 
 **Source:** `src/lower.rs` (comparison operator lowering, check added before
 the f64/f32/i32 dispatch path)
-
----
-
-## §6.21 / §6.7 — Comparison Operator Non-Associativity
-
-**Gap:** The FLS states that comparison operators (`<`, `>`, `<=`, `>=`, `==`,
-`!=`) are non-associative (chaining `a < b < c` is a parse error), but does
-not define the parser rule precisely — how many comparison operators may appear
-in a single expression before the error is triggered.
-
-**Galvanic's choice:** Comparison operators are left-associative at the grammar
-level (like other binary operators). A chained comparison `a < b < c` parses
-successfully but produces incorrect results at runtime. Enforcement of non-
-associativity is deferred.
-
-**Source:** `src/parser.rs:2119`, `src/parser.rs:2270`
 
 ---
 
