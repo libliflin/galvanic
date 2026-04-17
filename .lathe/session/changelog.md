@@ -40,3 +40,39 @@ finding exists but is filed under a different number. Correct citations = unbrok
 Specific moment: Step 4, finding `§6.3.2` in source, looking up §6.3 in `refs/fls-pointer.md`
 ("Path Expressions"), searching the ref file — no §6.3.2 entry. Dead end. Same pattern for
 §6.7 and §6.6.1.
+
+---
+
+## Applied
+
+Fixed 3 stale AMBIGUOUS annotation section numbers and added 1 missing ref entry.
+
+**`src/ast.rs`**
+- Line 1120–1130: Updated all `§6.3.2` references → `§6.12.2` (Method Call Expressions).
+  The fls-ambiguities.md entry was already filed under `§6.12.2 — Method Auto-Deref Step Limit`.
+
+**`src/parser.rs`**
+- Line 2268–2275 (`parse_cmp`): Updated all `§6.7` references → `§6.21` (Expression Precedence).
+  The fls-ambiguities.md entry was already filed under `§6.21 — Comparison Non-Associativity`.
+- Line 2344–2352 (`parse_bitand`): Updated `§6.6.1` → `§6.5.7` (Bit Expressions, confirmed
+  via live FLS fetch). Clarified the annotation to name both §6.5.1 (Borrow) and §6.5.7 (Bit).
+
+**`refs/fls-ambiguities.md`**
+- Added TOC entry: `§6.5.7 — Bitwise AND Disambiguation: & as Borrow vs Bit AND`
+- Added body entry with gap description, galvanic's resolution, source pointer, and minimal
+  reproducer. Inserted before the existing §6.5.7 shift entry (both are valid §6.5.7 findings).
+
+**Files modified:**
+- `src/ast.rs`
+- `src/parser.rs`
+- `refs/fls-ambiguities.md`
+- `.lathe/session/changelog.md`
+
+## Validated
+
+- `cargo test`: 2055 passed, 0 failed.
+- The three AMBIGUOUS annotations now match their corresponding ref entries:
+  - `grep -r 'AMBIGUOUS' src/ | grep '§6.12.2'` → finds `src/ast.rs`, ref entry exists at `§6.12.2`
+  - `grep -r 'AMBIGUOUS' src/ | grep '§6.21'` → finds `src/parser.rs`, ref entry exists at `§6.21`
+  - `grep -r 'AMBIGUOUS' src/ | grep '§6.5.7'` → finds `src/parser.rs`, ref entry now exists at `§6.5.7 — Bitwise AND Disambiguation`
+- The §6.6.1 stale annotation is eliminated; no AMBIGUOUS annotation remains for a non-existent section.

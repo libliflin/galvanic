@@ -2265,9 +2265,9 @@ impl<'src> Parser<'src> {
         Ok(lhs)
     }
 
-    /// Comparison operators — FLS §6.7. Non-associative (chaining is a type error).
+    /// Comparison operators — FLS §6.21. Non-associative (chaining is a type error).
     ///
-    /// FLS §6.7 AMBIGUOUS: The spec says comparison operators are
+    /// FLS §6.21 AMBIGUOUS: The spec says comparison operators are
     /// "non-associative" but this is a *type-level* constraint, not a
     /// syntactic one. `a < b < c` parses as `(a < b) < c` in the grammar;
     /// the type checker must reject it because `bool < i32` is meaningless.
@@ -2341,14 +2341,15 @@ impl<'src> Parser<'src> {
         Ok(lhs)
     }
 
-    /// Bitwise and `&` — FLS §6.6.1. Left-associative.
+    /// Bitwise and `&` — FLS §6.5.7. Left-associative.
     ///
-    /// FLS §6.6.1 AMBIGUOUS: `&` is overloaded — in unary position it is a
-    /// borrow operator (FLS §6.4.4); in binary position it is bitwise AND.
-    /// The disambiguation is positional: `parse_bitand` is only entered
-    /// after a left-hand operand has been fully parsed, so `&` here is
-    /// always the binary bitwise AND. Borrow expressions are parsed in
-    /// `parse_unary` before the binary layer is reached.
+    /// FLS §6.5.7 AMBIGUOUS: `&` is overloaded — in unary position it is a
+    /// borrow operator (FLS §6.5.1); in binary position it is bitwise AND
+    /// (FLS §6.5.7 Bit Expressions). The disambiguation is positional:
+    /// `parse_bitand` is only entered after a left-hand operand has been
+    /// fully parsed, so `&` here is always the binary bitwise AND. Borrow
+    /// expressions are parsed in `parse_unary` before the binary layer is
+    /// reached.
     fn parse_bitand(&mut self) -> Result<Expr, ParseError> {
         let mut lhs = self.parse_shift()?;
 
