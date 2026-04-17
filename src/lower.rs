@@ -4087,10 +4087,14 @@ fn lower_fn(
 /// NaN/infinity literals (Rust has none) or hexadecimal float literals
 /// (not supported by the lexer at this milestone).
 fn parse_float_value(text: &str) -> Result<f64, LowerError> {
-    // Strip suffix: _f32 or _f64 must be checked longest-first.
+    // Strip suffix: longest-match first (_f64 before f64, _f32 before f32)
+    // so the underscore separator is consumed when present.
+    // FLS §2.4.4.2: both `1.0f64` and `1.0_f64` are valid float literal forms.
     let nosuffix = text
         .strip_suffix("_f64")
+        .or_else(|| text.strip_suffix("f64"))
         .or_else(|| text.strip_suffix("_f32"))
+        .or_else(|| text.strip_suffix("f32"))
         .unwrap_or(text);
     // Strip underscores used as digit separators.
     let cleaned: String = nosuffix.chars().filter(|&c| c != '_').collect();
@@ -4104,9 +4108,12 @@ fn parse_float_value(text: &str) -> Result<f64, LowerError> {
 /// FLS §2.4.4.2: Same syntax as f64 but with `_f32` suffix (or forced by
 /// context). Underscores are stripped from the numeric part.
 fn parse_float32_value(text: &str) -> Result<f32, LowerError> {
+    // FLS §2.4.4.2: both `1.0f32` and `1.0_f32` are valid float literal forms.
     let nosuffix = text
         .strip_suffix("_f64")
+        .or_else(|| text.strip_suffix("f64"))
         .or_else(|| text.strip_suffix("_f32"))
+        .or_else(|| text.strip_suffix("f32"))
         .unwrap_or(text);
     let cleaned: String = nosuffix.chars().filter(|&c| c != '_').collect();
     cleaned.parse::<f32>().map_err(|_| {
@@ -10713,7 +10720,8 @@ impl<'src> LowerCtx<'src> {
                 // FLS §2.4.4.2: A literal with `_f32` suffix, or lowered in an
                 // f32 context, produces a single-precision value in an `s`-register.
                 // All other float literals default to f64 in a `d`-register.
-                if text.ends_with("_f32") || ret_ty == &IrTy::F32 {
+                // FLS §2.4.4.2: accept bare `f32` suffix as well as `_f32`.
+                if text.ends_with("_f32") || text.ends_with("f32") || ret_ty == &IrTy::F32 {
                     let val = parse_float32_value(text)?;
                     let bits = val.to_bits();
                     let idx = self.float32_consts.len() as u32;

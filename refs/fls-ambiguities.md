@@ -87,8 +87,9 @@ be encoded in a single 16-bit immediate — requires `movz` with a shift).
 **Gap:** The FLS does not specify the handling of NaN/infinity literal forms
 (Rust has none) or hexadecimal float literals (e.g. `0x1.fp10`).
 
-**Galvanic's choice:** Only decimal float literals with optional `_f32`/`_f64`
-suffix are supported. NaN/infinity are not expressible as literals. Hex floats
+**Galvanic's choice:** Decimal float literals with optional `f32`/`f64` or
+`_f32`/`_f64` suffix are supported (both `1.0f64` and `1.0_f64` parse correctly,
+per FLS §2.4.4.2). NaN/infinity are not expressible as literals. Hex floats
 are rejected at the lexer level.
 
 **Source:** `src/lower.rs:3968`
