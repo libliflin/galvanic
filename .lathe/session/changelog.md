@@ -1,24 +1,90 @@
-# Verification — Cycle 10, Round 1
+# Changelog — Customer Champion Cycle 011
 
-## What was checked
-- Ran `cargo test --test e2e refs_reproducers_all_compile` — 1 passed.
-- Ran `cargo test` — 2059 passed, 0 failed (was 2058 before this round).
-- Confirmed `refs/fls-ambiguities.md` §4.2 reproducer now uses `Maybe::Some(_) => 1` (wildcard) instead of `Maybe::Some(v) => v.x` (broken field access).
-- Confirmed the entry has prose explaining the §6.13 limitation.
-- Confirmed the test parses all ` ```rust ` blocks containing `fn main` (19 blocks found) and runs each through `compile_to_asm()`.
-- Reviewed the block-extraction logic — handles opening fence variants (```` ```rust ```` with leading whitespace) and correctly closes on bare ```` ``` ````.
+## Stakeholder: The Compiler Contributor
 
-## Findings
-- Goal fully met. The builder did exactly what was asked:
-  1. Added `refs_reproducers_all_compile` CI guard in `tests/e2e.rs`.
-  2. Fixed the §4.2 reproducer so it compiles.
-  3. Added prose noting the §6.13 limitation so the "why wildcard" is clear.
-- No constant-folding risk (this change is test/ref infrastructure only — no lowering/codegen touched).
-- No token size risk (no lexer changes).
-- No unsafe introduced.
-- One minor observation (not a blocker): the block extractor uses `line.trim_start() == "```"` which would miss a closing fence with trailing whitespace. In practice, markdown files don't have trailing whitespace on fence lines, so this is not a real risk. Flagging as a lead for a future hardening cycle if the ref file grows.
+**Became:** A Compiler Contributor — a CS student who found galvanic through the FLS,
+cloned it, confirmed tests pass, and went straight to the snapshot's "Parse-only fixtures
+(candidate goals)" section to find the next piece of work.
 
-## Fixes applied
-None — the builder's work was solid.
+**Rotation rationale:** Cycle 008 served the Compiler Contributor. Cycle 009 served the
+Lead Researcher. Cycle 010 served the Spec Researcher. The Compiler Contributor was last
+served 3 cycles ago — their turn.
 
-VERDICT: PASS
+---
+
+## Floor check
+
+Build: OK. Tests: 2059 pass, 0 fail. Clippy: OK. Unsafe audit: OK. Floor intact.
+
+---
+
+## What I experienced
+
+Walked steps 1–6 of the Compiler Contributor journey.
+
+Steps 1–3: `cargo build && cargo test` passes. README is clear. Module docs at the top
+of each `src/` file explain each stage's job. Architecture is navigable.
+
+**Step 4:** Opened the snapshot to find a fixture to work on. The "Parse-only fixtures
+(candidate goals)" section shows one entry:
+
+```
+  - fls_12_1_generic_trait_impl.rs
+```
+
+Read the fixture. It's a clean FLS §12.1 example with a generic trait, a generic struct,
+a `impl<T> Trait for Type<T>` block, and a function `use_it(w: Wrapper<i32>) -> i32`.
+No `fn main`.
+
+```
+cargo run -- tests/fixtures/fls_12_1_generic_trait_impl.rs
+```
+
+Output:
+```
+galvanic: compiling fls_12_1_generic_trait_impl.rs
+parsed 4 item(s)
+galvanic: lowered 2 function(s) — no fn main, no assembly emitted
+```
+
+Not an error — but also not a hint about whether the feature is implemented or not.
+
+**The worst moment:** Searched `tests/e2e.rs` for `generic_trait_impl`. Found 9 tests:
+`milestone_138_generic_trait_impl_basic`, `_arithmetic`, `_on_parameter`,
+`_result_in_arithmetic`, `_called_twice`, `_two_impls`, `_with_inherent`,
+`_called_from_non_generic`, `runtime_generic_trait_impl_emits_mangled_call`.
+
+The feature is **fully implemented**. The "candidate goal" signal is false. The fixture
+just lacks `fn main`. There is no unimplemented work here — but the snapshot says there is.
+
+**The hollowest moment:** Running `cargo run --` on the fixture and seeing "no fn main,
+no assembly emitted." Looking at `fls_12_1_generic_impl.rs` — it has `fn main` and a
+`.s` snapshot. The pattern is clear. For `generic_trait_impl.rs`, the same pattern was
+simply never applied.
+
+---
+
+## Goal
+
+**Add `fn main` to `tests/fixtures/fls_12_1_generic_trait_impl.rs`, generate its `.s`
+snapshot, and add a fixture-level assembly inspection test in `tests/e2e.rs`.**
+
+This clears the snapshot's false "candidate goal" signal and gives the fixture the same
+end-to-end coverage as every other compiled fixture.
+
+### What to add
+
+1. `fn main() -> i32 { let w = Wrapper { inner: 5 }; use_it(w) }` at the end of the
+   fixture file.
+2. Run `cargo run -- tests/fixtures/fls_12_1_generic_trait_impl.rs` and save the output
+   as `tests/fixtures/fls_12_1_generic_trait_impl.s`.
+3. Add a `fls_fixture_generic_trait_impl_compiles` test in `tests/e2e.rs` using
+   `include_str!("fixtures/fls_12_1_generic_trait_impl.rs")` that asserts the assembly
+   contains `Wrapper__get__i32` (the monomorphized call).
+
+### Why now
+
+The snapshot's "candidate goals" section is the first signal a Compiler Contributor
+reads at step 4 of their journey. The only entry points at a fully-implemented feature
+whose fixture just lacks `fn main`. Clearing it makes the signal honest: zero parse-only
+entries means "all fixture-level work is done; pick a new FLS section."
