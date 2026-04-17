@@ -88,3 +88,23 @@ The snapshot's "candidate goals" section is the first signal a Compiler Contribu
 reads at step 4 of their journey. The only entry points at a fully-implemented feature
 whose fixture just lacks `fn main`. Clearing it makes the signal honest: zero parse-only
 entries means "all fixture-level work is done; pick a new FLS section."
+
+---
+
+## Applied (Builder)
+
+1. Added `fn main() -> i32 { let w = Wrapper { inner: 5 }; use_it(w) }` to `tests/fixtures/fls_12_1_generic_trait_impl.rs`.
+2. Ran `cargo run -- tests/fixtures/fls_12_1_generic_trait_impl.rs` to generate `tests/fixtures/fls_12_1_generic_trait_impl.s`.
+3. Added `fls_fixture_generic_trait_impl_compiles` test in `tests/e2e.rs` using `include_str!` that asserts the assembly contains `Wrapper__get__i32` (monomorphized call) and `bl use_it` (no constant folding).
+
+**Files:**
+- `tests/fixtures/fls_12_1_generic_trait_impl.rs` — added `fn main`
+- `tests/fixtures/fls_12_1_generic_trait_impl.s` — generated assembly snapshot
+- `tests/e2e.rs` — added `fls_fixture_generic_trait_impl_compiles` test
+
+## Validated
+
+- `cargo test fls_fixture_generic_trait_impl_compiles` — passes
+- `cargo test` — 2060 pass, 0 fail (up from 2059)
+- Assembly contains `Wrapper__get__i32` and `bl use_it` — runtime instructions, not constant-folded
+- Verifier: `cargo test fls_fixture_generic_trait_impl_compiles` or `grep Wrapper__get__i32 tests/fixtures/fls_12_1_generic_trait_impl.s`

@@ -20993,6 +20993,26 @@ fn main() -> i32 { use_wrapper(Wrapper { inner: 7 }) }
     );
 }
 
+/// Fixture-level assembly inspection: fls_12_1_generic_trait_impl.rs compiles end-to-end.
+///
+/// Verifies that the complete fixture (trait + struct + impl + fn use_it + fn main)
+/// compiles and emits the monomorphized method label `Wrapper__get__i32`.
+///
+/// FLS §12.1: Generic trait implementation — `impl<T> Trait for Type<T>`.
+#[test]
+fn fls_fixture_generic_trait_impl_compiles() {
+    let src = include_str!("fixtures/fls_12_1_generic_trait_impl.rs");
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("Wrapper__get__i32"),
+        "fixture must emit monomorphized label Wrapper__get__i32: {asm}"
+    );
+    assert!(
+        asm.contains("bl      use_it") || asm.contains("bl use_it"),
+        "main must call use_it via bl — not constant-folded: {asm}"
+    );
+}
+
 // ── Milestone 139: Generic trait bounds compile to runtime ARM64 (FLS §12.1 + §4.14) ─
 //
 // A generic function with a trait bound (`fn apply<T: Scalable>(t: T, n: i32) -> i32`)
