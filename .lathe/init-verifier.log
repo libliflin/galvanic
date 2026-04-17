@@ -1,15 +1,13 @@
-`.lathe/verifier.md` is written. Here's what shaped it:
+`.lathe/verifier.md` written.
 
-**From builder.md:**
-- The builder's self-reported validation is `cargo build && cargo test && cargo clippy`. The verifier's job is to not take that on faith — run it again and check the tests themselves.
-- The builder knows the litmus test but may skip it when under pressure to deliver. The verifier has no goal pressure — it only has correctness pressure.
-- The builder's claims methodology requires all three parts (fixture + exit-code test + assembly inspection). The verifier checks that all three exist and that the assembly inspection includes both a positive instruction assert and a negative constant-fold assert.
+**Shape detected: service/CLI.** Galvanic is a compiler — changes are witnessed by running the binary against representative source, not by deploying anywhere.
 
-**From the project's specific risks:**
-- The central failure mode is a "falsification" that actually constant-folds. An exit code of 3 for `1 + 2` is consistent with both correct codegen and with `mov x0, #3`. The `compile_to_asm()` + `!asm.contains("mov x0, #3")` pattern is the only proof.
-- FLS citation gaps are research output, not cosmetic. A missing `AMBIGUOUS` annotation is a substantive miss.
-- Pipeline completeness (AST → lower → codegen) is a common partial-implementation failure.
+The verifier is built around this project's specific failure modes:
 
-**Structural choices:**
-- The instruction table tells the verifier what to look for per construct type — it doesn't have to re-derive this from the codebase each round.
-- "No fixes needed, no commit" is an explicit option — the verifier shouldn't make noise-commits when the builder's work is solid.
+- **Constant folding** — after any lowering change, `compile_to_asm` must show a runtime instruction, not a precomputed constant. The playbook spells out how to check.
+- **Token size regression** — any lexer change triggers `token_is_eight_bytes` explicitly.
+- **Half-documented ambiguities** — `AMBIGUOUS` annotations without a matching `refs/fls-ambiguities.md` entry are the spec researcher's primary pain point; the verifier catches them by diffing source annotations against the ref file.
+- **Pipeline order gaps** — the verifier checks that new language features touch all seven stages, not just the ones that were "needed."
+- **FLS citation gaps** — the verifier greps new `struct`/`enum`/`fn` declarations in the diff for missing citations.
+
+The Verification Playbook is immediately runnable: `cargo test`, `compile_to_asm` assertions, direct CLI invocation, the token size test, and `gh pr view` for the `e2e` CI job as the runtime oracle on macOS where cross-tools aren't available.

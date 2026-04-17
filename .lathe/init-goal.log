@@ -1,15 +1,23 @@
-Done. Here's what I wrote and why:
+Done. Here's what was written:
 
 ---
 
-**`.lathe/goal.md`** — The goal-setter's behavioral instructions.
+**`.lathe/goal.md`** — The customer champion behavioral doc. Three stakeholders grounded in what's actually in the code:
 
-Four stakeholders grounded in what I actually saw in the code: William (the researcher reading the git log), FLS spec readers (who care about ambiguity findings currently buried in inline comments), future contributors (who can infer the claims methodology from commits but find nothing that explains it), and CI/validation infrastructure. The tensions are real ones I found: parse fixtures vs. full pipeline codegen, breadth vs. correctness depth (the assembly inspection gap), and ambiguity documentation vs. forward progress.
+- **Lead researcher** (the author) — wants momentum; walks the feature-extension journey, looking for compile-pipeline gaps and missing FLS annotations
+- **Spec researcher** — wants discovery; navigates from `AMBIGUOUS` annotations in source to `refs/fls-ambiguities.md`, checking whether findings are documented with enough specificity to be actionable
+- **Compiler contributor** — wants clarity; tries to add a new construct end-to-end, looking for where the pattern breaks down
 
-The ranking section deliberately avoids a layer ladder. CI being broken is the floor; above that, stakeholder impact decides.
+The ranking model is floor (CI/tests) then lived experience — no layer ladder.
 
-**`.lathe/skills/testing.md`** — How galvanic actually tests, including the mandatory assembly inspection pattern and the claims methodology.
+**`.lathe/skills/testing.md`** — The three test files, what each covers, CI jobs, key invariants (no unsafe, no constant folding, token size), and the pattern for adding a new feature test.
 
-**`.lathe/skills/architecture.md`** — Pipeline, module responsibilities, the cache-line invariant, what's implemented end-to-end vs. parse-only. The "what can it compile today" section is something the goal-setter needs to avoid picking claims that have unmet prerequisites.
+**`.lathe/skills/architecture.md`** — Pipeline overview, the three non-negotiable design constraints (safe Rust, no const folding, cache-line awareness + FLS traceability), IR design philosophy, codegen target quirks (Linux ELF only, macOS can't run output), and the step-by-step pattern for adding a new feature.
 
-**`.lathe/alignment-summary.md`** — For you. The thing I'm most uncertain about: whether all recently-added features (while-let, match, struct-expressions) actually have `compile_to_asm()` inspection tests or only exit-code tests. Worth a quick `grep -n "compile_to_asm" tests/e2e.rs` to check. If the inspection tests are missing for recent claims, that's the first thing the goal-setter should target.
+**`.lathe/skills/journeys.md`** — Concrete step-by-step journeys for each stakeholder, with specific commands to run and friction signals to watch for.
+
+**`.lathe/skills/domains.md`** — Domain boundary map: FLS, ARM64 ISA, Platform ABI, Safe Rust. The "symptom → likely domain" table at the bottom is where the confusion points actually live.
+
+**`.lathe/alignment-summary.md`** — For you. Includes the security assessment: `ci.yml` uses `pull_request` (not `pull_request_target`), global `contents: read` permission — low injection risk. Action item: confirm branch protection on `main` before running lathe autonomously.
+
+**`snapshot.sh`** — Added two new sections: FLS Coverage (fixture count split between compiled and parse-only, with parse-only listed as candidate goals) and Ambiguity Tracking (counts `AMBIGUOUS §` annotations in source vs. documented entries in `refs/fls-ambiguities.md`, flags mismatches).

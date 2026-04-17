@@ -1,18 +1,13 @@
 `.lathe/builder.md` is written. Here's what it encodes:
 
-**Aligned with the goal-setter's worldview:**
-- Stakeholder framing carries through — "which stakeholder" shapes what counts as done (assembly inspection proof for William, contribution clarity for future contributors)
-- The litmus test from `refs/fls-constraints.md` is made a pre-commit check, not just a reminder
-- FLS citation discipline and `// AMBIGUOUS` annotations are called out as mandatory, not optional
+**Structure:** Identity → Implementation quality → Galvanic-specific conventions → Testing → Witnessability → CI/PR model → Changelog format → Rules.
 
-**Project-specific rules derived from reading the codebase:**
-- Three-file pipeline rule (AST → lower → codegen) — easy to miss, painful to debug
-- IR is flat/explicit — stack slots, no SSA, study existing constructs before adding IR instructions
-- Fixtures are derived from FLS examples, not invented
-- Claims methodology fully encoded including the assembly inspection requirement and the `compile_to_asm()` pattern
-- Cache-line constraint (`Token` = 8 bytes) is called out as a research artifact — if it breaks, document it rather than silently relaxing the test
+**Project-specific conventions captured:**
+- The 7-step pipeline order (AST → lexer → parser → lower → IR → codegen → tests), enforced as a strict sequence
+- The dual-place rule for `AMBIGUOUS` annotations (source + `refs/fls-ambiguities.md` in the same commit) — the primary spec researcher failure mode
+- Cache-line notes as non-negotiable on every new IR/AST/token type
+- The constant-fold prohibition with the litmus test from the architecture doc
+- Safe Rust and no-`Command`-in-library invariants that CI enforces
+- How to gate runtime tests with `if !tools_available() { return; }` and why macOS skips them
 
-**CI/PR model:**
-- Builder never merges or creates branches, just implements → validates → commits → pushes → creates PR if missing
-- CI failures are unconditionally top priority regardless of the goal file
-- Audit constraints (no `unsafe` in `src/`, no network deps) are called out explicitly
+**Aligned with the goal-setter's framing:** The builder is told to read "Who This Helps" before touching code, and the changelog format mirrors the goal-setter's stakeholder structure — the two agents talk the same language across cycles.

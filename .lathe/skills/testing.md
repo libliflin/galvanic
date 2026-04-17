@@ -1,66 +1,88 @@
-# Testing in Galvanic
+# Testing — Galvanic
 
 ## Test runner
-`cargo test` — standard Rust test harness. No external test runner.
+
+`cargo test` runs all tests. Three test files, each with a different scope:
+
+---
 
 ## Test files
 
-### `tests/e2e.rs` — Full pipeline, end-to-end
-Runs the complete lex -> parse -> lower -> codegen -> assemble -> link -> run pipeline and checks exit codes or assembly output. Tests are gated on tool availability (ARM64 cross-toolchain + qemu-aarch64); they skip on macOS or any machine missing the tools. CI installs the tools explicitly.
+### `tests/smoke.rs` — Binary behavior
 
-**WARNING: On macOS, `compile_and_run()` tests silently skip and the test harness reports them as "passed."** This is dangerously misleading — hundreds of runtime tests appear green but never actually ran. Only `compile_to_asm()` assembly inspection tests truly execute on macOS. See `.lathe/skills/platform-and-abi.md` for why (Linux syscalls, ELF format, no user-mode QEMU on macOS). **CI on Linux is the only authoritative source for runtime test results.**
+Tests the compiled `galvanic` binary directly via `std::process::Command`. Verifies the CLI contract: exit codes, usage messages, file-not-found behavior. These are the fastest tests and run without cross-compilation tools.
 
-Two helper functions drive all tests:
-- `compile_and_run(source)` — full pipeline, returns `Option<i32>` exit code (None = tools not available, **test silently skips on macOS**)
-- `compile_to_asm(source)` — pipeline through codegen only, returns assembly text string. **Works on all platforms.** Use this for assembly inspection tests.
+### `tests/fls_fixtures.rs` — Parse acceptance
 
-**Assembly inspection tests are mandatory for every new e2e feature.** Exit code tests alone cannot prove the project is emitting runtime instructions rather than constant-folding. The pattern:
+Each test calls `assert_galvanic_accepts(fixture_name)`, which runs the lexer and parser on a fixture file and asserts no errors. These tests do **not** run lowering or codegen — they verify that galvanic can parse FLS-derived examples, even when lowering isn't yet implemented.
 
-```rust
-let asm = compile_to_asm("fn main() -> i32 { 1 + 2 }\n");
-assert!(asm.contains("add"), "expected add instruction");
-assert!(!asm.contains("mov     x0, #3"), "must not constant-fold");
-```
+Adding a new fixture: drop a `.rs` file in `tests/fixtures/`, add a corresponding `#[test]` fn in `fls_fixtures.rs`.
 
-### `tests/fls_fixtures.rs` — Parse acceptance only
-Verifies that galvanic can lex and parse FLS example programs. Uses `assert_galvanic_accepts(fixture_name)`. Does NOT test lowering or codegen. A fixture test passing means the parser accepts the program — it says nothing about whether the compiler can produce correct code.
+### `tests/e2e.rs` — Full pipeline
 
-Fixtures live in `tests/fixtures/*.rs`. Each fixture should be a real Rust program derived from a specific FLS section example. Do not invent programs — derive them from the spec.
+Two kinds of tests live here:
 
-### `tests/smoke.rs` — Basic smoke tests
-Minimal sanity checks (exact contents unknown, but separate from e2e).
+**Assembly inspection** (`compile_to_asm(source)`): Runs the full lex → parse → lower → codegen pipeline and returns the emitted ARM64 assembly text as a `String`. These work everywhere — macOS, Linux, CI — because they never invoke the assembler or linker. Use these to verify the compiler emits the correct instruction forms. This is the primary way FLS §6.1.2 compliance is checked: inspect the assembly to confirm runtime instructions are emitted, not constant-folded results.
 
-### Unit tests in `src/lexer.rs`
-Size-enforcement tests: `token_is_eight_bytes`, `span_is_eight_bytes`. These assert the cache-line layout invariant. If they fail after a change, the cache-line constraint has been violated and the change needs to be reconsidered, not the test.
+**Runtime execution** (`compile_and_run(source, expected_exit)`): Assembles the output with `aarch64-linux-gnu-as`, links with `aarch64-linux-gnu-ld`, runs under `qemu-aarch64`, and checks the exit code. These are **skipped** when the cross-toolchain is absent. On macOS, they are always skipped (macOS cannot run Linux ELF binaries even on Apple Silicon — the syscall ABI is different). CI (ubuntu-latest) is the authoritative source of truth for runtime tests.
 
-## Claims methodology
+The e2e suite is large (1,700+ assembly inspection tests). Run `cargo test --test e2e` to run only e2e tests. Run `cargo test --test e2e compile_to_asm_add` (any substring match) to run a specific test.
 
-The project's commits follow a pattern: `Claim 4k: add while-let runtime falsification for FLS §6.15.4`. Each "claim" covers one FLS section and has three required parts:
+---
 
-1. A parse fixture in `tests/fixtures/fls_X_Y_name.rs` (if one doesn't exist)
-2. An e2e exit-code test in `tests/e2e.rs` verifying correct runtime behavior
-3. An assembly inspection test in `tests/e2e.rs` verifying runtime instruction emission (e.g., `cbz` for a branch, `add` for addition)
+## Test fixtures (`tests/fixtures/`)
 
-A claim without the assembly inspection test is incomplete. The core constraint (`refs/fls-constraints.md`) requires runtime codegen, and only assembly inspection proves it.
+Each fixture is a `.rs` file containing real Rust code drawn from FLS examples. Some have a corresponding `.s` file (expected or generated ARM64 assembly).
 
-## Running specific tests
+Fixtures without `.s` files: parse-acceptance only — the construct is parsed but not yet lowered or compiled.  
+Fixtures with `.s` files: the compiler can compile them end-to-end.
 
-```bash
-cargo test                          # all tests
-cargo test --test e2e               # e2e only
-cargo test --test fls_fixtures      # parse fixtures only
-cargo test --lib                    # unit tests only (including lexer size tests)
-cargo test --lib -- --exact lexer::tests::token_is_eight_bytes  # one test
-```
+---
 
-## What CI runs
+## CI jobs
 
-1. `cargo build` — must pass
-2. `cargo test` — all tests must pass
-3. `cargo clippy -- -D warnings` — no warnings
-4. fuzz-smoke job: adversarial inputs (garbage, NUL bytes, 10k let statements, 500-deep nesting) must exit cleanly (no signal, no hang)
-5. e2e job (ubuntu-latest + arm64 cross-tools + qemu): `cargo test --test e2e`
-6. audit job: no `unsafe` in `src/`, no `std::process::Command` outside `main.rs`, no network crate dependencies
-7. bench job: criterion benchmarks run with throughput reporting
+Five jobs run on every PR and push to `main`:
 
-The e2e job gate (`needs: build`) means a build failure blocks e2e from running.
+| Job | What it runs |
+|---|---|
+| `build` | `cargo build`, `cargo test`, `cargo clippy -- -D warnings` |
+| `fuzz-smoke` | Binary edge cases: no args, missing file, empty file, large inputs, deep nesting, binary garbage, NUL bytes, long lines |
+| `audit` | No `unsafe` in `src/`, no `Command` in library code, no network deps in `Cargo.toml` |
+| `e2e` | Installs `binutils-aarch64-linux-gnu` + `qemu-user`, runs `cargo test --test e2e` including runtime tests |
+| `bench` | Runs throughput benchmarks, checks that data structure sizes haven't grown |
+
+---
+
+## Key invariants enforced by CI
+
+**No unsafe code.** The `audit` job rejects any `unsafe { }`, `unsafe fn`, or `unsafe impl` in `src/`. CI blocks a PR if unsafe appears.
+
+**No constant folding.** The FLS §6.1.2 constraint says all non-const code must emit runtime instructions. Tests in `e2e.rs` check the emitted assembly directly — a test that passes but emits a constant result instead of a runtime instruction is a false positive. The `compile_to_asm()` helper exists specifically to catch this.
+
+**No `Command` in library code.** `main.rs` may invoke `aarch64-linux-gnu-as` and `aarch64-linux-gnu-ld`. The library (`lexer.rs`, `parser.rs`, `ir.rs`, `lower.rs`, `codegen.rs`) must never shell out.
+
+**Token size.** `cargo test --lib -- --exact lexer::tests::token_is_eight_bytes` verifies the `Token` type fits in 8 bytes. This is a load-bearing cache-line invariant — each token takes exactly one slot alongside a `Span` in a 16-byte cache line.
+
+---
+
+## Adding a new feature test
+
+1. Write a fixture in `tests/fixtures/your_feature.rs` with a minimal Rust program using the feature.
+2. Add `fn fls_your_feature() { assert_galvanic_accepts("your_feature.rs"); }` in `fls_fixtures.rs` to verify parsing.
+3. Once lowering and codegen work, add an assembly inspection test in `e2e.rs`:
+   ```rust
+   #[test]
+   fn your_feature_emits_correct_asm() {
+       let asm = compile_to_asm("fn main() { /* your feature */ }");
+       assert!(asm.contains("add"), "expected add instruction");
+       // Assert runtime instruction, not constant result
+   }
+   ```
+4. Once the cross-toolchain is available on your machine, add a runtime test:
+   ```rust
+   #[test]
+   fn your_feature_exits_correctly() {
+       if !tools_available() { return; }
+       compile_and_run("fn main() -> i32 { 2 + 3 }", 5);
+   }
+   ```

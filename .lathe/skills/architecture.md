@@ -1,106 +1,129 @@
 # Architecture — Galvanic
 
+## What galvanic is
+
+A clean-room ARM64 Rust compiler built strictly from the Ferrocene Language Specification (FLS), targeting `no_std` Rust. Two research questions drive every design decision:
+
+1. Is the FLS actually implementable by an independent party?
+2. What happens when cache-line alignment is a first-class design constraint — not an optimization pass, but a constraint woven into layout, register allocation, and instruction selection from the start?
+
+This is not a production compiler. It's a research instrument. Value comes from what is learned about the spec and about cache-aware codegen.
+
+---
+
 ## Pipeline
 
-```
-source text
-  → lexer::tokenize()    → Vec<Token>
-  → parser::parse()      → ast::SourceFile
-  → lower::lower()       → ir::Module
-  → codegen::emit_asm()  → ARM64 assembly text (GAS syntax)
-  → aarch64-linux-gnu-as → .o object file
-  → aarch64-linux-gnu-ld → ELF binary
-  → qemu-aarch64 / native ARM64 → runs
-```
+Source `.rs` file → **lexer** → **parser** → **AST** → **lower** → **IR** → **codegen** → ARM64 GAS assembly → (assembler + linker → binary)
 
-Each stage is a separate module with a clean public API. The binary (`src/main.rs`) drives the pipeline and shells out to the assembler/linker. The library (`src/lib.rs`) exposes the Rust-only stages (lex, parse, lower, codegen) for testing.
+Each stage lives in its own file:
 
-## Key constraint: no compile-time evaluation in non-const functions
+| File | Stage | FLS anchor |
+|---|---|---|
+| `src/lexer.rs` | Tokenization | §2: Lexical Elements |
+| `src/parser.rs` | Parse tokens → AST | §4–§18: Grammar |
+| `src/ast.rs` | AST node types | §4–§18 |
+| `src/lower.rs` | AST → IR | §6, §8, §9, §15, … |
+| `src/ir.rs` | IR node types | Design doc (no direct FLS section) |
+| `src/codegen.rs` | IR → ARM64 GAS | ABI + §18.1 |
+| `src/main.rs` | CLI driver | — |
 
-This is the project's central integrity check. See `refs/fls-constraints.md` for the full rationale. Short version: galvanic is a compiler, not an interpreter. Every regular function body must emit runtime ARM64 instructions. Constant folding of non-const code is forbidden, even when it would produce the correct exit code.
+The library (`src/lib.rs`) exports all pipeline modules. `main.rs` is the CLI wrapper only — it parses arguments and invokes the library. The library must never shell out (`std::process::Command` is forbidden in library code).
 
-The litmus test: replace every literal in a function with a parameter. If the implementation breaks, it was evaluating at compile time.
+---
 
-## Module responsibilities
+## Key design constraints
 
-### `src/lexer.rs` — FLS §2
-Tokenizes source text. Emits only meaningful tokens (no whitespace/comments). Terminates with `TokenKind::Eof`.
+### Safe Rust only
 
-**Cache-line layout is enforced:** `Token` is 8 bytes (`repr(u8)` discriminant, 24-bit span). This is locked by `lexer::tests::token_is_eight_bytes`. Do not add fields to `Token` or change `TokenKind` to `repr(u16)` without explicit discussion of the cache-line tradeoff.
+No `unsafe` blocks, no `unsafe fn`, no `unsafe impl`. CI enforces this. The compiler is safe Rust end-to-end — this is a deliberate constraint to keep the implementation trustworthy and auditable.
 
-`Span` encodes `(start: u32, end: u32)` as a pair of 32-bit byte offsets into the source string.
+### No constant folding in non-const contexts
 
-### `src/parser.rs` — FLS §3–§6
-Recursive-descent parser. One method per grammar rule. Returns `ParseError` on failure with the offending span. Has a `MAX_BLOCK_DEPTH` limit (200) to prevent stack overflow on adversarial input.
+FLS §6.1.2 is explicit: compile-time evaluation is only permitted in const contexts (`const` items, `const fn` when called from a const context, `const { }` blocks, `static` initializers, etc.). A regular `fn main()` body is not a const context, even if every value is statically known. Galvanic must emit runtime instructions for all non-const code.
 
-Operator precedence is encoded in the call graph (not a Pratt parser). 13 levels from assignment (lowest) to primary (highest). See module doc for the full table.
+The litmus test: if you could replace a literal with a function parameter and the compiler would break (by emitting the wrong constant), it's a constant-fold bug.
 
-### `src/ast.rs`
-The AST node types. `SourceFile` is the root. `Item` covers top-level declarations. `Expr`/`ExprKind` covers all expression forms. No semantic information — just structure.
+This constraint is enforced by assembly inspection tests that check the actual emitted instructions, not just exit codes.
 
-### `src/ir.rs`
-A minimal, flat IR for ARM64 codegen. `Module` contains `Vec<IrFn>`. `IrFn` contains `Vec<Instr>`. Instructions are explicit stack operations (stack slots indexed by integer), loads/stores, arithmetic, branches, and calls. No SSA, no phi nodes — this is a simple 1:1 codegen target.
+### Cache-line awareness
 
-### `src/lower.rs` — FLS §6–§9
-Translates `SourceFile` → `Module`. Each `FnDef` becomes an `IrFn`. Local variables are allocated stack slots (tracked by name in a `HashMap<String, usize>`). The lowering pass is the core of the compiler — every FLS feature that produces runtime behavior has to be implemented here.
+Every data structure in `ir.rs`, `ast.rs`, and `lexer.rs` documents its cache-line layout. The `Token` type is exactly 8 bytes (enforced by a size assertion test). The `Span` type is exactly 8 bytes. `Instr` and `IrValue` are small enums designed to fit in one cache line per instruction.
 
-**FLS citation discipline:** every `lower_*` function should cite the FLS section it implements. Ambiguities go as `// FLS §X.Y: AMBIGUOUS — <description>` inline.
+When adding a new IR node or AST type, document its size and cache-line impact in a `// Cache-line note:` comment. This is not optional — it's how the research question is answered.
 
-### `src/codegen.rs` — FLS §18.1
-Translates `Module` → ARM64 GAS assembly text. Linear traversal of `Vec<Instr>`. Bare `_start` entry point (no libc).
+### FLS traceability
 
-**Dual-platform target:** Galvanic targets both macOS ARM64 and Linux ARM64. The ARM64 instructions are identical; only the syscall ABI and binary format differ. See `.lathe/skills/platform-and-abi.md` for the full comparison. Currently only Linux is implemented (syscall via `svc #0`, number in `x8`). macOS support (`svc #0x80`, number in `x16`) is needed.
+Every module, type, and non-trivial function has `// FLS §N.M: ...` citations in comments. Ambiguities discovered during implementation are marked `// AMBIGUOUS: §N.M — ...` in source and documented in `refs/fls-ambiguities.md`. Constraints on what the compiler must not do are documented in `refs/fls-constraints.md`.
 
-## ARM64 calling convention (as implemented)
+---
 
-Arguments: x0–x{n-1} (first n args). Callee spills to stack immediately. Return value: x0. Caller saves x0 before placing args if needed. This is a simplified (non-ABI-conformant) convention sufficient for internal calls — not the full AAPCS64.
+## IR design
 
-## The "claims" methodology
+The IR is intentionally minimal. Nothing is added until it is needed by the next runnable program milestone. This prevents premature abstraction and keeps the FLS mapping clear.
 
-Each FLS section implemented follows the "Claim" pattern:
-- "Claim 4k: add while-let runtime falsification for FLS §6.15.4"
-- One claim = one FLS section = parse fixture + e2e exit-code test + assembly inspection test
+Key IR types (in `src/ir.rs`):
+- `Module` — the compilation unit (one per source file)
+- `IrFn` — a function, with a name, parameters, and a list of `Instr`
+- `Instr` — an instruction (load immediate, binary op, return, branch, call, etc.)
+- `IrValue` — a value (register slot, immediate, unit)
+- `IrTy` — a type (i32, u32, f32, f64, bool, unit, ptr, etc.)
 
-The assembly inspection test is the proof that the claim is true at runtime, not just "the exit code happened to be right."
+The IR does not have SSA form — it uses stack slots (spill-everything model). This is deliberate: SSA would require a separate pass, and the research value is in the FLS mapping, not in register allocation sophistication.
 
-## What the project can compile today (known as of recent commits)
+---
 
-Fully through the pipeline (e2e + assembly inspection):
-- fn main with i32 / unit return (§9, §18.1)
-- Integer literals, boolean literals (§2.4.4.1, §2.4.7)
-- Arithmetic: +, -, * (§6.5.5)
-- Let bindings (§8.1)
-- If/else (§6.17)
-- Function calls with parameters (§6.12.1, §9)
-- Mutable assignment (§6.5.10)
-- While, while-let, loop, break, continue (§6.15.2–§6.15.4, §6.15.6–§6.15.7)
-- Match expressions (§6.18)
-- Struct expressions (§6.11)
-- Path expressions / named blocks (§6.3, §6.4.3)
+## Codegen target
 
-Parse only (parse fixture, no codegen):
-- Closures (§6.14), for loops (§6.15.1), range expressions (§6.16)
-- Generics (§12), traits (§13), impl blocks, associated items (§10)
-- Patterns (§5), type aliases (§4.10), const/static items (§7)
-- Let-else (§8.1), dyn trait (§4.13), unsafe (§19), slices (§4.9)
+Output is ARM64 GAS (GNU Assembler) syntax:
+- Architecture: AArch64
+- ABI: AAPCS64 (same register conventions on macOS, Linux, and BSDs)
+- Binary format: Linux ELF with bare `_start` entry point (Linux syscalls via `svc #0`)
+- The output `.s` file is assembled with `aarch64-linux-gnu-as` and linked with `aarch64-linux-gnu-ld`
 
-The gap between "parse fixture" and "e2e codegen" is where future claims live.
+**Important:** The emitted binary uses Linux syscalls and Linux ELF format. It **cannot** run on macOS, even on Apple Silicon, because macOS uses Mach-O format and a different syscall ABI. On macOS, assembly and runtime tests are skipped. CI (ubuntu-latest with `qemu-aarch64`) is the authoritative runtime test environment.
 
-## Benches
+For platform ABI differences (macOS vs Linux vs BSDs), see `refs/arm64-platform-abi.md`.
 
-`benches/throughput.rs` — criterion benchmark measuring compilation throughput (tokens/second or similar). Run with `cargo bench`. CI runs with short warm-up/measurement to catch regressions.
+---
 
-## Build requirements
+## Adding a new language feature
 
-- Rust stable (edition 2024)
-- For e2e runtime tests on Linux: `binutils-aarch64-linux-gnu`, `qemu-user`
-- For e2e runtime tests on macOS: native `as` and `ld` (once macOS codegen is implemented)
-- `cargo build` and `cargo test --lib` work everywhere; assembly inspection tests work everywhere
+The pattern to follow, in order:
 
-The binary shells out to platform-appropriate assembler and linker when given `-o output`. No other external dependencies.
+1. **AST node** (`src/ast.rs`): Add the new expression, statement, or item type. Document the FLS section. Note cache-line size if it's a frequently-traversed node.
 
-## Platform targets
+2. **Lexer** (`src/lexer.rs`): Add any new tokens the feature requires. Document the FLS section.
 
-Galvanic targets ARM64 on both macOS and Linux. The instruction set is identical; only the syscall ABI and binary format differ. See `.lathe/skills/platform-and-abi.md` for the full comparison.
+3. **Parser** (`src/parser.rs`): Add the parser case that recognizes the new construct and builds the AST node. Document the FLS section.
 
-**Current state:** Only Linux ARM64 codegen is implemented. macOS codegen (different syscall convention, Mach-O format) is needed so that developers on Apple Silicon can run the full test suite locally. Until then, runtime e2e tests skip on macOS and only CI (Linux) executes them.
+4. **Lowering** (`src/lower.rs`): Add the AST-to-IR translation. Emit runtime instructions (not constant-folded results). Document FLS citations. If the spec is silent on something, add an `AMBIGUOUS` annotation.
+
+5. **IR** (`src/ir.rs`): Add any new instruction or type the lowering needs. Document cache-line layout.
+
+6. **Codegen** (`src/codegen.rs`): Add the IR-to-assembly translation. Document the ABI register usage and any cache-line impact.
+
+7. **Tests**: Parse acceptance test in `fls_fixtures.rs`, assembly inspection test in `e2e.rs`, and a runtime test in `e2e.rs` (skipped when cross-toolchain is absent).
+
+---
+
+## Trampoline and vtable shim functions
+
+When closures are passed as `impl Fn` arguments, galvanic generates **trampoline functions** in `Module::trampolines`. A trampoline bridges the captured-variable calling convention (arguments spread across extra registers) to the `impl Fn` calling convention. See `src/ir.rs` `ClosureTrampoline` for the design.
+
+When `dyn Trait` dispatch is used, galvanic generates **vtable shim functions** in `Module::vtable_shims`. A shim adapts the "fields in registers" calling convention used by galvanic's struct methods to the "data pointer in x0" convention expected by vtable callers. Each shim loads the struct's fields from a stack-allocated pointer and tail-calls the concrete method.
+
+These are generated during lowering and emitted as regular assembly functions during codegen.
+
+---
+
+## Stack layout
+
+Galvanic uses a spill-everything model: every local variable is assigned a stack slot in the function prologue. Arguments are spilled from their parameter registers (`x0`..`x7` for integers, `d0`..`d7` for floats) to the stack immediately on entry. This is conservative but keeps the IR simple and the FLS mapping clear.
+
+Frame setup: `sub sp, sp, #N` where N is computed at lowering time. Frame teardown: `add sp, sp, #N` before `ret`.
+
+---
+
+## Benchmark suite
+
+`benches/throughput.rs` (Criterion) measures compile throughput on representative programs. CI runs benchmarks and reports timing, and checks that data structure sizes haven't grown (via size assertion tests in `src/lexer.rs`).

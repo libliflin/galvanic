@@ -1,0 +1,11 @@
+Script runs cleanly. Output is 1,426 characters on a green build — well within the 6,000-character budget, with plenty of headroom for failure details when things break.
+
+**What it covers:**
+- **Git status/log** — raw short status + last 10 commits
+- **Build** — `cargo build`, one line on success, errors on failure
+- **Tests** — `cargo test`, Pass/Fail/Ignored counts; expands to show failed test names + context on failure
+- **Clippy** — `cargo clippy -D warnings`, OK or error count + first errors
+- **Unsafe audit** — mirrors the CI check, warns if unsafe blocks appear in `src/`
+- **CI** — lists job names from `.github/workflows/ci.yml`
+
+The happy path produces ~1,400 chars. Failure paths expand per section but are capped (`head -10`, `head -8`, etc.) to stay well under 6,000.

@@ -1,41 +1,59 @@
-# Alignment Summary
+# Alignment Summary — Galvanic Customer Champion
 
-This file is for William (the user), not the runtime agent. It records the decisions made during goal-setter setup and the uncertainties worth checking.
+This file is for the human. It summarizes the alignment decisions made during init and flags what could be wrong.
 
 ---
 
 ## Who this serves
 
-**William Laffin** — the primary researcher. Reads the git log. Evaluates whether cycles advance the two research questions: (1) is the FLS implementable? (2) what does cache-line-aware codegen look like from the start? His relationship with the project is through commit history and the research findings that surface.
+**Lead researcher (the author):** Extending the compiler feature by feature, tracking FLS fidelity, documenting cache-line tradeoffs. Uses galvanic daily as a research instrument.
 
-**FLS spec readers / Ferrocene team** — people who want to know where the spec fails to pin down behavior. They see the project through `// FLS §X.Y: AMBIGUOUS —` annotations. The research output they care about is currently scattered — no single document collects the findings.
+**Spec researcher:** Studying the Ferrocene Language Specification — looking for concrete ambiguities and gaps, using galvanic's findings as evidence. Arrives at `refs/fls-ambiguities.md` and traces findings from source annotations to documentation.
 
-**Future contributors** — the person who finds this on GitHub on a Sunday. They can read the commits and infer the "claims" methodology, but nothing explicitly documents the contribution pattern. The README is 4 short paragraphs.
+**Compiler contributor:** A Rust programmer adding a new language feature to galvanic as a learning exercise or contribution. Needs the architecture to be discoverable and the patterns to be clear.
 
-**Lathe itself** — reads goal.md + snapshot each cycle. The goal-setter is now set up to rank work by stakeholder impact rather than a fixed feature ladder.
+---
+
+## Emotional signal per stakeholder
+
+| Stakeholder          | Signal    | Tracks                                                    |
+|----------------------|-----------|-----------------------------------------------------------|
+| Lead researcher      | Momentum  | Is the compiler getting smarter? Are findings being captured? |
+| Spec researcher      | Discovery | Are FLS gaps specific, grounded, and documented?           |
+| Compiler contributor | Clarity   | Is the pipeline discoverable? Can a new contributor follow the pattern? |
 
 ---
 
 ## Key tensions
 
-**Parse acceptance vs. full pipeline.** ~40 parse fixtures exist for closures, generics, traits, etc. Adding more parse fixtures is not research progress — it's scaffolding. Real progress is taking a parse fixture all the way to e2e codegen with assembly inspection.
+**Spec fidelity vs. feature breadth.** Tight FLS compliance (precise citations, constraint tracking, ambiguity documentation) slows feature development. Signal: check whether `refs/fls-ambiguities.md` and `refs/fls-constraints.md` are growing alongside the feature set.
 
-**FLS breadth vs. correctness depth.** Several implemented features may have exit-code e2e tests but no assembly inspection tests. A test that checks only the exit code cannot distinguish "compiled correctly" from "constant-folded at compile time and emitted the result." Assembly inspection closes the gap. Until that gap is closed for all existing features, new claims may be premature.
+**Cache-line rigor vs. implementation speed.** Every IR node needs a cache-line note. This is the research question, not optional polish. Signal: scan recent IR additions — do they have `Cache-line note` comments?
 
-**Ambiguity documentation vs. forward progress.** The project's primary research output — where the FLS is silent, ambiguous, or contradictory — lives as scattered inline comments with no surface document collecting them. One cycle spent aggregating those findings would make the research more visible.
+**Contributor accessibility vs. research depth.** FLS traceability and cache-line analysis add cognitive load for contributors. Signal: at which step in the contributor journey does a new contributor stall?
+
+---
+
+## Repository security assessment (for autonomous operation)
+
+**Prompt injection risk:** Lathe reads CI status and PR metadata from GitHub and feeds it into agent prompts. This is a potential prompt injection vector.
+
+- **Workflow triggers:** `ci.yml` is triggered by `push` (to `main`) and `pull_request` (to `main`). It does **not** use `pull_request_target` or `issue_comment`, which are the high-risk triggers that run with elevated permissions on untrusted code. Risk: low.
+- **Workflow permissions:** Global `permissions: contents: read` is set. No write permissions granted. Risk: low.
+- **Repo visibility:** Could not verify automatically (GitHub CLI not authorized during init). The README and Cargo.toml mention `libliflin/galvanic`, which appears to be a public repo. **Action needed:** Confirm whether the repo is public or private, and whether the default branch (`main`) has branch protection rules enabled. Without branch protection, any lathe PR could be merged without review.
+
+**Recommendation:** Enable branch protection on `main` requiring CI to pass before merge. This is the primary safeguard for autonomous operation.
 
 ---
 
 ## What could be wrong
 
-**The assembly inspection coverage may be incomplete.** I looked at the e2e test structure but didn't read every test. It's possible that some milestone features (e.g., while-let, match, struct-expressions, which appear in recent commits) have only exit-code tests and no `compile_to_asm()` inspection. If so, the core constraint could be silently violated. Recommend checking: `grep -n "compile_to_asm" tests/e2e.rs` to see which features have assembly inspection.
+**Stakeholder coverage:** The "spec researcher" stakeholder is partially inferred. The README doesn't explicitly name external spec researchers as a target audience — it says "nobody needs to use this." If the actual audience is narrower (just the author), the spec researcher journey may produce misaligned goals. Watch for goals that optimize for spec researcher clarity when the author already knows where the findings live.
 
-**Closures (§6.14) are the hard case.** They require a capture environment — a fundamentally different memory model than anything currently implemented. The goal-setter ranks next claims by proximity to existing infrastructure. If a cycle picks closures and the IR doesn't support capture slots, the agent will hit a wall. The goal.md notes that closures are unimplemented at codegen level, but I haven't verified whether the IR has any scaffolding for them.
+**The contributor stakeholder may be premature.** The README says this is not a production compiler and nobody needs to use it. If there are no external contributors and no intention to have any, optimizing for contributor clarity could distract from the research goals. If the author is the sole contributor, the lead researcher and contributor journeys are the same person — the champion should weight researcher momentum over contributor onboarding in that case.
 
-**No branch protection check performed.** I couldn't directly query GitHub's branch protection settings from here. The CI uses `pull_request` (not `pull_request_target`) — that's the safe pattern. The `permissions: contents: read` on the main CI job is correct. Recommend verifying via GitHub settings that the default branch (`main`) is protected and requires CI to pass before merge.
+**Cache-line rigor as a first-class invariant:** The goal.md treats cache-line notes as a research artifact the champion should watch for. If the project phase has shifted (e.g., the cache-line research question has been answered), this invariant may no longer be the right thing to guard. The champion should check: are cache-line notes still being written with genuine analysis, or has it become boilerplate?
 
-**The repo is public** (github.com/libliflin/galvanic). The snapshot.sh reads `git log` and `git status` — not PR titles or issue comments — so prompt injection from external PR metadata is not a current risk. If the engine is ever configured to feed PR descriptions into the agent prompt, that changes and should be audited.
+**FLS version drift:** `refs/fls-pointer.md` notes the table of contents was verified as of 2026-04-05. The FLS is versioned and may have been updated since. Section numbers in source citations could be stale. The champion should periodically spot-check citations against the current spec.
 
-**No `skills/fls-constraints.md`** exists — the constraints doc is in `refs/fls-constraints.md`. That's fine, but the testing.md I wrote refers to `refs/fls-constraints.md` correctly. The goal.md also references it correctly.
-
-**The "claims" numbering** (4a, 4b, ..., 4k) appears to be within a milestone 4 series. I don't know what claims 1–3 covered or what determines a milestone boundary. The goal-setter doesn't need this, but a future contributor would benefit from the methodology being documented somewhere explicit.
+**No `pull_request_target` risk confirmed but not verified:** The security assessment above is based on reading `ci.yml`. If additional workflow files are added in future (e.g., `release.yml` or `labeler.yml`), they should be reviewed for `pull_request_target` or `issue_comment` triggers before lathe is run autonomously.
