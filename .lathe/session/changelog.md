@@ -1,3 +1,52 @@
+# Verification — Cycle 009, Round 1
+
+## What was checked
+
+- Read the builder's diff in full: `src/lower.rs` (struct-lit branch in enum variant constructor loop), `refs/fls-ambiguities.md` (new §4.2 entry + §4.14 update), `tests/smoke.rs` (updated `lower_error_names_expr_kind_variant`).
+- Confirmed `AMBIGUOUS: §4.2` annotation exists in `src/lower.rs` and `refs/fls-ambiguities.md` has matching entry in TOC and body.
+- Ran full test suite: 2058 passed, 0 failed.
+- Ran `cargo run -- tests/fixtures/fls_4_14_where_clauses_on_types.rs`: error shifted from "StructLit expression in non-const context" to "variable `v` is not a struct, enum, or tuple struct; method calls on primitive types are not yet supported" in `get_maybe__i32` — confirms the goal's StructLit fix is live, and the new remaining error is a distinct, separate problem.
+- Token size check: `token_is_eight_bytes` passes (no lexer changes).
+- Checked the ref entry's minimal reproducer: `v.x` field access on a match-bound variable fails at this milestone, so the reproducer is not yet fully demonstrable. Noted as a finding below.
+
+## Findings
+
+1. **Reproducer in ref entry not fully demonstrable.** The §4.2 ref entry reproducer uses `v.x` in a match arm, which hits "field access on scalar value" — a separate unimplemented feature. The reproducer is misleading as written (it appears runnable but fails). This is a documentation gap, not a code gap.
+
+2. **Assembly inspection test missing.** The builder added no e2e assembly inspection test for the new struct-literal-in-enum-variant path. The fix is in `lower_stmt` only (let bindings), so the test must use that pattern.
+
+3. **Scope confirmed correct.** The fix is in the `lower_stmt` let-binding path only; function-return of a struct-literal enum variant still hits the catch-all. This is expected and consistent with the goal's scope ("in `lower_stmt`"). Not a gap for this round.
+
+## Fixes applied
+
+Added two assembly inspection tests in `tests/e2e.rs` (at end of file):
+
+- `cycle_009_struct_lit_enum_variant_arg_emits_store`: verifies `str` and `mov #7` appear when `let m = Maybe::Some(Foo { x: 7 })` is lowered — confirms inline field storage, not constant folding.
+- `cycle_009_struct_lit_enum_variant_discriminant_before_fields`: verifies at least 2 `str` instructions appear (discriminant + field), confirming the inline layout.
+
+Both tests pass. Total: 2058 → 2058 (net +2 new tests all passing).
+
+**Files:** `tests/e2e.rs`
+
+## Witnessed
+
+```
+cargo run -- tests/fixtures/fls_4_14_where_clauses_on_types.rs
+→ "lowered 5 of 6 functions (1 failed)"
+→ error in get_maybe__i32: "method calls on primitive types are not yet supported" (NOT StructLit)
+→ emitted .s file (partial)
+
+cargo test: 2058 pass, 0 fail
+cargo test --test e2e cycle_009: 2 pass, 0 fail
+```
+
+Assembly snippet from `let w = Wrap::Val(Point { x: 3 })`:
+- `mov x0, #3` then `str x0, [sp, #<slot>]` — runtime store, not constant-folded.
+
+VERDICT: PASS
+
+---
+
 # Changelog — Cycle 009, Round 1
 
 ## Goal

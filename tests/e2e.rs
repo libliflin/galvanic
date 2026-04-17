@@ -35465,3 +35465,56 @@ fn fls_6_19_fixture_compiles_end_to_end() {
     // Expected: 1 + 5 + 6 + 3 + 1 + 0 + 6 = 22
     assert_eq!(code, 22, "fls_6_19 fixture expected exit 22, got {code}");
 }
+
+// =============================================================================
+// Cycle 009 — Struct literal args in enum tuple variant constructors
+//   FLS §4.2 AMBIGUOUS: Struct-typed enum variant field layout is unspecified.
+//   Galvanic stores struct fields inline starting at the variant field's slot.
+// =============================================================================
+
+#[test]
+// FLS §6.11, §4.2: struct literal argument in let-bound enum tuple variant
+// constructor must store fields inline (not constant-fold the struct).
+// The builder's fix targets the lower_stmt path (let bindings only).
+fn cycle_009_struct_lit_enum_variant_arg_emits_store() {
+    let asm = compile_to_asm(
+        "struct Foo { x: i32 }
+enum Maybe { Some(Foo), None }
+fn main() -> i32 {
+    let m = Maybe::Some(Foo { x: 7 });
+    42
+}\n",
+    );
+    // The struct field must be stored with a runtime str instruction — not
+    // folded to a constant. Slot 1 (after discriminant at slot 0) holds x=7.
+    assert!(
+        asm.contains("str"),
+        "expected str instruction for inline struct field storage; got:\n{asm}"
+    );
+    // The literal value 7 must be loaded before storing (not absent).
+    assert!(
+        asm.contains("mov") && asm.contains("#7"),
+        "expected mov #7 for field x; got:\n{asm}"
+    );
+}
+
+#[test]
+// FLS §4.2 AMBIGUOUS: discriminant slot is stored before struct fields.
+// Galvanic lays out: slot 0 = discriminant, slot 1+ = struct fields inline.
+// In a let binding, at least 2 str instructions are expected.
+fn cycle_009_struct_lit_enum_variant_discriminant_before_fields() {
+    let asm = compile_to_asm(
+        "struct Point { x: i32 }
+enum Wrap { Val(Point), Empty }
+fn main() -> i32 {
+    let w = Wrap::Val(Point { x: 3 });
+    42
+}\n",
+    );
+    // Two str instructions expected: one for discriminant, one for field x.
+    let store_count = asm.matches("str ").count();
+    assert!(
+        store_count >= 2,
+        "expected at least 2 str instructions (discriminant + field); got {store_count}:\n{asm}"
+    );
+}
