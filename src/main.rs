@@ -82,8 +82,8 @@ fn compile(args: Vec<String>) -> i32 {
     println!("parsed {} item(s)", source_file.items.len());
 
     // ── Lower AST → IR ────────────────────────────────────────────────────────
-    let module = match galvanic::lower::lower(&source_file, &source) {
-        Ok(m) => m,
+    let (module, had_lower_errors) = match galvanic::lower::lower(&source_file, &source) {
+        Ok(m) => (m, false),
         Err(errs) => {
             // Print every per-function error so the researcher sees the full
             // error landscape in a single run (not just the first failure).
@@ -100,7 +100,13 @@ fn compile(args: Vec<String>) -> i32 {
                     errs.errors.len()
                 );
             }
-            return 1;
+            // If some functions did lower successfully, emit assembly for them
+            // so the researcher has an artifact to inspect (the goal of partial
+            // output: a partial success should not be entirely silent).
+            match errs.partial_module {
+                Some(partial) => (*partial, true),
+                None => return 1,
+            }
         }
     };
 
@@ -110,7 +116,8 @@ fn compile(args: Vec<String>) -> i32 {
             "galvanic: lowered {} function(s) — no fn main, no assembly emitted",
             module.fns.len()
         );
-        return 0;
+        // Exit non-zero if lower errors occurred, even when there's no fn main.
+        return if had_lower_errors { 1 } else { 0 };
     }
 
     // ── Emit ARM64 assembly ───────────────────────────────────────────────────
@@ -136,10 +143,16 @@ fn compile(args: Vec<String>) -> i32 {
             eprintln!("error: could not write {}: {e}", out_path.display());
             return 1;
         }
-        println!("galvanic: emitted {}", out_path.display());
+        if had_lower_errors {
+            // Partial output: some functions failed, but we emit what succeeded.
+            println!("galvanic: emitted {} (partial — some functions failed)", out_path.display());
+        } else {
+            println!("galvanic: emitted {}", out_path.display());
+        }
     }
 
-    0
+    // Exit non-zero if any lower errors occurred, even with partial assembly.
+    if had_lower_errors { 1 } else { 0 }
 }
 
 /// Write assembly text to a temp file, assemble it to an object file, and

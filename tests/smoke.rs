@@ -112,6 +112,59 @@ fn succeed() -> i32 {{
 }
 
 #[test]
+fn partial_lower_emits_assembly_for_successful_fns() {
+    // When some functions fail to lower and fn main succeeds, galvanic must
+    // still emit a .s file for the functions that worked — the lead researcher
+    // needs the artifact to inspect, even when one unsupported construct blocks
+    // a minority of functions.
+    // Exit code must remain non-zero (partial failure), but the file is written.
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let src = tmp_dir.path().join("partial.rs");
+    std::fs::write(
+        &src,
+        r#"
+fn main() -> i32 {
+    42
+}
+fn unsupported(x: i32, y: i32) -> i32 {
+    match (x, y) { (0, 0) => 0, _ => 1 }
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_galvanic"))
+        .arg(&src)
+        .output()
+        .expect("failed to run galvanic");
+
+    // Exit non-zero because unsupported() failed.
+    assert!(
+        !output.status.success(),
+        "expected non-zero exit for partial failure, got {:?}",
+        output.status
+    );
+    // Assembly file must exist.
+    let asm_path = tmp_dir.path().join("partial.s");
+    assert!(
+        asm_path.exists(),
+        "expected .s file to be emitted for partial success, but file not found"
+    );
+    // Assembly must mention main.
+    let asm = std::fs::read_to_string(&asm_path).unwrap();
+    assert!(
+        asm.contains("main"),
+        "expected main in emitted assembly, got: {asm}"
+    );
+    // Stdout must mention the partial output.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("partial"),
+        "expected 'partial' in stdout for partial emission, got: {stdout}"
+    );
+}
+
+#[test]
 fn no_main_prints_lowered_note() {
     // When lowering succeeds but no fn main is present, galvanic must print
     // a human-readable note so the compiler contributor knows the file was
