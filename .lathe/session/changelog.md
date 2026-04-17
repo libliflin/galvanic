@@ -1,3 +1,37 @@
+# Changelog — Cycle 2, Round 1
+
+## Goal
+Fix float literal bare-suffix parsing (`1.0f64`, `8_031.4_e-12f64`) so FLS §2.4.4.2
+examples compile without error.
+
+## Who This Helps
+- **Stakeholder:** Lead Researcher
+- **Impact:** `tests/fixtures/fls_2_4_literals.rs` — galvanic's own verbatim §2.4.4.2
+  fixture — now compiles end-to-end. The specific blocker was `8_031.4_e-12f64`
+  (a literal taken directly from the spec); it now parses and lowers correctly.
+
+## Applied
+**`src/lower.rs`:**
+- `parse_float_value`: Added `strip_suffix("f64")` and `strip_suffix("f32")` after
+  the underscore-prefix forms, longest-match first (`_f64` > `f64` > `_f32` > `f32`).
+- `parse_float32_value`: Same four-way suffix stripping.
+- LitFloat dispatch (~line 10716): Added `|| text.ends_with("f32")` so bare-suffix
+  `3.0f32` routes to the f32 codepath, not the f64 default.
+
+**`refs/fls-ambiguities.md` §2.4.4.2:**
+- Updated "choice" paragraph to reflect that both `1.0f64` and `1.0_f64` forms are
+  now supported. Remaining gap (NaN, infinity, hex floats) unchanged.
+
+**Files:** `src/lower.rs`, `refs/fls-ambiguities.md`
+
+## Validated
+- `cargo test`: 2052 passed, 0 failed (all suites).
+- `cargo run -- tests/fixtures/fls_2_4_literals.rs` → emits `.s` with no errors.
+- Verifier: run `cargo run -- tests/fixtures/fls_2_4_literals.rs` and confirm
+  `galvanic: emitted tests/fixtures/fls_2_4_literals.s` with exit 0.
+
+---
+
 # Verification — Cycle 1, Round 1
 
 ## What was checked
