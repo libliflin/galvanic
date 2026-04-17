@@ -1,56 +1,35 @@
-# Goal: Diagnose no-entry-point silently — add `fn main` to `fls_6_19_return_expressions.rs` and its e2e test
+# Goal: Add a navigable table of contents to `refs/fls-ambiguities.md`
 
-## What
+## What to change
 
-Two changes, one goal:
+Add a sorted, linked table of contents at the top of `refs/fls-ambiguities.md`, immediately after the introductory paragraph. The TOC should:
 
-1. Add a `fn main()` to `tests/fixtures/fls_6_19_return_expressions.rs` that exercises all eight return-expression functions in the file. The main must pass parameters that prevent constant folding (Constraint 1 — each callee already takes an `i32` argument, so the calls must pass non-const values). Since parameters can't be truly runtime in `main`, use `let` bindings initialized to literals: the existing functions take parameters and do real branching, so the calls to them emit real `bl` instructions.
+1. List every documented FLS section in numeric section order (§2 before §4, §6.5.3 before §6.5.9, etc.)
+2. Include a one-line summary of the gap for each entry (what the spec doesn't say, in ~10 words)
+3. Use Markdown anchor links so each entry links directly to its section heading in the file
 
-2. Add an assembly inspection test in `tests/e2e.rs` for the fixture that asserts: (a) `bl early_return_taken` or equivalent calls are present, (b) the file emits without error, and (c) runtime branch instructions appear (not a constant-folded result).
+Additionally, reorder the body entries into the same FLS section order. Currently, entries added in later cycles were appended at the bottom out of order (§4.14 appears after §12.1; §6.10, §6.12.2, §6.13, §6.14, §6.15.6, §9.2, §13, §14, §19 all appear after §15), so the file would have a TOC pointing to one order while the content appears in another. A single consistent sort fixes both problems.
 
-**Do NOT change `src/main.rs`.** The silent exit is a symptom; the root cause is that the fixture was written as a library without an entry point. Fix the fixture.
+## Which stakeholder this helps and why
 
-## Which stakeholder
+This serves the **Spec Researcher** — a person studying the FLS who arrived at galvanic because it documents where the spec is silent or ambiguous and they want concrete, citable findings to take back to spec authors.
 
-**The Compiler Contributor** — a Rust programmer following the contributor journey who wants to add lowering+codegen for a parse-only fixture.
+Their journey step 2 is: open `refs/fls-ambiguities.md` and scan for sections they care about. That step is currently broken. There is no table of contents. The file is 807 lines across 47 entries, and the entries are not in section order. A spec researcher wanting all float-related findings (§6.5.3, §6.5.5) must scroll 800 lines or use editor search. A researcher preparing for a spec meeting on §6.15 (loops) has no way to scan which loop-related findings exist without reading the whole file.
 
-Step 4 of the journey says: "Pick a fixture that has only a parse test and try to add lowering + codegen for it." `fls_6_19_return_expressions.rs` has no `.s` file and appears to be a candidate. The contributor runs:
-
-```
-cargo run -- tests/fixtures/fls_6_19_return_expressions.rs
-```
-
-And gets:
-```
-galvanic: compiling fls_6_19_return_expressions.rs
-parsed 8 item(s)
-```
-
-Nothing else. No error. No assembly. Exit code 0.
-
-The contributor has no idea whether the feature works, failed silently, or is simply missing something. They spend 5–15 minutes reading `lower.rs`, searching for missing `ExprKind::Return` arms, checking the IR — before eventually noticing the file has no `fn main`. At that point they realize the feature IS already implemented; the fixture just never had an entry point.
+This is a class-level fix: a single well-structured, sorted TOC eliminates the entire "I know a finding exists but I can't find it" category for all 47 current entries and every future one.
 
 ## Why now
 
-The last four cycles all served the Lead Researcher (FLS compliance, overflow guards, Constraint 8). The Compiler Contributor has not been served. The `fls_6_19_return_expressions.rs` fixture is the sharpest example of the "fixture exists, feature works, but contributor can't tell" problem, because:
+The ambiguity registry has grown to 47 entries covering 30+ FLS sections — it is now large enough that scanning without a TOC is genuinely painful, but small enough that building the TOC and sorting the entries is a single, clean, bounded task.
 
-- It is parse-only (no `.s` file committed)
-- The feature it covers (§6.19 return expressions) IS fully implemented — the functions compile individually
-- Running it produces no output and no error — the most confusing possible outcome
-- The fix is completely self-contained: add a `main`, add a test
-
-Once fixed, a contributor who picks this fixture will immediately see assembly output, understand the feature is working, and know their job is to verify and extend test coverage — not to implement something that's already done.
+The last ~15 cycles have exclusively served the Lead Researcher (Claims 4m–4s, Constraint 8, e2e test additions). The Spec Researcher's primary artifact — `refs/fls-ambiguities.md` — has grown in volume without growing in navigability. Adding entries without adding structure erodes the value of the registry: 47 findings scattered across 807 unsorted lines is harder to use than 20 well-indexed ones.
 
 ## Lived-experience note
 
-**Stakeholder:** The Compiler Contributor.
+**Stakeholder:** The Spec Researcher.
 
-**What I tried:** Step 4 of the journey — scan `tests/fixtures/` for parse-only fixtures, pick one, try to compile it end-to-end.
+**What I tried:** I walked step 2 of the Spec Researcher journey. I opened `refs/fls-ambiguities.md` wanting to find everything galvanic says about floating-point semantics. The file opens with "§2.4.4.1 — Integer Literals" — a lexer-level entry — and proceeds roughly in section order through the §4 and §5 entries. By line 200 I'm in §6. I find §6.5.3 at line 213 and §6.5.5 at line 228 — good. Then I try to verify I haven't missed anything in §6.5: I have to manually scan every subsequent entry because later additions (§6.10 at line 604, §6.13 at line 620, §6.15.6 at line 665) were appended out of order.
 
-**What I felt:** I picked `fls_6_19_return_expressions.rs`. The file is well-commented, has eight functions each with a clear FLS §6.19 citation, and looks like a meaningful test of return expression behavior. I ran `cargo run -- tests/fixtures/fls_6_19_return_expressions.rs`. The compiler said "parsed 8 item(s)" and stopped. No error, no assembly, no explanation.
+**The worst moment:** Trying to answer "does galvanic have a finding for §6.15 (loop expressions)?" There is no §6.15 entry at the position I'd expect it. There IS a §6.15.1 (For Loop) entry at line 330 and a §6.15.6 (Break-with-Value) entry at line 665 — 335 lines apart, out of order relative to each other. A spec researcher preparing a talk on loop semantics would miss the second entry entirely unless they read the whole file.
 
-My first instinct was: something in the lowering is silently failing for this construct. I started reading `lower.rs` searching for `ExprKind::Return`. I found it — at line 5230 and 16902 — and it's clearly implemented. I wrote a minimal program with a `return` expression and it compiled fine. I wrote another with return-from-loop, return-from-nested-block — all fine.
-
-The **worst moment** was realizing I had been debugging for 10 minutes and the feature was working the whole time. The fixture simply had no `fn main`. The compiler exited cleanly without telling me why. That is the hollow moment: an exit code of 0, silence, and wasted effort.
-
-The **specific turn**: when I checked `grep -n "^fn main" fls_6_19_return_expressions.rs` and got no output. The fixture is a library of examples, not a runnable program. Return expressions are implemented. The fixture just needed an entry point.
+**The hollowest moment:** The introductory paragraph says this file aggregates AMBIGUOUS annotations "by FLS section." The entries are not by section. The promise of the document contradicts its structure. That gap between promise and reality is the thing to fix.
