@@ -1153,9 +1153,18 @@ the projection fails at codegen.
 
 **Source:** `src/parser.rs:1786`
 
-**Minimal reproducer:** Not yet demonstrable — requires generic trait machinery
-with associated types, which is not compiled end-to-end at this milestone
-(`fls_12_1_generic_trait_impl.rs` is parse-only).
+**Minimal reproducer:** Demonstrable — `tests/fixtures/fls_10_2_assoc_types.rs`
+compiles end-to-end. Key assembly signature: `mul` instructions in
+`Square__scaled_area` and `Rectangle__scaled_area` (runtime arithmetic). Run:
+
+```
+cargo run -- tests/fixtures/fls_10_2_assoc_types.rs
+grep 'mul\|bl ' tests/fixtures/fls_10_2_assoc_types.s
+```
+
+The `type Area = i32` binding is resolved at codegen; galvanic ignores the
+associated type alias itself and uses the concrete type from the impl block.
+`Self::X` projection in return types is still deferred (future work).
 
 ---
 
@@ -1175,9 +1184,18 @@ with associated types, which is not compiled end-to-end at this milestone
 
 **Source:** `src/ast.rs:384`, `src/ast.rs:388`
 
-**Minimal reproducer:** Not yet demonstrable — generic `impl<T>` disambiguation
-and `unsafe impl` enforcement both involve features not compiled end-to-end
-at this milestone.
+**Minimal reproducer:** Demonstrable — `tests/fixtures/fls_11_impl_trait.rs`
+compiles end-to-end. Key assembly signature: `bl extract__Num` (monomorphized
+call site) and `bl Num__get` (trait dispatch via name mangling). Run:
+
+```
+cargo run -- tests/fixtures/fls_11_impl_trait.rs
+grep 'bl ' tests/fixtures/fls_11_impl_trait.s
+```
+
+Generic `impl<T>` disambiguation is observable via `tests/fixtures/fls_12_1_generic_trait_impl.rs`,
+which emits `bl Wrapper_i32__get` (monomorphized at `T=i32`). `unsafe impl`
+enforcement remains a parser-only concern — galvanic parses but does not enforce.
 
 ---
 
@@ -1194,10 +1212,21 @@ via a "pending GT" flag in the parser.
 
 **Source:** `src/parser.rs:367`, `src/parser.rs:394`, `src/parser.rs:518`
 
-**Minimal reproducer:** Not yet demonstrable — nested generic type arguments
-are parsed but `fls_12_1_generic_trait_impl.rs` is parse-only at this
-milestone. The `>>` split is observable at the parse level but not in emitted
-assembly.
+**Minimal reproducer:** The `>>` split in type-annotation position fails to
+parse at this milestone. `fls_12_1_generic_trait_impl.rs` has compiled
+end-to-end since cycle 011 — the parse-only attribution was stale. The actual
+blocker is narrower: `>>` in a `let` type annotation (`let w: Outer<Inner<i32>>`)
+triggers a parse error. Run to confirm:
+
+```
+echo 'struct W<T>{inner:T} fn main()->i32{let _:W<W<i32>>=W{inner:W{inner:0}};0}' \
+  | cargo run -- /dev/stdin
+# error: parse error at byte N: expected Semi, found Eof
+```
+
+The `>>` split is implemented for generic parameter lists in `impl<T>` and
+`fn foo<T>` positions (`src/parser.rs:367,394,518`), but not for type
+annotations in `let` bindings. The disambiguation rule is unspecified in the FLS.
 
 ---
 
