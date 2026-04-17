@@ -135,3 +135,74 @@ constructs that do work.
 - Once partial output is emitted, the researcher can document FLS findings from match pattern
   assembly — particularly the `AMBIGUOUS` question of whether wildcard pattern lowering order
   is specified by §6.18.
+
+---
+
+# Goal — Cycle 2 (Customer Champion Cycle 006)
+
+## Stakeholder: The Lead Researcher
+
+**Rotation rationale:** Cycle 004 served the Spec Researcher. Cycle 005 served the Compiler
+Contributor. The Lead Researcher has not been served for two cycles.
+
+## Floor check
+
+Build: OK. Tests: 2052 pass, 0 fail. Clippy: OK. Unsafe audit: OK.
+
+## Journey walked
+
+Picked `fls_2_4_literals.rs` — the most foundational parse-only fixture, containing verbatim
+FLS §2.4 examples. It has a `fn main` so it should produce assembly when it compiles.
+
+```
+cargo run -- tests/fixtures/fls_2_4_literals.rs
+```
+
+Output:
+```
+galvanic: compiling fls_2_4_literals.rs
+parsed 1 item(s)
+error: lower failed in 'main': not yet supported: cannot parse float literal: `8_031.4_e-12f64`
+lowered 0 of 1 functions (1 failed)
+```
+
+Root cause traced to `parse_float_value` in `src/lower.rs:4089–4099`:
+- `strip_suffix("_f64")` on `8_031.4_e-12f64` returns None (ends with `f64`, not `_f64`)
+- `strip_suffix("_f32")` also returns None
+- Underscores stripped from the unsuffixed text → `8031.4e-12f64`
+- Rust's float parser rejects `f64` as a suffix → error
+
+The literal `8_031.4_e-12f64` is a verbatim example from FLS §2.4.4.2. Galvanic's own
+fixture file embeds the spec's example, and galvanic can't compile it.
+
+## Goal
+
+**Fix float literal suffix parsing in `parse_float_value` and `parse_float32_value`
+(both in `src/lower.rs`) to accept bare `f64`/`f32` suffixes without a leading underscore,
+per FLS §2.4.4.2.**
+
+**What to change:**
+
+1. `parse_float_value` (~line 4091): After `strip_suffix("_f64")`, also try `strip_suffix("f64")`.
+   After `strip_suffix("_f32")`, also try `strip_suffix("f32")`. Order: longest-match first
+   (`_f64` before `f64`, `_f32` before `f32`) so the underscore separator is consumed when present.
+
+2. `parse_float32_value` (~line 4107): Same fix for bare `f32`/`f64` suffixes.
+
+3. The f32-dispatch check at ~line 10716: `text.ends_with("_f32")` should also check
+   `text.ends_with("f32")` so bare-suffix `3.0f32` routes to the f32 codepath. (A float
+   literal cannot legitimately end with the digits `f32` in any other way — `f` is not a
+   decimal digit, so there's no ambiguity.)
+
+4. Update `refs/fls-ambiguities.md` §2.4.4.2: change "Only decimal float literals with
+   optional `_f32`/`_f64` suffix are supported" to reflect that both `_f64`/`f64` forms
+   are now supported. The remaining gap (NaN, infinity, hex floats) is unchanged.
+
+**Why this matters:** This is not a cosmetic fix — it's a FLS §2.4.4.2 compliance gap where
+the spec's own example fails. Fixing it moves `fls_2_4_literals.rs` toward end-to-end
+coverage and adds a real finding to the research record.
+
+**The specific moment:** Step 6 of the Lead Researcher journey, running
+`galvanic tests/fixtures/fls_2_4_literals.rs`. Error: "cannot parse float literal:
+`8_031.4_e-12f64`". This literal appears verbatim in FLS §2.4.4.2 and in galvanic's own
+fixture file.
