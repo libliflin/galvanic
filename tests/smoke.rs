@@ -166,14 +166,12 @@ fn unsupported(x: i32, y: i32) -> i32 {
 
 #[test]
 fn lower_error_names_expr_kind_variant() {
-    // The catch-all in lower_expr must include the ExprKind variant name so
-    // contributors can grep for `ExprKind::<Name>` in lower.rs and find where
-    // to add the missing arm.
-    // Format: "not yet supported: <VariantName> expression in non-const context ..."
+    // StructLit args in enum tuple variant constructors are now supported
+    // (cycle 009 fix). This test was originally a regression guard for the
+    // "not yet supported: StructLit expression" error message, but since the
+    // feature was implemented it must instead verify that galvanic accepts
+    // the construct and emits assembly without error.
     let mut tmp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
-    // StructLit passed as an enum tuple variant argument hits the catch-all
-    // because lower_expr is called on the struct literal with IrTy::I32 and
-    // StructLit is not yet handled in that path.
     write!(
         tmp,
         r#"
@@ -193,12 +191,16 @@ fn main() -> i32 {{
         .expect("failed to run galvanic");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    // The variant name must appear in the error — not just "expression kind"
+    // Galvanic should now compile this without error.
     assert!(
-        stderr.contains("StructLit expression in non-const context"),
-        "expected variant name in catch-all error, got: {stderr}"
+        output.status.success(),
+        "expected zero exit for struct-literal enum variant arg, stderr: {stderr}"
     );
-    assert!(!output.status.success(), "expected non-zero exit");
+    // No "not yet supported" error should appear.
+    assert!(
+        !stderr.contains("not yet supported"),
+        "unexpected 'not yet supported' in stderr: {stderr}"
+    );
 }
 
 #[test]
