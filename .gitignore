@@ -4,3 +4,6 @@
 
 # Lathe session state (ephemeral, engine-managed)
 .lathe/session/
+
+# Compiler-emitted assembly from fixture compilation
+tests/fixtures/*.s
