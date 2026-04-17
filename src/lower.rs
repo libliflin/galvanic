@@ -18794,9 +18794,12 @@ impl<'src> LowerCtx<'src> {
             }
 
             // Anything else: not yet supported as runtime codegen.
-            _ => Err(LowerError::Unsupported(
-                "expression kind in non-const context (runtime codegen not yet implemented)".into(),
-            )),
+            // The variant name is included so contributors can grep for
+            // `ExprKind::<Name>` in lower.rs and add the missing arm.
+            other => Err(LowerError::Unsupported(format!(
+                "{} expression in non-const context (runtime codegen not yet implemented)",
+                other.variant_name(),
+            ))),
         }
     }
 }

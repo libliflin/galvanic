@@ -1503,6 +1503,53 @@ pub enum ExprKind {
     },
 }
 
+impl ExprKind {
+    /// Return the variant name as a static string.
+    ///
+    /// Used in diagnostic messages so contributors can grep for the variant
+    /// in `lower.rs` and find where to add the missing lowering arm.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            ExprKind::LitInt(_) => "LitInt",
+            ExprKind::LitFloat => "LitFloat",
+            ExprKind::LitBool(_) => "LitBool",
+            ExprKind::LitStr => "LitStr",
+            ExprKind::LitChar => "LitChar",
+            ExprKind::Unit => "Unit",
+            ExprKind::Path(_) => "Path",
+            ExprKind::Block(_) => "Block",
+            ExprKind::Unary { .. } => "Unary",
+            ExprKind::Binary { .. } => "Binary",
+            ExprKind::Cast { .. } => "Cast",
+            ExprKind::CompoundAssign { .. } => "CompoundAssign",
+            ExprKind::Call { .. } => "Call",
+            ExprKind::StructLit { .. } => "StructLit",
+            ExprKind::EnumVariantLit { .. } => "EnumVariantLit",
+            ExprKind::FieldAccess { .. } => "FieldAccess",
+            ExprKind::MethodCall { .. } => "MethodCall",
+            ExprKind::Range { .. } => "Range",
+            ExprKind::Loop { .. } => "Loop",
+            ExprKind::While { .. } => "While",
+            ExprKind::WhileLet { .. } => "WhileLet",
+            ExprKind::For { .. } => "For",
+            ExprKind::Break { .. } => "Break",
+            ExprKind::Continue { .. } => "Continue",
+            ExprKind::Return(_) => "Return",
+            ExprKind::If { .. } => "If",
+            ExprKind::IfLet { .. } => "IfLet",
+            ExprKind::Match { .. } => "Match",
+            ExprKind::Array(_) => "Array",
+            ExprKind::ArrayRepeat { .. } => "ArrayRepeat",
+            ExprKind::Tuple(_) => "Tuple",
+            ExprKind::Index { .. } => "Index",
+            ExprKind::NamedBlock { .. } => "NamedBlock",
+            ExprKind::ConstBlock(_) => "ConstBlock",
+            ExprKind::UnsafeBlock(_) => "UnsafeBlock",
+            ExprKind::Closure { .. } => "Closure",
+        }
+    }
+}
+
 /// A parameter in a closure expression.
 ///
 /// FLS §6.14: `ClosureParam → OuterAttribute* Pattern (`:` Type)?`
