@@ -114,3 +114,65 @@ driver (`main.rs`).
 - Verifier can confirm: run
   `echo 'fn helper(x: i32) -> i32 { x + 1 }' > /tmp/nomain.rs && cargo run -- /tmp/nomain.rs`
   and check stdout contains `lowered 1 function(s) — no fn main, no assembly emitted`.
+
+---
+
+# Verification — Cycle 5, Round 1
+
+## What was checked
+
+**Goal match:** Builder added one `println!` in `src/main.rs` at the early-return
+branch (lines 109–112) and one smoke test `no_main_prints_lowered_note` in
+`tests/smoke.rs`. Exactly what the goal prescribed.
+
+**Tests:** `cargo test` — all pass. Smoke suite: 5 passed (including new test).
+e2e suite: 212 passed. fls_fixtures: 42 passed.
+
+**End-to-end witness:**
+```
+$ echo 'fn helper(x: i32) -> i32 { x + 1 }' > /tmp/nomain.rs && cargo run -- /tmp/nomain.rs
+galvanic: compiling nomain.rs
+parsed 1 item(s)
+galvanic: lowered 1 function(s) — no fn main, no assembly emitted
+```
+Matches the goal's "After" output exactly (with `function(s)` plural form).
+
+**Original fixture from the goal:**
+```
+$ cargo run -- tests/fixtures/fls_12_1_generic_trait_impl.rs
+galvanic: compiling fls_12_1_generic_trait_impl.rs
+parsed 4 item(s)
+galvanic: lowered 2 function(s) — no fn main, no assembly emitted
+```
+The Compiler Contributor now sees confirmation that lowering ran on both functions
+in the fixture.
+
+**Edge case — empty file (0 functions):**
+```
+$ cargo run -- /tmp/empty.rs
+galvanic: compiling empty.rs
+parsed 0 item(s)
+galvanic: lowered 0 function(s) — no fn main, no assembly emitted
+```
+Exit 0. Existing `empty_file_exits_zero` smoke test still passes — it only asserts
+`stdout.contains("galvanic: compiling")`, not exclusivity of output.
+
+**Regression check — file with fn main is unaffected:** The new `println!` is
+inside the `if !module.fns.iter().any(|f| f.name == "main")` branch. Normal
+compilation paths are untouched.
+
+## Findings
+
+No issues. The change is minimal and correct:
+- One `println!` at the right branch.
+- Smoke test exercises the exact path.
+- No pipeline stages touched — no FLS citations, cache-line notes, or IR changes needed.
+- No constant-folding risk (CLI driver only).
+- No `unsafe` introduced.
+- Existing `empty_file_exits_zero` test unaffected.
+
+## Fixes applied
+
+None. The builder's work is solid.
+
+VERDICT: PASS
