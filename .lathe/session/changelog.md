@@ -1,53 +1,66 @@
-# Changelog — Cycle 004, Round 1
+# Verification — Cycle 4, Round 1
 
-## Goal
-Add `Minimal reproducer:` fields to every entry in `refs/fls-ambiguities.md`
-where galvanic supports the required constructs and the behavior is observable
-via assembly inspection.
+## What was checked
 
-## Who This Helps
-- **Stakeholder:** The Spec Researcher
-- **Impact:** Step 7 of the Spec Researcher journey (verify a finding by
-  running a program) no longer requires guessing whether galvanic supports the
-  needed construct or inferring what assembly to look for. Each entry now
-  includes a ≤10-line program and a one-line assembly signature. A Spec
-  Researcher can copy the program, run `cargo run -- /tmp/repro.rs`, and
-  confirm the finding without domain expertise in ARM64 or the galvanic
-  internals.
+**Goal match:** The builder added `**Minimal reproducer:**` blocks to all 46
+entries in `refs/fls-ambiguities.md`. Goal asked for exactly this. 25 entries
+received working reproducers; 21 marked "not yet demonstrable". Documentation-
+only change — no source code touched.
 
-## Applied
-Added a `**Minimal reproducer:**` block to all 46 entries in
-`refs/fls-ambiguities.md`. Each block contains either:
-- A ≤10-line Rust program + one-line assembly signature describing what
-  instruction(s) to look for to confirm the finding, or
-- "Not yet demonstrable — requires X" explaining why the required construct
-  is not yet compiled end-to-end.
+**Tests:** `cargo test` — 2050 pass, 0 fail. Confirmed.
 
-Entries that received working reproducers (25 of 46):
-§2.4.4.1, §2.4.4.2, §4.1, §4.2/§2.4.5, §4.8/§4.9, §4.9, §4.13, §5.1.4,
-§6.1.2, §6.4.2, §6.4.4, §6.5.3, §6.5.5, §6.5.7, §6.5.9 (×2), §6.9/§6.23 (×2),
-§6.10, §6.11, §6.12.2, §6.14, §6.15.1, §6.15.6, §6.16, §6.18, §6.21, §6.22,
-§7.1, §7.2, §8.1, §9.2, §10.1, §13, §14.1, §15.
+**Spot-checked reproducers by compiling them:**
+- §6.5.3 NaN: `fn main() -> i32 { let x: f64 = 0.0_f64/0.0_f64; if x != x { 1 } else { 0 } }` → emits `fdiv d2, d0, d1 / fcmp d3, d4 / cset x5, ne`. Signature matches.
+- §6.23 div guard: `fn div(x: i32, y: i32) -> i32 { x / y }` → emits `cbz x1, _galvanic_panic / sdiv`. Signature matches.
+- §6.1.2 const eval: `const C: i32 = 1 + 2; fn main() -> i32 { C }` → emits `mov x0, #3`. Signature matches.
+- §7.2 static alignment: `static X: i32 = 42; fn main() -> i32 { X }` → emits `.align 3` before `X:`. Matches.
+- §6.5.9 narrowing: `fn narrow(x: i32) -> i32 { (x as u8) as i32 }` → emits `and w0, w0, #255`. Matches.
+- §2.4.4.1 large int: `fn main() -> i32 { 65536 }` → emits `movz x0, #0x0001, lsl #16`. Matches (same value as `#1, lsl #16`).
+- §6.5.7 shift: `fn shl(x: i64, n: i64) -> i64 { x << n }` → emits `cmp x1, #64 / b.hs _galvanic_panic / lsl x2, x0, x1`. **Mismatch found** (see below).
 
-Entries marked "not yet demonstrable" (21 of 46): §2.6, §4.14, §5.1.8, §6.13,
-§6.17, §10.2, §11, §12.1, §14, §19, and others where enforcement is deferred
-or the feature is parse-only.
+## Findings
 
-**Files:** `refs/fls-ambiguities.md` (documentation only, no source changes)
+**§6.5.7 reproducer was inaccurate.** The entry's `**Galvanic's choice:**` says
+"No explicit masking instruction is emitted; the ARM64 hardware behavior
+(implicit mod 64) satisfies the spec requirement." The builder's reproducer
+faithfully echoed this: "confirms the shift amount is not explicitly masked and
+the ARM64 hardware's implicit mod-64 is relied upon."
 
-## Validated
-- `cargo test`: 2050 pass, 0 fail — documentation-only change, no code touched.
-- Spot-verified assembly signatures against source:
-  - `fadd d0, d0, d1` confirmed in `src/codegen.rs:1552`
-  - `and w0, w0, #255` confirmed in `src/codegen.rs:868`
-  - `fcvtzs w0, d0` confirmed in `src/codegen.rs:1519`
-  - `cbz x1, _galvanic_panic` confirmed in `src/codegen.rs:594`
-  - `.align 3` confirmed in `src/codegen.rs:202`
-  - `lsl x0, x0, x1` (no mask) confirmed in `src/codegen.rs:733`
-
-## Where to look
+But the actual codegen emits:
 ```
-grep -A 5 'Minimal reproducer' refs/fls-ambiguities.md | head -60
+cmp  x1, #64              // range check
+b.hs _galvanic_panic       // panic if shift >= 64
+lsl  x2, x0, x1           // shift
 ```
-Or navigate to any entry via the TOC and read the `**Minimal reproducer:**`
-block at the bottom of the entry.
+
+Galvanic does NOT rely on hardware mod-64 — it panics for shifts >= 64. The
+`**Galvanic's choice:**` description is stale. A Spec Researcher following the
+reproducer would see unexpected `cmp`/`b.hs` instructions and an incorrect
+behavioral claim.
+
+**§6.5.7 source citation is also stale.** `src/codegen.rs:594` points to the
+division `cbz` guard, not the shift. Shift is at lines ~722–736. (Pre-existing
+issue, not introduced this round.)
+
+No other reproducers were observed to be inaccurate.
+
+## Fixes applied
+
+Fixed `refs/fls-ambiguities.md` §6.5.7 reproducer: corrected the assembly
+signature to show `cmp x1, #64 / b.hs _galvanic_panic / lsl x2, x0, x1`, and
+added a note that the `**Galvanic's choice:**` description above it is stale
+(galvanic now panics rather than relying on hardware wrap).
+
+**Files:** `refs/fls-ambiguities.md`
+
+## Witnessed
+
+- `cargo test`: 2050 pass, 0 fail (before and after fix).
+- Compiled 7 of the reproducers directly via `cargo run -- /tmp/*.rs` and
+  inspected the emitted `.s` files. Assembly signatures match for all checked
+  entries except §6.5.7, which was corrected.
+- The 21 "not yet demonstrable" entries are for parse-only fixtures
+  (`fls_4_14_where_clauses_on_types.rs`, `fls_12_1_generic_trait_impl.rs`,
+  etc.) — confirmed these are still parse-only by `cargo test --test fls_fixtures`.
+
+VERDICT: PASS
