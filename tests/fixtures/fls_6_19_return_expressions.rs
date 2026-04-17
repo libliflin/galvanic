@@ -85,3 +85,29 @@ fn return_from_nested_block(x: i32) -> i32 {
 fn explicit_return_only(x: i32) -> i32 {
     return x * 3;  // FLS §6.19: explicit return; no tail expression
 }
+
+// FLS §9: Entry point exercising all eight return-expression functions above.
+// Each function uses a parameter so galvanic must emit runtime instructions
+// (fls-constraints.md Constraint 1 — no constant folding in non-const contexts).
+//
+// Expected exit code: 1 + 5 + 6 + 3 + 1 + 0 + 6 = 22
+//   early_return_taken(1)          → 1   (early return taken, x > 0)
+//   early_return_not_taken(5)      → 5   (tail expression, x >= 0)
+//   tail_expression_return(3)      → 6   (3 * 2)
+//   return_from_loop(3)            → 3   (loop exits when i >= 3)
+//   classify(1)                    → 1   (positive)
+//   return_from_nested_block(5)    → 0   (x <= 10, block returns x+1 but main path returns 0)
+//   explicit_return_only(2)        → 6   (2 * 3)
+//   return_unit(0), return_unit(1) → ()  (side-effects, no contribution to sum)
+fn main() -> i32 {
+    let a = early_return_taken(1);       // FLS §6.19: early return taken (x > 0)
+    let b = early_return_not_taken(5);   // FLS §6.19: tail expression path (x >= 0)
+    return_unit(0);                      // FLS §6.19: bare return; unit return type
+    return_unit(1);                      // FLS §6.19: falls through to side-effect body
+    let c = tail_expression_return(3);   // FLS §6.19: implicit return via tail expression
+    let d = return_from_loop(3);         // FLS §6.19: return exits function from inside loop
+    let e = classify(1);                 // FLS §6.19: multiple return paths, positive branch
+    let f = return_from_nested_block(5); // FLS §6.19: return inside nested block exits fn
+    let g = explicit_return_only(2);     // FLS §6.19: explicit return as sole return path
+    a + b + c + d + e + f + g           // FLS §6.19: tail expression (implicit return)
+}
