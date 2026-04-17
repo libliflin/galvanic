@@ -68,12 +68,16 @@ type EnumDefs = HashMap<String, HashMap<String, EnumVariantInfo>>;
 pub enum LowerError {
     /// A language feature used by the program is not yet implemented.
     Unsupported(String),
+    /// An unsupported feature encountered while lowering a named item.
+    /// Wraps `Unsupported` to attach the item name for compiler contributor clarity.
+    InItem { item: String, inner: Box<LowerError> },
 }
 
 impl std::fmt::Display for LowerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LowerError::Unsupported(msg) => write!(f, "not yet supported: {msg}"),
+            LowerError::InItem { item, inner } => write!(f, "in '{item}': {inner}"),
         }
     }
 }
@@ -2044,7 +2048,9 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                 if !fn_def.generic_params.is_empty() || has_impl_trait {
                     continue;
                 }
-                let (ir_fn, closure_fns, fn_trampolines, next_label, needed, vtable_reqs) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &tuple_struct_float_field_types, &tuple_struct_narrow_field_types, &enum_defs, &enum_variant_float_field_types, &enum_variant_narrow_field_types, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &const_f64_vals, &const_f32_vals, &assoc_const_vals, &static_names, &static_f64_names, &static_f32_names, &fn_names, &struct_raw_field_types, &struct_generic_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, &struct_narrow_field_types, &generic_fn_param_counts, &HashMap::new(), &HashMap::new(), &trait_method_order, &fn_dyn_param_traits, &fn_dyn_return_traits, None, label_base)?;
+                let fn_name = fn_def.name.text(source).to_owned();
+                let (ir_fn, closure_fns, fn_trampolines, next_label, needed, vtable_reqs) = lower_fn(fn_def, source, &struct_defs, &tuple_struct_defs, &tuple_struct_float_field_types, &tuple_struct_narrow_field_types, &enum_defs, &enum_variant_float_field_types, &enum_variant_narrow_field_types, &method_self_kinds, &mut_self_scalar_return_fns, &struct_return_fns, &struct_return_free_fns, &enum_return_fns, &struct_return_methods, &tuple_return_free_fns, &f64_return_fns, &f32_return_fns, &const_vals, &const_f64_vals, &const_f32_vals, &assoc_const_vals, &static_names, &static_f64_names, &static_f32_names, &fn_names, &struct_raw_field_types, &struct_generic_field_types, &struct_field_offsets, &struct_sizes, &type_alias_irtys, &struct_float_field_types, &struct_narrow_field_types, &generic_fn_param_counts, &HashMap::new(), &HashMap::new(), &trait_method_order, &fn_dyn_param_traits, &fn_dyn_return_traits, None, label_base)
+                    .map_err(|e| LowerError::InItem { item: fn_name, inner: Box::new(e) })?;
                 label_base = next_label;
                 fns.push(ir_fn);
                 fns.extend(closure_fns);
@@ -2187,7 +2193,8 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                         &fn_dyn_return_traits,
                         mctx,
                         label_base,
-                    )?;
+                    )
+                    .map_err(|e| LowerError::InItem { item: mangled.clone(), inner: Box::new(e) })?;
                     label_base = next_label;
                     fns.push(ir_fn);
                     fns.extend(closure_fns);
@@ -2265,7 +2272,8 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
                                 &fn_dyn_return_traits,
                                 mctx,
                                 label_base,
-                            )?;
+                            )
+                            .map_err(|e| LowerError::InItem { item: mangled.clone(), inner: Box::new(e) })?;
                             label_base = next_label;
                             fns.push(ir_fn);
                             fns.extend(closure_fns);
@@ -2448,7 +2456,8 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerError> {
             &fn_dyn_return_traits,
             mctx,
             label_base,
-        )?;
+        )
+        .map_err(|e| LowerError::InItem { item: mangled.clone(), inner: Box::new(e) })?;
         label_base = next_label;
         fns.push(ir_fn);
         fns.extend(closure_fns);
