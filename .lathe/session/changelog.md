@@ -1,3 +1,34 @@
+# Verification — Cycle 012, Round 1
+
+## What was checked
+- Ran `cargo test`: 2063 pass, 0 fail across all three suites (smoke, fls_fixtures, e2e).
+- Ran `cargo test fls_4_14_fn_bound_inline_emits_call` and `fls_4_14_fn_bound_where_clause_emits_call` — both pass.
+- Ran `cargo test fls_4_14_fn_bounds` (parse acceptance) — passes.
+- Ran `cargo test --lib -- --exact lexer::tests::token_is_eight_bytes` — passes (no token regression).
+- Built the binary and ran `./target/debug/galvanic tests/fixtures/fls_4_14_fn_bounds.rs` — emits `.s` file, exit 0.
+- Inspected emitted assembly: contains `bl apply_inline__i32` — runtime call, not constant-folded.
+- Verified `AMBIGUOUS: §4.14` annotations at all three parser sites (lines 405, 551, 957).
+- Verified `refs/fls-ambiguities.md` has ToC entry and full body under §4.14.
+- Exercised adversarial cases:
+  - Multi-arg bound `Fn(i32, i32) -> i32` — parses and lowers.
+  - Unit return `Fn(i32) -> ()` — parses and lowers.
+  - Same fn with both inline and where-clause bounds — parses and lowers.
+  - Empty file input — exits cleanly.
+
+## Findings
+- Goal fully met. Parser handles `Fn(T) -> R` in all three bound-parsing sites.
+- Three new tests confirm parse, monomorphization, and call emission.
+- AMBIGUOUS annotation in source cross-linked to ref entry — spec researcher path intact.
+- No token size regression, no unsafe, no constant folding.
+- No edge case failures found.
+
+## Fixes applied
+None — the work was solid.
+
+VERDICT: PASS
+
+---
+
 # Changelog — Cycle 012, Round 1
 
 ## Goal
