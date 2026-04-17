@@ -17,6 +17,7 @@ annotations for full context.
 - [§2.4.4.2 — Float Literals: NaN, Infinity, Hex Floats](#2442--float-literals-nan-infinity-hex-floats)
 - [§2.6 — Keyword Classification: `'static` and `_`](#26--keyword-classification-static-and-_)
 - [§4.1 — Built-in Associated Constants (MIN, MAX, BITS)](#41--built-in-associated-constants-min-max-bits)
+- [§4.2 — Struct-Typed Enum Variant Field Layout](#42--struct-typed-enum-variant-field-layout)
 - [§4.2 / §2.4.5 — `char` Type Encoding](#42--245--char-type-encoding)
 - [§4.8 / §4.9 — Fat Pointer ABI for `&str` and `&[T]`](#48--49--fat-pointer-abi-for-str-and-t)
 - [§4.9 — Bounds Checking Mechanism](#49--bounds-checking-mechanism)
@@ -149,6 +150,37 @@ compile time rather than requiring a runtime lookup.
 
 ---
 
+## §4.2 — Struct-Typed Enum Variant Field Layout
+
+**Gap:** The FLS does not specify the in-memory layout for enum variant fields
+that are struct types (e.g. `Maybe::Some(Foo { x: 7 })`). Specifically, it
+does not say whether the struct's fields are stored inline at the variant field's
+slot, or whether an indirection (pointer) is used.
+
+**Galvanic's choice:** Struct fields are stored inline starting at the variant
+field's slot. For `Maybe::Some(Foo { x: 7 })` where `Maybe` has one variant
+field, the discriminant is at `base_slot`, the struct's first field (`x = 7`)
+is at `base_slot + 1`. This matches the nested-struct literal lowering used for
+regular struct fields (`store_nested_struct_lit`).
+
+**Source:** `src/lower.rs` — enum tuple variant constructor loop, `_` arm
+(AMBIGUOUS annotation in the struct-literal branch).
+
+**Minimal reproducer:**
+```rust
+struct Foo { x: i32 }
+enum Maybe<T> { Some(T), None }
+fn main() -> i32 {
+    let m = Maybe::Some(Foo { x: 7 });
+    match m { Maybe::Some(v) => v.x, Maybe::None => 0 }
+}
+```
+Assembly signature: look for `str w<N>, [sp, #<offset>]` after storing the
+discriminant — confirms `x = 7` is stored inline in the variant's field slot,
+not via a pointer.
+
+---
+
 ## §4.2 / §2.4.5 — `char` Type Encoding
 
 **Gap:** The FLS describes `char` as "the Unicode scalar value type" but does
@@ -271,10 +303,11 @@ availability is resolved for concrete types at call sites.
 **Source:** `src/parser.rs:719`, `src/parser.rs:744`, `src/parser.rs:858`,
 `src/parser.rs:1133`, `src/parser.rs:1226`
 
-**Minimal reproducer:** Not yet demonstrable — where-clause bound checking is
-not implemented; `fls_4_14_where_clauses_on_types.rs` is parse-only at this
-milestone. The enforcement mechanism (or its absence) is not observable in
-assembly output.
+**Minimal reproducer:** The fixture `tests/fixtures/fls_4_14_where_clauses_on_types.rs`
+exercises where-clause-bounded structs, enums, and trait impls. At this milestone the
+file partially compiles (struct literal args in enum variant constructors are now
+lowered). The enforcement mechanism for where-clause bounds (or its absence) is not
+observable in assembly output.
 
 ---
 

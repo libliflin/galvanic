@@ -9484,6 +9484,26 @@ impl<'src> LowerCtx<'src> {
                                     self.slot_float_ty.insert(slot, IrTy::F32);
                                 }
                                 _ => {
+                                    // AMBIGUOUS: §4.2 — The FLS does not specify the memory
+                                    // layout for struct-typed enum variant fields (e.g.
+                                    // `Maybe::Some(Foo { x: 7 })`). Galvanic stores the struct's
+                                    // fields inline starting at the variant field's slot, meaning
+                                    // the struct occupies consecutive slots from `base_slot + 1 + i`.
+                                    // This matches the struct-literal lowering convention used
+                                    // elsewhere (see `store_nested_struct_lit`). Galvanic's
+                                    // resolution: inline layout, field 0 at field slot.
+                                    if let ExprKind::StructLit { name: sname, .. } = &arg.kind {
+                                        let struct_name = sname.text(self.source).to_owned();
+                                        if self.struct_defs.contains_key(struct_name.as_str()) {
+                                            // Register the concrete struct type at this slot so
+                                            // that method dispatch during match destructuring can
+                                            // resolve `v.get()` to the correct impl.
+                                            // FLS §6.12.2, §12.1: method call resolution.
+                                            self.slot_generic_type.insert(slot, struct_name.clone());
+                                            self.store_nested_struct_lit(arg, slot, &struct_name)?;
+                                            continue;
+                                        }
+                                    }
                                     let val = self.lower_expr(arg, &IrTy::I32)?;
                                     let src = self.val_to_reg(val)?;
                                     match self.enum_variant_field_narrow_ty(enum_name, variant_name, i) {
