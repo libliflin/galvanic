@@ -5,9 +5,60 @@ This document aggregates the `AMBIGUOUS` annotations scattered across
 and `src/codegen.rs`. Each entry names the spec gap, galvanic's chosen
 resolution, and the source location where the annotation lives.
 
-Entries are grouped by FLS section. Generated from annotations present as of
-the commit that introduced this file; check the individual source annotations
-for full context.
+Entries are grouped by FLS section in numeric order. Generated from annotations
+present as of the commit that introduced this file; check the individual source
+annotations for full context.
+
+---
+
+## Table of Contents
+
+- [§2.4.4.1 — Integer Literals: Large-Immediate Encoding](#2441--integer-literals-large-immediate-encoding)
+- [§2.4.4.2 — Float Literals: NaN, Infinity, Hex Floats](#2442--float-literals-nan-infinity-hex-floats)
+- [§2.6 — Keyword Classification: `'static` and `_`](#26--keyword-classification-static-and-_)
+- [§4.1 — Built-in Associated Constants (MIN, MAX, BITS)](#41--built-in-associated-constants-min-max-bits)
+- [§4.2 / §2.4.5 — `char` Type Encoding](#42--245--char-type-encoding)
+- [§4.8 / §4.9 — Fat Pointer ABI for `&str` and `&[T]`](#48--49--fat-pointer-abi-for-str-and-t)
+- [§4.9 — Bounds Checking Mechanism](#49--bounds-checking-mechanism)
+- [§4.13 — `dyn Trait` Vtable Layout and Fat Pointer Return ABI](#413--dyn-trait-vtable-layout-and-fat-pointer-return-abi)
+- [§4.14 — Where-Clause Bounds: When Are They Checked?](#414--where-clause-bounds-when-are-they-checked)
+- [§5.1.4 — Pattern Binding and Or-Patterns: Evaluation Order](#514--pattern-binding-and-or-patterns-evaluation-order)
+- [§5.1.8 — Rest Patterns (`..`) Inside Slice Patterns](#518--rest-patterns--inside-slice-patterns)
+- [§6.1.2 — Overflow in Const Contexts](#612--overflow-in-const-contexts)
+- [§6.4.2 — Const Block: Permitted Expression Forms](#642--const-block-permitted-expression-forms)
+- [§6.4.4 — Unsafe Block: Permitted vs Required Operations](#644--unsafe-block-permitted-vs-required-operations)
+- [§6.5.3 — NaN Comparison Behavior](#653--nan-comparison-behavior)
+- [§6.5.5 — Floating-Point: IEEE 754 Reference Without Encoding Details](#655--floating-point-ieee-754-reference-without-encoding-details)
+- [§6.5.7 — Shift Amount Modulo Behavior](#657--shift-amount-modulo-behavior)
+- [§6.5.9 — Narrowing Integer Casts and Float-to-Int Casts](#659--narrowing-integer-casts-and-float-to-int-casts)
+- [§6.9 / §6.23 — Panic Mechanism](#69--623--panic-mechanism)
+- [§6.10 — Tuple Return Calling Convention](#610--tuple-return-calling-convention)
+- [§6.11 — Struct Expression Shorthand and Update Syntax](#611--struct-expression-shorthand-and-update-syntax)
+- [§6.12.2 — Method Auto-Deref Step Limit](#6122--method-auto-deref-step-limit)
+- [§6.13 — Field Access on Temporary Expressions](#613--field-access-on-temporary-expressions)
+- [§6.14 — Inner Function Name Visibility](#614--inner-function-name-visibility)
+- [§6.15.1 — For Loop: IntoIterator Desugaring](#6151--for-loop-intoiterator-desugaring)
+- [§6.15.6 — Break-with-Value: Syntactic or Semantic Restriction?](#6156--break-with-value-syntactic-or-semantic-restriction)
+- [§6.16 — Range Expressions: Value or Type?](#616--range-expressions-value-or-type)
+- [§6.17 — Struct Literal Restriction in Condition Positions](#617--struct-literal-restriction-in-condition-positions)
+- [§6.18 — Match Exhaustiveness](#618--match-exhaustiveness)
+- [§6.21 — Comparison Non-Associativity: Chained Comparisons](#621--comparison-non-associativity-chained-comparisons)
+- [§6.21 / §6.7 — Comparison Operator Non-Associativity](#621--67--comparison-operator-non-associativity)
+- [§6.22 — Closure Capture ABI](#622--closure-capture-abi)
+- [§7.1 — Const Evaluation Step Limit and Item Order](#71--const-evaluation-step-limit-and-item-order)
+- [§7.2 — Static Data-Section Alignment](#72--static-data-section-alignment)
+- [§8.1 — Let Binding: Uninit Memory and Type Inference](#81--let-binding-uninit-memory-and-type-inference)
+- [§9 — Function Qualifier Ordering](#9--function-qualifier-ordering)
+- [§9.2 — Irrefutable Patterns in Parameter Position](#92--irrefutable-patterns-in-parameter-position)
+- [§10.1 — Method and Associated Function Calling Convention](#101--method-and-associated-function-calling-convention)
+- [§10.2 — `Self::X` Projection Resolution in Default Methods](#102--selfx-projection-resolution-in-default-methods)
+- [§11 — `impl` Generics and `unsafe impl`](#11--impl-generics-and-unsafe-impl)
+- [§12.1 — Generic `>>` Token Disambiguation](#121--generic--token-disambiguation)
+- [§13 — Trait Definition Order and Default Method Bodies](#13--trait-definition-order-and-default-method-bodies)
+- [§14 — Visibility and Name Resolution](#14--visibility-and-name-resolution)
+- [§14.1 — Valid Place Expressions for Assignment LHS](#141--valid-place-expressions-for-assignment-lhs)
+- [§15 — Discriminant Default Values and Drop Order](#15--discriminant-default-values-and-drop-order)
+- [§19 — Unsafety Enforcement Mechanism](#19--unsafety-enforcement-mechanism)
 
 ---
 
@@ -133,6 +184,26 @@ infrastructure is in place.
 
 **Source:** `src/ir.rs:984`, `src/codegen.rs:119`, `src/codegen.rs:252`,
 `src/lower.rs:3281`, `src/lower.rs:9784`
+
+---
+
+## §4.14 — Where-Clause Bounds: When Are They Checked?
+
+**Gap:** The FLS does not specify whether where-clause bounds on trait, struct,
+and enum definitions are checked at definition time, implementation time, or
+monomorphization time. The spec also does not define how supertrait method
+availability is resolved for concrete types at call sites.
+
+**Galvanic's choice:**
+- Supertrait method availability: resolved naturally at monomorphization;
+  `t.base_method()` on a generic `T: Derived` resolves to `T__base_method`,
+  which exists because the concrete type implements the supertrait.
+- Where-clause bounds on struct/trait/enum definitions: parsed and stored but
+  not checked at parse time, type-check time, or monomorphization. The bound
+  is present in the AST but has no enforcement mechanism at this milestone.
+
+**Source:** `src/parser.rs:719`, `src/parser.rs:744`, `src/parser.rs:858`,
+`src/parser.rs:1133`, `src/parser.rs:1226`
 
 ---
 
@@ -311,6 +382,22 @@ the program) while keeping the implementation simple.
 
 ---
 
+## §6.10 — Tuple Return Calling Convention
+
+**Gap:** The FLS defines tuple expressions as producing values but does not
+specify the ABI for returning tuples from functions — which registers carry
+which elements, or whether tuples are returned on the stack.
+
+**Galvanic's choice:** Extends the struct-return convention: element[i] is
+returned in register x{i}. For tuples with more than 8 elements (beyond x0–x7),
+this would overflow the register set; only tuples up to 8 elements are currently
+supported. This is consistent with the general struct-return convention but is
+not mandated by the spec.
+
+**Source:** `src/lower.rs:1923`, `src/lower.rs:3824`
+
+---
+
 ## §6.11 — Struct Expression Shorthand and Update Syntax
 
 **Two gaps:**
@@ -324,6 +411,51 @@ the program) while keeping the implementation simple.
    non-overridden fields as stack loads/stores; no move semantics are enforced.
 
 **Source:** `src/ast.rs:1093`, `src/ast.rs:1272`
+
+---
+
+## §6.12.2 — Method Auto-Deref Step Limit
+
+**Gap:** The FLS does not specify how many auto-deref steps are legal for
+method call receivers, or how auto-deref interacts with `Deref` trait
+implementations.
+
+**Galvanic's choice:** Zero auto-deref steps: the receiver must already be
+the correct struct type. Method calls on references require explicit
+dereferencing. Auto-deref is deferred to a future type-checking phase.
+
+**Source:** `src/lower.rs:17388`, `src/ast.rs:1127`
+
+---
+
+## §6.13 — Field Access on Temporary Expressions
+
+**Gap:** The FLS does not specify whether field access on a temporary
+(non-place) expression is well-formed, or how the compiler should handle the
+lifetime of the temporary.
+
+**Galvanic's choice:** Field access is restricted to named local variables and
+chained field access expressions. Temporary struct values returned from
+function calls are not yet supported as receivers for field access — the
+caller must assign to a named binding first.
+
+**Source:** `src/lower.rs:17213`
+
+---
+
+## §6.14 — Inner Function Name Visibility
+
+**Gap:** The FLS does not distinguish inner functions from closures in terms
+of name visibility or calling convention. The spec's treatment of nested
+function definitions is under §9 (functions), not §6.14 (closures), but the
+distinction is not explicit.
+
+**Galvanic's choice:** Inner function names are direct-call targets compiled
+to a separate label (not `blr` indirect dispatch). They are visible only
+within the enclosing function body. Closures use trampoline dispatch (`blr`);
+inner functions use direct call (`bl`).
+
+**Source:** `src/lower.rs:10101`, `src/parser.rs:3061`
 
 ---
 
@@ -347,6 +479,21 @@ observable behavior but deviates from the spec's type-level model.
 
 ---
 
+## §6.15.6 — Break-with-Value: Syntactic or Semantic Restriction?
+
+**Gap:** The FLS does not clearly distinguish whether the restriction that
+`break expr` is only valid inside `loop` (not `while` or `for`) is a
+syntactic constraint (parse error) or a semantic constraint (type error).
+
+**Galvanic's choice:** `break expr` is parsed freely in any loop context.
+The restriction is not enforced at the parse level; it is deferred to a
+future semantic analysis phase. A `break 5` inside a `while` loop parses
+successfully but has unspecified runtime behavior.
+
+**Source:** `src/ast.rs:1242`
+
+---
+
 ## §6.16 — Range Expressions: Value or Type?
 
 **Gap:** The FLS defines range expressions (`a..b`, `a..=b`, `..`, etc.) as
@@ -358,6 +505,21 @@ in `for` loops (desugared inline). They are not supported as standalone values
 that can be stored or passed. The parse fixture accepts them; codegen does not.
 
 **Source:** `src/ast.rs:1148`
+
+---
+
+## §6.17 — Struct Literal Restriction in Condition Positions
+
+**Gap:** The FLS does not explicitly enumerate the positions where struct
+literal expressions are forbidden (e.g., `if`, `while`, `for` conditions).
+The restriction exists in the Rust grammar but the FLS's treatment is implicit.
+
+**Galvanic's choice:** The parser tracks a `restrict_struct_lit` flag that
+is set when entering condition positions. When the flag is set, struct literal
+syntax is rejected to avoid ambiguity with block delimiters. This matches
+observed Rust behavior but the spec does not state it explicitly.
+
+**Source:** `src/parser.rs:99`
 
 ---
 
@@ -415,6 +577,38 @@ detect.
 
 **Source:** `src/lower.rs` (comparison operator lowering, check added before
 the f64/f32/i32 dispatch path)
+
+---
+
+## §6.21 / §6.7 — Comparison Operator Non-Associativity
+
+**Gap:** The FLS states that comparison operators (`<`, `>`, `<=`, `>=`, `==`,
+`!=`) are non-associative (chaining `a < b < c` is a parse error), but does
+not define the parser rule precisely — how many comparison operators may appear
+in a single expression before the error is triggered.
+
+**Galvanic's choice:** Comparison operators are left-associative at the grammar
+level (like other binary operators). A chained comparison `a < b < c` parses
+successfully but produces incorrect results at runtime. Enforcement of non-
+associativity is deferred.
+
+**Source:** `src/parser.rs:2119`, `src/parser.rs:2270`
+
+---
+
+## §6.22 — Closure Capture ABI
+
+**Gap:** The FLS specifies that closures capture variables from their
+environment (§6.22) but does not specify the ABI — how captures are passed to
+the closure body or returned, whether they are on the stack or in a heap-
+allocated closure object.
+
+**Galvanic's choice:** Capturing closures are lowered to a trampoline function.
+Captured values are passed as hidden leading parameters (before the explicit
+closure parameters). Mutable captures (`FnMut`) are passed by address;
+immutable captures are passed by value.
+
+**Source:** `src/lower.rs:18078`, `src/lower.rs:18173`
 
 ---
 
@@ -480,6 +674,22 @@ not enforced at this milestone.
 
 ---
 
+## §9.2 — Irrefutable Patterns in Parameter Position
+
+**Gap:** The FLS allows arbitrary irrefutable patterns in function parameter
+position (e.g., `fn foo((a, b): (i32, i32))`) but does not enumerate which
+patterns are valid there. The reader must cross-reference §5 (patterns)
+without a direct statement of the intersection.
+
+**Galvanic's choice:** Supports struct, tuple, and tuple-struct destructuring
+patterns in parameter position. Slice patterns and or-patterns in parameter
+position are not yet supported. Nested patterns in parameter position are
+future work.
+
+**Source:** `src/ast.rs:489`
+
+---
+
 ## §10.1 — Method and Associated Function Calling Convention
 
 **Two gaps:**
@@ -496,6 +706,22 @@ not enforced at this milestone.
 
 **Source:** `src/ast.rs:311`, `src/lower.rs:3675`, `src/codegen.rs:878`,
 `src/lower.rs:17800`
+
+---
+
+## §10.2 — `Self::X` Projection Resolution in Default Methods
+
+**Gap:** The FLS does not fully specify how `Self::X` associated type
+projections are resolved when `Self` appears in a default method body or
+trait method signature — specifically, whether resolution happens at
+trait-definition time or impl-instantiation time.
+
+**Galvanic's choice:** `Self::X` is resolved to the concrete associated type
+registered in the impl block (or the trait's default) at codegen time.
+Resolution is deferred until monomorphization; if no concrete type is known,
+the projection fails at codegen.
+
+**Source:** `src/parser.rs:1786`
 
 ---
 
@@ -529,217 +755,6 @@ generic, the second `>` is re-examined by the outer context. This is tracked
 via a "pending GT" flag in the parser.
 
 **Source:** `src/parser.rs:367`, `src/parser.rs:394`, `src/parser.rs:518`
-
----
-
-## §15 — Discriminant Default Values and Drop Order
-
-**Two gaps:**
-
-1. **Discriminant defaults:** The FLS specifies that enum discriminants default
-   to one more than the previous variant (starting at 0) but does not specify
-   the behavior when a variant is given an explicit discriminant that collides
-   with an implicit one.
-
-2. **Drop order:** The FLS describes drop semantics (§15) but does not specify
-   the exact drop order for locals within a block when multiple locals go out
-   of scope. Galvanic emits no drop calls (no destructor support).
-
-**Source:** `src/lower.rs:10564`, `src/lower.rs:3782`
-
----
-
-## §6.21 / §6.7 — Comparison Operator Non-Associativity
-
-**Gap:** The FLS states that comparison operators (`<`, `>`, `<=`, `>=`, `==`,
-`!=`) are non-associative (chaining `a < b < c` is a parse error), but does
-not define the parser rule precisely — how many comparison operators may appear
-in a single expression before the error is triggered.
-
-**Galvanic's choice:** Comparison operators are left-associative at the grammar
-level (like other binary operators). A chained comparison `a < b < c` parses
-successfully but produces incorrect results at runtime. Enforcement of non-
-associativity is deferred.
-
-**Source:** `src/parser.rs:2119`, `src/parser.rs:2270`
-
----
-
-## §6.22 — Closure Capture ABI
-
-**Gap:** The FLS specifies that closures capture variables from their
-environment (§6.22) but does not specify the ABI — how captures are passed to
-the closure body or returned, whether they are on the stack or in a heap-
-allocated closure object.
-
-**Galvanic's choice:** Capturing closures are lowered to a trampoline function.
-Captured values are passed as hidden leading parameters (before the explicit
-closure parameters). Mutable captures (`FnMut`) are passed by address;
-immutable captures are passed by value.
-
-**Source:** `src/lower.rs:18078`, `src/lower.rs:18173`
-
----
-
-## §4.14 — Where-Clause Bounds: When Are They Checked?
-
-**Gap:** The FLS does not specify whether where-clause bounds on trait, struct,
-and enum definitions are checked at definition time, implementation time, or
-monomorphization time. The spec also does not define how supertrait method
-availability is resolved for concrete types at call sites.
-
-**Galvanic's choice:**
-- Supertrait method availability: resolved naturally at monomorphization;
-  `t.base_method()` on a generic `T: Derived` resolves to `T__base_method`,
-  which exists because the concrete type implements the supertrait.
-- Where-clause bounds on struct/trait/enum definitions: parsed and stored but
-  not checked at parse time, type-check time, or monomorphization. The bound
-  is present in the AST but has no enforcement mechanism at this milestone.
-
-**Source:** `src/parser.rs:719`, `src/parser.rs:744`, `src/parser.rs:858`,
-`src/parser.rs:1133`, `src/parser.rs:1226`
-
----
-
-## §6.10 — Tuple Return Calling Convention
-
-**Gap:** The FLS defines tuple expressions as producing values but does not
-specify the ABI for returning tuples from functions — which registers carry
-which elements, or whether tuples are returned on the stack.
-
-**Galvanic's choice:** Extends the struct-return convention: element[i] is
-returned in register x{i}. For tuples with more than 8 elements (beyond x0–x7),
-this would overflow the register set; only tuples up to 8 elements are currently
-supported. This is consistent with the general struct-return convention but is
-not mandated by the spec.
-
-**Source:** `src/lower.rs:1923`, `src/lower.rs:3824`
-
----
-
-## §6.13 — Field Access on Temporary Expressions
-
-**Gap:** The FLS does not specify whether field access on a temporary
-(non-place) expression is well-formed, or how the compiler should handle the
-lifetime of the temporary.
-
-**Galvanic's choice:** Field access is restricted to named local variables and
-chained field access expressions. Temporary struct values returned from
-function calls are not yet supported as receivers for field access — the
-caller must assign to a named binding first.
-
-**Source:** `src/lower.rs:17213`
-
----
-
-## §6.14 — Inner Function Name Visibility
-
-**Gap:** The FLS does not distinguish inner functions from closures in terms
-of name visibility or calling convention. The spec's treatment of nested
-function definitions is under §9 (functions), not §6.14 (closures), but the
-distinction is not explicit.
-
-**Galvanic's choice:** Inner function names are direct-call targets compiled
-to a separate label (not `blr` indirect dispatch). They are visible only
-within the enclosing function body. Closures use trampoline dispatch (`blr`);
-inner functions use direct call (`bl`).
-
-**Source:** `src/lower.rs:10101`, `src/parser.rs:3061`
-
----
-
-## §6.12.2 — Method Auto-Deref Step Limit
-
-**Gap:** The FLS does not specify how many auto-deref steps are legal for
-method call receivers, or how auto-deref interacts with `Deref` trait
-implementations.
-
-**Galvanic's choice:** Zero auto-deref steps: the receiver must already be
-the correct struct type. Method calls on references require explicit
-dereferencing. Auto-deref is deferred to a future type-checking phase.
-
-**Source:** `src/lower.rs:17388`, `src/ast.rs:1127`
-
----
-
-## §6.15.6 — Break-with-Value: Syntactic or Semantic Restriction?
-
-**Gap:** The FLS does not clearly distinguish whether the restriction that
-`break expr` is only valid inside `loop` (not `while` or `for`) is a
-syntactic constraint (parse error) or a semantic constraint (type error).
-
-**Galvanic's choice:** `break expr` is parsed freely in any loop context.
-The restriction is not enforced at the parse level; it is deferred to a
-future semantic analysis phase. A `break 5` inside a `while` loop parses
-successfully but has unspecified runtime behavior.
-
-**Source:** `src/ast.rs:1242`
-
----
-
-## §6.17 — Struct Literal Restriction in Condition Positions
-
-**Gap:** The FLS does not explicitly enumerate the positions where struct
-literal expressions are forbidden (e.g., `if`, `while`, `for` conditions).
-The restriction exists in the Rust grammar but the FLS's treatment is implicit.
-
-**Galvanic's choice:** The parser tracks a `restrict_struct_lit` flag that
-is set when entering condition positions. When the flag is set, struct literal
-syntax is rejected to avoid ambiguity with block delimiters. This matches
-observed Rust behavior but the spec does not state it explicitly.
-
-**Source:** `src/parser.rs:99`
-
----
-
-## §9.2 — Irrefutable Patterns in Parameter Position
-
-**Gap:** The FLS allows arbitrary irrefutable patterns in function parameter
-position (e.g., `fn foo((a, b): (i32, i32))`) but does not enumerate which
-patterns are valid there. The reader must cross-reference §5 (patterns)
-without a direct statement of the intersection.
-
-**Galvanic's choice:** Supports struct, tuple, and tuple-struct destructuring
-patterns in parameter position. Slice patterns and or-patterns in parameter
-position are not yet supported. Nested patterns in parameter position are
-future work.
-
-**Source:** `src/ast.rs:489`
-
----
-
-## §10.2 — `Self::X` Projection Resolution in Default Methods
-
-**Gap:** The FLS does not fully specify how `Self::X` associated type
-projections are resolved when `Self` appears in a default method body or
-trait method signature — specifically, whether resolution happens at
-trait-definition time or impl-instantiation time.
-
-**Galvanic's choice:** `Self::X` is resolved to the concrete associated type
-registered in the impl block (or the trait's default) at codegen time.
-Resolution is deferred until monomorphization; if no concrete type is known,
-the projection fails at codegen.
-
-**Source:** `src/parser.rs:1786`
-
----
-
-## §14.1 — Valid Place Expressions for Assignment LHS
-
-**Gap:** The FLS defines assignment expressions as requiring a place expression
-on the left-hand side but does not enumerate which expression forms qualify as
-place expressions. The categorization must be inferred from §6.1.4.
-
-**Galvanic's choice:** Restricts assignment LHS to:
-- Simple variable paths (`x = ...`)
-- Field access chains (`s.field = ...`)
-- Array index expressions (`arr[i] = ...`)
-- Dereference expressions (`*ptr = ...`)
-
-More complex LHS forms (e.g., tuple field assignment via `.0`, method calls
-that return mutable references) are not supported at this milestone.
-
-**Source:** `src/lower.rs:14302`, `src/lower.rs:14393`, `src/lower.rs:14604`
 
 ---
 
@@ -778,6 +793,42 @@ phase; all fields are currently accessible regardless of visibility.
 
 ---
 
+## §14.1 — Valid Place Expressions for Assignment LHS
+
+**Gap:** The FLS defines assignment expressions as requiring a place expression
+on the left-hand side but does not enumerate which expression forms qualify as
+place expressions. The categorization must be inferred from §6.1.4.
+
+**Galvanic's choice:** Restricts assignment LHS to:
+- Simple variable paths (`x = ...`)
+- Field access chains (`s.field = ...`)
+- Array index expressions (`arr[i] = ...`)
+- Dereference expressions (`*ptr = ...`)
+
+More complex LHS forms (e.g., tuple field assignment via `.0`, method calls
+that return mutable references) are not supported at this milestone.
+
+**Source:** `src/lower.rs:14302`, `src/lower.rs:14393`, `src/lower.rs:14604`
+
+---
+
+## §15 — Discriminant Default Values and Drop Order
+
+**Two gaps:**
+
+1. **Discriminant defaults:** The FLS specifies that enum discriminants default
+   to one more than the previous variant (starting at 0) but does not specify
+   the behavior when a variant is given an explicit discriminant that collides
+   with an implicit one.
+
+2. **Drop order:** The FLS describes drop semantics (§15) but does not specify
+   the exact drop order for locals within a block when multiple locals go out
+   of scope. Galvanic emits no drop calls (no destructor support).
+
+**Source:** `src/lower.rs:10564`, `src/lower.rs:3782`
+
+---
+
 ## §19 — Unsafety Enforcement Mechanism
 
 **Three distinct gaps:**
@@ -804,4 +855,4 @@ phase; all fields are currently accessible regardless of visibility.
 
 ---
 
-*Last updated: 2026-04-11. Source annotation count at time of writing: ~155 `AMBIGUOUS` markers across 6 source files. Covers all sections with annotations; three previously missing sections (§13, §14, §19) added in this revision.*
+*Last updated: 2026-04-17. Source annotation count at time of writing: ~155 `AMBIGUOUS` markers across 6 source files. 46 entries, sorted by FLS section number, with linked table of contents.*
