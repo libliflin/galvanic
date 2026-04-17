@@ -29,6 +29,7 @@ annotations for full context.
 - [§6.4.4 — Unsafe Block: Permitted vs Required Operations](#644--unsafe-block-permitted-vs-required-operations)
 - [§6.5.3 — NaN Comparison Behavior](#653--nan-comparison-behavior)
 - [§6.5.5 — Floating-Point: IEEE 754 Reference Without Encoding Details](#655--floating-point-ieee-754-reference-without-encoding-details)
+- [§6.5.7 — Bitwise AND Disambiguation: & as Borrow vs Bit AND](#657--bitwise-and-disambiguation--as-borrow-vs-bit-and)
 - [§6.5.7 — Shift Amount Modulo Behavior](#657--shift-amount-modulo-behavior)
 - [§6.5.9 — Narrowing Integer Casts and Float-to-Int Casts](#659--narrowing-integer-casts-and-float-to-int-casts)
 - [§6.9 / §6.23 — Panic Mechanism](#69--623--panic-mechanism)
@@ -440,6 +441,34 @@ fn add_f32(a: f32, b: f32) -> f32 { a + b }
 Assembly signature: `add_f64` emits `fadd d0, d0, d1` (D-registers = binary64);
 `add_f32` emits `fadd s0, s0, s1` (S-registers = binary32) — confirms the
 encoding choice (binary64 vs binary32) is implicit in the register width.
+
+---
+
+## §6.5.7 — Bitwise AND Disambiguation: & as Borrow vs Bit AND
+
+**Gap:** FLS §6.5.7 defines `&` as a bitwise AND operator (Bit Expressions),
+while FLS §6.5.1 defines `&` as a borrow operator (Borrow Expression). The spec
+defines both uses but does not specify how a recursive-descent parser should
+distinguish them when `&` appears in expression position.
+
+**Galvanic's choice:** Disambiguation is positional. The parser is structured as
+a precedence-climbing descent: `parse_bitand` is only entered after a complete
+left-hand operand has been successfully parsed at a higher-precedence level. At
+that point, `&` can only be a binary infix operator (bitwise AND). Borrow
+expressions (`&expr`, `&mut expr`) are handled in `parse_unary`, which runs
+before the binary precedence layer — so `&` in unary position is always
+consumed as a borrow before `parse_bitand` is reached.
+
+**Source:** `src/parser.rs` — `fn parse_bitand` (search `FLS §6.5.7 AMBIGUOUS`)
+
+**Minimal reproducer:**
+```rust
+fn bitand(a: i32, b: i32) -> i32 { a & b }
+fn borrow_ref(x: &i32) -> i32 { *x }
+```
+`galvanic bitand.rs` must emit `and w0, w0, w1` (bitwise AND instruction).
+`galvanic borrow_ref.rs` must emit a `ldr` from the argument register (borrow).
+The parser must not confuse the two uses of `&`.
 
 ---
 

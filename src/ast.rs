@@ -1117,14 +1117,14 @@ pub enum ExprKind {
         field: Span,
     },
 
-    /// A method call expression. FLS §6.3.2.
+    /// A method call expression. FLS §6.12.2.
     ///
     /// Example: `vec.push(1)`, `self.len()`
     ///
-    /// FLS §6.3.2: A method call expression invokes a method on a receiver.
+    /// FLS §6.12.2: A method call expression invokes a method on a receiver.
     /// The receiver is auto-dereferenced to find an applicable implementation.
     ///
-    /// FLS §6.3.2 AMBIGUOUS: The spec does not fully specify how many
+    /// FLS §6.12.2 AMBIGUOUS: The spec does not fully specify how many
     /// auto-deref steps are legal or how they interact with `Deref` trait
     /// implementations. This implementation parses the syntax only; method
     /// resolution is deferred to a future type-checking phase.
