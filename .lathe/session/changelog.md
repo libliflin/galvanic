@@ -108,3 +108,35 @@ entries means "all fixture-level work is done; pick a new FLS section."
 - `cargo test` — 2060 pass, 0 fail (up from 2059)
 - Assembly contains `Wrapper__get__i32` and `bl use_it` — runtime instructions, not constant-folded
 - Verifier: `cargo test fls_fixture_generic_trait_impl_compiles` or `grep Wrapper__get__i32 tests/fixtures/fls_12_1_generic_trait_impl.s`
+
+---
+
+# Verification — Cycle 11, Round 1
+
+## What was checked
+
+- `cargo test fls_fixture_generic_trait_impl_compiles` — ran directly, confirmed 1 passed, 0 failed.
+- `cargo test` — all three suites: 212 lib + 1799 e2e + 42 fls_fixtures + 7 smoke = 2060 pass, 0 fail.
+- `tests/fixtures/fls_12_1_generic_trait_impl.s` — confirmed exists, contains 4 occurrences of `Wrapper__get__i32`.
+- Diff reviewed against goal: `fn main` added to fixture, `.s` snapshot generated, assembly inspection test added with both `Wrapper__get__i32` and `bl use_it` assertions.
+
+## Findings
+
+None. All three goal items delivered:
+1. `fn main() -> i32 { let w = Wrapper { inner: 5 }; use_it(w) }` added to fixture.
+2. `.s` snapshot generated and committed with expected monomorphized label.
+3. `fls_fixture_generic_trait_impl_compiles` test asserts both the monomorphized call label and the `bl use_it` branch (no constant folding).
+
+Test count moved from 2059 → 2060 as expected.
+
+## Fixes applied
+
+None.
+
+## Witnessed
+
+- `cargo test fls_fixture_generic_trait_impl_compiles` → `1 passed; 0 failed`
+- `grep -c "Wrapper__get__i32" tests/fixtures/fls_12_1_generic_trait_impl.s` → `4`
+- Full suite: 2060 pass, 0 fail
+
+VERDICT: PASS
