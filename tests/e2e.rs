@@ -35300,3 +35300,139 @@ fn constraint_8_for_loop_counter_increment_is_addr_no_guard() {
         "loop counter increment (IrTy::Addr) must not emit sxtw+b.ne overflow guard; got:\n{asm}"
     );
 }
+
+// ── FLS §6.19: Return expressions ────────────────────────────────────────────
+//
+// Assembly inspection tests for tests/fixtures/fls_6_19_return_expressions.rs.
+// Each test verifies that a specific §6.19 return-expression pattern emits
+// runtime instructions (cmp + branch), not a constant-folded result.
+//
+// Fixture: tests/fixtures/fls_6_19_return_expressions.rs
+// FLS §6.19: "A return expression is an expression that optionally evaluates
+// and returns the value of an operand back to the caller of the innermost
+// enclosing function."
+
+/// FLS §6.19: Early return (taken path) emits a conditional branch.
+///
+/// `early_return_taken` has `if x > 0 { return 1; }`. The condition must be
+/// evaluated at runtime — galvanic must emit `cmp` + branch, not constant-fold
+/// the comparison (fls-constraints.md Constraint 1).
+#[test]
+fn fls_6_19_early_return_taken_emits_cmp_and_branch() {
+    let asm = compile_to_asm(
+        "fn early_return_taken(x: i32) -> i32 { if x > 0 { return 1; } 0 }\n\
+         fn main() -> i32 { early_return_taken(1) }\n",
+    );
+    assert!(
+        asm.contains("cmp"),
+        "early_return_taken must emit cmp for runtime comparison; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("ret"),
+        "early_return_taken must emit ret instruction; got:\n{asm}"
+    );
+    // Must not constant-fold: the comparison is not statically resolved.
+    assert!(
+        !asm.contains("mov     x0, #1\n    ret\n    mov     x0, #1"),
+        "early_return_taken must not constant-fold both paths to mov x0, #1; got:\n{asm}"
+    );
+}
+
+/// FLS §6.19: Tail expression (implicit return) emits runtime multiply.
+///
+/// `tail_expression_return` has `let doubled = x * 2; doubled`. The multiply
+/// must be emitted as a runtime `mul` instruction, not folded to a constant.
+/// FLS §6.19: "the tail expression is evaluated and the value is implicitly returned."
+#[test]
+fn fls_6_19_tail_expression_return_emits_runtime_mul() {
+    let asm = compile_to_asm(
+        "fn tail_expression_return(x: i32) -> i32 { let doubled = x * 2; doubled }\n\
+         fn main() -> i32 { tail_expression_return(3) }\n",
+    );
+    assert!(
+        asm.contains("mul"),
+        "tail_expression_return must emit mul for x * 2 at runtime; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("ret"),
+        "tail_expression_return must emit ret; got:\n{asm}"
+    );
+}
+
+/// FLS §6.19: Return from inside a loop emits loop branch + conditional return.
+///
+/// `return_from_loop` uses `loop { if i >= x { return i; } i = i + 1; }`.
+/// The loop must be emitted as a branch-back loop, not evaluated at compile time.
+/// FLS §6.19: "innermost enclosing function" — return crosses loop boundaries.
+#[test]
+fn fls_6_19_return_from_loop_emits_branch_loop() {
+    let asm = compile_to_asm(
+        "fn return_from_loop(x: i32) -> i32 { let mut i = 0; loop { if i >= x { return i; } i = i + 1; } }\n\
+         fn main() -> i32 { return_from_loop(3) }\n",
+    );
+    assert!(
+        asm.contains("cmp"),
+        "return_from_loop must emit cmp for loop condition; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("add"),
+        "return_from_loop must emit add for i = i + 1; got:\n{asm}"
+    );
+    // A backward branch (b or b.XX to an earlier label) must be present for the loop.
+    assert!(
+        asm.contains("b ") || asm.contains("b."),
+        "return_from_loop must emit a branch instruction for the loop; got:\n{asm}"
+    );
+}
+
+/// FLS §6.19: Explicit return as the sole return path emits runtime multiply + ret.
+///
+/// `explicit_return_only` has `return x * 3;` with no tail expression.
+/// Galvanic must emit `mul` + `ret`, not constant-fold (Constraint 1).
+#[test]
+fn fls_6_19_explicit_return_only_emits_mul_and_ret() {
+    let asm = compile_to_asm(
+        "fn explicit_return_only(x: i32) -> i32 { return x * 3; }\n\
+         fn main() -> i32 { explicit_return_only(2) }\n",
+    );
+    assert!(
+        asm.contains("mul"),
+        "explicit_return_only must emit mul for x * 3; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("ret"),
+        "explicit_return_only must emit ret; got:\n{asm}"
+    );
+}
+
+/// FLS §6.19: All eight return-expression functions compile end-to-end.
+///
+/// Compiles the full fls_6_19_return_expressions.rs fixture (including fn main)
+/// and verifies that the emitted assembly contains runtime instructions for each
+/// return-expression variant. This is the single "does it work?" test for the
+/// Compiler Contributor: if this passes, §6.19 is fully implemented.
+///
+/// Fixture: tests/fixtures/fls_6_19_return_expressions.rs
+#[test]
+fn fls_6_19_fixture_compiles_end_to_end() {
+    let source = include_str!("fixtures/fls_6_19_return_expressions.rs");
+    let asm = compile_to_asm(source);
+    // All eight functions must appear as labels in the output.
+    assert!(asm.contains("early_return_taken:"), "early_return_taken not found in asm");
+    assert!(asm.contains("early_return_not_taken:"), "early_return_not_taken not found in asm");
+    assert!(asm.contains("return_unit:"), "return_unit not found in asm");
+    assert!(asm.contains("tail_expression_return:"), "tail_expression_return not found in asm");
+    assert!(asm.contains("return_from_loop:"), "return_from_loop not found in asm");
+    assert!(asm.contains("classify:"), "classify not found in asm");
+    assert!(asm.contains("return_from_nested_block:"), "return_from_nested_block not found in asm");
+    assert!(asm.contains("explicit_return_only:"), "explicit_return_only not found in asm");
+    // Runtime instructions must be present (not constant-folded).
+    assert!(asm.contains("cmp"), "fixture must emit cmp for runtime comparisons; got:\n{asm}");
+    assert!(asm.contains("mul"), "fixture must emit mul for x * 2, x * 3; got:\n{asm}");
+    assert!(asm.contains("add"), "fixture must emit add for i = i + 1; got:\n{asm}");
+    // Runtime test (skipped on macOS — Linux ELF cannot run natively).
+    let exit = compile_and_run(source);
+    let Some(code) = exit else { return };
+    // Expected: 1 + 5 + 6 + 3 + 1 + 0 + 6 = 22
+    assert_eq!(code, 22, "fls_6_19 fixture expected exit 22, got {code}");
+}
