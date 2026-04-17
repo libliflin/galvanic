@@ -48,7 +48,7 @@ To find out whether the other functions worked, I had to manually split the fixt
 
 ## Goal
 
-**When lowering a source file with multiple top-level functions, galvanic should continue past per-function lower errors, report all of them, and print a summary line stating how many functions succeeded and how many failed.**
+**When lowering a source file with multiple top-level items, galvanic should report all per-function lower errors (not just the first), and print a summary line stating how many items succeeded and how many failed.**
 
 Before (current behavior):
 ```
@@ -65,19 +65,19 @@ error: lower failed in 'match_tuple': not yet supported: tuple expression must b
 lowered 10 of 11 functions (1 failed)
 ```
 
-When multiple functions fail, all errors are reported before the summary:
+(Non-function items — struct defs, enum defs, type aliases — are not counted in the function tally since they don't fail in isolation.)
+
+If there is more than one failing function, all errors are reported before the summary:
 ```
 error: lower failed in 'fn_a': not yet supported: ...
 error: lower failed in 'fn_b': not yet supported: ...
 lowered 9 of 11 functions (2 failed)
 ```
 
-When all functions succeed, no summary line is printed — the existing "galvanic: emitted" line is the success signal.
+When all functions succeed, no summary line is printed (the existing "galvanic: emitted" line serves this purpose).
 
-**No assembly is emitted when any function fails** — the exit code remains 1, the `.s` file is not written. This is a diagnostic feature that shows the full error landscape in a single run, not partial compilation.
-
-Non-function items (struct defs, enum defs, type aliases, const items) are not counted in the function tally since they don't fail independently in the current lowering model.
+**No assembly is emitted when any function fails** — the exit code remains 1, the `.s` file is not written. This is not a partial-compilation feature. It is a diagnostic feature that shows the full error landscape in a single run.
 
 **Why this is the most valuable change right now:** The Lead Researcher's primary signal is momentum. Momentum comes from knowing the compiler is getting smarter — new constructs working, coverage expanding. When the output treats "1 of 11 functions fails" the same as "all 11 fail," the researcher cannot read their own progress. They have to do manual fixture surgery to recover information the compiler already had. This is a class-level fix: it eliminates "how much of this fixture works?" as a question for every parse-only fixture, now and in the future.
 
-**The specific moment that turned:** Step 3 of the Lead Researcher journey, running `cargo run -- tests/fixtures/fls_6_18_match_expressions.rs`. The error correctly names the failing function (cycle 002's improvement) but provides no count of successes — leaving the researcher unable to tell they were 10/11 of the way to full coverage for the match expressions fixture.
+**The specific moment:** Step 3 of the Lead Researcher journey, running `galvanic tests/fixtures/fls_6_18_match_expressions.rs`. The error output correctly names the failing function (cycle 002's improvement) but provides no count of successes — leaving the researcher unable to tell they were 10/11 of the way to full coverage.

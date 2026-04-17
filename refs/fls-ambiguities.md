@@ -460,9 +460,15 @@ this could produce surprising results — not yet addressed.
 ```rust
 fn shl(x: i64, n: i64) -> i64 { x << n }
 ```
-Assembly signature: look for `lsl x0, x0, x1` with **no** preceding
-`and x1, x1, #63` — confirms the shift amount is not explicitly masked and
-the ARM64 hardware's implicit mod-64 is relied upon.
+Assembly signature: look for `cmp x1, #64` followed by `b.hs _galvanic_panic`
+then `lsl x2, x0, x1` — galvanic panics for shift amounts ≥ 64 rather than
+relying on hardware mod-64 wrapping. There is no `and x1, x1, #63` masking
+instruction. The ambiguity remains for shifts of narrower types stored in 64-bit
+registers, where hardware mod-64 could produce surprising results.
+
+Note: the `**Galvanic's choice**` description above is stale — galvanic now
+emits a range guard (panic if n ≥ 64), not a bare `lsl` relying on hardware
+behavior.
 
 ---
 
