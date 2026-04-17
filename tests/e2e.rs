@@ -18231,6 +18231,64 @@ fn main() -> i32 { double(21) }
     );
 }
 
+// ── FLS §4.14: Parenthesized trait bounds `Fn(T) -> R` ───────────────────────
+
+/// Assembly check: generic `F: Fn(i32) -> i32` inline bound parses and lowers.
+///
+/// FLS §4.14: Parenthesized bound syntax is accepted in generic-param position.
+/// The monomorphizer instantiates `apply__i32` and emits a call to the closure
+/// body (`__closure_main_0`). We verify that the closure label is present in the
+/// assembly (confirming the closure was emitted) and that a `bl` or `blr`
+/// call instruction appears (confirming the call is not constant-folded).
+#[test]
+fn fls_4_14_fn_bound_inline_emits_call() {
+    let src = r#"
+fn apply<F: Fn(i32) -> i32>(f: F, x: i32) -> i32 { f(x) }
+fn main() -> i32 { apply(|x| x * 2, 5) }
+"#;
+    let asm = compile_to_asm(src);
+    // The monomorphized `apply__i32` function must be present.
+    assert!(
+        asm.contains("apply__i32"),
+        "Fn(i32)->i32 inline bound must monomorphize apply to apply__i32: {asm}"
+    );
+    // A closure body must be emitted (closure was not inlined to a constant).
+    assert!(
+        asm.contains("__closure_main_0"),
+        "closure body __closure_main_0 must appear in assembly: {asm}"
+    );
+    // A call instruction (bl or blr) must be present — no constant folding.
+    assert!(
+        asm.contains("bl ") || asm.contains("blr"),
+        "Fn(i32)->i32 inline bound must emit a call instruction (bl/blr): {asm}"
+    );
+}
+
+/// Assembly check: generic `F: Fn(i32) -> i32` where-clause bound parses and lowers.
+///
+/// FLS §4.14: Parenthesized bound syntax is accepted in where-clause position.
+/// Same verification as inline bound: closure label present, call instruction present.
+#[test]
+fn fls_4_14_fn_bound_where_clause_emits_call() {
+    let src = r#"
+fn apply<F>(f: F, x: i32) -> i32 where F: Fn(i32) -> i32 { f(x) }
+fn main() -> i32 { apply(|x| x * 2, 5) }
+"#;
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("apply__i32"),
+        "Fn(i32)->i32 where-clause bound must monomorphize apply to apply__i32: {asm}"
+    );
+    assert!(
+        asm.contains("__closure_main_0"),
+        "closure body __closure_main_0 must appear in assembly: {asm}"
+    );
+    assert!(
+        asm.contains("bl ") || asm.contains("blr"),
+        "Fn(i32)->i32 where-clause bound must emit a call instruction (bl/blr): {asm}"
+    );
+}
+
 // ── Milestone 125: move closures (FLS §6.14, §6.22) ─────────────────────────
 
 /// Milestone 125: basic `move` closure captures an integer by value.
