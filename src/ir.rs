@@ -55,6 +55,7 @@ pub enum StaticValue {
 /// an ADRP + ADD + LDR sequence (12 bytes in the instruction stream),
 /// whereas a `const` costs a single MOV (4 bytes) — the primary cache-line
 /// tradeoff documented in galvanic's design.
+#[derive(Debug)]
 pub struct StaticData {
     /// The assembly label for this static (matches the Rust name).
     pub name: String,
@@ -66,6 +67,7 @@ pub struct StaticData {
 ///
 /// FLS §18.1: A crate is the unit of compilation. The `Module` holds all
 /// functions emitted from one source file.
+#[derive(Debug)]
 pub struct Module {
     /// The functions defined in this module.
     pub fns: Vec<IrFn>,
@@ -129,6 +131,7 @@ pub struct Module {
 /// Cache-line note: (n_fields + 1) × 4-byte instructions. For a 1-field
 /// struct: 2 instructions (8 bytes). For a 4-field struct: 5 instructions
 /// (20 bytes). All fit in a single 64-byte instruction cache line.
+#[derive(Debug)]
 pub struct VtableShim {
     /// Assembly label for this shim (e.g., `vtable_shim_MyTrait_MyStruct_0`).
     pub name: String,
@@ -148,6 +151,7 @@ pub struct VtableShim {
 /// Indexed by method position (0 = first method in trait declaration order).
 ///
 /// Cache-line note: N × 8 bytes in `.rodata`, 8-byte aligned.
+#[derive(Debug)]
 pub struct VtableSpec {
     /// Assembly label for this vtable (e.g., `vtable_MyTrait_MyStruct`).
     pub label: String,
@@ -170,6 +174,7 @@ pub struct VtableSpec {
 /// ARM64 callee-saved registers are preserved across function calls
 /// (x19–x28), so x27 set in `main` before `bl apply` is still valid when
 /// `apply` calls the trampoline via `blr x9`.
+#[derive(Debug)]
 pub struct ClosureTrampoline {
     /// Unique name for this trampoline function (e.g., `__closure_main_0_trampoline`).
     pub name: String,
@@ -187,6 +192,7 @@ pub struct ClosureTrampoline {
 /// A function in the IR.
 ///
 /// FLS §9: Functions. Each `IrFn` corresponds to one `fn` item.
+#[derive(Debug)]
 pub struct IrFn {
     /// The mangled/resolved function name (e.g., `"main"`).
     pub name: String,
@@ -347,6 +353,7 @@ pub enum IrBinOp {
 /// Milestone 14 adds `Call` for function call expressions (FLS §6.12.1).
 /// Milestone 16 adds comparison ops to `IrBinOp` and while loop lowering.
 /// Milestone 21 adds bitwise and shift ops to `IrBinOp` (FLS §6.5.6, §6.5.7).
+#[derive(Debug)]
 pub enum Instr {
     /// Return a value to the caller.
     ///
@@ -1626,7 +1633,7 @@ pub enum IrValue {
 /// `Clone` and `Copy` are derived so that `LowerCtx` can store the function
 /// return type and pass it to `return` expression lowering without borrow
 /// conflicts (FLS §6.19).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IrTy {
     /// The `i32` type. FLS §4.1.
     I32,

@@ -1,52 +1,58 @@
-# Changelog — Cycle 001
+# Changelog — Cycle 001, Round 1
 
-## Stakeholder: Lead Researcher
+## Goal
+Emit partial assembly when lowering partially succeeds: carry the successfully-lowered
+functions in `LowerErrors` so `main.rs` can write a `.s` file for the working subset
+even when some functions fail. Exit code stays non-zero; errors still print.
 
-**Rotation rationale:** The last 4+ goals served Compiler Contributor (×3) and Spec Researcher
-(×1). The Lead Researcher — the person this compiler is built for — hadn't been served in 5+
-cycles. Today's cycle was theirs.
+## Who This Helps
+- **Stakeholder:** Lead Researcher
+- **Impact:** Running `cargo run -- fls_6_18_match_expressions.rs` now produces a 456-line
+  `.s` file covering the 12 functions that lower successfully, instead of producing nothing.
+  The researcher can inspect real runtime assembly for §6.18 match patterns immediately.
+  Every parse-only fixture with one unsupported construct is now inspectable for all the
+  constructs that do work.
 
-## Journey walked
+## Applied
 
-- Confirmed floor: `cargo test` — 2051 passed, 0 failed, build clean.
-- Picked `fls_6_18_match_expressions.rs` as the most substantive parse-only fixture (13 functions
-  covering §6.18 comprehensively: literal patterns, guards, boolean scrutinee, or-patterns, enum
-  variants, match-in-let, tuple scrutinee, range patterns, nested match).
-- Ran `cargo run -- tests/fixtures/fls_6_18_match_expressions.rs`.
-- Result: 12 of 13 functions lowered; `match_tuple` failed (tuple expression as scrutinee is
-  not yet supported).
-- No `.s` file was produced.
-- Verified separately that simple match expressions emit correct runtime assembly (cmp/cset/cbz
-  branches — not constant-folded, ABI-correct).
+### `src/ir.rs`
+- Added `#[derive(Debug)]` to `Module`, `StaticData`, `IrFn`, `Instr`, `IrTy`,
+  `VtableShim`, `VtableSpec`, `ClosureTrampoline`.  Required so `LowerErrors` (which
+  holds `Option<Module>`) can derive `Debug`. No structural changes.
 
-## What I found
+### `src/lower.rs`
+- Added `partial_module: Option<crate::ir::Module>` field to `LowerErrors`.
+  Populated with `Some(Module { fns, … })` when at least one function lowered
+  successfully; `None` when every function failed.
+- At the error-return site, package the already-lowered `fns`, `static_data`,
+  `trampolines`, `vtable_shims`, and `vtables` into the partial module.
 
-12 of 13 §6.18 functions compile successfully. The emitted assembly for those 12 is correct
-runtime code. The one failure (`match_tuple`) is caused by a separate, unimplemented feature
-(tuple expression in value context), not a match expression bug.
+### `src/main.rs`
+- In the `Err(errs)` arm of the lower match: after printing errors and the summary
+  line, check `errs.partial_module`. If it is `Some` and contains `fn main`, run
+  `codegen::emit_asm` on it and write the `.s` file. Print a diagnostic message
+  noting partial emission. Exit code remains 1.
 
-But the researcher cannot see any of this: `LowerErrors` carries no partial output, so 
-`main.rs` emits nothing when any function fails.
+## Validated
 
-## Goal set
+**Command:**
+```
+cargo run -- tests/fixtures/fls_6_18_match_expressions.rs
+```
 
-**Emit partial assembly when lowering partially succeeds.**
+**Output:**
+```
+galvanic: compiling fls_6_18_match_expressions.rs
+parsed 16 item(s)
+error: lower failed in 'match_tuple': not yet supported: ...
+lowered 12 of 13 functions (1 failed)
+galvanic: emitting partial assembly for 12 succeeded function(s)
+galvanic: partial assembly written to tests/fixtures/fls_6_18_match_expressions.s
+```
 
-When `lower()` returns partial results (some functions succeed, some fail), carry the
-successfully-lowered `fns` in `LowerErrors` (or an equivalent partial-success return type)
-so `main.rs` can emit a `.s` file for the successful functions. Exit code stays non-zero.
-Error messages still print. But the artifact is produced.
+456 lines of runtime ARM64 assembly (cmp/cset/cbz — not constant-folded).
 
-This eliminates the whole class of "partial success produces no output" — every parse-only
-fixture that has one unsupported construct will immediately become inspectable for all the
-constructs that do work.
-
-## Next cycle candidates
-
-- The tuple-scrutinee match (`match (x, y) { (0, 0) => ... }`) is a natural next feature to
-  unblock `fls_6_18_match_expressions.rs` completely.
-- `fls_9_functions.rs` and `fls_2_4_literals.rs` are also parse-only and likely in the same
-  partial-lowering situation.
-- Once partial output is emitted, the researcher can document FLS findings from match pattern
-  assembly — particularly the `AMBIGUOUS` question of whether wildcard pattern lowering order
-  is specified by §6.18.
+**Where the verifier should look:**
+- Run the command above; confirm the `.s` file is written and is non-empty.
+- `head -20 tests/fixtures/fls_6_18_match_expressions.s` — should show `cmp`/`cset`/`cbz`.
+- `cargo test` — 2051 passed, 0 failed.

@@ -100,6 +100,28 @@ fn compile(args: Vec<String>) -> i32 {
                     errs.errors.len()
                 );
             }
+            // If some functions succeeded and the partial module contains
+            // fn main, emit assembly for the successful subset so the
+            // researcher can inspect the working code even when some functions
+            // failed.  Exit code stays non-zero.
+            if let Some(partial) = errs.partial_module {
+                if partial.fns.iter().any(|f| f.name == "main") {
+                    eprintln!("galvanic: emitting partial assembly for {} succeeded function(s)", errs.success_count);
+                    match galvanic::codegen::emit_asm(&partial) {
+                        Ok(asm) => {
+                            let out_path = source_path.with_extension("s");
+                            if let Err(e) = std::fs::write(&out_path, &asm) {
+                                eprintln!("error: could not write {}: {e}", out_path.display());
+                            } else {
+                                eprintln!("galvanic: partial assembly written to {}", out_path.display());
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("error: codegen failed on partial module: {e}");
+                        }
+                    }
+                }
+            }
             return 1;
         }
     };

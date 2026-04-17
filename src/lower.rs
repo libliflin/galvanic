@@ -101,6 +101,16 @@ pub struct LowerErrors {
     pub success_count: usize,
     /// Total number of functions attempted (success + fail).
     pub fn_count: usize,
+    /// The functions that lowered successfully, packaged as a partial module.
+    ///
+    /// `Some` when at least one function lowered without error. `None` when
+    /// every function failed (nothing to emit). The caller may use this to
+    /// emit assembly for the successful subset even when the overall lower
+    /// result is an error.
+    ///
+    /// FLS §18.1: errors in one function do not prevent reporting or emitting
+    /// output for other functions.
+    pub partial_module: Option<crate::ir::Module>,
 }
 
 impl std::fmt::Display for LowerErrors {
@@ -2582,11 +2592,25 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerErrors> {
 
     // FLS §18.1: If any function failed to lower, return all errors together
     // with the success/total counts so the caller can report the full picture.
+    // Include the successfully-lowered functions as a partial module so the
+    // caller can still emit assembly for the working subset.
     if !lower_errors.is_empty() {
+        let partial_module = if fns.is_empty() {
+            None
+        } else {
+            Some(crate::ir::Module {
+                fns,
+                statics: static_data,
+                trampolines,
+                vtable_shims,
+                vtables,
+            })
+        };
         return Err(LowerErrors {
             errors: lower_errors,
             success_count: fn_success_count,
             fn_count,
+            partial_module,
         });
     }
 
