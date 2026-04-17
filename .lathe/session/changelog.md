@@ -76,3 +76,42 @@ Fixed 3 stale AMBIGUOUS annotation section numbers and added 1 missing ref entry
   - `grep -r 'AMBIGUOUS' src/ | grep '§6.21'` → finds `src/parser.rs`, ref entry exists at `§6.21`
   - `grep -r 'AMBIGUOUS' src/ | grep '§6.5.7'` → finds `src/parser.rs`, ref entry now exists at `§6.5.7 — Bitwise AND Disambiguation`
 - The §6.6.1 stale annotation is eliminated; no AMBIGUOUS annotation remains for a non-existent section.
+
+---
+
+# Verification — Cycle 007, Round 1
+
+## What was checked
+
+- Confirmed all 3 AMBIGUOUS annotations targeted by the goal were updated: `src/ast.rs:1127` (§6.3.2 → §6.12.2), `src/parser.rs:2270` (§6.7 → §6.21), `src/parser.rs:2346` (§6.6.1 → §6.5.7).
+- Confirmed no stale AMBIGUOUS annotation remains for §6.3.2, §6.6.1, or §6.7 (non-parenthesized form).
+- Confirmed the new `§6.5.7 — Bitwise AND Disambiguation` entry exists in both the TOC and body of `refs/fls-ambiguities.md`.
+- Confirmed TOC and body counts still match: 46 each.
+- The two §6.5.7 entries have distinct subtitles (`Bitwise AND Disambiguation` vs `Shift Amount Modulo Behavior`), giving distinct Markdown anchors — navigation works correctly.
+- Ran `cargo test`: 2055 passed, 0 failed.
+- Verified `grep -r 'AMBIGUOUS' src/ | grep '§6.12.2'`, `§6.21`, `§6.5.7` all resolve to existing ref entries.
+
+## Findings
+
+**Goal met.** The builder fixed exactly the 3 AMBIGUOUS annotations specified in the goal and added the missing ref entry. No AMBIGUOUS annotation remains pointing to a nonexistent FLS section.
+
+**Out-of-scope stale citations (not a blocker):** Parser.rs still contains ~10 non-AMBIGUOUS regular citation comments using old section numbers (§6.3.2 for method calls at lines 2539/2550/5384/5401; §6.7 for comparison/grouped expressions at lines 2794/4562/4572/4582/4592/4624; §6.6.1 at line 5030). These are outside the goal's scope (AMBIGUOUS annotations only) and don't affect the Spec Researcher's primary search path (`grep -r 'AMBIGUOUS'`). Flag for a future goal to sweep non-AMBIGUOUS stale citations in parser.rs.
+
+## Fixes applied
+
+None — builder's work is solid.
+
+## Witnessed
+
+- `cargo test`: 2055 passed, 0 failed.
+- `grep -r 'AMBIGUOUS' src/ | grep '§6.12.2'` → `src/ast.rs:1127`.
+- `grep -r 'AMBIGUOUS' src/ | grep '§6.21'` → `src/parser.rs:2270`.
+- `grep -r 'AMBIGUOUS' src/ | grep '§6.5.7'` → `src/parser.rs:2346`.
+- All three resolve to existing body sections in `refs/fls-ambiguities.md`. The Spec Researcher's search-and-navigate path is unbroken for all AMBIGUOUS annotations.
+- `grep -c '^## §' refs/fls-ambiguities.md` → 46; `grep -c '^- \[§' refs/fls-ambiguities.md` → 46. Counts match.
+
+## Confidence
+
+High. The goal was narrow and the builder executed it precisely. Every AMBIGUOUS annotation now points to a real, current FLS section with a matching ref entry. The only remaining stale citations are in non-AMBIGUOUS comments (outside the scope the Spec Researcher primarily searches).
+
+VERDICT: PASS
