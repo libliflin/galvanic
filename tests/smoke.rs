@@ -165,6 +165,43 @@ fn unsupported(x: i32, y: i32) -> i32 {
 }
 
 #[test]
+fn lower_error_names_expr_kind_variant() {
+    // The catch-all in lower_expr must include the ExprKind variant name so
+    // contributors can grep for `ExprKind::<Name>` in lower.rs and find where
+    // to add the missing arm.
+    // Format: "not yet supported: <VariantName> expression in non-const context ..."
+    let mut tmp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
+    // StructLit passed as an enum tuple variant argument hits the catch-all
+    // because lower_expr is called on the struct literal with IrTy::I32 and
+    // StructLit is not yet handled in that path.
+    write!(
+        tmp,
+        r#"
+struct Foo {{ x: i32 }}
+enum Maybe {{ Some(Foo) }}
+fn main() -> i32 {{
+    let _v = Maybe::Some(Foo {{ x: 7 }});
+    0
+}}
+"#
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_galvanic"))
+        .arg(tmp.path())
+        .output()
+        .expect("failed to run galvanic");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // The variant name must appear in the error — not just "expression kind"
+    assert!(
+        stderr.contains("StructLit expression in non-const context"),
+        "expected variant name in catch-all error, got: {stderr}"
+    );
+    assert!(!output.status.success(), "expected non-zero exit");
+}
+
+#[test]
 fn no_main_prints_lowered_note() {
     // When lowering succeeds but no fn main is present, galvanic must print
     // a human-readable note so the compiler contributor knows the file was

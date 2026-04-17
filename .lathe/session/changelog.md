@@ -77,3 +77,46 @@ Files modified:
   (or whichever variant fires first) instead of the generic message.
 - The verifier can confirm the message format by grepping the binary output:
   `cargo run -- tests/fixtures/fls_4_14_where_clauses_on_types.rs 2>&1 | grep 'expression in non-const'`
+
+---
+
+# Verification — Cycle 8, Round 1
+
+## What was checked
+
+- Read the full diff: `ExprKind::variant_name()` exhaustive match in `src/ast.rs`, catch-all updated in `src/lower.rs`.
+- Confirmed the match is exhaustive — the code compiles; a non-exhaustive match would be a compile error.
+- Ran `cargo test`: 2055 pass, 0 fail, 0 ignored.
+- Ran `./target/debug/galvanic tests/fixtures/fls_4_14_where_clauses_on_types.rs` and observed the exact error the goal named: `error: lower failed in 'main': not yet supported: StructLit expression in non-const context (runtime codegen not yet implemented)`.
+- Checked that the variant count in `variant_name()` (38 arms) matches what compiles cleanly — confirmed by green build.
+
+## Findings
+
+- **Missing regression test.** The builder added no test that asserts the variant name appears in the error. The existing `lower_error_names_failing_item` test checks for `lower failed in '` (item name) but not for the new format. If `variant_name()` were accidentally removed, the test suite would still pass. Added a focused test.
+- No cache-line notes needed — `variant_name()` is a method on an existing type, not a new type.
+- No FLS citation needed — this is a pure diagnostic helper with no spec-mandated behavior.
+- No constant-folding risk — change is in AST diagnostics only.
+
+## Fixes applied
+
+Added `lower_error_names_expr_kind_variant` to `tests/smoke.rs`: writes a temp file containing a `StructLit` argument inside an `EnumVariantLit` constructor (the exact case from the goal), runs galvanic, asserts `StructLit expression in non-const context` appears in stderr. Test passes.
+
+**Files:** `tests/smoke.rs`
+
+## Witnessed
+
+```
+$ ./target/debug/galvanic tests/fixtures/fls_4_14_where_clauses_on_types.rs
+error: lower failed in 'main': not yet supported: StructLit expression in non-const context (runtime codegen not yet implemented)
+lowered 2 of 3 functions (1 failed)
+galvanic: lowered 2 function(s) — no fn main, no assembly emitted
+exit: 1
+```
+
+`cargo test --test smoke`: 7 passed, 0 failed (including the new `lower_error_names_expr_kind_variant` test).
+
+## Confidence
+
+High. The goal asked for one thing — the variant name in the catch-all error — and it's delivered. The match is exhaustive (compiler-enforced), the message format is exactly what the goal specified, and the new smoke test locks in the regression guard.
+
+VERDICT: PASS
