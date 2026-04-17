@@ -80,3 +80,37 @@ added a note that the `**Galvanic's choice:**` description above it is stale
   etc.) — confirmed these are still parse-only by `cargo test --test fls_fixtures`.
 
 VERDICT: PASS
+
+---
+
+# Changelog — Cycle 5, Round 1
+
+## Goal
+Print `galvanic: lowered N function(s) — no fn main, no assembly emitted` when
+lowering succeeds but no `fn main` is present, so contributors can confirm
+a library-only fixture was processed rather than silently ignored.
+
+## Who This Helps
+- **Stakeholder:** Compiler Contributor
+- **Impact:** Eliminates "did it work?" ambiguity for every parse-only / library
+  fixture. The contributor now sees a positive confirmation that lowering ran
+  successfully, with a count of functions lowered.
+
+## Applied
+- `src/main.rs`: Added `println!` at the early-return branch (line 108–113).
+  The message uses `module.fns.len()` for the count.
+- `tests/smoke.rs`: Added `no_main_prints_lowered_note` test — creates a
+  tempfile with `fn helper(x: i32) -> i32 { x + 1 }` (no main), runs
+  galvanic, asserts exit 0 and the expected stdout note.
+
+**Pipeline steps:** No new AST nodes, tokens, IR types, or codegen paths —
+no cache-line notes or FLS citations needed. Change is purely in the CLI
+driver (`main.rs`).
+
+## Validated
+- `cargo test`: 2055 pass, 0 fail (2050 existing + 5 smoke, including the new test).
+- Smoke test `no_main_prints_lowered_note` passes — confirms exact stdout
+  fragments `lowered`, `function(s)`, `no fn main`.
+- Verifier can confirm: run
+  `echo 'fn helper(x: i32) -> i32 { x + 1 }' > /tmp/nomain.rs && cargo run -- /tmp/nomain.rs`
+  and check stdout contains `lowered 1 function(s) — no fn main, no assembly emitted`.
