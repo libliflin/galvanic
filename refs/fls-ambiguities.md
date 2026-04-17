@@ -172,12 +172,17 @@ struct Foo { x: i32 }
 enum Maybe<T> { Some(T), None }
 fn main() -> i32 {
     let m = Maybe::Some(Foo { x: 7 });
-    match m { Maybe::Some(v) => v.x, Maybe::None => 0 }
+    match m { Maybe::Some(_) => 1, Maybe::None => 0 }
 }
 ```
 Assembly signature: look for `str w<N>, [sp, #<offset>]` after storing the
 discriminant — confirms `x = 7` is stored inline in the variant's field slot,
-not via a pointer.
+not via a pointer. The wildcard arm (`_`) is used instead of `v => v.x`
+because field access on a match-bound variable extracted from an enum variant
+is not yet supported (§6.13 limitation: field access is restricted to named
+local variables). The inline-storage invariant is confirmed by the `str` for
+the struct field; a pointer-indirection layout would emit a different store
+sequence.
 
 ---
 

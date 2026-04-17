@@ -35518,3 +35518,62 @@ fn main() -> i32 {
         "expected at least 2 str instructions (discriminant + field); got {store_count}:\n{asm}"
     );
 }
+
+// =============================================================================
+// Cycle 010 — refs/fls-ambiguities.md reproducer CI guard
+//   Every fn-main-containing code block in the ref file must pass
+//   compile_to_asm(). If a reproducer is aspirational (not yet supported),
+//   the entry must say so and not include a fn main block.
+// =============================================================================
+
+#[test]
+// Spec Researcher journey: every `fn main`-containing ```rust code block in
+// refs/fls-ambiguities.md must compile through galvanic's full pipeline.
+// A broken reproducer without a "not yet demonstrable" disclaimer makes the
+// whole ref file feel unreliable. This test enforces the invariant.
+//
+// To exempt a future aspirational reproducer: omit `fn main` from the block
+// and document the limitation in prose (see §5.1.8, §10.2, §11, §12.1, §13
+// for examples of "Not yet demonstrable" entries that have no fn main).
+fn refs_reproducers_all_compile() {
+    let md = std::fs::read_to_string("refs/fls-ambiguities.md")
+        .expect("refs/fls-ambiguities.md must be readable from the workspace root");
+
+    // Extract all ```rust ... ``` code blocks that contain `fn main`.
+    let mut in_block = false;
+    let mut current_block = String::new();
+    let mut blocks: Vec<String> = Vec::new();
+
+    for line in md.lines() {
+        if !in_block && line.trim_start().starts_with("```rust") {
+            in_block = true;
+            current_block.clear();
+        } else if in_block && line.trim_start() == "```" {
+            in_block = false;
+            if current_block.contains("fn main") {
+                blocks.push(current_block.clone());
+            }
+        } else if in_block {
+            current_block.push_str(line);
+            current_block.push('\n');
+        }
+    }
+
+    assert!(
+        !blocks.is_empty(),
+        "expected at least one fn-main code block in refs/fls-ambiguities.md"
+    );
+
+    for (i, block) in blocks.iter().enumerate() {
+        // Print context before each block so that if compile_to_asm panics,
+        // the test output identifies which block number failed.
+        eprintln!(
+            "refs_reproducers_all_compile: block {} / {} ({} bytes)\n---\n{}\n---",
+            i + 1,
+            blocks.len(),
+            block.len(),
+            block
+        );
+        let _asm = compile_to_asm(block.as_str());
+    }
+}
