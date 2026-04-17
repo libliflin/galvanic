@@ -93,7 +93,8 @@ impl std::fmt::Display for LowerError {
 /// not prevent reporting errors in others.
 ///
 /// Cache-line note: diagnostic-only type; not on any hot compilation path.
-#[derive(Debug)]
+/// `partial_module` is boxed to keep the `Err` variant ≤ 64 bytes and satisfy
+/// `clippy::result_large_err` — `Module` alone is ~120 bytes (five `Vec` fields).
 pub struct LowerErrors {
     /// All errors that occurred, one per failing item.
     pub errors: Vec<LowerError>,
@@ -101,6 +102,21 @@ pub struct LowerErrors {
     pub success_count: usize,
     /// Total number of functions attempted (success + fail).
     pub fn_count: usize,
+    /// The functions that DID lower successfully, boxed to keep `LowerErrors`
+    /// small enough for `Result<Module, LowerErrors>` to avoid the large-err
+    /// clippy lint. `None` only when zero functions succeeded.
+    pub partial_module: Option<Box<crate::ir::Module>>,
+}
+
+impl std::fmt::Debug for LowerErrors {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LowerErrors")
+            .field("errors", &self.errors)
+            .field("success_count", &self.success_count)
+            .field("fn_count", &self.fn_count)
+            .field("partial_module", &self.partial_module.as_ref().map(|m| format!("<Module with {} fns>", m.fns.len())))
+            .finish()
+    }
 }
 
 impl std::fmt::Display for LowerErrors {
@@ -2582,11 +2598,20 @@ pub fn lower(src: &SourceFile, source: &str) -> Result<Module, LowerErrors> {
 
     // FLS §18.1: If any function failed to lower, return all errors together
     // with the success/total counts so the caller can report the full picture.
+    // Carry the partial module so main.rs can emit assembly for the functions
+    // that succeeded, giving the lead researcher an artifact to inspect even
+    // when one unsupported construct blocks a minority of functions.
     if !lower_errors.is_empty() {
+        let partial = if fns.is_empty() {
+            None
+        } else {
+            Some(Box::new(Module { fns, statics: static_data, trampolines, vtable_shims, vtables }))
+        };
         return Err(LowerErrors {
             errors: lower_errors,
             success_count: fn_success_count,
             fn_count,
+            partial_module: partial,
         });
     }
 
