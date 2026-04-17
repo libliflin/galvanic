@@ -27,3 +27,8 @@ impl<T> Getter for Wrapper<T> {
 fn use_it(w: Wrapper<i32>) -> i32 {
     w.get()
 }
+
+fn main() -> i32 {
+    let w = Wrapper { inner: 5 };
+    use_it(w)
+}
