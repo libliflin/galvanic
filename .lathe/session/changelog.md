@@ -1,4 +1,76 @@
-# Changelog — Cycle 2, Round 1
+# Verification — Cycle 2, Round 1
+
+## What was checked
+
+- Read the builder's diff: `parse_float_value`, `parse_float32_value`, and the LitFloat
+  dispatch check in `src/lower.rs`, plus `refs/fls-ambiguities.md` update.
+- Ran `cargo test` — 2052 pass, 0 fail (baseline confirmed).
+- Ran `./target/debug/galvanic tests/fixtures/fls_2_4_literals.rs` — exit 0, `.s` emitted.
+- Added three assembly inspection tests for the new suffix forms (`3.0f64`, `3.0f32`,
+  `8_031.4_e-12f64`) to confirm runtime `ldr`/`fcvtzs` instructions (no constant folding).
+- The `3.0f32 as i32` test failed immediately, exposing a gap in the builder's change.
+
+## Findings
+
+**Gap: `is_f32_expr` and `is_f64_expr` not updated for bare suffix.**
+
+The builder fixed `parse_float_value`, `parse_float32_value`, and the LitFloat dispatch
+check in `lower_expr`. But `is_f32_expr` (line ~6005) still checks only `ends_with("_f32")`
+— so `3.0f32` was not recognized as f32. Symmetrically, `is_f64_expr` (line ~5889) used
+`!text.ends_with("_f32")` — so `3.0f32` was misclassified as f64. Result: `3.0f32 as i32`
+failed with "expected float register for f64 cast source".
+
+No other issues found. The fixture now compiles, assembly contains runtime `ldr`/`fcvtzs`
+instructions (not constant-folded), and clippy is clean.
+
+## Fixes applied
+
+**`src/lower.rs`:**
+- `is_f64_expr` LitFloat arm: changed to `!text.ends_with("_f32") && !text.ends_with("f32")`
+  so bare-suffix f32 literals are correctly excluded from the f64 path.
+- `is_f32_expr` LitFloat arm: changed to `text.ends_with("_f32") || text.ends_with("f32")`
+  so bare-suffix f32 literals are recognized as f32.
+
+**`tests/e2e.rs`:**
+- Added `bare_f64_suffix_emits_float_load`: confirms `3.0f64` emits `ldr d` and `fcvtzs`.
+- Added `bare_f32_suffix_emits_f32_load`: confirms `3.0f32` emits `ldr s` (f32 register).
+- Added `fls_example_digit_sep_float_bare_f64_suffix`: confirms `8_031.4_e-12f64` emits
+  a float constant label and `ldr d` — the verbatim FLS §2.4.4.2 example.
+
+**Files:** `src/lower.rs`, `tests/e2e.rs`
+
+## Witnessed
+
+```
+$ ./target/debug/galvanic tests/fixtures/fls_2_4_literals.rs
+galvanic: compiling fls_2_4_literals.rs
+parsed 1 item(s)
+galvanic: emitted tests/fixtures/fls_2_4_literals.s
+exit: 0
+```
+
+Assembly: `ldr d4, [x17]` and `ldr s7, [x18]` for float constants. Float constant
+`0x3e413f4f1060cba2` (8.0314e-9) for `8_031.4_e-12f64`. No constant folding.
+
+```
+cargo test: 2055 pass, 0 fail (lib 212, e2e 1795, fls_fixtures 42, smoke 6)
+cargo clippy -- -D warnings: clean
+lexer::tests::token_is_eight_bytes: ok
+```
+
+## Confidence
+
+High. The builder's fix was structurally correct but incomplete — the type-classification
+helpers (`is_f32_expr`, `is_f64_expr`) were not updated to match the new suffix forms. The
+missing fix was caught by the new assembly inspection test and resolved. The full round is
+now solid: `fls_2_4_literals.rs` compiles end-to-end, both suffix forms route to the correct
+register class, and three new tests lock in the behavior.
+
+VERDICT: PASS
+
+---
+
+# Changelog — Cycle 2, Round 1 (Builder)
 
 ## Goal
 Fix float literal bare-suffix parsing (`1.0f64`, `8_031.4_e-12f64`) so FLS §2.4.4.2

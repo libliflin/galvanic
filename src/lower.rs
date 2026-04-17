@@ -5884,9 +5884,9 @@ impl<'src> LowerCtx<'src> {
     fn is_f64_expr(&self, expr: &crate::ast::Expr) -> bool {
         match &expr.kind {
             crate::ast::ExprKind::LitFloat => {
-                // FLS §2.4.4.2: A literal with `_f32` suffix is f32, not f64.
+                // FLS §2.4.4.2: A literal with `_f32` or bare `f32` suffix is f32, not f64.
                 let text = expr.span.text(self.source);
-                !text.ends_with("_f32")
+                !text.ends_with("_f32") && !text.ends_with("f32")
             }
             crate::ast::ExprKind::Path(segs) if segs.len() == 1 => {
                 let name = segs[0].text(self.source);
@@ -6001,8 +6001,9 @@ impl<'src> LowerCtx<'src> {
     fn is_f32_expr(&self, expr: &crate::ast::Expr) -> bool {
         match &expr.kind {
             crate::ast::ExprKind::LitFloat => {
+                // FLS §2.4.4.2: both `_f32` and bare `f32` suffix indicate f32 type.
                 let text = expr.span.text(self.source);
-                text.ends_with("_f32")
+                text.ends_with("_f32") || text.ends_with("f32")
             }
             crate::ast::ExprKind::Path(segs) if segs.len() == 1 => {
                 let name = segs[0].text(self.source);

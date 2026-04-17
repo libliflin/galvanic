@@ -13278,6 +13278,35 @@ fn main() -> i32 {
     );
 }
 
+/// FLS §2.4.4.2: Bare `f64` suffix (no leading underscore) is valid.
+/// Verifies that `3.0f64` (not `3.0_f64`) emits a float load and fcvtzs.
+#[test]
+fn bare_f64_suffix_emits_float_load() {
+    let asm = compile_to_asm("fn main() -> i32 { 3.0f64 as i32 }\n");
+    assert!(asm.contains("ldr     d"), "expected ldr d in asm:\n{asm}");
+    assert!(asm.contains("fcvtzs"), "expected fcvtzs in asm:\n{asm}");
+    assert!(!asm.contains("mov x0, #3"), "must not constant-fold to mov:\n{asm}");
+}
+
+/// FLS §2.4.4.2: Bare `f32` suffix (no leading underscore) is valid.
+/// Verifies that `3.0f32` routes to f32 codepath (s-register, not d-register).
+#[test]
+fn bare_f32_suffix_emits_f32_load() {
+    let asm = compile_to_asm("fn main() -> i32 { 3.0f32 as i32 }\n");
+    assert!(asm.contains("ldr     s"), "expected ldr s (f32) in asm:\n{asm}");
+    assert!(asm.contains("fcvtzs"), "expected fcvtzs in asm:\n{asm}");
+    assert!(!asm.contains("mov x0, #3"), "must not constant-fold to mov:\n{asm}");
+}
+
+/// FLS §2.4.4.2: Digit-separator float with bare f64 suffix — the FLS §2.4.4.2 example.
+/// `8_031.4_e-12f64` must parse, lower, and emit a float constant, not a parse error.
+#[test]
+fn fls_example_digit_sep_float_bare_f64_suffix() {
+    let asm = compile_to_asm("fn main() -> i32 { let _x = 8_031.4_e-12f64; 0 }\n");
+    assert!(asm.contains("main__fc"), "expected float constant label in asm:\n{asm}");
+    assert!(asm.contains("ldr     d"), "expected ldr d for f64 in asm:\n{asm}");
+}
+
 // ── Milestone 97: f64 arithmetic (fadd/fsub/fmul/fdiv) ───────────────────────
 
 /// Milestone 97: f64 addition of two let bindings, cast to i32.
