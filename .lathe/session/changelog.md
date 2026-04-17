@@ -1,3 +1,32 @@
+# Customer Champion Cycle 013
+
+## Stakeholder: The Spec Researcher
+
+**Rotation rationale:** Cycle 012 → Lead Researcher. Cycle 011 → Compiler Contributor.
+Cycle 010 → Spec Researcher. Spec Researcher is most under-served (3 cycles ago).
+
+## Goal
+
+Update the three stale "Not yet demonstrable" entries in `refs/fls-ambiguities.md`
+(§10.2, §11, §12.1) to reflect current compiler capabilities:
+
+- **§11**: Now demonstrable — `impl<T>` generic compiles. Add working reproducer + assembly signature.
+- **§10.2**: Now demonstrable — associated types compile. Add working reproducer + assembly signature.
+- **§12.1**: Still not demonstrable, but the reason is wrong. Update note to say `>>` in type annotations fails to parse — remove stale "fixture is parse-only" attribution (that fixture has compiled since cycle 011).
+
+## Lived experience
+
+Walked steps 2–8 of the Spec Researcher journey. Picked §11, found annotations in
+source, navigated to refs entry — hit "Not yet demonstrable." Tried the reproducer
+anyway: compiled clean in 0.3 seconds. The stale note blocked discovery that didn't
+need to be blocked. Same for §10.2. §12.1 is genuinely not demonstrable but for the
+WRONG reason. Three stale notes; two real findings that can be verified today.
+
+**Worst moment:** Reading "Not yet demonstrable" for §11 and almost closing the entry.
+The trust violation: the docs said impossible, the compiler said otherwise.
+
+---
+
 # Verification — Cycle 012, Round 1
 
 ## What was checked
