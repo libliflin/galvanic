@@ -1,36 +1,24 @@
-# Changelog — Customer Champion Cycle 010
+# Verification — Cycle 10, Round 1
 
-## Stakeholder: The Spec Researcher
+## What was checked
+- Ran `cargo test --test e2e refs_reproducers_all_compile` — 1 passed.
+- Ran `cargo test` — 2059 passed, 0 failed (was 2058 before this round).
+- Confirmed `refs/fls-ambiguities.md` §4.2 reproducer now uses `Maybe::Some(_) => 1` (wildcard) instead of `Maybe::Some(v) => v.x` (broken field access).
+- Confirmed the entry has prose explaining the §6.13 limitation.
+- Confirmed the test parses all ` ```rust ` blocks containing `fn main` (19 blocks found) and runs each through `compile_to_asm()`.
+- Reviewed the block-extraction logic — handles opening fence variants (```` ```rust ```` with leading whitespace) and correctly closes on bare ```` ``` ````.
 
-Walked steps 2–7 of the Spec Researcher journey. Floor intact (2058 pass, 0 fail).
+## Findings
+- Goal fully met. The builder did exactly what was asked:
+  1. Added `refs_reproducers_all_compile` CI guard in `tests/e2e.rs`.
+  2. Fixed the §4.2 reproducer so it compiles.
+  3. Added prose noting the §6.13 limitation so the "why wildcard" is clear.
+- No constant-folding risk (this change is test/ref infrastructure only — no lowering/codegen touched).
+- No token size risk (no lexer changes).
+- No unsafe introduced.
+- One minor observation (not a blocker): the block extractor uses `line.trim_start() == "```"` which would miss a closing fence with trailing whitespace. In practice, markdown files don't have trailing whitespace on fence lines, so this is not a real risk. Flagging as a lead for a future hardening cycle if the ref file grows.
 
-**Rotation:** Spec Researcher last served in cycle 007 (3 cycles ago).
+## Fixes applied
+None — the builder's work was solid.
 
-**What I tried:** Read `refs/fls-ambiguities.md` TOC. Picked §4.2 (newest entry, added
-cycle-009). Searched source for annotation. Navigated to ref entry. Ran the minimal
-reproducer.
-
-**Worst moment:** The §4.2 entry has a complete-looking code block with `fn main()` and
-a concrete assembly signature. Running it gives:
-```
-error: lower failed in 'main': not yet supported: field access on scalar value (field `x`)
-```
-The finding (inline struct storage in enum variants) is real and observable with a simpler
-form — the reproducer just includes `v.x` field access that isn't implemented yet. The
-entry gives no indication it's aspirational.
-
-**Contrast:** §6.22 and §6.5.7 both have working reproducers that confirm their findings.
-§4.2 looks the same but fails. The Spec Researcher has no way to distinguish broken
-reproducers from working ones without trying them all.
-
-**Goal:** Add a `refs_reproducers_all_compile` test that extracts all `fn main`-containing
-rust code blocks from `refs/fls-ambiguities.md` and runs each through `compile_to_asm()`.
-Fix the §4.2 reproducer (the new test forces this) by replacing `v.x` field access with a
-wildcard match arm, and note the limitation explicitly in the entry.
-
-**Why now:** The ref file is the Spec Researcher's primary artifact. One broken reproducer
-without any "not yet demonstrable" warning is enough to make the whole file feel unreliable.
-A CI test makes the invariant enforceable: every code block in refs either compiles or says
-why it doesn't.
-
-**File:** `.lathe/session/goal-history/cycle-010.md`
+VERDICT: PASS
