@@ -355,6 +355,58 @@ fn partial_lower_no_main_emits_inspection_assembly() {
     let _ = std::fs::remove_file(&asm_path);
 }
 
+/// When `main` is the only function and it fails to lower, no assembly is emitted
+/// and the exit code is non-zero. This is the zero-function boundary: `partial_module`
+/// is `None` so the code returns early with exit 1 before reaching any emit path.
+///
+/// Distinct from the inspection-only path (main fails but ≥1 other function succeeded).
+#[test]
+fn main_only_fails_emits_no_assembly() {
+    // A file with struct defs and only fn main, where main fails to lower.
+    // Outer { inner: x } uses a variable for a nested struct field — not yet supported.
+    let mut tmp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
+    write!(
+        tmp,
+        r#"
+struct Inner {{ a: i32 }}
+struct Outer {{ inner: Inner }}
+fn main() -> i32 {{
+    let x = Inner {{ a: 1 }};
+    let o = Outer {{ inner: x }};
+    o.inner.a
+}}
+"#
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_galvanic"))
+        .arg(tmp.path())
+        .output()
+        .expect("failed to run galvanic");
+
+    // Must exit non-zero — lower errors occurred.
+    assert!(
+        !output.status.success(),
+        "expected non-zero exit when only function fails to lower, got {:?}",
+        output.status
+    );
+
+    // No .s file must be created — zero functions lowered successfully.
+    let asm_path = tmp.path().with_extension("s");
+    assert!(
+        !asm_path.exists(),
+        "expected no .s file when zero functions lowered, but found one at {}",
+        asm_path.display()
+    );
+
+    // Must NOT emit the inspection-only message — that path requires ≥1 successful fn.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("inspection-only"),
+        "must not emit inspection-only message when zero functions lowered, got: {stdout}"
+    );
+}
+
 #[test]
 fn lower_source_all_unsupported_strings_cite_fls() {
     // Static invariant: every non-comment line in src/lower.rs containing
