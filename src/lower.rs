@@ -6786,10 +6786,21 @@ impl<'src> LowerCtx<'src> {
                 }
 
                 // FLS §6.13: Named struct field — look up field index and offset.
+                // When the field name is numeric (`.0`, `.1`), the receiver looks
+                // like a tuple, but `local_tuple_lens` has no entry for it — this
+                // happens when the binding comes from a call result or a let-binding
+                // without destructuring. Cite §6.10 (Tuple Expressions) alongside
+                // §6.13 so the researcher finds both registry entries.
                 let type_name = recv_ty.ok_or_else(|| {
-                    LowerError::Unsupported(format!(
-                        "field access on scalar value: `{field_name}` (FLS §6.13)"
-                    ))
+                    if field_name.parse::<usize>().is_ok() {
+                        LowerError::Unsupported(format!(
+                            "tuple index access on non-destructured binding: `{field_name}` (FLS §6.10, §6.13)"
+                        ))
+                    } else {
+                        LowerError::Unsupported(format!(
+                            "field access on scalar value: `{field_name}` (FLS §6.13)"
+                        ))
+                    }
                 })?;
 
                 let field_names = self.struct_defs.get(&type_name).ok_or_else(|| {
