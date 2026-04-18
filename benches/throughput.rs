@@ -1,10 +1,12 @@
-//! Throughput benchmarks for galvanic's lexer and parser.
+//! Throughput benchmarks for galvanic's lexer, parser, and full pipeline.
 //!
 //! Run with: cargo bench
 //! Results land in target/criterion/ with HTML reports.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use galvanic::codegen;
 use galvanic::lexer;
+use galvanic::lower;
 use galvanic::parser;
 
 /// FLS §2.4.4.1 — integer literals in all bases with suffixes
@@ -99,6 +101,18 @@ fn bench_end_to_end(c: &mut Criterion) {
             b.iter(|| {
                 let tokens = lexer::tokenize(black_box(src)).unwrap();
                 parser::parse(black_box(&tokens), black_box(src)).unwrap()
+            });
+        });
+
+        // full_pipeline: lex → parse → lower → emit_asm
+        // This is the benchmark that closes the claim→code→test→benchmark chain
+        // for Instr (80 bytes, cache-line-spanning) — the codegen stage is now measured.
+        group.bench_with_input(BenchmarkId::new("full_pipeline", name), src, |b, src| {
+            b.iter(|| {
+                let tokens = lexer::tokenize(black_box(src)).unwrap();
+                let ast = parser::parse(black_box(&tokens), black_box(src)).unwrap();
+                let module = lower::lower(black_box(&ast), black_box(src)).unwrap();
+                codegen::emit_asm(black_box(&module)).unwrap()
             });
         });
     }
