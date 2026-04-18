@@ -814,6 +814,29 @@ fn fls_6_15_forward_break_branch_not_annotated_as_back_edge() {
     );
 }
 
+/// Assembly inspection: for-range loop body at exactly 64 bytes spans 1 cache line.
+///
+/// A `for x in 0..n { acc = acc + x; }` loop lowers to 16 ARM64 instructions:
+///   5 (condition: ldr+ldr+cmp+cset+cbz) + 6 (acc+x: ldr+ldr+add+cmp+b.ne+str)
+///   + 4 (increment: ldr+mov+add+str) + 1 (back-edge b) = 16 instructions.
+/// 16 × 4 B = 64 B = exactly one 64-byte cache line.
+///
+/// This is the exact boundary case for `div_ceil(bytes, 64)`:
+/// `div_ceil(64, 64) = 1` (not 2). A loop body that fills exactly one cache line
+/// should read as one fill — the annotation must say "spans 1 cache line(s)".
+///
+/// FLS §6.15.1: For loop expression with range (§6.16).
+#[test]
+fn fls_6_15_for_range_body_at_exact_cache_line_boundary() {
+    let asm = compile_to_asm(
+        "fn foo(n: i32) -> i32 { let mut acc = 0; for x in 0..n { acc = acc + x; } acc }\nfn main() -> i32 { foo(5) }\n",
+    );
+    assert!(
+        asm.contains("loop body = 16 instr × 4 B = 64 B, spans 1 cache line(s)"),
+        "expected for-range loop at exact cache-line boundary (16 instr = 64 B) to span 1 cache line, got:\n{asm}"
+    );
+}
+
 // ── Milestone 8: loop / break / continue ─────────────────────────────────────
 //
 // FLS §6.15.2: Infinite loop expressions. A `loop` block executes indefinitely

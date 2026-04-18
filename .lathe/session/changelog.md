@@ -1,72 +1,57 @@
-# Verification — Cycle 023, Round 1 (Verifier)
+# Verification — Cycle 023, Round 2 (Verifier)
 
 ## What I compared
 
 - **Goal on one side:** At back-edge branches (unconditional `Branch` whose target precedes it
   in the instruction array), emit "back-edge — cache: loop body = N instr × 4 B = K B, spans M
   cache line(s)". Makes the loop body footprint verifiable from the assembly alone.
-- **Builder's change on the other:** Added `machine_instr_count()` to mirror `emit_instr`'s
-  expansion logic; pre-scanned the body to build `label_cumulative`; intercept back-edges in
-  the main emit loop and write the annotation inline; regenerated
-  `tests/fixtures/fls_6_15_loop_expressions.s` with 11 back-edge annotations; added an e2e test
-  asserting the 1-cache-line case (12 instr, 48 B, `while x < 5 { x = x + 1; }`).
+- **Round 1 verifier's changes on the other:** Two e2e tests added in round 1 —
+  `fls_6_15_two_variable_while_spans_two_cache_lines` (18 instr → 2 cache lines) and
+  `fls_6_15_forward_break_branch_not_annotated_as_back_edge` (forward break not mislabeled).
 
 **What I ran:**
-- `cargo test` — 2108 pass, 0 fail ✓
+- `cargo test` — 2109 pass (was 2108), 0 fail ✓
 - `cargo clippy -- -D warnings` — clean ✓
 - `cargo run -- tests/fixtures/fls_6_15_loop_expressions.rs` → 11 back-edge annotations in .s ✓
-- Manual instruction count for `while i < 5 { s = s+i; i = i+1; }`:
-  ldr+ldr+BinOp(Lt)=2+cbz+ldr+ldr+BinOp(Add,I32)=3+str+ldr+LoadImm+BinOp(Add,I32)=3+str+b
-  = 1+1+2+1+1+1+3+1+1+1+3+1+1 = **18 instructions** → annotation says 18 ✓
-- Manual count for single-variable while (builder's test): **12 instructions** ✓
-- Manual count for `loop { if i>=x { break; } continue; }`: **14 instructions** ✓
-- Spot-checked `for_range_sum` back-edge (16 instrs): verified that the for-range increment
-  lowers to a plain `add` (1 instr, not I32-overflow-guarded), consistent with
-  `machine_instr_count` returning 1 for non-I32 BinOp(Add) ✓
-- Confirmed forward branches (`cbz`, `b .L1` break) are NOT annotated as back-edges ✓
+- All 8 `fls_6_15_*` e2e tests pass ✓
+- New boundary test passes: `fn foo(n: i32) -> i32 { for x in 0..n { acc = acc + x; } }` → 16 instr × 4 B = 64 B, spans 1 cache line(s) ✓
 
 ## What's here, what was asked
 
-Matches: the builder's change reaches the goal. Every back-edge in the fixture carries a
-concrete footprint claim. The annotation format is exactly what the goal specified.
-The `machine_instr_count` function produces counts consistent with actual ARM64 instruction
-emission across all loop types (while, for, loop, while_let, labeled).
+Matches from the builder's work. The round 1 verifier added the 2-cache-line case and the
+forward-branch non-annotation guard. One remaining gap from my comparative lens:
 
-**One narrow gap in the builder's tests:** the e2e test only asserts the 1-cache-line case.
-The goal's hollow moment was specifically about a 2-cache-line body (the `while_loop` body:
-18 instrs × 4 B = 72 B, spans 2 cache lines). An explicit test asserting `spans 2 cache
-line(s)` was missing. Added below. Also added an explicit test that forward unconditional
-break branches inside a loop body are not mislabeled as back-edges.
+**Missing test: the exact cache-line boundary (16 instr = 64 B = exactly 1 cache line).**
+The existing tests cover under-boundary (12 instr, 48 B, 1 line) and over-boundary (18 instr,
+72 B, 2 lines), but not the exact 64-byte case. At exactly 64 bytes, `div_ceil(64, 64) = 1` —
+the annotation must say "spans 1 cache line(s)", not 2. The `for_range_sum` fixture demonstrates
+this case but with no dedicated unit test to pin it. Added below.
 
 ## What I added
 
-**`tests/e2e.rs` — two additional tests:**
+**`tests/e2e.rs` — one additional test:**
 
-1. `fls_6_15_two_variable_while_spans_two_cache_lines`: compiles a two-variable while loop
-   (accumulator + counter), asserts `loop body = 18 instr × 4 B = 72 B, spans 2 cache
-   line(s)`. This is the loop shape that was the goal's hollow moment — now verifiable in
-   under one test run.
+`fls_6_15_for_range_body_at_exact_cache_line_boundary`: compiles a for-range loop
+(`fn foo(n: i32) -> i32 { for x in 0..n { acc = acc + x; } }`) with a main caller, asserts
+`loop body = 16 instr × 4 B = 64 B, spans 1 cache line(s)`. This is the exact boundary:
+`div_ceil(64, 64) = 1`, not 2. A for-range loop that fills exactly one cache line should
+show one fill — the arithmetic at the boundary must not round up.
 
-2. `fls_6_15_forward_break_branch_not_annotated_as_back_edge`: compiles a `loop { i=i+1; if
-   i>=3 { break; } }`, asserts the loop's back-edge IS annotated, and the break's forward `b`
-   (FLS §6.15.6) is NOT annotated as a back-edge. Guards against the case where a forward
-   unconditional branch inside a loop body could be misidentified.
+This completes the coverage set for the cache-line span annotation:
+- 12 instr → 1 line (well under boundary) ✓
+- 16 instr → 1 line (exact boundary) ✓  ← added this round
+- 18 instr → 2 lines (over boundary) ✓
 
 **Files:** `tests/e2e.rs`
 
-Test count: 2106 → 2108 (2 added, 0 failed).
+Test count: 2108 → 2109 (1 added, 0 failed).
 
 ## Notes for the goal-setter
 
-- **Empty-body edge case:** The back-edge detection uses `header_cum < cumulative` (strict
-  less-than). An empty loop body where the Branch immediately follows the Label would have
-  `header_cum == cumulative`, and would NOT be annotated. Changing to `<=` would fix this
-  without introducing false positives (forward branch targets always have
-  `label_cumulative[target] > cumulative` since they come later in the stream). In practice,
-  galvanic's current feature set always emits at least some instructions between a loop header
-  and its back-edge, so this is a latent correctness note, not a present bug.
-
-- **`machine_instr_count` and `emit_instr` are parallel implementations.** Any future change
-  to `emit_instr` that changes instruction counts must be mirrored in `machine_instr_count` or
-  the annotation will silently drift. A test that cross-checks the two functions' output counts
-  for a battery of IR instructions would catch this drift — worth a future cleanup cycle.
+- The `machine_instr_count` / `emit_instr` parallel-implementation drift risk (noted by round 1
+  verifier) remains the primary structural follow-up. Any future instruction added to `emit_instr`
+  must be mirrored in `machine_instr_count`. A property-based test comparing both functions'
+  output over a battery of IR instructions would be the structural fix.
+- The empty-body edge case (`header_cum == cumulative`) from round 1 verifier's notes: still
+  latent, still not a present bug given galvanic's current feature set.
+- None other.
