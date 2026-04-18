@@ -759,6 +759,61 @@ fn fls_6_15_back_edge_branch_carries_cache_line_annotation() {
     );
 }
 
+/// Assembly inspection: two-variable while loop body spans 2 cache lines.
+///
+/// The one-variable loop above (12 instrs, 48 B) fits in one 64-byte cache line.
+/// A two-variable loop (accumulator + counter) has 18 instructions:
+///   ldr(i) + ldr(n) + cmp + cset [BinOp Lt = 2] + cbz [CondBranch = 1]
+///   + ldr(s) + ldr(i) + add + cmp + b.ne [BinOp Add I32 = 3] + str
+///   + ldr(i) + mov(#1) + add + cmp + b.ne [BinOp Add I32 = 3] + str
+///   + b(back-edge) = 18 ARM64 instructions.
+/// 18 × 4 B = 72 B, spans ceil(72/64) = 2 cache lines.
+///
+/// This is the key annotation the Cache-Line Performance Researcher uses to spot
+/// loops that cross cache-line boundaries — the "hollow moment" in cycle 023's goal.
+///
+/// FLS §6.15.3: While loop with accumulator and counter.
+#[test]
+fn fls_6_15_two_variable_while_spans_two_cache_lines() {
+    let asm = compile_to_asm(
+        "fn main() -> i32 { let mut i = 0; let mut s = 0; while i < 5 { s = s + i; i = i + 1; } s }\n",
+    );
+    assert!(
+        asm.contains("loop body = 18 instr × 4 B = 72 B, spans 2 cache line(s)"),
+        "expected two-variable while loop to span 2 cache lines, got:\n{asm}"
+    );
+}
+
+/// Assembly inspection: forward unconditional branches inside a loop body
+/// are NOT annotated as back-edges.
+///
+/// A `loop { if cond { break; } }` emits an unconditional `b` to the break
+/// exit label inside the loop body. This forward branch must NOT carry
+/// the "back-edge — cache: ..." annotation — only branches whose target
+/// precedes them in the instruction stream are back-edges.
+///
+/// FLS §6.15.2: Infinite loop. FLS §6.15.6: Break — forward branch to exit.
+#[test]
+fn fls_6_15_forward_break_branch_not_annotated_as_back_edge() {
+    let asm = compile_to_asm(
+        "fn main() -> i32 { let mut i = 0; loop { i = i + 1; if i >= 3 { break; } } i }\n",
+    );
+    // Back-edge (loop iteration) must be annotated.
+    assert!(
+        asm.contains("back-edge — cache: loop body ="),
+        "expected back-edge annotation on loop iteration branch, got:\n{asm}"
+    );
+    // The break forward branch must appear with its FLS §6.15.6 label but NO back-edge annotation.
+    assert!(
+        asm.contains("// FLS §6.15.6: branch"),
+        "expected break branch labeled FLS §6.15.6 without back-edge, got:\n{asm}"
+    );
+    assert!(
+        !asm.contains("// FLS §6.15.6: back-edge"),
+        "forward break branch must not be annotated as back-edge, got:\n{asm}"
+    );
+}
+
 // ── Milestone 8: loop / break / continue ─────────────────────────────────────
 //
 // FLS §6.15.2: Infinite loop expressions. A `loop` block executes indefinitely
