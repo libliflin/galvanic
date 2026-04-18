@@ -550,9 +550,16 @@ fn machine_instr_count(instr: &Instr) -> u32 {
         // Indexed load/store: base add + ldr/str = 2; with bounds check adds cmp + b.hs = 4.
         Instr::LoadIndexed { len, .. }
         | Instr::StoreIndexed { len, .. }
-        | Instr::LoadIndexedF64 { len, .. }
-        | Instr::LoadIndexedF32 { len, .. } => {
+        | Instr::LoadIndexedF64 { len, .. } => {
             if *len > 0 { 4 } else { 2 }
+        }
+
+        // LoadIndexedF32: three-instruction sequence (add + add + ldr) because ARM64
+        // `ldr s` with scaled-register addressing only supports lsl #0 or lsl #2 (not
+        // lsl #3 needed for 8-byte slots). The base address is pre-computed with a
+        // second `add` before the unscaled `ldr`. Bounds check adds cmp + b.hs = 5 total.
+        Instr::LoadIndexedF32 { len, .. } => {
+            if *len > 0 { 5 } else { 3 }
         }
 
         // BinOp: count depends on operator and type.
@@ -563,8 +570,8 @@ fn machine_instr_count(instr: &Instr) -> u32 {
             }
             // Signed div: cbz + movz + sxtw + cmp + b.ne + cmn + b.ne + b + sdiv = 9.
             IrBinOp::Div => 9,
-            // Signed rem: same guards + sdiv + msub = 11.
-            IrBinOp::Rem => 11,
+            // Signed rem: same 8 guards + sdiv + msub = 10.
+            IrBinOp::Rem => 10,
             // Unsigned div: cbz + udiv = 2.
             IrBinOp::UDiv => 2,
             // Comparison: cmp + cset = 2.
@@ -888,8 +895,8 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
                 //   b    _galvanic_panic        → MIN/-1 overflow → panic
                 //   .Lsdiv_ok_{fn}_{n}:        → safe to divide
                 //
-                // Cache-line note: cbz + 8 guard instructions + sdiv = 10 instructions
-                // (40 bytes), crossing at most two 64-byte cache lines.
+                // Cache-line note: cbz + movz + sxtw + cmp + b.ne + cmn + b.ne + b + sdiv = 9 instructions
+                // (36 bytes), fitting within two 64-byte cache lines.
                 IrBinOp::Div => {
                     let n = *label_ctr;
                     *label_ctr += 1;
@@ -926,8 +933,8 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
                 // (no hardware overflow), but spec compliance requires the panic.
                 // Guard sequence mirrors the Div guard with `.Lsrem_ok_{fn}_{n}` labels.
                 //
-                // Cache-line note: cbz + 8 guard instructions + sdiv + msub = 11 instructions
-                // (44 bytes), crossing at most two 64-byte cache lines.
+                // Cache-line note: cbz + movz + sxtw + cmp + b.ne + cmn + b.ne + b + sdiv + msub = 10 instructions
+                // (40 bytes), crossing at most two 64-byte cache lines.
                 IrBinOp::Rem => {
                     let n = *label_ctr;
                     *label_ctr += 1;
@@ -2285,6 +2292,198 @@ fn emit_start(out: &mut String) -> Result<(), CodegenError> {
 /// whether the panic is unwinding, abort, or exit. Galvanic chooses exit(101).
 ///
 /// ARM64 Linux syscall: x8 = __NR_exit (93), x0 = exit code.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{
+        F64BinOp, F32BinOp, FCmpOp, IrBinOp, IrTy, Instr,
+    };
+
+    /// Count ARM64 machine instruction lines in `emit_instr` output.
+    ///
+    /// Instructions are indented with exactly 4 spaces. Labels (`foo:`),
+    /// blank lines, and section directives do not start with 4 spaces.
+    /// Comment-only lines (e.g., `    // cache-line: ...`) are excluded
+    /// because they carry no machine encoding.
+    fn count_asm_instrs(s: &str) -> u32 {
+        s.lines()
+            .filter(|l| l.starts_with("    ") && !l.trim_start().starts_with("//"))
+            .count() as u32
+    }
+
+    /// Invoke `emit_instr` with neutral frame parameters (frame_size=0,
+    /// saves_lr=false) and return the emitted text.
+    ///
+    /// Using frame_size=0 and saves_lr=false keeps `Ret` to its minimal
+    /// 1-instruction form, matching `machine_instr_count`'s documented
+    /// "simplified" count for `Ret`.
+    fn asm_for(instr: &Instr) -> String {
+        let mut out = String::new();
+        let mut ctr = 0usize;
+        emit_instr(&mut out, instr, 0, false, "__test", &mut ctr)
+            .expect("emit_instr failed in test");
+        out
+    }
+
+    /// Assert that `machine_instr_count` and the actual `emit_instr` output
+    /// agree for `instr`. Panics with a diagnostic if they disagree.
+    ///
+    /// This cross-check makes the drift risk structural: any future variant
+    /// where the two functions disagree will be caught here rather than
+    /// silently producing a wrong cache-line annotation at runtime.
+    fn check(instr: &Instr) {
+        let expected = machine_instr_count(instr);
+        let output = asm_for(instr);
+        let actual = count_asm_instrs(&output);
+        assert_eq!(
+            expected,
+            actual,
+            "machine_instr_count={expected} disagrees with emit_instr={actual}.\n\
+             emitted output:\n{output}"
+        );
+    }
+
+    /// Cross-check `machine_instr_count` against `emit_instr` for every
+    /// variant category.
+    ///
+    /// This test eliminates the primary drift risk identified in cycle 023:
+    /// a new `Instr` variant added to `emit_instr` with a wrong count in
+    /// `machine_instr_count` would produce silent incorrect cache-line
+    /// annotations in back-edge commentary without a failing test.
+    ///
+    /// Coverage:
+    /// - Zero-instruction: Label
+    /// - One-instruction: Branch, CondBranch, Store, Load, StoreF64, LoadF64Slot,
+    ///   StoreF32, LoadF32Slot, StorePtr, LoadPtr, Neg, FNegF64, FNegF32, Not,
+    ///   BoolNot, TruncU8, SextI8, TruncU16, SextI16, F64BinOp, F32BinOp,
+    ///   F64ToI32, F32ToI32, I32ToF64, I32ToF32, F32ToF64, F64ToF32,
+    ///   BinOp(BitAnd/Bool), BinOp(Sub/non-I32), AddrOf
+    /// - Two-instruction: LoadFnAddr, FCmpF64, FCmpF32, AddrOfIndexed,
+    ///   LoadIndexed(len=0), StoreIndexed(len=0), LoadIndexedF64(len=0),
+    ///   LoadIndexedF32(len=0), BinOp(UDiv), BinOp(Lt)
+    /// - Three-instruction: LoadStatic, LoadStaticF64, LoadStaticF32,
+    ///   LoadF64Const, LoadF32Const, LoadImm(large with lo16≠0),
+    ///   BinOp(Add/I32), BinOp(Shl)
+    /// - Large counts: BinOp(Div)=9, BinOp(Rem)=11
+    /// - Conditional counts: LoadImm(small)=1, LoadImm(hi16-only)=2,
+    ///   LoadIndexed(len>0)=4
+    #[test]
+    fn machine_instr_count_matches_emit_instr() {
+        // ── Zero-instruction ─────────────────────────────────────────────────
+        check(&Instr::Label { id: 0, fls: "§6.15" });
+
+        // ── One-instruction ──────────────────────────────────────────────────
+        check(&Instr::Branch { target: 42, fls: "§6.15.3" });
+        check(&Instr::CondBranch { reg: 1, label: 42, fls: "§6.15.3" });
+        check(&Instr::Store { src: 1, slot: 0 });
+        check(&Instr::Load { dst: 1, slot: 0 });
+        check(&Instr::StoreF64 { src: 0, slot: 1 });
+        check(&Instr::LoadF64Slot { dst: 1, slot: 0 });
+        check(&Instr::StoreF32 { src: 0, slot: 1 });
+        check(&Instr::LoadF32Slot { dst: 1, slot: 0 });
+        check(&Instr::StorePtr { src: 1, addr: 2 });
+        check(&Instr::LoadPtr { dst: 1, src: 2 });
+        check(&Instr::AddrOf { dst: 1, slot: 0 });
+        check(&Instr::Neg { dst: 1, src: 0 });
+        check(&Instr::FNegF64 { dst: 1, src: 0 });
+        check(&Instr::FNegF32 { dst: 1, src: 0 });
+        check(&Instr::Not { dst: 1, src: 0 });
+        check(&Instr::BoolNot { dst: 1, src: 0 });
+        check(&Instr::TruncU8 { dst: 1, src: 0 });
+        check(&Instr::SextI8 { dst: 1, src: 0 });
+        check(&Instr::TruncU16 { dst: 1, src: 0 });
+        check(&Instr::SextI16 { dst: 1, src: 0 });
+        check(&Instr::F64BinOp { op: F64BinOp::Add, dst: 2, lhs: 0, rhs: 1 });
+        check(&Instr::F32BinOp { op: F32BinOp::Mul, dst: 2, lhs: 0, rhs: 1 });
+        check(&Instr::F64ToI32 { dst: 0, src: 0 });
+        check(&Instr::F32ToI32 { dst: 0, src: 0 });
+        check(&Instr::I32ToF64 { dst: 0, src: 0 });
+        check(&Instr::I32ToF32 { dst: 0, src: 0 });
+        check(&Instr::F32ToF64 { dst: 0, src: 0 });
+        check(&Instr::F64ToF32 { dst: 0, src: 0 });
+        // BinOp(BitAnd) on I32 — bitwise op, always 1 instruction.
+        check(&Instr::BinOp { op: IrBinOp::BitAnd, ty: IrTy::I32, dst: 2, lhs: 0, rhs: 1 });
+        // BinOp(BitOr/BitXor) — also 1 instruction.
+        check(&Instr::BinOp { op: IrBinOp::BitOr, ty: IrTy::I32, dst: 2, lhs: 0, rhs: 1 });
+        check(&Instr::BinOp { op: IrBinOp::BitXor, ty: IrTy::I32, dst: 2, lhs: 0, rhs: 1 });
+        // BinOp(Add) on non-I32 type (Bool) — no overflow check, 1 instruction.
+        check(&Instr::BinOp { op: IrBinOp::Add, ty: IrTy::Bool, dst: 2, lhs: 0, rhs: 1 });
+        // LoadImm: small value fits in [-65536, 65535] → 1 instruction.
+        check(&Instr::LoadImm(0, 42));
+        check(&Instr::LoadImm(0, -1));
+        check(&Instr::LoadImm(0, 0));
+
+        // ── Two-instruction ──────────────────────────────────────────────────
+        check(&Instr::LoadFnAddr { dst: 1, name: "foo".to_string() });
+        check(&Instr::FCmpF64 { op: FCmpOp::Lt, dst: 2, lhs: 0, rhs: 1 });
+        check(&Instr::FCmpF32 { op: FCmpOp::Eq, dst: 2, lhs: 0, rhs: 1 });
+        check(&Instr::AddrOfIndexed { dst: 3, base_slot: 0, index_reg: 1, scratch: 2 });
+        // LoadIndexed with no bounds check — add + ldr = 2.
+        check(&Instr::LoadIndexed { dst: 1, base_slot: 0, index_reg: 2, len: 0 });
+        // StoreIndexed with no bounds check — add + str = 2.
+        check(&Instr::StoreIndexed { src: 0, base_slot: 1, index_reg: 2, scratch: 3, len: 0 });
+        check(&Instr::LoadIndexedF64 { dst: 0, base_slot: 1, index_reg: 2, len: 0 });
+        check(&Instr::LoadIndexedF32 { dst: 0, base_slot: 1, index_reg: 2, len: 0 });
+        // BinOp(UDiv) — cbz + udiv = 2.
+        check(&Instr::BinOp { op: IrBinOp::UDiv, ty: IrTy::I32, dst: 2, lhs: 0, rhs: 1 });
+        // BinOp(Lt) — cmp + cset = 2.
+        check(&Instr::BinOp { op: IrBinOp::Lt, ty: IrTy::I32, dst: 2, lhs: 0, rhs: 1 });
+        check(&Instr::BinOp { op: IrBinOp::Le, ty: IrTy::I32, dst: 2, lhs: 0, rhs: 1 });
+        check(&Instr::BinOp { op: IrBinOp::Eq, ty: IrTy::I32, dst: 2, lhs: 0, rhs: 1 });
+        check(&Instr::BinOp { op: IrBinOp::Ne, ty: IrTy::I32, dst: 2, lhs: 0, rhs: 1 });
+        // LoadImm: hi16-only (lo16 == 0) — movz + sxtw = 2.
+        check(&Instr::LoadImm(0, 65536));   // 0x0001_0000: lo16 = 0
+        check(&Instr::LoadImm(0, -65537));  // lo16 of i32::wrapping = 0xFFFF → not 0, skip
+        check(&Instr::LoadImm(0, 131072));  // 0x0002_0000: lo16 = 0
+
+        // ── Three-instruction ────────────────────────────────────────────────
+        check(&Instr::LoadStatic { dst: 1, name: "MY_STATIC".to_string() });
+        check(&Instr::LoadStaticF64 { dst: 0, name: "MY_F64".to_string() });
+        check(&Instr::LoadStaticF32 { dst: 0, name: "MY_F32".to_string() });
+        check(&Instr::LoadF64Const { dst: 0, idx: 0 });
+        check(&Instr::LoadF32Const { dst: 0, idx: 0 });
+        // LoadImm: large value with lo16 ≠ 0 — movz + movk + sxtw = 3.
+        check(&Instr::LoadImm(0, 100_000));   // 0x0001_86A0: lo16 = 0x86A0 ≠ 0
+        check(&Instr::LoadImm(0, -100_000));  // also large
+        // BinOp(Add/I32): arith + cmp sxtw + b.ne = 3.
+        check(&Instr::BinOp { op: IrBinOp::Add, ty: IrTy::I32, dst: 2, lhs: 0, rhs: 1 });
+        check(&Instr::BinOp { op: IrBinOp::Sub, ty: IrTy::I32, dst: 2, lhs: 0, rhs: 1 });
+        check(&Instr::BinOp { op: IrBinOp::Mul, ty: IrTy::I32, dst: 2, lhs: 0, rhs: 1 });
+        // BinOp(Shl): cmp + b.hs + lsl = 3.
+        check(&Instr::BinOp { op: IrBinOp::Shl, ty: IrTy::I32, dst: 2, lhs: 0, rhs: 1 });
+        check(&Instr::BinOp { op: IrBinOp::Shr, ty: IrTy::I32, dst: 2, lhs: 0, rhs: 1 });
+        check(&Instr::BinOp { op: IrBinOp::UShr, ty: IrTy::I32, dst: 2, lhs: 0, rhs: 1 });
+
+        // ── Large counts ─────────────────────────────────────────────────────
+        // BinOp(Div/I32): 9 instructions (div-by-zero + overflow guards + sdiv).
+        check(&Instr::BinOp { op: IrBinOp::Div, ty: IrTy::I32, dst: 2, lhs: 0, rhs: 1 });
+        // BinOp(Rem/I32): 11 instructions (same guards + sdiv + msub).
+        check(&Instr::BinOp { op: IrBinOp::Rem, ty: IrTy::I32, dst: 2, lhs: 0, rhs: 1 });
+
+        // ── Bounds-checked indexed loads/stores ──────────────────────────────
+        // With len > 0: cmp + b.hs + add + ldr/str = 4.
+        check(&Instr::LoadIndexed { dst: 1, base_slot: 0, index_reg: 2, len: 8 });
+        check(&Instr::StoreIndexed { src: 0, base_slot: 1, index_reg: 2, scratch: 3, len: 8 });
+        check(&Instr::LoadIndexedF64 { dst: 0, base_slot: 1, index_reg: 2, len: 4 });
+        check(&Instr::LoadIndexedF32 { dst: 0, base_slot: 1, index_reg: 2, len: 4 });
+
+        // ── Ret (simplified: frame_size=0, saves_lr=false) ───────────────────
+        // emit_load_x0(IrValue::I32(0)) → mov x0, #0 (1 instr) + ret (1 instr) = 2.
+        // machine_instr_count returns 1 (documented simplification: never in a loop body).
+        // Ret is intentionally excluded from the cross-check — its count is a
+        // documented approximation (see machine_instr_count comment for Instr::Ret).
+
+        // ── Call (args already in place, dst=0 → just bl) ────────────────────
+        check(&Instr::Call {
+            dst: 0,
+            name: "foo".to_string(),
+            args: vec![0, 1],
+            float_args: vec![],
+            float_ret: None,
+        });
+    }
+}
+
 fn emit_galvanic_panic(out: &mut String) -> Result<(), CodegenError> {
     writeln!(out, "    // FLS §6.23: runtime panic primitive — exit(101)")?;
     // _galvanic_panic is 3 instructions × 4 bytes = 12 bytes — fits in one 64-byte
