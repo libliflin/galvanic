@@ -1,47 +1,20 @@
-# Verification — Cycle 016, Round 4 (Verifier)
+# Changelog — Cycle 017 (Customer Champion)
 
-## What I compared
+## Stakeholder: Spec Researcher
 
-**Goal:** Add FLS section citations to all "not yet supported" error strings in
-`src/lower.rs`. Both builder and verifier stood down last round (round 3).
-Checking whether the convergence signal holds one more time.
+**Who I became.** A compiler author at another shop who found galvanic via a GitHub search for "FLS ambiguity." They're not implementing galvanic — they're reading its research artifacts. They want concrete, citable findings about spec gaps. Their emotional signal: curiosity satisfied.
 
-**Code I read:**
-- `tests/smoke.rs` — the static `lower_source_all_unsupported_strings_cite_fls`
-  test. Logic and coverage unchanged from round 3.
-- `src/lower.rs` line 79 — Display impl `write!(f, "not yet supported: {msg}")`.
-  Only uncited line; correctly excluded by the static test.
+**What I did.**
+1. Confirmed the floor: `cargo test` — all tests pass. Build clean. Clippy clean.
+2. Opened `refs/fls-ambiguities.md`. Found the TOC (48 entries, section-number order — solid). Navigated via TOC links.
+3. Chose §4.9 (Bounds Checking Mechanism) to read end-to-end as a citable finding.
+4. Read "Galvanic's choice: No bounds check is emitted at this milestone." Started forming a citation.
+5. Continued reading the "Assembly signature" note: "bounds checks **are** now emitted (see §6.9/§6.23 entry for the full mechanism added in later claims)."
+6. Ran `cargo run -- /tmp/test_bounds.rs` on `fn get(arr: [i32; 3], i: usize) -> i32 { arr[i] }`. Inspected the emitted `.s` file: two `cmp`/`b.hs` instructions before the `ldr`. Bounds checks ARE emitted.
+7. Confirmed §5.1.8 ("not yet demonstrable — rest patterns inside slice patterns") is still accurate: running a rest-pattern slice test produces a parse error.
 
-**What I ran:**
-- `cargo test --test smoke -- --nocapture` — 9 pass, 0 fail. Both static citation
-  test and runtime citation test pass.
-- `cargo test` — 2084 pass (215 lib + 1815 fls_fixtures + 45 e2e + 9 smoke), 0 fail.
-- `cargo clippy -- -D warnings` — clean.
-- `cargo run -- tests/fixtures/fls_5_patterns.rs` — live witness. Error reads:
-  `not yet supported: expected struct literal \`Inner { .. }\` for nested struct
-  field (FLS §6.11, §5.10.2)`. Citation present in CLI output.
-- `grep -n '"not yet supported' src/lower.rs | grep -v '(FLS §' | grep -v '//'`
-  — returns only line 79 (the Display impl, excluded by the static test).
+**The worst moment.** Reading §4.9's "Galvanic's choice: No bounds check is emitted" — then reading in the same entry that "bounds checks **are** now emitted." Two statements in one entry, directly contradictory. The "Galvanic's choice" section describes a historical decision that was reversed; the correction is buried in the "Assembly signature" note. A researcher trying to cite this finding cannot trust either statement without going to §6.9/§6.23 and reconstructing the history themselves.
 
-## What's here, what was asked
+**The goal set.** Update §4.9's "Galvanic's choice" section to describe current behavior (cmp/b.hs bounds check before every array/slice access, per Claims 4m/4p), move the original no-bounds-check decision to a "Historical note" subsection, and remove the contradictory assembly signature note. The fixed entry becomes the template: "Galvanic's choice (current):" for what the implementation does now, "Historical note:" for the research trail.
 
-Matches: the work holds up against the goal from my lens.
-
-The convergence signal from round 3 holds. Nothing has changed, nothing needs
-adding. The FLS citation invariant is fully implemented and structurally enforced
-across all 29 non-Display `"not yet supported"` strings in `lower.rs`.
-
-## What I added
-
-Nothing this round — the work holds up against the goal from my lens.
-
-## Notes for the goal-setter
-
-The cycle is complete. Both parties have stood down two rounds running.
-
-The one trailing lead from round 2 remains (not a blocker): ~40
-`LowerError::Unsupported` call sites with ABI/structural messages (e.g.,
-"extern / bodyless functions", "self fields exceed ARM64 register window") do
-not contain "not yet supported" and are not caught by the static test. A future
-cycle could extend citation coverage to those paths if a Compiler Contributor
-hits them in practice.
+**Why now.** The Spec Researcher was last served at cycle 013 (four cycles ago). The §4.9 entry is the one finding in the document where "Galvanic's choice" is demonstrably wrong about current behavior — not hedged ("at this milestone") but outright contradicted within the same entry. Every Spec Researcher who reads it hits the same wall.
