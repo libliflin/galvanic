@@ -36547,3 +36547,54 @@ fn fls_2_4_literals_emits_valid_arm64_registers() {
         "aarch64-linux-gnu-as rejected assembly for fls_2_4_literals.rs — invalid register names"
     );
 }
+
+// ── §9 register-pressure fixture: valid ARM64 register names ─────────────────
+
+/// FLS §9 — A function with 40 sequential let-bindings generates virtual
+/// register indices well above 30. The linear-scan register allocator must
+/// map every VR to a physical register from the pool (x0–x8, x10, x11, x15)
+/// so that the emitted assembly contains only valid ARM64 GPR names.
+///
+/// Without the allocator, galvanic would emit instructions like
+/// `add x198, x196, x197` — architecturally invalid on ARM64.
+#[test]
+fn fls_9_register_pressure_emits_valid_arm64_registers() {
+    let fixture = include_str!("fixtures/fls_9_register_pressure.rs");
+    let asm = compile_to_asm(fixture);
+
+    // ARM64 GPRs are x0–x30; x31 = sp/xzr (not a writable GPR); x32+ do not exist.
+    // Every instruction operand referencing x31+ would be invalid assembly.
+    for reg in 31u32..=64 {
+        let as_operand = format!(" x{reg}");
+        let as_comma_operand = format!(",x{reg}");
+        assert!(
+            !asm.contains(&as_operand) && !asm.contains(&as_comma_operand),
+            "assembly references invalid ARM64 register x{reg}:\n{asm}"
+        );
+    }
+
+    // When the cross-assembler is available, verify the output actually assembles.
+    if !tool_available("aarch64-linux-gnu-as") {
+        eprintln!("e2e: skipping assembly check — aarch64-linux-gnu-as not available");
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let asm_path = dir.path().join("fls_9_register_pressure.s");
+    let obj_path = dir.path().join("fls_9_register_pressure.o");
+    std::fs::write(&asm_path, &asm).expect("write .s");
+
+    let status = Command::new("aarch64-linux-gnu-as")
+        .args([
+            asm_path.to_str().unwrap(),
+            "-o",
+            obj_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("failed to invoke aarch64-linux-gnu-as");
+
+    assert!(
+        status.success(),
+        "aarch64-linux-gnu-as rejected assembly for fls_9_register_pressure.rs — invalid register names"
+    );
+}
