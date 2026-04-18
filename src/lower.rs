@@ -12387,6 +12387,27 @@ impl<'src> LowerCtx<'src> {
                                 }
                                 self.instrs.push(Instr::CondBranch { reg: matched_reg, label: else_label, fls: "§6.17" });
                             }
+                            // FLS §5.1.4 + §5.1: `n @ _` — wildcard sub-pattern always matches.
+                            // No check instructions needed; just bind and continue.
+                            // Cache-line note: 0 extra check instructions (8 bytes for binding).
+                            Pat::Wildcard => {
+                                // No condition to test — wildcard always matches. Fall through.
+                            }
+                            // FLS §5.1.4 + §5.2: `n @ true` / `n @ false` — boolean literal.
+                            // Parity with match @ binding LitBool support.
+                            // Cache-line note: 3 instructions (ldr + mov + cmp + cbz = 12 bytes).
+                            Pat::LitBool(b) => {
+                                let s_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                                let p_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::LoadImm(p_reg, *b as i32));
+                                let cmp_reg = self.alloc_reg()?;
+                                self.instrs.push(Instr::BinOp {
+                                    op: IrBinOp::Eq, dst: cmp_reg, lhs: s_reg, rhs: p_reg,
+                                    ty: IrTy::Bool,
+                                });
+                                self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: else_label, fls: "§6.17" });
+                            }
                             other => return Err(LowerError::Unsupported(format!(
                                 "@ binding sub-pattern not yet supported in if-let (FLS §6.17, §5.1.4): {other:?}"
                             ))),
@@ -13472,6 +13493,12 @@ impl<'src> LowerCtx<'src> {
                                                 self.accum_or_alt(alt, scrut_slot, matched_reg)?;
                                             }
                                             self.instrs.push(Instr::CondBranch { reg: matched_reg, label: next_label, fls: "§6.18" });
+                                        }
+                                        // FLS §5.1.4 + §5.1: `n @ _` — wildcard sub-pattern always matches.
+                                        // No check instructions needed; just bind and continue to body.
+                                        // Cache-line note: 0 extra check instructions (8 bytes for binding).
+                                        Pat::Wildcard => {
+                                            // No condition to test — wildcard always matches. Fall through.
                                         }
                                         other => return Err(LowerError::Unsupported(format!(
                                             "@ binding sub-pattern not yet supported in match (FLS §6.18, §5.1.4): {other:?}"
