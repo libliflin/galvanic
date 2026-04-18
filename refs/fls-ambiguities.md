@@ -240,8 +240,8 @@ instruction, or something else.
 
 **Galvanic's choice (current):** A `cmp`/`b.hs` bounds check is emitted
 before every array and slice index access (Claims 4m/4p). Out-of-bounds
-access branches to a trap path. The panic mechanism is a bare `brk #1`
-instruction — not a library call — because galvanic has no runtime library.
+access branches to `_galvanic_panic`, which calls `exit(101)` via a bare
+Linux syscall (`svc #0` with `x8=93`). No stack unwinding, no panic message.
 See also the §6.9/§6.23 entry for the full mechanism.
 
 **Historical note:** Prior to Claims 4m/4p, no bounds check was emitted.

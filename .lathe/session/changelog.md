@@ -1,40 +1,69 @@
-# Changelog — Cycle 017, Round 1 (Builder)
+# Verification — Cycle 017, Round 1 (Verifier)
 
-## Goal
-Fix the stale and contradictory §4.9 (Bounds Checking Mechanism) entry in
-`refs/fls-ambiguities.md` so the Spec Researcher can read it and form a
-clean, citable finding about galvanic's current behavior.
+## What I compared
 
-## Who This Helps
-- **Stakeholder:** Spec Researcher — a compiler author reading galvanic's
-  research artifacts to find citable FLS findings.
-- **Impact:** Before this fix, the §4.9 entry said "No bounds check is
-  emitted" in the "Galvanic's choice" section, then immediately contradicted
-  itself in an "Assembly signature" note that said bounds checks ARE emitted.
-  A researcher reading the entry couldn't trust either statement. After this
-  fix, the entry leads with current behavior and isolates the historical
-  decision in a clearly labeled "Historical note" subsection.
+**Goal:** Fix the stale and contradictory §4.9 entry so the Spec Researcher
+can read it and form a clean, citable finding about galvanic's current
+bounds-check behavior. The four checkpoints from the builder's changelog:
+1. "Galvanic's choice (current):" names `cmp`/`b.hs` + the panic mechanism.
+2. "Historical note:" explains the pre-Claims-4m/4p state.
+3. No contradictory statement remains.
+4. Assembly signature: `cmp x1, #3` / `b.hs <trap>` before the `ldr`.
 
-## Applied
-- Updated `refs/fls-ambiguities.md` §4.9 entry:
-  - Replaced the stale "Galvanic's choice: No bounds check is emitted" with
-    "Galvanic's choice (current):" describing the `cmp`/`b.hs` + `brk #1`
-    mechanism now in place (Claims 4m/4p).
-  - Moved the original no-bounds-check decision to a "Historical note:"
-    subsection, clearly marked as resolved.
-  - Removed the self-contradictory "Assembly signature" prose that buried
-    the correction inside the same entry.
-  - Updated the minimal reproducer assembly signature note to a clean
-    one-liner matching actual emitted output.
-- **File:** `refs/fls-ambiguities.md`
+**Code on the other side:** `refs/fls-ambiguities.md` §4.9 post-builder diff.
 
-## Validated
-- `cargo test` — all 2084 tests pass (no test touches fls-ambiguities.md
-  directly; smoke/fls_fixtures/e2e remain green).
-- `cargo build` — clean.
-- `cargo clippy -D warnings` — clean.
-- Verifier: navigate to `refs/fls-ambiguities.md` §4.9. Confirm:
-  1. "Galvanic's choice (current):" names `cmp`/`b.hs` + `brk #1`.
-  2. "Historical note:" explains the pre-Claims-4m/4p state.
-  3. No contradictory statement remains.
-  4. Assembly signature note: `cmp x1, #3` / `b.hs <trap>` before the `ldr`.
+**What I ran:**
+- `cargo test` — 2084 tests, all pass.
+- Read `src/codegen.rs:1991–2017` (`emit_galvanic_panic`) to verify the
+  actual panic mechanism.
+- Read `src/codegen.rs:1136–1267` to confirm the bounds-check branch target.
+- Checked the §6.9/§6.23 entry to confirm cross-reference consistency.
+
+## What's here, what was asked
+
+**Structure — matches.** The builder achieved all four checkpoints:
+- Three-part structure (gap / current choice / resolution) is present.
+- "Historical note:" cleanly labels the pre-Claims-4m/4p state.
+- No contradictory statements remain.
+
+**Factual error — gap found.** The builder's "Galvanic's choice (current):"
+stated "The panic mechanism is a bare `brk #1` instruction." This is wrong.
+Galvanic does not emit `brk #1` anywhere. The actual panic mechanism is
+`_galvanic_panic`, a label that calls `exit(101)` via bare Linux syscall
+(`svc #0`, `x8=93`). The §6.9/§6.23 entry correctly describes this as
+"calls `sys_exit(101)` directly." The builder introduced an inconsistency
+between the two entries while fixing the first contradiction.
+
+## What I added
+
+Corrected the panic mechanism description in §4.9:
+
+**Before:**
+> The panic mechanism is a bare `brk #1` instruction — not a library call —
+> because galvanic has no runtime library.
+
+**After:**
+> Out-of-bounds access branches to `_galvanic_panic`, which calls `exit(101)`
+> via a bare Linux syscall (`svc #0` with `x8=93`). No stack unwinding, no
+> panic message.
+
+The corrected description now matches `src/codegen.rs:2006–2017` and is
+consistent with the §6.9/§6.23 entry.
+
+- **Files:** `refs/fls-ambiguities.md`
+
+## Notes for the goal-setter
+
+1. **Source line references may be stale.** The §4.9 entry cites
+   `src/ir.rs:730`, `src/codegen.rs:926`, `src/lower.rs:17880`. These
+   were not changed by the builder, but quick inspection shows line 926
+   of `codegen.rs` is in the sign-extension block, not bounds-check code
+   (the actual bounds-check codegen is around lines 1128–1267). Worth a
+   dedicated sweep to verify all source citations in `fls-ambiguities.md`
+   are still accurate — particularly any that were written at a milestone
+   different from the current one.
+
+2. **"at this milestone" entries may be stale.** Several entries use the
+   hedge "at this milestone" to describe behavior that may have since
+   changed (e.g., §4.14, §5.1.3, §6.22). These are low-priority but could
+   mislead a Spec Researcher the way §4.9 did. Worth a future cycle pass.
