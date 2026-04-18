@@ -1,13 +1,15 @@
-`.lathe/verifier.md` written.
+`.lathe/verifier.md` is written. Here's what shaped it:
 
-**Shape detected: service/CLI.** Galvanic is a compiler — changes are witnessed by running the binary against representative source, not by deploying anywhere.
+**Project shape detected: Service / CLI compiler** — no registry publish, no deploy environment, no web UI. Galvanic is witnessed by running the binary and exercising the changed code path via `cargo test`.
 
-The verifier is built around this project's specific failure modes:
+**Key decisions:**
 
-- **Constant folding** — after any lowering change, `compile_to_asm` must show a runtime instruction, not a precomputed constant. The playbook spells out how to check.
-- **Token size regression** — any lexer change triggers `token_is_eight_bytes` explicitly.
-- **Half-documented ambiguities** — `AMBIGUOUS` annotations without a matching `refs/fls-ambiguities.md` entry are the spec researcher's primary pain point; the verifier catches them by diffing source annotations against the ref file.
-- **Pipeline order gaps** — the verifier checks that new language features touch all seven stages, not just the ones that were "needed."
-- **FLS citation gaps** — the verifier greps new `struct`/`enum`/`fn` declarations in the diff for missing citations.
+- **The Hard Constraint section is front-and-center.** FLS §6.1.2:37–45 (no constant-folding in runtime contexts) is the research claim galvanic exists to prove. The verifier's primary lens is: does this change uphold it? The dual `assert!(contains) / assert!(!contains)` pattern is called out as non-negotiable — an exit-code-only test is explicitly named as insufficient.
 
-The Verification Playbook is immediately runnable: `cargo test`, `compile_to_asm` assertions, direct CLI invocation, the token size test, and `gh pr view` for the `e2e` CI job as the runtime oracle on macOS where cross-tools aren't available.
+- **Verification Playbook is concrete and immediately runnable.** Five steps with actual commands: `cargo test`, `cargo clippy -- -D warnings`, suite-specific test invocations, manual CLI exercise, and the Token size invariant check. No placeholders.
+
+- **The playbook covers all three test tiers** from the builder's instructions — fixture acceptance, assembly inspection e2e, and CLI smoke — with the right command for each.
+
+- **`refs/fls-ambiguities.md` verification is explicit.** When a change requires an implementation choice the FLS doesn't specify, the verifier checks that the ambiguity was recorded, sorted correctly, and resolves specifically (not vaguely).
+
+- **"Never weaken an assembly inspection test"** is a verifier rule, mirroring the builder's identical rule — so both agents are guarding this invariant independently.

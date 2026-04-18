@@ -1,13 +1,15 @@
-`.lathe/builder.md` is written. Here's what it encodes:
+`.lathe/builder.md` is written. Here's what it encodes about this project specifically:
 
-**Structure:** Identity → Implementation quality → Galvanic-specific conventions → Testing → Witnessability → CI/PR model → Changelog format → Rules.
+**Pipeline knowledge:** The exact module chain (lexer → parser → lower → ir → codegen), what each module owns, and which is the right insertion point for different classes of change.
 
-**Project-specific conventions captured:**
-- The 7-step pipeline order (AST → lexer → parser → lower → IR → codegen → tests), enforced as a strict sequence
-- The dual-place rule for `AMBIGUOUS` annotations (source + `refs/fls-ambiguities.md` in the same commit) — the primary spec researcher failure mode
-- Cache-line notes as non-negotiable on every new IR/AST/token type
-- The constant-fold prohibition with the litmus test from the architecture doc
-- Safe Rust and no-`Command`-in-library invariants that CI enforces
-- How to gate runtime tests with `if !tools_available() { return; }` and why macOS skips them
+**The hard constraint:** FLS §6.1.2:37–45 gets its own section with the litmus test ("replace a literal with a parameter — if it breaks, you have an interpreter") and the dual-assertion assembly inspection pattern that enforces it.
 
-**Aligned with the goal-setter's framing:** The builder is told to read "Who This Helps" before touching code, and the changelog format mirrors the goal-setter's stakeholder structure — the two agents talk the same language across cycles.
+**Three test tiers, clearly separated:** Fixture/parse acceptance (`fls_fixtures.rs`), assembly inspection + runtime (`e2e.rs`), and CLI smoke (`smoke.rs`) — with the fixture naming convention (`fls_X_Y_feature_name`), the exact helper function signatures, and when to use each tier.
+
+**Brand specifics:** The `"not yet supported: {specific thing}"` error pattern with an explanation of why `"yet"` is load-bearing. The commit format `type: what for {stakeholder} {signal} (cycle N)`. The quiet success output pattern from `main.rs`.
+
+**Safety rules that CI enforces:** No unsafe, no `Command` outside `main.rs`, no networking crates, `Token` stays 8 bytes.
+
+**The ambiguity register protocol:** New FLS findings go into `refs/fls-ambiguities.md`, sorted by section number with ToC, in a specific format — because that file is the Spec Researcher's primary artifact.
+
+**CI topology:** Five jobs, what each runs, why e2e only passes on Linux, and that assembly inspection tests work on macOS (so local validation is always possible even without QEMU).

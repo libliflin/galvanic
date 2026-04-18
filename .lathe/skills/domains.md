@@ -1,81 +1,86 @@
 # Domain Map — Galvanic
 
-Galvanic spans four distinct domains of authority. A bug that looks like one domain's problem often lives in another. This map answers "who to ask about what" and marks where domain boundaries create confusion.
+Galvanic operates across several distinct knowledge domains. Each has its own authority. A bug that looks like a spec gap might actually be a platform ABI difference. A decision that looks like implementation freedom might be constrained by the FLS. This file maps the domains so the builder and verifier attribute problems to the right authority and propose fixes in the right layer.
 
 ---
 
-## Domain 1: The Ferrocene Language Specification (FLS)
+## Domain 1: Ferrocene Language Specification (FLS)
 
-**Covers:** What Rust programs mean. What expressions are valid, what type rules apply, what evaluation order is specified, what behavior is undefined, what the compiler must and must not do. Const contexts, ownership rules, trait semantics, pattern matching, generics.
+**What it covers:** Language semantics — expression evaluation, type system, pattern matching, function calling, lifetimes, const contexts, operator behavior. Everything about *what Rust means*.
 
-**Authoritative source:** `https://rust-lang.github.io/fls/` (versioned; was previously at `spec.ferrocene.dev`). See `.lathe/refs/fls-pointer.md` for the current table of contents.
+**Authoritative source:** `https://rust-lang.github.io/fls/` (section-stable URLs). Table of contents in `.lathe/refs/fls-pointer.md`.
 
-**Project artifacts:**
-- `refs/fls-constraints.md` — what galvanic must not do (constraints from the spec)
-- `refs/fls-ambiguities.md` — where the spec is silent or ambiguous, and what galvanic chose
-- `AMBIGUOUS: §N.M — ...` annotations throughout `src/`
-- `FLS §N.M: ...` citations throughout `src/`
+**In this project:** Every implementation decision in `src/lexer.rs`, `src/parser.rs`, `src/lower.rs`, `src/codegen.rs` should cite the FLS section it implements. When the spec is ambiguous or silent, the decision is documented in `refs/fls-ambiguities.md`.
 
-**Boundary confusion with IR design:** The FLS defines what code means; the IR defines how galvanic represents it internally. When a lowering decision feels wrong, ask: "Is the FLS actually prescribing this, or am I choosing an IR representation that could have been different?" The FLS doesn't dictate IR shape — that's galvanic's design choice. FLS citations in `src/lower.rs` mark where the spec drives the decision; unmarked choices are galvanic's own.
+**Boundary with Platform ABI domain:** The FLS describes *what* calling conventions must achieve (pass arguments, return values) but does not specify ARM64 register assignments. That's the ABI domain.
 
-**Boundary confusion with ABI:** The FLS defines the Rust abstract machine but does not specify calling conventions, register layout, or binary format — those are the ABI's domain. When a function call produces the wrong result, check the ABI first (are arguments in the right registers?), not the FLS.
+**Boundary with Rust compiler conventions domain:** Galvanic does NOT consult rustc internals. When the FLS and rustc behavior diverge, galvanic follows the FLS. The research value depends on this independence.
+
+**Common confusion:** "How does rustc handle X?" is the wrong question. "What does the FLS say about X?" is the right one. If the FLS doesn't say, document the gap — that's the output.
 
 ---
 
-## Domain 2: ARM64 ISA (Instruction Set Architecture)
+## Domain 2: ARM64 Architecture
 
-**Covers:** Which instructions exist, what they do, their encoding, their latency. `add`, `sub`, `mul`, `sdiv`, `mov`, `movz`, `movk`, `ldr`, `str`, `bl`, `ret`, `svc`, branch conditions, vector instructions.
+**What it covers:** Instruction encoding, register names and roles (x0–x30, sp, lr, xzr), addressing modes, branching, calling convention at the instruction level (which registers hold args, which hold return values, which are caller-saved).
 
-**Authoritative source:** ARM Architecture Reference Manual (ARM DDI 0487). For galvanic's purposes, the GAS (GNU Assembler) mnemonics and syntax are sufficient — see any `aarch64-linux-gnu-as` documentation.
+**Authoritative source:** ARM Architecture Reference Manual (ARMv8-A). Key practical reference: `refs/arm64-abi.md` (galvanic's own summary of what it needs).
 
-**Boundary confusion with ABI:** The ISA says what `bl` does (branch with link, sets `x30`). The ABI says what argument goes in `x0` before the call. When a function call is wrong, distinguish: is the wrong instruction being used (ISA problem), or are the arguments in the wrong registers (ABI problem)?
+**In this project:** `src/codegen.rs` is the only file that reasons about ARM64 instructions. It emits GNU assembler syntax.
 
-**Boundary confusion with FLS:** The ISA doesn't know about Rust types or const contexts. When galvanic emits `mov x0, #5` for `fn main() -> i32 { 2 + 3 }`, the ISA is fine with it — but the FLS constraint says `2 + 3` is not a const context, so the compiler must emit `mov x0, #2; mov x1, #3; add x0, x0, x1` instead. ISA correctness and FLS compliance are different questions.
+**Boundary with FLS domain:** FLS says "this expression returns a value." ARM64 says "return values go in x0 for integers, x0/x1 for 64-bit pairs." The boundary is the calling convention — the FLS says *what* must happen, ARM64 says *how*.
 
----
-
-## Domain 3: Platform ABI (Application Binary Interface)
-
-**Covers:** Calling conventions (which registers hold arguments, return values, are callee-saved vs caller-saved), stack layout, binary format, syscall conventions. Platform-specific differences between macOS, Linux, and BSDs.
-
-**Authoritative sources:**
-- `refs/arm64-abi.md` — AAPCS64 (Procedure Call Standard for AArch64), shared by all platforms
-- `refs/arm64-platform-abi.md` — platform-specific differences (syscall ABI, binary format, startup convention)
-
-**Key facts:**
-- Register conventions (x0–x7 for integer args, d0–d7 for float args, x0/d0 for return, x29/x30 for frame/link) are identical on all platforms (AAPCS64).
-- Binary format and syscall convention differ:
-  - Linux: ELF, `svc #0` with syscall number in `x8`
-  - macOS: Mach-O, different syscall numbers (galvanic doesn't currently target macOS natively)
-  - BSDs: ELF like Linux, different syscall numbers
-- Galvanic emits Linux ELF. The output binary will not run on macOS even on Apple Silicon.
-
-**Boundary confusion with FLS:** The ABI is not specified by the FLS — the FLS defines the Rust abstract machine, not the binary representation. Calling conventions are an ABI concern, not a spec concern. When galvanic's codegen puts arguments in the wrong registers, that's an ABI bug, not an FLS compliance bug.
-
-**Boundary confusion with ISA:** The ISA says `x0`–`x30` are general-purpose registers. The ABI says `x0` holds the first integer argument and return value, `x29` is the frame pointer, `x30` is the link register. When a function returns the wrong value, check whether the ABI convention is being followed before checking the instruction encoding.
+**Boundary with Platform ABI domain:** ARM64 registers are the same on all platforms; syscall numbers and binary format differ. A bug in which register holds a return value is an ARM64 domain bug. A bug in the `_start` entry point vs. `main` calling convention is a Platform ABI bug.
 
 ---
 
-## Domain 4: Safe Rust (the implementation language)
+## Domain 3: Platform ABI
 
-**Covers:** The Rust language galvanic is written in. Ownership, borrowing, lifetimes, error handling (`Result`, `?`), iterators, string formatting, standard library types.
+**What it covers:** How the OS interacts with the binary. Entry point (`_start` for Linux ELF, different for macOS Mach-O). Syscall instruction (`svc #0` on Linux, same on macOS but different numbers). Binary format (ELF for Linux/BSDs, Mach-O for macOS). Syscall numbers (each OS has its own table).
 
-**Authoritative source:** The Rust Reference (`https://doc.rust-lang.org/reference/`) and `rustc` documentation.
+**Authoritative source:** `refs/arm64-platform-abi.md` — galvanic's own comparison table across macOS, Linux, and BSD. The Linux syscall table (kernel headers or `man 2 syscall`).
 
-**Important distinction:** Galvanic is written in Rust, but the Rust being *compiled* by galvanic is constrained by the FLS, not by the full Rust reference. The FLS covers a subset of Rust (including `no_std`). When galvanic needs to *implement* something (e.g., a `HashMap` for the symbol table), it uses whatever Rust feature works — including `std`. When galvanic needs to *compile* something, it's bound by the FLS subset.
+**In this project:** Galvanic currently emits Linux ARM64 ELF. The e2e tests run via `qemu-aarch64`. Platform differences are documented in `refs/arm64-platform-abi.md` for future work.
 
-**Boundary confusion:** A contributor might try to add support for a Rust feature that galvanic uses in its own implementation but has not yet implemented for compilation. These are separate: "galvanic uses `HashMap`" and "galvanic can compile programs that use `HashMap`" are independent.
+**Common confusion:** A failing e2e test may be a Platform ABI bug (wrong entry point, wrong syscall number) rather than a codegen bug. Check the ELF format and syscall choices before assuming the instruction encoding is wrong.
 
 ---
 
-## Where boundaries create confusion
+## Domain 4: Rust Compiler Conventions (Excluded by Design)
 
-| Symptom | Likely domain | Common mistake |
+**What it covers:** What rustc does internally — its IR, its optimization passes, its actual ABI choices for edge cases the FLS doesn't specify.
+
+**Authoritative source:** rustc source code, compiler-internal documentation.
+
+**In this project:** **Explicitly excluded.** Galvanic is a clean-room implementation. Looking at rustc internals to resolve an FLS ambiguity would corrupt the research output. When the FLS is silent, galvanic makes a reasoned choice and documents it in `refs/fls-ambiguities.md`. That documented choice — not rustc's actual behavior — is the artifact.
+
+**Common confusion:** "This is how rustc does it" is not a valid justification for a galvanic implementation choice. "This is what the FLS says" is. If the FLS doesn't say, document the ambiguity.
+
+---
+
+## Domain 5: Cache-Line Optimization Theory
+
+**What it covers:** How cache lines work (64 bytes on ARM64), data structure layout for cache efficiency, instruction stream density (fewer bytes = more instructions per cache line = better throughput for instruction-fetch-bound code).
+
+**Authoritative source:** ARM Architecture Reference Manual (cache behavior), empirical measurement. The design thesis is stated in `README.md`.
+
+**In this project:** Every data structure in `src/ir.rs` and `src/lexer.rs` carries a cache-line note. The `Token` type is enforced to be 8 bytes. Cache-line awareness shapes IR node design, not as a post-hoc optimization but as a constraint considered during initial design.
+
+**Boundary with ARM64 domain:** ARM64 specifies cache line size (64 bytes). Cache-line optimization theory says how to use that fact. The domains are adjacent — a cache-line note in the code cites the ARM64 cache line size and then explains the layout decision.
+
+**Common confusion:** Cache-line awareness is a *design constraint*, not an optimization pass. Adding a cache-line pass that runs after IR construction misses the point. The question to ask when adding an IR node: "Does this fit in a cache line? What are the tradeoffs if it doesn't?"
+
+---
+
+## Where Domains Create Confusion
+
+| Symptom | Likely domain | Wrong attribution |
 |---|---|---|
-| Wrong exit code from compiled binary | ABI (wrong return register) | Blamed on FLS |
-| Constant result emitted instead of runtime code | FLS §6.1.2 violation | Blamed on codegen (it's actually correct ISA, wrong semantics) |
-| Function call passes wrong value | ABI (wrong argument register) | Blamed on ISA |
-| Section number in citation doesn't exist | FLS version drift | Treated as annotation error |
-| Binary runs on Linux but not on macOS | Platform ABI (ELF vs Mach-O) | Treated as ISA bug |
-| `AMBIGUOUS` annotation with no matching ref entry | Process gap | Treated as code quality issue |
-| Clippy warning about an implementation detail | Safe Rust domain | Confused with FLS compliance |
+| Emitted assembly has wrong register | ARM64 ABI | FLS ambiguity |
+| Binary doesn't run on Linux but codegen looks right | Platform ABI (entry point, syscall) | ARM64 instruction encoding |
+| FLS says X but galvanic does Y | FLS implementation gap | Platform constraint |
+| "rustc does it differently" | Not galvanic's concern | ARM64 or FLS |
+| Token size grew past 8 bytes | Cache-line domain | ARM64 instruction set |
+| Test fails on CI but passes locally | Platform ABI (Linux vs. macOS) | Codegen bug |
+
+When debugging, name which domain owns the bug before proposing a fix. A fix in the wrong domain (adding an FLS citation to a syscall number bug) will not resolve the problem.

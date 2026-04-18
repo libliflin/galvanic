@@ -1,0 +1,10 @@
+`.lathe/brand.md` is written. Here's what the evidence showed:
+
+**Identity:** Researcher-voiced, disarmingly honest. The "sacrificial anode" line and "do not use this on anything you care about" (README:14–15) set the register — this project speaks like a scientist keeping lab notes, not a product making claims.
+
+**Three signals that define the voice:**
+1. FLS section citations everywhere — commits, comments, error messages, the ambiguity register. The spec is the authority; everything traces back to it.
+2. `"not yet supported: {specific thing}"` — the error pattern (lower.rs:79) names the boundary precisely and keeps the "yet" in scope. Vague errors corrupt the research value.
+3. Structured commits (`type: what for {stakeholder} (cycle N)`) — the git log is a research journal, not a change log.
+
+The anti-pattern (the thing we'd never do): vague errors. The catch-all in `lower_expr` (lower.rs:18817–22) includes the variant name and a comment pointing contributors to the right grep. An error that can't be cited is useless to a researcher.

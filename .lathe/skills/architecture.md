@@ -1,129 +1,113 @@
 # Architecture — Galvanic
 
-## What galvanic is
-
-A clean-room ARM64 Rust compiler built strictly from the Ferrocene Language Specification (FLS), targeting `no_std` Rust. Two research questions drive every design decision:
-
-1. Is the FLS actually implementable by an independent party?
-2. What happens when cache-line alignment is a first-class design constraint — not an optimization pass, but a constraint woven into layout, register allocation, and instruction selection from the start?
-
-This is not a production compiler. It's a research instrument. Value comes from what is learned about the spec and about cache-aware codegen.
+Key architectural decisions visible in the codebase. For the builder and verifier.
 
 ---
 
 ## Pipeline
 
-Source `.rs` file → **lexer** → **parser** → **AST** → **lower** → **IR** → **codegen** → ARM64 GAS assembly → (assembler + linker → binary)
+Galvanic is a linear six-stage compiler pipeline:
 
-Each stage lives in its own file:
+```
+Source text
+  → Lexer (src/lexer.rs)        — produces Vec<Token>
+  → Parser (src/parser.rs)      — produces SourceFile (AST, src/ast.rs)
+  → Lower (src/lower.rs)        — produces Module (IR, src/ir.rs)
+  → Codegen (src/codegen.rs)    — produces ARM64 assembly text
+  → Assembler (aarch64-linux-gnu-as) — produces .o
+  → Linker (aarch64-linux-gnu-ld)   — produces ELF binary
+```
 
-| File | Stage | FLS anchor |
+The last two stages (assemble/link) are invoked from `src/main.rs` using subprocess commands. The library (`src/lib.rs`) only covers lex through codegen — the CLI driver in `main.rs` is the only place that shells out.
+
+**Why this matters for the builder:** Never add subprocess invocations (`std::process::Command`) to any file other than `src/main.rs`. The audit CI job enforces this.
+
+---
+
+## IR Design Philosophy
+
+The IR (`src/ir.rs`) is intentionally minimal. Nothing is added before it is needed by the next runnable binary. The comment at the top of `ir.rs` says: "The design will grow with each milestone program." This is not debt — it is the design.
+
+Every new IR node must earn its place by being needed by an actual source program that galvanic should compile. Do not add speculative IR nodes.
+
+---
+
+## Cache-Line Awareness
+
+Cache-line alignment is a first-class design constraint, not an optimization pass. Every public type in the IR carries a cache-line note explaining how it fits (or will fit) in 64-byte cache lines. The `Token` type is enforced to be exactly 8 bytes (tested in `lexer::tests::token_is_eight_bytes`).
+
+When adding new IR nodes or AST nodes, add a cache-line note. When an existing note says "will be revisited when the instruction set grows," that means: if your change makes the type larger, document the tradeoff.
+
+---
+
+## FLS Traceability
+
+Every implementation decision cites the FLS section it implements:
+
+```rust
+// FLS §9: Functions — each IrFn maps to one source-level function.
+// FLS §6.1.2:37–45 — const-folding is forbidden in runtime contexts.
+// FLS §X.Y: AMBIGUOUS — <describe what the spec doesn't say>
+```
+
+This is not optional decoration. The research value of galvanic comes from these citations. When a section is ambiguous, the `AMBIGUOUS` annotation and `refs/fls-ambiguities.md` entry are the primary outputs.
+
+---
+
+## No Const-Folding in Runtime Contexts
+
+The hardest correctness constraint: FLS §6.1.2:37–45 forbids evaluating runtime code at compile time, even when all values are statically known. A regular `fn` body is not a const context. Galvanic must emit runtime instructions even for `fn main() -> i32 { 1 + 2 }`.
+
+Assembly inspection tests enforce this:
+```rust
+let asm = compile_to_asm("fn main() -> i32 { 1 + 2 }\n");
+assert!(asm.contains("add"), "expected add instruction");
+assert!(!asm.contains("mov     x0, #3"), "must not constant-fold");
+```
+
+**For the builder:** When implementing arithmetic, control flow, or any expression that has a constant value in a test case, write an assembly inspection test — not just an exit-code test.
+
+---
+
+## Test Tiers
+
+Four test tiers, each with a different scope:
+
+| Tier | File | What it tests |
 |---|---|---|
-| `src/lexer.rs` | Tokenization | §2: Lexical Elements |
-| `src/parser.rs` | Parse tokens → AST | §4–§18: Grammar |
-| `src/ast.rs` | AST node types | §4–§18 |
-| `src/lower.rs` | AST → IR | §6, §8, §9, §15, … |
-| `src/ir.rs` | IR node types | Design doc (no direct FLS section) |
-| `src/codegen.rs` | IR → ARM64 GAS | ABI + §18.1 |
-| `src/main.rs` | CLI driver | — |
+| Unit | `src/*.rs` (inline `#[test]`) | Data structure properties (token size, span size) |
+| Smoke | `tests/smoke.rs` | Parser/lexer on minimal inputs |
+| Fixture | `tests/fls_fixtures.rs` | Parse acceptance of FLS-derived programs |
+| E2E | `tests/e2e.rs` | Full pipeline: lex → parse → lower → codegen → assemble → run |
 
-The library (`src/lib.rs`) exports all pipeline modules. `main.rs` is the CLI wrapper only — it parses arguments and invokes the library. The library must never shell out (`std::process::Command` is forbidden in library code).
+E2E tests have two modes:
+- **Assembly inspection**: call `compile_to_asm()`, assert on instruction presence/absence
+- **Run-and-check**: call `compile_and_run()`, assert on exit code
 
----
-
-## Key design constraints
-
-### Safe Rust only
-
-No `unsafe` blocks, no `unsafe fn`, no `unsafe impl`. CI enforces this. The compiler is safe Rust end-to-end — this is a deliberate constraint to keep the implementation trustworthy and auditable.
-
-### No constant folding in non-const contexts
-
-FLS §6.1.2 is explicit: compile-time evaluation is only permitted in const contexts (`const` items, `const fn` when called from a const context, `const { }` blocks, `static` initializers, etc.). A regular `fn main()` body is not a const context, even if every value is statically known. Galvanic must emit runtime instructions for all non-const code.
-
-The litmus test: if you could replace a literal with a function parameter and the compiler would break (by emitting the wrong constant), it's a constant-fold bug.
-
-This constraint is enforced by assembly inspection tests that check the actual emitted instructions, not just exit codes.
-
-### Cache-line awareness
-
-Every data structure in `ir.rs`, `ast.rs`, and `lexer.rs` documents its cache-line layout. The `Token` type is exactly 8 bytes (enforced by a size assertion test). The `Span` type is exactly 8 bytes. `Instr` and `IrValue` are small enums designed to fit in one cache line per instruction.
-
-When adding a new IR node or AST type, document its size and cache-line impact in a `// Cache-line note:` comment. This is not optional — it's how the research question is answered.
-
-### FLS traceability
-
-Every module, type, and non-trivial function has `// FLS §N.M: ...` citations in comments. Ambiguities discovered during implementation are marked `// AMBIGUOUS: §N.M — ...` in source and documented in `refs/fls-ambiguities.md`. Constraints on what the compiler must not do are documented in `refs/fls-constraints.md`.
+Always prefer assembly inspection for any test involving arithmetic, comparisons, or control flow. Exit-code tests are appropriate only when the runtime behavior (not the instruction form) is what matters.
 
 ---
 
-## IR design
+## Compilation Thread Stack
 
-The IR is intentionally minimal. Nothing is added until it is needed by the next runnable program milestone. This prevents premature abstraction and keeps the FLS mapping clear.
-
-Key IR types (in `src/ir.rs`):
-- `Module` — the compilation unit (one per source file)
-- `IrFn` — a function, with a name, parameters, and a list of `Instr`
-- `Instr` — an instruction (load immediate, binary op, return, branch, call, etc.)
-- `IrValue` — a value (register slot, immediate, unit)
-- `IrTy` — a type (i32, u32, f32, f64, bool, unit, ptr, etc.)
-
-The IR does not have SSA form — it uses stack slots (spill-everything model). This is deliberate: SSA would require a separate pass, and the research value is in the FLS mapping, not in register allocation sophistication.
+`src/main.rs` spawns the entire compilation pipeline on a thread with a 64 MB stack (matching rustc's own budget). This prevents stack overflows in the recursive-descent parser from killing the process with a signal. The fuzz-smoke CI job tests this with deeply nested inputs.
 
 ---
 
-## Codegen target
+## Platform Targeting
 
-Output is ARM64 GAS (GNU Assembler) syntax:
-- Architecture: AArch64
-- ABI: AAPCS64 (same register conventions on macOS, Linux, and BSDs)
-- Binary format: Linux ELF with bare `_start` entry point (Linux syscalls via `svc #0`)
-- The output `.s` file is assembled with `aarch64-linux-gnu-as` and linked with `aarch64-linux-gnu-ld`
+Galvanic emits **Linux ARM64 ELF binaries**. Even on macOS (Apple Silicon), the output is Linux ELF — the e2e tests use `qemu-aarch64` to run the result. The assembler and linker are `aarch64-linux-gnu-as` / `aarch64-linux-gnu-ld` (GNU cross tools).
 
-**Important:** The emitted binary uses Linux syscalls and Linux ELF format. It **cannot** run on macOS, even on Apple Silicon, because macOS uses Mach-O format and a different syscall ABI. On macOS, assembly and runtime tests are skipped. CI (ubuntu-latest with `qemu-aarch64`) is the authoritative runtime test environment.
-
-For platform ABI differences (macOS vs Linux vs BSDs), see `refs/arm64-platform-abi.md`.
+The platform ABI differences (macOS vs. Linux vs. BSD syscall numbers, entry point conventions) are documented in `refs/arm64-platform-abi.md`.
 
 ---
 
-## Adding a new language feature
+## No Unsafe Code
 
-The pattern to follow, in order:
-
-1. **AST node** (`src/ast.rs`): Add the new expression, statement, or item type. Document the FLS section. Note cache-line size if it's a frequently-traversed node.
-
-2. **Lexer** (`src/lexer.rs`): Add any new tokens the feature requires. Document the FLS section.
-
-3. **Parser** (`src/parser.rs`): Add the parser case that recognizes the new construct and builds the AST node. Document the FLS section.
-
-4. **Lowering** (`src/lower.rs`): Add the AST-to-IR translation. Emit runtime instructions (not constant-folded results). Document FLS citations. If the spec is silent on something, add an `AMBIGUOUS` annotation.
-
-5. **IR** (`src/ir.rs`): Add any new instruction or type the lowering needs. Document cache-line layout.
-
-6. **Codegen** (`src/codegen.rs`): Add the IR-to-assembly translation. Document the ABI register usage and any cache-line impact.
-
-7. **Tests**: Parse acceptance test in `fls_fixtures.rs`, assembly inspection test in `e2e.rs`, and a runtime test in `e2e.rs` (skipped when cross-toolchain is absent).
+The library (`src/`) has no unsafe blocks. The audit CI job enforces this with a grep. Do not add `unsafe` blocks.
 
 ---
 
-## Trampoline and vtable shim functions
+## No Network Dependencies
 
-When closures are passed as `impl Fn` arguments, galvanic generates **trampoline functions** in `Module::trampolines`. A trampoline bridges the captured-variable calling convention (arguments spread across extra registers) to the `impl Fn` calling convention. See `src/ir.rs` `ClosureTrampoline` for the design.
-
-When `dyn Trait` dispatch is used, galvanic generates **vtable shim functions** in `Module::vtable_shims`. A shim adapts the "fields in registers" calling convention used by galvanic's struct methods to the "data pointer in x0" convention expected by vtable callers. Each shim loads the struct's fields from a stack-allocated pointer and tail-calls the concrete method.
-
-These are generated during lowering and emitted as regular assembly functions during codegen.
-
----
-
-## Stack layout
-
-Galvanic uses a spill-everything model: every local variable is assigned a stack slot in the function prologue. Arguments are spilled from their parameter registers (`x0`..`x7` for integers, `d0`..`d7` for floats) to the stack immediately on entry. This is conservative but keeps the IR simple and the FLS mapping clear.
-
-Frame setup: `sub sp, sp, #N` where N is computed at lowering time. Frame teardown: `add sp, sp, #N` before `ret`.
-
----
-
-## Benchmark suite
-
-`benches/throughput.rs` (Criterion) measures compile throughput on representative programs. CI runs benchmarks and reports timing, and checks that data structure sizes haven't grown (via size assertion tests in `src/lexer.rs`).
+Cargo.toml has no networking crates. The audit CI job checks this. The compiler has no runtime network access.

@@ -1,23 +1,13 @@
 Done. Here's what was written:
 
----
+**`.lathe/goal.md`** — The customer champion's behavioral doc. Three stakeholders (Spec Researcher, Lead Researcher, Compiler Contributor) described richly enough to inhabit, with concrete first-encounter journeys, per-stakeholder emotional signals, and tensions grounded in what the code actually shows. Ranking from two sources: CI floor then lived experience. No layer ladder.
 
-**`.lathe/goal.md`** — The customer champion behavioral doc. Three stakeholders grounded in what's actually in the code:
+**`.lathe/skills/journeys.md`** — The eight concrete steps each stakeholder walks, with specific watch-for moments and the emotional signal to track at each step. These are what the champion actually executes each cycle.
 
-- **Lead researcher** (the author) — wants momentum; walks the feature-extension journey, looking for compile-pipeline gaps and missing FLS annotations
-- **Spec researcher** — wants discovery; navigates from `AMBIGUOUS` annotations in source to `refs/fls-ambiguities.md`, checking whether findings are documented with enough specificity to be actionable
-- **Compiler contributor** — wants clarity; tries to add a new construct end-to-end, looking for where the pattern breaks down
+**`.lathe/skills/architecture.md`** — Pipeline overview, IR design philosophy, cache-line constraints, test tiers, the no-const-folding rule, no-unsafe constraint, and why the assembler/linker live only in `main.rs`.
 
-The ranking model is floor (CI/tests) then lived experience — no layer ladder.
+**`.lathe/skills/testing.md`** — The four test tiers (unit, smoke, fixture, e2e), when to use assembly inspection vs. exit-code tests, and the checklist for adding a new feature's tests.
 
-**`.lathe/skills/testing.md`** — The three test files, what each covers, CI jobs, key invariants (no unsafe, no constant folding, token size), and the pattern for adding a new feature test.
+**`.lathe/skills/domains.md`** — Five domains (FLS, ARM64, Platform ABI, Rust compiler conventions [excluded], Cache-line theory), their boundaries, and a confusion table mapping symptoms to the right domain authority.
 
-**`.lathe/skills/architecture.md`** — Pipeline overview, the three non-negotiable design constraints (safe Rust, no const folding, cache-line awareness + FLS traceability), IR design philosophy, codegen target quirks (Linux ELF only, macOS can't run output), and the step-by-step pattern for adding a new feature.
-
-**`.lathe/skills/journeys.md`** — Concrete step-by-step journeys for each stakeholder, with specific commands to run and friction signals to watch for.
-
-**`.lathe/skills/domains.md`** — Domain boundary map: FLS, ARM64 ISA, Platform ABI, Safe Rust. The "symptom → likely domain" table at the bottom is where the confusion points actually live.
-
-**`.lathe/alignment-summary.md`** — For you. Includes the security assessment: `ci.yml` uses `pull_request` (not `pull_request_target`), global `contents: read` permission — low injection risk. Action item: confirm branch protection on `main` before running lathe autonomously.
-
-**`snapshot.sh`** — Added two new sections: FLS Coverage (fixture count split between compiled and parse-only, with parse-only listed as candidate goals) and Ambiguity Tracking (counts `AMBIGUOUS §` annotations in source vs. documented entries in `refs/fls-ambiguities.md`, flags mismatches).
+**`.lathe/alignment-summary.md`** — For you: stakeholder roster, emotional signals, tensions, CI security check (low injection risk, permissions are minimal), and what could be wrong (missing Spec Author stakeholder, no brand.md, e2e test friction on macOS).

@@ -1,11 +1,13 @@
-Script runs cleanly. Output is 1,426 characters on a green build — well within the 6,000-character budget, with plenty of headroom for failure details when things break.
+Works cleanly. Output is ~950 characters — well within the 6K cap. Here's what each section reports:
 
-**What it covers:**
-- **Git status/log** — raw short status + last 10 commits
-- **Build** — `cargo build`, one line on success, errors on failure
-- **Tests** — `cargo test`, Pass/Fail/Ignored counts; expands to show failed test names + context on failure
-- **Clippy** — `cargo clippy -D warnings`, OK or error count + first errors
-- **Unsafe audit** — mirrors the CI check, warns if unsafe blocks appear in `src/`
-- **CI** — lists job names from `.github/workflows/ci.yml`
+| Section | Happy path | Failure path |
+|---|---|---|
+| **Git Status** | `git status --short` (changes visible) | — |
+| **Recent Commits** | last 10 one-liners | — |
+| **Build** | `OK — builds clean` | `FAILED` + first 10 `error` lines |
+| **Tests** | `Pass: 2063 \| Fail: 0 \| Ignored: 0` | expands with failure details |
+| **Clippy** | `OK — no warnings` | error count + first 5 |
+| **CI** | lists file + job names | notes absence |
+| **Audit** | `No unsafe code — clean` | lists violations |
 
-The happy path produces ~1,400 chars. Failure paths expand per section but are capped (`head -10`, `head -8`, etc.) to stay well under 6,000.
+The script uses `gtimeout`/`timeout` with a macOS fallback, `|| true` to keep running through test failures, and `2>&1` to capture stderr everywhere.
