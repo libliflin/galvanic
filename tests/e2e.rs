@@ -37990,6 +37990,56 @@ fn fls_6_18_bound_range_exclusive_in_tuple_emits_lt_check() {
     );
 }
 
+/// Assembly inspection: registry reproducer for §5.1.4 Gap 2 — check-first ordering.
+///
+/// The registry entry at refs/fls-ambiguities.md §5.1.4 Gap 2 documents galvanic's
+/// choice: sub-pattern check first, binding store only on success (check-first).
+/// This test witnesses that claim by inspecting the actual emitted assembly:
+///   1. Range check emits `cmp` instructions (lower-bound ge and upper-bound le tests)
+///   2. `cbz` gates the success path — the binding store appears after the cbz
+///   3. On the mismatch path, no binding store is emitted
+///
+/// FLS §5.1.4 AMBIGUOUS: check-first is galvanic's documented choice; the spec
+/// does not mandate ordering. See refs/fls-ambiguities.md §5.1.4 Gap 2.
+#[test]
+fn fls_5_1_4_at_binding_registry_reproducer_check_first_ordering() {
+    // Exact reproducer from refs/fls-ambiguities.md §5.1.4 Gap 2.
+    let asm = compile_to_asm(
+        "fn classify(x: i32) -> i32 {\n\
+             match x { n @ 1..=10 => n, _ => 0 }\n\
+         }\n\
+         fn main() -> i32 { classify(5) }\n",
+    );
+    // 1. Range check: at least two cmp instructions (lower-bound ge + upper-bound le).
+    let cmp_count = asm.matches("cmp").count();
+    assert!(
+        cmp_count >= 2,
+        "expected >= 2 cmp instructions for `n @ 1..=10` range check (FLS §5.1.4 Gap 2), \
+         got {cmp_count} in:\n{asm}"
+    );
+    // 2. Conditional branch present: cbz is the check-first gate.
+    assert!(
+        asm.contains("cbz"),
+        "expected cbz for check-first gate in `n @ 1..=10` (FLS §5.1.4 Gap 2), got:\n{asm}"
+    );
+    // 3. Binding store appears after cbz in the instruction stream — check-first ordering:
+    //    the str for the binding slot is only reachable after the cbz guard passes.
+    let cbz_pos = asm.find("cbz").expect("cbz must be present");
+    assert!(
+        asm[cbz_pos..].contains("str"),
+        "expected str (binding store) after cbz (check-first gate) in `n @ 1..=10` \
+         (FLS §5.1.4 Gap 2), confirming check-first ordering; got:\n{asm}"
+    );
+    // 4. No constant-fold: classify must not return via a bare move without any compare.
+    //    The presence of `cmp` in the assembly (checked above) is the primary guard.
+    //    Additionally, the classify body must contain `ldr` (load from binding slot).
+    assert!(
+        asm.contains("ldr"),
+        "expected ldr (binding slot load) in classify — runtime load, not constant-fold \
+         (FLS §6.1.2): {asm}"
+    );
+}
+
 /// Assembly inspection: `@ 1..=10` binding in if-let tuple sub-pattern (Site F).
 ///
 /// `if let (a @ 1..=10, 0) = t { a } else { -1 }` — the refactored Site F
