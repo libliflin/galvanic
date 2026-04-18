@@ -243,3 +243,13 @@ fn fls_6_14_closure_expressions() {
 fn fls_6_4_3_named_block() {
     assert_galvanic_accepts("fls_6_4_3_named_block.rs");
 }
+
+#[test]
+fn fls_6_8_array_expressions() {
+    assert_galvanic_accepts("fls_6_8_array_expressions.rs");
+}
+
+#[test]
+fn fls_6_9_indexing_expressions() {
+    assert_galvanic_accepts("fls_6_9_indexing_expressions.rs");
+}
