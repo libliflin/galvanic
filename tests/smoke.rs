@@ -279,6 +279,49 @@ fn lower_error_includes_fls_citation() {
 }
 
 #[test]
+fn tuple_scrutinee_error_names_fls_sections_and_fix_site() {
+    // Cycle 028 goal: when a contributor writes `match (x, y) { ... }`, the
+    // error must come from the ExprKind::Match handler — naming FLS §6.18
+    // (Match expressions) and §6.10 (Tuple expressions) and pointing to the
+    // enum_base_slot / struct_base_slot pattern to extend.
+    //
+    // Before cycle 028 this error came from the generic ExprKind::Tuple fallback
+    // with no FLS citation and no guidance. Both are now required.
+    let mut tmp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
+    write!(
+        tmp,
+        r#"
+fn match_tuple(x: i32, y: i32) -> i32 {{
+    match (x, y) {{ (0, 0) => 0, _ => 1 }}
+}}
+"#
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_galvanic"))
+        .arg(tmp.path())
+        .output()
+        .expect("failed to run galvanic");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Must cite both FLS sections the goal named.
+    assert!(
+        stderr.contains("FLS §6.18"),
+        "expected FLS §6.18 citation in tuple scrutinee error, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("§6.10"),
+        "expected §6.10 citation in tuple scrutinee error, got: {stderr}"
+    );
+    // Must point the contributor to the right fix site.
+    assert!(
+        stderr.contains("enum_base_slot"),
+        "expected fix-site hint 'enum_base_slot' in tuple scrutinee error, got: {stderr}"
+    );
+    assert!(!output.status.success(), "expected non-zero exit");
+}
+
+#[test]
 fn partial_lower_no_main_emits_inspection_assembly() {
     // When fn main fails to lower but other functions succeed, galvanic must
     // emit a partial .s file annotated "inspection-only" so the Lead Researcher

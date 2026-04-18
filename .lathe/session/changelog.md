@@ -1,3 +1,47 @@
+# Verification — Cycle 028, Round 1 (Verifier)
+
+## What I compared
+
+- **Goal:** Fix error provenance for tuple scrutinee match errors — the error must come from the `ExprKind::Match` handler, name FLS §6.18 and §6.10, and point to `enum_base_slot` / `struct_base_slot`.
+- **Builder's diff:** 11-line early-detection block added in `src/lower.rs` after the `struct_base_slot` detection block, before `lower_expr(scrutinee, ...)`.
+
+**What I ran:**
+- `cargo test` — 2115 pass, 0 fail ✓
+- `cargo clippy -- -D warnings` — clean ✓
+- `cargo run -- tests/fixtures/fls_6_18_match_expressions.rs`:
+  ```
+  error: lower failed in 'match_tuple': not yet supported: tuple scrutinee in match
+  not yet supported (FLS §6.18, §6.10); extend enum_base_slot / struct_base_slot
+  detection in lower_expr
+  lowered 12 of 13 functions (1 failed)
+  ```
+  The error names both FLS sections and points to the fix site. ✓
+
+## What's here, what was asked
+
+The goal asked for error placement and message quality only — no functional change. The builder delivered:
+- Error now comes from the match handler (not the generic tuple fallback 6,000 lines away). ✓
+- Message names FLS §6.18 and §6.10. ✓
+- Message points to `enum_base_slot` / `struct_base_slot` — the exact pattern a contributor must extend. ✓
+
+**Gap found:** The testing table requires "New CLI behavior / error message → `tests/smoke.rs` test asserting the exact output form." The builder added no smoke test pinning the new message. The `lower_error_reports_all_failures` test uses `match (x, y)` but only asserts function names and summary counts — it doesn't assert the FLS citation or the fix-site hint. The `lower_error_includes_fls_citation` test checks a different fixture (patterns). Nothing locks the new message form in place.
+
+## What I added
+
+**`tests/smoke.rs` — `tuple_scrutinee_error_names_fls_sections_and_fix_site`:**
+Asserts that a `match (x, y)` program produces stderr containing `FLS §6.18`, `§6.10`, and `enum_base_slot`. This pins the exact three properties the goal required in a place that will catch any regression — a future refactor that moves the error back to the tuple fallback, drops a citation, or removes the fix-site hint will now fail here.
+
+- Files: `tests/smoke.rs`
+- `cargo test --test smoke` after addition: **12 pass, 0 fail** (was 11)
+- `cargo test` full suite: **2116 pass, 0 fail** (was 2115)
+
+## Notes for the goal-setter
+
+- The `lower_error_reports_all_failures` smoke test (lines 76–117) uses `match (x, y)` as its "unsupported construct." Now that the error message has changed, the comment on line 81 ("Two functions that both use a tuple expression as a match scrutinee") is still accurate, but a future reader might wonder why those two are the chosen fixtures. Worth noting for documentation hygiene — not a blocker.
+- The error message says "extend enum_base_slot / struct_base_slot detection in lower_expr" — the guidance is accurate but slightly imprecise: the detection blocks live inside the `ExprKind::Match` arm of `lower_expr`, not `lower_expr` itself. A follow-up could tighten this to "extend the detection in the ExprKind::Match arm of lower_expr" — small, out of scope here.
+
+---
+
 # Changelog — Cycle 028, Round 1 (Builder)
 
 ## Goal
