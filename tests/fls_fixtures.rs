@@ -53,6 +53,11 @@ fn fls_5_patterns() {
 }
 
 #[test]
+fn fls_5_1_4_at_binding_patterns() {
+    assert_galvanic_accepts("fls_5_1_4_at_binding_patterns.rs");
+}
+
+#[test]
 fn fls_13_traits() {
     assert_galvanic_accepts("fls_13_traits.rs");
 }
