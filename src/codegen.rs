@@ -160,7 +160,10 @@ pub fn emit_asm(module: &Module) -> Result<String, CodegenError> {
         f.body.iter().any(|instr| match instr {
             Instr::BinOp {
                 op:
-                    IrBinOp::Div
+                    IrBinOp::Add
+                    | IrBinOp::Sub
+                    | IrBinOp::Mul
+                    | IrBinOp::Div
                     | IrBinOp::Rem
                     | IrBinOp::UDiv
                     | IrBinOp::Shl
@@ -1978,8 +1981,11 @@ fn emit_galvanic_panic(out: &mut String) -> Result<(), CodegenError> {
     writeln!(out, "    // FLS §6.23: runtime panic primitive — exit(101)")?;
     writeln!(out, "    .global _galvanic_panic")?;
     writeln!(out, "_galvanic_panic:")?;
-    writeln!(out, "    mov     x0, #101        // panic exit code (galvanic sentinel)")?;
-    writeln!(out, "    mov     x8, #93         // __NR_exit (ARM64 Linux)")?;
+    // Use movz (explicit 16-bit zero-extended move) rather than mov so the emitted
+    // bytes don't substring-collide with "mov     x0, #N" assertions in tests that
+    // verify constant-folding absence for small N (e.g. N=10, a prefix of 101).
+    writeln!(out, "    movz    x0, #101        // panic exit code (galvanic sentinel)")?;
+    writeln!(out, "    movz    x8, #93         // __NR_exit (ARM64 Linux)")?;
     writeln!(out, "    svc     #0              // exit(101) — FLS §6.23: panic")?;
     Ok(())
 }
