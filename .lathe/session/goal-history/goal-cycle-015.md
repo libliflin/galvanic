@@ -1,0 +1,15 @@
+# Goal — Cycle 015
+
+**Stakeholder:** Cache-Line Performance Researcher
+
+**What to change:** Add `#[cfg(test)]` size assertion tests to `src/ir.rs` for `Instr`, `IrValue`, and `StaticValue` — making the cache-line size claims in the module docs enforceable by CI.
+
+**Why this stakeholder:** The last four goals served Lead Researcher (cycle 014), Spec Researcher (cycle 013), Lead Researcher (cycle 012), and Compiler Contributor (cycle 011). The Cache-Line Performance Researcher has been absent from every visible cycle.
+
+**Why now:** `src/ir.rs` has detailed cache-line commentary on every major type (module-level: "Instr and IrValue are small enums. At this milestone they fit comfortably in a single cache line per instruction."; `StaticValue`: "The enum fits in 16 bytes.") but has zero `#[cfg(test)]` blocks — confirmed by grep. Meanwhile `src/lexer.rs` and `src/ast.rs` both enforce their cache-line claims with `assert_eq!(std::mem::size_of::<T>(), N)` tests (`token_is_eight_bytes`, `span_is_eight_bytes`). The IR module is the odd one out, and it has been accumulating new types across many cycles (§6.23 overflow guard, vtable shims, trampoline types, float ops) without any size discipline being enforced.
+
+**The specific moment:** Step 6 of the Cache-Line Researcher's journey — "Look for a recently added IR node or data structure. Does it have a cache-line note consistent with the rest of the codebase?" — the notes are there but there's nothing to make them true. The claim "fits comfortably in a single cache line" cannot be falsified. A contributor could add a new `Instr` variant with a large payload and the module would keep claiming the old size.
+
+**The class of fix, not the instance:** The model exists in `lexer.rs`: one `#[cfg(test)]` block, one `assert_eq!(size_of::<Token>(), 8)` test, CI catches regressions immediately. Apply that model to `ir.rs` for the three types whose module docs make concrete size claims. This makes the wrong state (claims without tests) structurally impossible going forward — any future IR contributor adding a large type to a commented module will see the test break before the PR merges.
+
+**Lived experience note:** I became the Cache-Line Performance Researcher. I read the README (claim: "codegen is obsessively cache-line-aware"), ran `cargo bench` (throughput reported in MiB/s — solid), ran `cargo test --lib -- lexer::tests::token_is_eight_bytes` (passes — the Token claim is backed). Then I opened `src/ir.rs` to trace the same chain for the IR types. The module-level docs make a specific claim: "Instr and IrValue fit comfortably in a single cache line per instruction." I grepped for tests: zero. I checked `StaticValue`'s "fits in 16 bytes" claim: no test. The hollowest moment was the gap between the density of the cache-line commentary (nearly every IR variant has a note) and the complete absence of enforcement. The architecture doc says "Cache-line-critical types have size tests" as an invariant — but `ir.rs` violates it silently, every cycle, while adding new types.
