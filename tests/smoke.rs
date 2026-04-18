@@ -638,6 +638,66 @@ fn main() {{}}
 }
 
 #[test]
+fn lifetime_annotated_ref_parse_error_cites_fls() {
+    // FLS §4.8, §4.14: When the parser sees a lifetime-annotated reference type
+    // (`&'static T`, `&'a T`) in any type position, the error must cite FLS §4.8
+    // and §4.14 so a contributor knows which spec sections to read.
+    let mut tmp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
+    write!(
+        tmp,
+        "fn foo(x: &'static str) -> &'static str {{ x }}\nfn main() {{}}\n"
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_galvanic"))
+        .arg(tmp.path())
+        .output()
+        .expect("failed to run galvanic");
+
+    assert!(!output.status.success(), "expected non-zero exit for lifetime-annotated ref");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FLS §4.8"),
+        "expected FLS §4.8 citation in lifetime-annotated ref error, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("lifetime"),
+        "expected 'lifetime' in error message, got: {stderr}"
+    );
+}
+
+#[test]
+fn lifetime_bound_parse_error_cites_fls() {
+    // FLS §4.14, §12.1: When the parser sees a lifetime bound (`T: 'static`,
+    // `T: 'a`) in a generic parameter, the error must cite FLS §4.14 so a
+    // contributor knows which spec section to read.
+    let mut tmp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
+    write!(
+        tmp,
+        "fn foo<T: 'static>(x: T) -> T {{ x }}\nfn main() {{}}\n"
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_galvanic"))
+        .arg(tmp.path())
+        .output()
+        .expect("failed to run galvanic");
+
+    assert!(!output.status.success(), "expected non-zero exit for lifetime bound");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FLS §4.14"),
+        "expected FLS §4.14 citation in lifetime bound error, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("lifetime"),
+        "expected 'lifetime' in error message, got: {stderr}"
+    );
+}
+
+#[test]
 fn lower_source_all_unsupported_strings_cite_fls() {
     // Static invariant: every LowerError::Unsupported( call site in src/lower.rs
     // must supply a message string that contains "(FLS §". This ensures every

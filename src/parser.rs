@@ -409,6 +409,18 @@ impl<'src> Parser<'src> {
                 let mut consumed_outer_gt = false;
                 if self.eat(TokenKind::Colon) {
                     'bound_loop: loop {
+                        if self.peek_kind() == TokenKind::Lifetime {
+                            // FLS §4.14: Lifetime bounds (`T: 'a`, `T: 'static`) are valid
+                            // Rust but not yet implemented in galvanic. Fix site: the
+                            // `'bound_loop` in `parse_fn_def()` in `src/parser.rs`.
+                            return Err(self.error(
+                                "lifetime bounds not yet supported (FLS §4.14, §12.1) — \
+                                 galvanic handles trait bounds (`T: Trait`) but not lifetime \
+                                 bounds (`T: 'static`, `T: 'a`); remove the lifetime bound \
+                                 to continue"
+                                    .to_owned(),
+                            ));
+                        }
                         if self.peek_kind() == TokenKind::Ident {
                             self.advance(); // skip bound trait name
                             // FLS §4.14: Parenthesized bound `Fn(T) -> R`.
@@ -1710,6 +1722,19 @@ impl<'src> Parser<'src> {
             TokenKind::And => {
                 self.advance();
                 let mutable = self.eat(TokenKind::KwMut);
+                if self.peek_kind() == TokenKind::Lifetime {
+                    // FLS §4.8, §4.14: Lifetime-annotated references (`&'a T`,
+                    // `&'static T`) are valid Rust but not yet implemented in
+                    // galvanic. Fix site: the `TokenKind::And` branch in
+                    // `parse_ty()` in `src/parser.rs`.
+                    return Err(self.error(
+                        "lifetime-annotated references not yet supported (FLS §4.8, §4.14) — \
+                         galvanic handles bare references (`&T`, `&mut T`) but not \
+                         lifetime-annotated ones (`&'a T`, `&'static T`); remove \
+                         the lifetime annotation to continue"
+                            .to_owned(),
+                    ));
+                }
                 let inner = self.parse_ty()?;
                 let end = inner.span;
                 Ok(Ty {
