@@ -1,3 +1,63 @@
+# Changelog — Cycle 028, Round 1 (Builder)
+
+## Goal
+Fix error provenance for tuple scrutinee match errors. When a contributor runs
+`match (x, y)`, the error must come from the `ExprKind::Match` handler (naming
+FLS §6.18 and §6.10, pointing to the `enum_base_slot` / `struct_base_slot`
+detection pattern), not from the generic `ExprKind::Tuple` fallback 6,000 lines
+away.
+
+## Who This Helps
+- **Stakeholder:** Compiler Contributor
+- **Impact:** The contributor who wants to add tuple scrutinee support now lands
+  in the right place immediately. The error names the FLS sections, names the
+  specific construct, and points to the exact detection pattern to extend.
+
+## Applied
+Added an early-detection check for `ExprKind::Tuple` scrutinees in the
+`ExprKind::Match` handler in `src/lower.rs`, directly after the
+`struct_base_slot` detection block and before the `lower_expr(scrutinee, ...)`
+call.
+
+```rust
+// FLS §6.18, §6.10: Tuple scrutinee early detection.
+if matches!(scrutinee.kind, ExprKind::Tuple(_)) {
+    return Err(LowerError::Unsupported(
+        "tuple scrutinee in match not yet supported (FLS §6.18, §6.10); \
+         extend enum_base_slot / struct_base_slot detection in lower_expr"
+            .into(),
+    ));
+}
+```
+
+The generic `ExprKind::Tuple` fallback at line 18645 remains untouched — it
+handles other contexts (tail expression, value context). No functional change.
+
+**Files changed:**
+- `src/lower.rs` — 11-line addition after `struct_base_slot` block (~line 12496)
+
+## Validated
+- `cargo test` — **2115 pass, 0 fail** (unchanged count, no regression)
+- `cargo clippy -- -D warnings` — clean
+- `cargo run -- tests/fixtures/fls_6_18_match_expressions.rs`:
+  ```
+  error: lower failed in 'match_tuple': not yet supported: tuple scrutinee in match
+  not yet supported (FLS §6.18, §6.10); extend enum_base_slot / struct_base_slot
+  detection in lower_expr
+  lowered 12 of 13 functions (1 failed)
+  ```
+  Before this change, the error came from `ExprKind::Tuple` fallback and said
+  "tuple expression must be bound to a `let` variable at this milestone" — no FLS
+  citation, no pointer to the match handler.
+
+**Where the verifier should look:**
+- `src/lower.rs` near line 12496 — the new early-detection block between
+  `struct_base_slot` and `lower_expr(scrutinee, ...)`
+- `cargo run -- tests/fixtures/fls_6_18_match_expressions.rs` — the error on
+  `match_tuple` should name `FLS §6.18, §6.10` and mention `enum_base_slot`
+
+---
+
 # Changelog — Cycle 028 (Customer Champion)
 
 ## Stakeholder: Compiler Contributor

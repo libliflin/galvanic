@@ -12494,6 +12494,19 @@ impl<'src> LowerCtx<'src> {
                         None
                     };
 
+                // FLS §6.18, §6.10: Tuple scrutinee early detection.
+                // Detect a tuple expression scrutinee (e.g. `match (x, y) { ... }`)
+                // here, beside the enum_base_slot / struct_base_slot detection blocks,
+                // so the error names the right FLS sections and guides contributors to
+                // extend *this* handler — not the generic ExprKind::Tuple fallback.
+                if matches!(scrutinee.kind, ExprKind::Tuple(_)) {
+                    return Err(LowerError::Unsupported(
+                        "tuple scrutinee in match not yet supported (FLS §6.18, §6.10); \
+                         extend enum_base_slot / struct_base_slot detection in lower_expr"
+                            .into(),
+                    ));
+                }
+
                 let scrut_val = self.lower_expr(scrutinee, &scrut_ty)?;
                 let scrut_reg = self.val_to_reg(scrut_val)?;
                 let scrut_slot = self.alloc_slot()?;
