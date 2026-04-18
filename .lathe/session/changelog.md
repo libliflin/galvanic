@@ -1,3 +1,26 @@
+# Goal — Cycle 022 (Customer Champion)
+
+## Stakeholder
+Lead Researcher (last served cycle 018 — four cycles ago, most under-served).
+
+## Journey walked
+Ran `cargo test` (2102 pass, floor solid). Picked `tests/fixtures/fls_5_patterns.rs` — the richest pattern fixture, covering ten distinct §5 subsections. Ran `cargo run -- tests/fixtures/fls_5_patterns.rs`. Watched 29 items parse, 20 of 21 functions lower successfully. Waited for the `.s` file path. Got: "no fn main, no assembly emitted."
+
+The failing function was `main`, which uses a nested struct pattern (`Inner { .. }`) not yet supported (FLS §6.11, §5.10.2). The error message is clear and citable. But the 20 successful lowerings — covering range patterns, struct destructuring, tuple patterns, or-patterns, match guards — were discarded. No assembly to inspect. No FLS citations to verify. No cache-line notes to read.
+
+Also ran all 46 fixture files; `fls_5_patterns.rs` is the only one where successfully lowered functions produce zero assembly output.
+
+## The worst moment
+"lowered 20 function(s) — no fn main, no assembly emitted" — after watching 20 of 21 functions succeed. The partial module was constructed. It was then thrown away. The Lead Researcher gets nothing to show for 10 FLS sections worth of successful lowering.
+
+## Goal set
+When `main` fails but other functions succeed, emit the partial assembly (without `_start`), annotated "inspection-only — no fn main; this assembly has no entry point." The exit code stays non-zero. Successful lowerings are never silently discarded. The only case where zero assembly is emitted is when zero functions lowered.
+
+## Why this and not something else
+The other three partial-failure fixtures (`fls_4_14_where_clauses_on_types.rs`, `fls_6_18_match_expressions.rs`, `fls_9_functions.rs`) all emit partial assembly and give the Lead Researcher something to inspect. Only the "main fails" case discards everything. This is the unique failure mode — and it's a code path in `src/main.rs` at line 114 that can be fixed directly.
+
+---
+
 # Verification — Cycle 021, Round 1 (Verifier)
 
 ## What I compared
