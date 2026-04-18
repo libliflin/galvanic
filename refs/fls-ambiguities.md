@@ -56,6 +56,7 @@ annotations for full context.
 - [§10.2 — `Self::X` Projection Resolution in Default Methods](#102--selfx-projection-resolution-in-default-methods)
 - [§11 — `impl` Generics and `unsafe impl`](#11--impl-generics-and-unsafe-impl)
 - [§12.1 — Generic `>>` Token Disambiguation](#121--generic--token-disambiguation)
+- [§12.1 / §4.14 — Lifetime Parameters: Parse-Reject vs Parse-Erase](#121--414--lifetime-parameters-parse-reject-vs-parse-erase)
 - [§13 — Trait Definition Order and Default Method Bodies](#13--trait-definition-order-and-default-method-bodies)
 - [§14 — Visibility and Name Resolution](#14--visibility-and-name-resolution)
 - [§14.1 — Valid Place Expressions for Assignment LHS](#141--valid-place-expressions-for-assignment-lhs)
@@ -1298,6 +1299,109 @@ annotations in `let` bindings. The disambiguation rule is unspecified in the FLS
 
 ---
 
+## §12.1 / §4.14 — Lifetime Parameters: Parse-Reject vs Parse-Erase
+
+**Three related gaps:**
+
+**1. Lifetime parameters in generic lists (§12.1):** FLS §12.1 defines generic
+parameter lists as containing both lifetime parameters (`'a`) and type
+parameters (`T`). The spec describes the syntax for `fn foo<'a, T>(...)` but
+does not specify how a compiler should behave when lifetime parameters are
+syntactically present but the implementation does not track lifetime
+information. A conforming compiler could parse-and-erase lifetime annotations
+(since lifetimes have no runtime representation per §12.1 and §4.14) without
+error, or reject them with a cited error. The spec does not mandate either
+approach.
+
+**Galvanic's choice:** Reject at parse time with an error citing both spec
+sections, rather than silently parsing and discarding the annotation.
+
+```
+error: parse error at byte 11: lifetime parameters not yet supported (FLS §12.1, §4.14)
+```
+
+This is the most honest implementation for a research tool — "not yet
+supported" is a documented finding, not a silent discard. But it is not the
+only conforming choice.
+
+**Source:** `src/parser.rs` (search `lifetime parameters not yet supported`)
+
+**Minimal reproducer:** Not yet demonstrable end-to-end — galvanic rejects
+lifetime parameters at parse time, so no assembly is produced. The rejection
+itself is the observable behavior. Run:
+
+```
+echo "fn longest<'a>(x: &'a i32, y: &'a i32) -> i32 { *x }" | cargo run -- /dev/stdin
+# → error: parse error at byte 10: lifetime parameters not yet supported (FLS §12.1, §4.14)
+```
+
+The same rejection applies to structs (`struct Ref<'a> { ... }`), enums
+(`enum E<'a> { ... }`), and impl blocks (`impl<'a> Foo<'a> { ... }`).
+
+---
+
+**2. Lifetime bounds in where clauses (§4.14):** FLS §4.14 defines outlives
+predicates of the form `'a: 'b` ("`'a` outlives `'b`") and `T: 'a` ("type `T`
+outlives lifetime `'a`"). Galvanic parses `where 'a: 'b` without error and
+stores the bound in the AST, but does not enforce the bound during lowering —
+the annotation is discarded at the AST-to-IR boundary. The spec does not
+specify the timing or mechanism for enforcing lifetime bounds; it defines what
+the predicate means semantically but leaves verification to the implementation.
+
+**Galvanic's choice:** Parse-and-store, then silently discard during lowering.
+The parse accepts the syntax, producing no error; the bound has no effect on
+codegen.
+
+**Source:** `src/parser.rs` (search `lifetime bound`), `src/lower.rs` (lifetime
+bounds are not consulted during lowering)
+
+**Minimal reproducer:** Not yet demonstrable end-to-end — the program below
+fails at the lifetime parameter in the generic list (gap 1 above). Once
+lifetime parameters are supported, the `where 'b: 'a` clause will parse
+cleanly and be silently discarded. The discarded-bound behavior is already
+verified for standalone where-clause entries that don't involve lifetime
+parameters in the generic list.
+
+```
+// aspirational — fails at lifetime parameter, not at where clause
+fn first<'a, 'b: 'a>(x: i32, _y: i32) -> i32 where 'b: 'a { x }
+```
+
+---
+
+**3. The parse-reject vs parse-erase design question:** Because lifetimes are
+erased before codegen (they have no runtime representation), galvanic could
+in principle accept `<'a>` syntax and silently produce correct assembly for
+any program whose runtime behavior is independent of lifetime enforcement —
+which is every program, since lifetimes are compile-time only. The choice to
+reject at parse time forces the caller to remove annotations that galvanic
+cannot check, rather than silently producing output that happens to be correct.
+This is a deliberate design decision driven by research honesty: a silent
+erase would make galvanic appear to support lifetimes when it does not.
+
+**Source:** `src/parser.rs` (the parse-reject sites at all four generic-list
+positions: function definition, struct definition, enum definition, impl block)
+
+**Parse site coverage:** All four rejection sites produce the same cited error
+format: `lifetime parameters not yet supported (FLS §12.1, §4.14)`. To
+observe each rejection site:
+
+```
+# function definition
+echo "fn f<'a>(x: &'a i32) -> i32 { *x }" | cargo run -- /dev/stdin
+
+# struct definition
+echo "struct S<'a> { v: &'a i32 }" | cargo run -- /dev/stdin
+
+# enum definition
+echo "enum E<'a> { V(&'a i32) }" | cargo run -- /dev/stdin
+
+# impl block
+echo "struct S; impl<'a> S { fn f(&'a self) -> i32 { 0 } }" | cargo run -- /dev/stdin
+```
+
+---
+
 ## §13 — Trait Definition Order and Default Method Bodies
 
 **Two gaps:**
@@ -1444,4 +1548,4 @@ confirmed by assembly content alone.
 
 ---
 
-*Last updated: 2026-04-18. Source annotation count at time of writing: ~155 `AMBIGUOUS` markers across 6 source files. 48 entries, sorted by FLS section number, with linked table of contents. All minimal reproducers include `fn main` — every reproducer produces assembly when run as published. §4.9 register corrected (`cmp x0, #3`, not `cmp x1, #3`).*
+*Last updated: 2026-04-18. Source annotation count at time of writing: ~155 `AMBIGUOUS` markers across 6 source files. 49 entries, sorted by FLS section number, with linked table of contents. All minimal reproducers include `fn main` — every reproducer produces assembly when run as published. §4.9 register corrected (`cmp x0, #3`, not `cmp x1, #3`).*
