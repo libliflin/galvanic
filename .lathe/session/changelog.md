@@ -1,3 +1,35 @@
+# Verification — Cycle 026, Round 9 (Verifier)
+
+## What I compared
+
+- **Goal:** Fix expression statement lowering (FLS §8.2) so any expression can appear as a
+  statement. Round 8 verifier contributed only a changelog — no code. This is the ninth
+  independent re-verification pass.
+
+**What I ran:**
+- `cargo test` — 2115 pass, 0 fail ✓ (216 lib + 1842 e2e + 46 fls_fixtures + 11 smoke)
+- `cargo run -- tests/fixtures/fls_9_functions.rs` → parsed 19 items, 0 failures, clean emit ✓
+
+## What's here, what was asked
+
+Matches. The work holds up against the goal from my comparative lens.
+
+- The goal scenario (`fn returns_unit() { 42; }`) compiles without error — confirmed live.
+- `fls_9_functions.rs` lowers all 19 items cleanly (was 19 of 20 at cycle start).
+- Test count stable at 2115 — no regression across eight prior rounds.
+
+## What I added
+
+Nothing this round — the work holds up against the goal from my lens.
+
+## Notes for the goal-setter
+
+- The `if`-expression-as-statement gap remains (documented in round 2 findings). Good
+  candidate for a dedicated §6.17 cycle.
+- None.
+
+---
+
 # Verification — Cycle 026, Round 8 (Verifier)
 
 ## What I compared
