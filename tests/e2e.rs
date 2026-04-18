@@ -35524,6 +35524,64 @@ fn main() -> i32 {\n\
     );
 }
 
+// ── Claim: §6.11 nested struct field in function-return position ────────────────
+
+/// Claim: nested struct field initializer works in function-return position.
+///
+/// FLS §6.11: Field initializers are arbitrary expressions. `fn f() -> Outer {
+/// Outer { inner: make_inner(n), ... } }` must lower via `lower_struct_expr_into`
+/// which previously called `lower_expr` for all fields. The fix routes
+/// nested-struct-typed fields through `store_nested_struct_lit`.
+///
+/// Verifies: `bl make_inner` appears (runtime call, not constant-folded).
+#[test]
+fn fls_6_11_nested_struct_fn_return_emits_call() {
+    let src = "\
+struct Inner { a: i32, b: i32 }\n\
+struct Outer { inner: Inner, c: i32 }\n\
+fn make_inner(x: i32) -> Inner { Inner { a: x, b: x + 1 } }\n\
+fn make_outer(n: i32) -> Outer { Outer { inner: make_inner(n), c: n + 10 } }\n\
+fn main() -> i32 { let o = make_outer(3); o.inner.a + o.c }\n";
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("bl      make_inner"),
+        "expected bl make_inner in assembly (runtime call, not folded): {asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #16"),
+        "must not constant-fold make_outer(3) result to #16: {asm}"
+    );
+}
+
+/// Claim: nested struct field initializer (variable path) works in function-return position.
+///
+/// FLS §6.11: `fn f(p: Point) -> Rect { Rect { top_left: p, width: 10, height: 5 } }`
+/// must route the nested struct field `top_left` through store_nested_struct_lit
+/// in lower_struct_expr_into's StructLit arm.
+///
+/// Verifies: `str` instructions present (fields stored at runtime via copies).
+#[test]
+fn fls_6_11_nested_struct_fn_return_var_path() {
+    let src = "\
+struct Point { x: i32, y: i32 }\n\
+struct Rect { top_left: Point, width: i32, height: i32 }\n\
+fn make_rect(p: Point, w: i32, h: i32) -> Rect { Rect { top_left: p, width: w, height: h } }\n\
+fn main() -> i32 {\n\
+    let p = Point { x: 1, y: 2 };\n\
+    let r = make_rect(p, 10, 5);\n\
+    r.width\n\
+}\n";
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("str"),
+        "expected str instructions for struct field stores: {asm}"
+    );
+    assert!(
+        asm.contains("bl      make_rect"),
+        "expected bl make_rect (runtime call): {asm}"
+    );
+}
+
 // ── Claim 4l: §6.18 match exhaustiveness check ─────────────────────────────────
 
 /// Claim 4l: non-exhaustive integer match rejected at compile time.
