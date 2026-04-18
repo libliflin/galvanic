@@ -626,9 +626,11 @@ upper 24 bits).
 fn f2i(x: f64) -> i32 { x as i32 }
 fn main() -> i32 { f2i(3.7) }
 ```
-Assembly signature: in the `f2i:` section look for `fcvtzs w0, d0` — confirms
-saturating conversion (out-of-range values clamp to INT_MIN/INT_MAX per ARM64
-`FCVTZS` semantics, not the FLS-specified truncation behavior).
+Assembly signature: in the `f2i:` section look for `fcvtzs w1, d0` followed by
+`mov x0, x1` — confirms saturating conversion (out-of-range values clamp to
+INT_MIN/INT_MAX per ARM64 `FCVTZS` semantics, not the FLS-specified truncation
+behavior). The result lands in w1 because d0 is the floating-point argument
+register; x0 is set by the subsequent `mov`.
 
 ---
 
@@ -669,7 +671,9 @@ fn div(x: i32, y: i32) -> i32 { x / y }
 fn main() -> i32 { div(10, 3) }
 ```
 Assembly signature: in the `div:` section look for `cbz x1, _galvanic_panic`
-immediately before `sdiv x0, x0, x1` — confirms the runtime zero-divisor guard.
+followed (after the MIN/-1 overflow guards) by `sdiv x2, x0, x1` — confirms the
+runtime zero-divisor guard. Note: the `sdiv` destination is `x2` (a scratch
+register); the result is moved to `x0` for return separately.
 
 **Minimal reproducer (MIN/-1 overflow guard):**
 ```rust
