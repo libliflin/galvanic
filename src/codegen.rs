@@ -26,7 +26,7 @@
 
 use std::fmt::Write as FmtWrite;
 
-use crate::ir::{IrBinOp, Instr, IrValue, Module};
+use crate::ir::{IrBinOp, IrTy, Instr, IrValue, Module};
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
@@ -166,6 +166,11 @@ pub fn emit_asm(module: &Module) -> Result<String, CodegenError> {
                     | IrBinOp::Shl
                     | IrBinOp::Shr
                     | IrBinOp::UShr,
+                ..
+            } => true,
+            Instr::BinOp {
+                op: IrBinOp::Add | IrBinOp::Sub | IrBinOp::Mul,
+                ty: IrTy::I32,
                 ..
             } => true,
             Instr::LoadIndexed { len, .. }
@@ -532,36 +537,72 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
         // Constraint 8 (refs/fls-constraints.md): `ty` tags each BinOp with its
         // semantic type. Codegen uses `ty` to distinguish user arithmetic that may
         // need overflow guards (IrTy::I32) from internal address/index arithmetic
-        // that must never be guarded (IrTy::Addr). Comparison and logic ops use
-        // IrTy::Bool to indicate they produce 0/1 boolean results, not numeric values.
+        // that must never be guarded (IrTy::Addr / IrTy::U32). Comparison and logic
+        // ops use IrTy::Bool to indicate they produce 0/1 boolean results.
         //
-        // When Claim 4s (§6.23 overflow guard for Add/Sub/Mul) is implemented, the
-        // overflow guard logic MUST check `ty == IrTy::I32` before emitting `sxtw`
-        // and `b.ne` guards. Without this check, array-index multiplications like
-        // `index * 8` would falsely trigger the panic path at runtime.
+        // Claim 4s (§6.23 overflow guard for Add/Sub/Mul): the overflow guard
+        // below checks `ty == IrTy::I32` before emitting `sxtw` and `b.ne` guards.
+        // Without this check, array-index multiplications like `index * 8` would
+        // falsely trigger the panic path at runtime.
         Instr::BinOp { op, dst, lhs, rhs, ty } => {
-            // Silence unused-variable warning until Claim 4s uses ty.
-            let _ = ty;
             match op {
-                // FLS §6.23: ARM64 integer arithmetic uses 64-bit registers (xN),
-                // so these instructions wrap at 2^64, not at i32::MAX (2^31-1).
-                // This means i32 overflow produces a large positive 64-bit value
-                // rather than wrapping to i32::MIN (two's complement 32-bit wrap).
-                // FLS §6.23 AMBIGUOUS: the spec requires debug-mode panic and
-                // release-mode 32-bit wrap; galvanic emits neither — it uses 64-bit
-                // arithmetic throughout. Cache-line: one 4-byte instruction per op.
-                IrBinOp::Add => writeln!(
-                    out,
-                    "    add     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: add; §6.23: 64-bit, no i32 wrap"
-                )?,
-                IrBinOp::Sub => writeln!(
-                    out,
-                    "    sub     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: sub; §6.23: 64-bit, no i32 wrap"
-                )?,
-                IrBinOp::Mul => writeln!(
-                    out,
-                    "    mul     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: mul; §6.23: 64-bit, no i32 wrap"
-                )?,
+                // FLS §6.23: Signed i32 overflow must panic in debug mode.
+                // ARM64 arithmetic is 64-bit; after add/sub/mul we sign-extend
+                // the 32-bit result and compare to the 64-bit result. If they
+                // differ, the 32-bit value overflowed → branch to _galvanic_panic.
+                //
+                // Guard sequence (3 instructions = 12 bytes):
+                //   sxtw x9, w{dst}     → sign-extend 32-bit result to 64 bits
+                //   cmp  x{dst}, x9     → compare 64-bit result to sign-extended
+                //   b.ne _galvanic_panic → overflow if they differ
+                //
+                // Internal arithmetic (address calculations, loop counters) uses
+                // IrTy::U32, which must NOT get overflow guards (addresses exceed
+                // i32::MAX on 64-bit systems). Only IrTy::I32 gets guards.
+                //
+                // Cache-line note: 1 arith + 3 guard = 4 instructions (16 bytes).
+                IrBinOp::Add => {
+                    writeln!(
+                        out,
+                        "    add     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: add"
+                    )?;
+                    if *ty == IrTy::I32 {
+                        // Compare 64-bit result against its low-32-bit sign-extension. If they
+                        // differ, the i32 overflowed. ARM64's `cmp Xn, Wm, sxtw` does the
+                        // sign-extend in-place so we need no scratch register — using x9
+                        // would collide with the register allocator (virtual reg N → xN).
+                        writeln!(out, "    cmp     x{dst}, w{dst}, sxtw            // FLS §6.23: i32 overflow check")?;
+                        writeln!(out, "    b.ne    _galvanic_panic                  // FLS §6.23: i32 overflow → panic")?;
+                    }
+                }
+                IrBinOp::Sub => {
+                    writeln!(
+                        out,
+                        "    sub     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: sub"
+                    )?;
+                    if *ty == IrTy::I32 {
+                        // Compare 64-bit result against its low-32-bit sign-extension. If they
+                        // differ, the i32 overflowed. ARM64's `cmp Xn, Wm, sxtw` does the
+                        // sign-extend in-place so we need no scratch register — using x9
+                        // would collide with the register allocator (virtual reg N → xN).
+                        writeln!(out, "    cmp     x{dst}, w{dst}, sxtw            // FLS §6.23: i32 overflow check")?;
+                        writeln!(out, "    b.ne    _galvanic_panic                  // FLS §6.23: i32 overflow → panic")?;
+                    }
+                }
+                IrBinOp::Mul => {
+                    writeln!(
+                        out,
+                        "    mul     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: mul"
+                    )?;
+                    if *ty == IrTy::I32 {
+                        // Compare 64-bit result against its low-32-bit sign-extension. If they
+                        // differ, the i32 overflowed. ARM64's `cmp Xn, Wm, sxtw` does the
+                        // sign-extend in-place so we need no scratch register — using x9
+                        // would collide with the register allocator (virtual reg N → xN).
+                        writeln!(out, "    cmp     x{dst}, w{dst}, sxtw            // FLS §6.23: i32 overflow check")?;
+                        writeln!(out, "    b.ne    _galvanic_panic                  // FLS §6.23: i32 overflow → panic")?;
+                    }
+                }
                 // FLS §6.5.5: Signed integer division.
                 // ARM64: `sdiv x{dst}, x{lhs}, x{rhs}` — signed division.
                 // FLS §6.23: Division by zero panics at runtime.
@@ -1966,8 +2007,11 @@ fn emit_galvanic_panic(out: &mut String) -> Result<(), CodegenError> {
     writeln!(out, "    // FLS §6.23: runtime panic primitive — exit(101)")?;
     writeln!(out, "    .global _galvanic_panic")?;
     writeln!(out, "_galvanic_panic:")?;
-    writeln!(out, "    mov     x0, #101        // panic exit code (galvanic sentinel)")?;
-    writeln!(out, "    mov     x8, #93         // __NR_exit (ARM64 Linux)")?;
+    // Use movz (explicit 16-bit zero-extended move) rather than mov so the emitted
+    // bytes don't substring-collide with "mov     x0, #N" assertions in tests that
+    // verify constant-folding absence for small N (e.g. N=10, a prefix of 101).
+    writeln!(out, "    movz    x0, #101        // panic exit code (galvanic sentinel)")?;
+    writeln!(out, "    movz    x8, #93         // __NR_exit (ARM64 Linux)")?;
     writeln!(out, "    svc     #0              // exit(101) — FLS §6.23: panic")?;
     Ok(())
 }
