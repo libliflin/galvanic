@@ -36221,3 +36221,70 @@ fn leaf_fn_zero_prologue_emits_cache_line_note() {
         "expected zero-prologue cache-line note for leaf function; got:\n{asm}"
     );
 }
+
+// ── Cycle 022: emit_asm_inspection_only ──────────────────────────────────────
+
+/// Compile through `emit_asm_inspection_only` and return the assembly.
+///
+/// Calls `lower()` expecting partial failure (main fails, others succeed).
+/// Panics if lower succeeds fully or produces no partial module.
+fn compile_to_asm_inspection_only(source: &str) -> String {
+    let tokens = galvanic::lexer::tokenize(source).expect("lex failed");
+    let sf = galvanic::parser::parse(&tokens, source).expect("parse failed");
+    match galvanic::lower::lower(&sf, source) {
+        Ok(_) => panic!("expected lower to fail for inspection-only test"),
+        Err(e) => {
+            let module = *e.partial_module.expect("expected partial_module to be Some");
+            galvanic::codegen::emit_asm_inspection_only(&module)
+                .expect("emit_asm_inspection_only failed")
+        }
+    }
+}
+
+/// `emit_asm_inspection_only` must prepend the annotation comment and omit `_start`.
+///
+/// When `main` fails to lower but helper functions succeed, the emitted assembly
+/// must begin with the inspection-only annotation so the Lead Researcher knows
+/// the artifact cannot be run. `_start` must be absent — assembling and linking
+/// this output would produce a binary with no entry point.
+///
+/// FLS §18.1: Programs require `main`; inspection-only output intentionally omits it.
+#[test]
+fn inspection_only_asm_has_annotation_and_no_start() {
+    // main fails: passes a variable (not a struct literal) as a nested struct field.
+    // add and helper lower successfully.
+    let src = "\
+struct Inner { a: i32, b: i32 }\n\
+struct Outer { inner: Inner, c: i32 }\n\
+fn add(x: i32, y: i32) -> i32 { x + y }\n\
+fn helper(x: i32) -> i32 { x + 1 }\n\
+fn main() -> i32 {\n\
+    let x = Inner { a: 1, b: 2 };\n\
+    let o = Outer { inner: x, c: 3 };\n\
+    o.c\n\
+}\n";
+    let asm = compile_to_asm_inspection_only(src);
+
+    // Annotation comment must appear at the top.
+    assert!(
+        asm.contains("inspection-only — no fn main; this assembly has no entry point"),
+        "expected inspection-only annotation; got first 200 chars:\n{}",
+        &asm[..asm.len().min(200)]
+    );
+
+    // _start must NOT be emitted — the researcher cannot run this binary.
+    assert!(
+        !asm.contains("_start"),
+        "inspection-only assembly must not contain _start; found it in:\n{asm}"
+    );
+
+    // The helper functions must appear in the assembly.
+    assert!(
+        asm.contains("add:") || asm.contains("\nadd:\n"),
+        "expected helper function 'add' in inspection-only assembly; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("helper:"),
+        "expected helper function 'helper' in inspection-only assembly; got:\n{asm}"
+    );
+}

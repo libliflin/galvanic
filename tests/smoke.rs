@@ -326,6 +326,31 @@ fn partial_lower_no_main_emits_inspection_assembly() {
         &asm[..asm.len().min(200)]
     );
 
+    // _start must NOT be emitted — inspection-only output has no entry point.
+    assert!(
+        !asm.contains("_start"),
+        "inspection-only assembly must not contain _start; it would produce a binary with no entry point"
+    );
+
+    // The 20 successfully lowered function bodies must be present.
+    // Count label lines (lines matching "^<ident>:") as a proxy for function count.
+    let fn_labels: Vec<&str> = asm
+        .lines()
+        .filter(|l| {
+            let t = l.trim();
+            t.ends_with(':')
+                && !t.starts_with('.')
+                && !t.starts_with("//")
+                && t != "_galvanic_panic:"
+        })
+        .collect();
+    assert!(
+        fn_labels.len() >= 20,
+        "expected ≥20 function labels in inspection-only assembly (one per successfully lowered fn), found {}: {:?}",
+        fn_labels.len(),
+        &fn_labels[..fn_labels.len().min(5)]
+    );
+
     // Clean up the .s file so the fixture directory stays pristine.
     let _ = std::fs::remove_file(&asm_path);
 }
