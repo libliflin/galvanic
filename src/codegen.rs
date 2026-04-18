@@ -609,7 +609,7 @@ fn rewrite_int_vr_in_instr(instr: Instr, phys: &[u8]) -> Instr {
         SextI16 { dst, src } => SextI16 { dst: rr(dst), src: rr(src) },
         Call { dst, name, args, float_args, float_ret } => {
             let new_dst = if float_ret.is_none() { rr(dst) } else { dst };
-            let new_args: Vec<u8> = args.into_iter().map(|a| rr(a)).collect();
+            let new_args: Vec<u8> = args.into_iter().map(rr).collect();
             Call { dst: new_dst, name, args: new_args, float_args, float_ret }
         }
         LoadIndexed { dst, base_slot, index_reg, len } => {
@@ -627,25 +627,25 @@ fn rewrite_int_vr_in_instr(instr: Instr, phys: &[u8]) -> Instr {
         LoadStatic { dst, name } => LoadStatic { dst: rr(dst), name },
         LoadFnAddr { dst, name } => LoadFnAddr { dst: rr(dst), name },
         CallIndirect { dst, ptr_slot, args } => {
-            let new_args: Vec<u8> = args.into_iter().map(|a| rr(a)).collect();
+            let new_args: Vec<u8> = args.into_iter().map(rr).collect();
             CallIndirect { dst: rr(dst), ptr_slot, args: new_args }
         }
         CallVtable { dst, data_slot, vtable_slot, method_idx } => {
             CallVtable { dst: rr(dst), data_slot, vtable_slot, method_idx }
         }
         CallRetFatPtr { name, args, dst_data_slot } => {
-            let new_args: Vec<u8> = args.into_iter().map(|a| rr(a)).collect();
+            let new_args: Vec<u8> = args.into_iter().map(rr).collect();
             CallRetFatPtr { name, args: new_args, dst_data_slot }
         }
         CallMut { name, args, write_back_slot, n_fields } => {
-            let new_args: Vec<u8> = args.into_iter().map(|a| rr(a)).collect();
+            let new_args: Vec<u8> = args.into_iter().map(rr).collect();
             CallMut { name, args: new_args, write_back_slot, n_fields }
         }
         RetFieldsAndValue { base_slot, n_fields, val_reg } => {
             RetFieldsAndValue { base_slot, n_fields, val_reg: rr(val_reg) }
         }
         CallMutReturn { name, args, write_back_slot, n_fields, dst } => {
-            let new_args: Vec<u8> = args.into_iter().map(|a| rr(a)).collect();
+            let new_args: Vec<u8> = args.into_iter().map(rr).collect();
             CallMutReturn { name, args: new_args, write_back_slot, n_fields, dst: rr(dst) }
         }
         AddrOf { dst, slot } => AddrOf { dst: rr(dst), slot },
