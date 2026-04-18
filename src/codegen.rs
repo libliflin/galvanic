@@ -2360,13 +2360,13 @@ mod tests {
     ///   BinOp(BitAnd/Bool), BinOp(Sub/non-I32), AddrOf
     /// - Two-instruction: LoadFnAddr, FCmpF64, FCmpF32, AddrOfIndexed,
     ///   LoadIndexed(len=0), StoreIndexed(len=0), LoadIndexedF64(len=0),
-    ///   LoadIndexedF32(len=0), BinOp(UDiv), BinOp(Lt)
+    ///   BinOp(UDiv), BinOp(Lt)
     /// - Three-instruction: LoadStatic, LoadStaticF64, LoadStaticF32,
     ///   LoadF64Const, LoadF32Const, LoadImm(large with lo16≠0),
-    ///   BinOp(Add/I32), BinOp(Shl)
-    /// - Large counts: BinOp(Div)=9, BinOp(Rem)=11
+    ///   BinOp(Add/I32), BinOp(Shl), LoadIndexedF32(len=0)
+    /// - Large counts: BinOp(Div)=9, BinOp(Rem)=10
     /// - Conditional counts: LoadImm(small)=1, LoadImm(hi16-only)=2,
-    ///   LoadIndexed(len>0)=4
+    ///   LoadIndexed(len>0)=4, LoadIndexedF32(len>0)=5
     #[test]
     fn machine_instr_count_matches_emit_instr() {
         // ── Zero-instruction ─────────────────────────────────────────────────
@@ -2423,7 +2423,6 @@ mod tests {
         // StoreIndexed with no bounds check — add + str = 2.
         check(&Instr::StoreIndexed { src: 0, base_slot: 1, index_reg: 2, scratch: 3, len: 0 });
         check(&Instr::LoadIndexedF64 { dst: 0, base_slot: 1, index_reg: 2, len: 0 });
-        check(&Instr::LoadIndexedF32 { dst: 0, base_slot: 1, index_reg: 2, len: 0 });
         // BinOp(UDiv) — cbz + udiv = 2.
         check(&Instr::BinOp { op: IrBinOp::UDiv, ty: IrTy::I32, dst: 2, lhs: 0, rhs: 1 });
         // BinOp(Lt) — cmp + cset = 2.
@@ -2453,18 +2452,21 @@ mod tests {
         check(&Instr::BinOp { op: IrBinOp::Shl, ty: IrTy::I32, dst: 2, lhs: 0, rhs: 1 });
         check(&Instr::BinOp { op: IrBinOp::Shr, ty: IrTy::I32, dst: 2, lhs: 0, rhs: 1 });
         check(&Instr::BinOp { op: IrBinOp::UShr, ty: IrTy::I32, dst: 2, lhs: 0, rhs: 1 });
+        // LoadIndexedF32(len=0): add + add + ldr = 3 (ARM64 `ldr s` can't use lsl #3 directly).
+        check(&Instr::LoadIndexedF32 { dst: 0, base_slot: 1, index_reg: 2, len: 0 });
 
         // ── Large counts ─────────────────────────────────────────────────────
         // BinOp(Div/I32): 9 instructions (div-by-zero + overflow guards + sdiv).
         check(&Instr::BinOp { op: IrBinOp::Div, ty: IrTy::I32, dst: 2, lhs: 0, rhs: 1 });
-        // BinOp(Rem/I32): 11 instructions (same guards + sdiv + msub).
+        // BinOp(Rem/I32): 10 instructions (same 8 guards + sdiv + msub).
         check(&Instr::BinOp { op: IrBinOp::Rem, ty: IrTy::I32, dst: 2, lhs: 0, rhs: 1 });
 
         // ── Bounds-checked indexed loads/stores ──────────────────────────────
-        // With len > 0: cmp + b.hs + add + ldr/str = 4.
+        // With len > 0: cmp + b.hs + add + ldr/str = 4 (except LoadIndexedF32 = 5).
         check(&Instr::LoadIndexed { dst: 1, base_slot: 0, index_reg: 2, len: 8 });
         check(&Instr::StoreIndexed { src: 0, base_slot: 1, index_reg: 2, scratch: 3, len: 8 });
         check(&Instr::LoadIndexedF64 { dst: 0, base_slot: 1, index_reg: 2, len: 4 });
+        // LoadIndexedF32(len>0): cmp + b.hs + add + add + ldr = 5.
         check(&Instr::LoadIndexedF32 { dst: 0, base_slot: 1, index_reg: 2, len: 4 });
 
         // ── Ret (simplified: frame_size=0, saves_lr=false) ───────────────────
