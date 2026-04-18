@@ -1,3 +1,67 @@
+# Changelog — Cycle 019, Round 1 (Builder)
+
+## Goal
+Surface galvanic's cache-line thesis in the emitted assembly output. The Customer Champion
+found ~20 cache-line notes in `codegen.rs` but zero in the emitted `.s` files. The reasoning
+was documented in the compiler source; it was never emitted to where the Cache-Line
+Performance Researcher actually looks.
+
+## Who This Helps
+- **Stakeholder:** Cache-Line Performance Researcher
+- **Impact:** Opening any emitted `.s` file and searching for "cache-line" now returns
+  results at every key structural boundary: function prologues, loop boundary labels,
+  `_galvanic_panic`, and `_start`. The thesis is verifiable from the output alone, without
+  reading the compiler source.
+
+## Applied
+
+**`src/codegen.rs`** — Emit cache-line commentary at four structural points:
+
+1. **Function prologues** (`emit_fn`): Emit `// cache-line: prologue = N instr(s) × 4 bytes
+   = M bytes — N of 16 slots in first cache line` immediately after each function label.
+   Restructured `emit_fn` to compute `fsize` before the prologue section so the count is
+   available when the comment is emitted.
+
+2. **Loop boundary labels** (`Instr::Label`): When `fls` contains "§6.15", emit
+   `// FLS §6.15.x: loop boundary — cache-line: label has zero footprint` instead of the
+   generic "branch target" annotation.
+
+3. **`_start`** (`emit_start`): Emit `// cache-line: _start = 4 instructions × 4 bytes = 16
+   bytes — fits in one 64-byte cache line` before the `.global _start` directive.
+
+4. **`_galvanic_panic`** (`emit_galvanic_panic`): Emit `// cache-line: _galvanic_panic = 3
+   instructions × 4 bytes = 12 bytes — fits in one 64-byte cache line` before the `.global
+   _galvanic_panic` directive.
+
+5. **`.data` and `.rodata` section headers**: Emit a cache-line context comment after each
+   section directive documenting per-element footprint and items-per-cache-line count.
+
+**`tests/e2e.rs`** — Added 4 assembly inspection tests (cycle 019 section):
+
+| Test | What it asserts |
+|---|---|
+| `fn_prologue_emits_cache_line_note` | Assembly contains "cache-line: prologue" |
+| `loop_label_emits_cache_line_note` | Assembly contains "§6.15" and "loop boundary" |
+| `galvanic_panic_emits_cache_line_note` | Assembly contains "_galvanic_panic = 3 instructions" |
+| `start_emits_cache_line_note` | Assembly contains "_start = 4 instructions" |
+
+- **Files:** `src/codegen.rs`, `tests/e2e.rs`
+
+## Validated
+
+- `cargo test` — 2099 pass, 0 fail (up from 2095; +4 new tests)
+- `cargo clippy -- -D warnings` — clean
+- Compiled `tests/fixtures/fls_6_15_loop_expressions.rs`; confirmed cache-line commentary
+  visible at: function prologues, `.L0:`/`.L1:` loop boundary labels, `_galvanic_panic:`,
+  and `_start:`.
+- Verifier: run `cargo test --test e2e -- fn_prologue_emits_cache_line_note
+  loop_label_emits_cache_line_note galvanic_panic_emits_cache_line_note
+  start_emits_cache_line_note` to witness the four new tests. Then
+  `cargo run -- tests/fixtures/fls_6_15_loop_expressions.rs && grep cache-line
+  tests/fixtures/fls_6_15_loop_expressions.s` to see the commentary in context.
+
+---
+
 # Changelog — Cycle 019 (Customer Champion)
 
 ## Stakeholder: Cache-Line Performance Researcher

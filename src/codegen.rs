@@ -201,6 +201,8 @@ pub fn emit_asm(module: &Module) -> Result<String, CodegenError> {
     if !module.statics.is_empty() {
         writeln!(out)?;
         writeln!(out, "    .data")?;
+        // cache-line: each static .quad is 8 bytes; .align 3 packs 8 statics per 64-byte data cache line
+        writeln!(out, "    // cache-line: each static .quad is 8 bytes; .align 3 → 8 statics per 64-byte data cache line")?;
         for s in &module.statics {
             match s.value {
                 crate::ir::StaticValue::Int(n) => {
@@ -247,6 +249,9 @@ pub fn emit_asm(module: &Module) -> Result<String, CodegenError> {
     if has_f64_floats || has_f32_floats {
         writeln!(out)?;
         writeln!(out, "    .section .rodata")?;
+        // cache-line: f64 constants are 8 bytes (.align 3) → 8 per 64-byte cache line;
+        // f32 constants are 4 bytes (.align 2) → 16 per 64-byte cache line.
+        writeln!(out, "    // cache-line: f64 constants are 8 bytes (.align 3) → 8 per 64-byte cache line; f32 are 4 bytes (.align 2) → 16 per line")?;
         // f64 constants: 8 bytes each, 8-byte aligned (.align 3).
         for func in &module.fns {
             for (idx, &bits) in func.float_consts.iter().enumerate() {
@@ -346,9 +351,23 @@ fn frame_size(stack_slots: u8) -> u32 {
 /// setup occupies one slot in the first cache line of the function body.
 /// The lr save/restore pair (`str`/`ldr`) each adds one 4-byte instruction.
 fn emit_fn(out: &mut String, func: &crate::ir::IrFn) -> Result<(), CodegenError> {
+    // Compute prologue size up front so the cache-line summary can be emitted
+    // immediately after the function label — before any instructions.
+    let fsize = frame_size(func.stack_slots);
+    let prologue_instrs: u32 = (func.saves_lr as u32) + if fsize > 0 { 1 } else { 0 };
+    let prologue_bytes = prologue_instrs * 4;
+
     writeln!(out, "    // fn {} — FLS §9", func.name)?;
     writeln!(out, "    .global {}", func.name)?;
     writeln!(out, "{}:", func.name)?;
+
+    // Emit a cache-line summary comment for the prologue.
+    // ARM64 instructions are 4 bytes each; 16 fill a 64-byte cache line.
+    // The prologue occupies the first N slots of the function's first cache line.
+    writeln!(
+        out,
+        "    // cache-line: prologue = {prologue_instrs} instr(s) × 4 bytes = {prologue_bytes} bytes — {prologue_instrs} of 16 slots in first cache line"
+    )?;
 
     // FLS §6.12.1: Non-leaf functions must save the link register (x30)
     // before any `bl` instruction overwrites it. ARM64 pre-indexed store:
@@ -364,8 +383,6 @@ fn emit_fn(out: &mut String, func: &crate::ir::IrFn) -> Result<(), CodegenError>
             "    str     x30, [sp, #-16]!      // FLS §6.12.1: save lr (non-leaf)"
         )?;
     }
-
-    let fsize = frame_size(func.stack_slots);
 
     if fsize > 0 {
         // FLS §8.1: allocate stack space for local variables.
@@ -977,7 +994,15 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
         // `fls` carries the originating FLS section (e.g., §6.15.3 for while headers).
         // Cache-line note: labels have zero instruction footprint.
         Instr::Label { id, fls } => {
-            writeln!(out, ".L{id}:                              // FLS {fls}: branch target")?;
+            if fls.contains("§6.15") {
+                // Loop boundary labels (§6.15.x — while, infinite loop, for, break, continue).
+                // Marking them "loop boundary" surfaces galvanic's cache-line thesis in the
+                // emitted output: every loop header and back-edge is a cache-line-relevant
+                // boundary where the instruction stream may cross a 64-byte cache line.
+                writeln!(out, ".L{id}:                              // FLS {fls}: loop boundary — cache-line: label has zero footprint")?;
+            } else {
+                writeln!(out, ".L{id}:                              // FLS {fls}: branch target")?;
+            }
         }
 
         // Unconditional branch.
@@ -1987,6 +2012,9 @@ fn emit_trampoline(
 /// first quarter of a 64-byte cache line.
 fn emit_start(out: &mut String) -> Result<(), CodegenError> {
     writeln!(out, "    // ELF entry point — FLS §18.1")?;
+    // _start is 4 instructions × 4 bytes = 16 bytes — fits entirely within one 64-byte
+    // instruction cache line. The bl + mov + svc sequence has no cache-line crossing.
+    writeln!(out, "    // cache-line: _start = 4 instructions × 4 bytes = 16 bytes — fits in one 64-byte cache line")?;
     writeln!(out, "    .global _start")?;
     writeln!(out, "_start:")?;
     writeln!(out, "    bl      main            // call fn main()")?;
@@ -2013,6 +2041,9 @@ fn emit_start(out: &mut String) -> Result<(), CodegenError> {
 /// ARM64 Linux syscall: x8 = __NR_exit (93), x0 = exit code.
 fn emit_galvanic_panic(out: &mut String) -> Result<(), CodegenError> {
     writeln!(out, "    // FLS §6.23: runtime panic primitive — exit(101)")?;
+    // _galvanic_panic is 3 instructions × 4 bytes = 12 bytes — fits in one 64-byte
+    // instruction cache line alongside the branch that jumps to it.
+    writeln!(out, "    // cache-line: _galvanic_panic = 3 instructions × 4 bytes = 12 bytes — fits in one 64-byte cache line")?;
     writeln!(out, "    .global _galvanic_panic")?;
     writeln!(out, "_galvanic_panic:")?;
     // Use movz (explicit 16-bit zero-extended move) rather than mov so the emitted

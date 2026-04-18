@@ -36100,3 +36100,77 @@ fn let_else_bound_pattern_branches_cite_fls_8_1() {
     assert!(asm.contains("§8.1"), "expected §8.1 citation on let-else @-binding branches, got:\n{asm}");
     assert!(!asm.contains("§6.17"), "let-else @-binding must have no §6.17 citations; found in:\n{asm}");
 }
+
+// ── Cache-line commentary in emitted assembly (cycle 019) ─────────────────────
+
+/// Function prologues must emit a cache-line summary comment in the assembly output.
+///
+/// The Cache-Line Performance Researcher journey: compile a program, open the .s file,
+/// and confirm the cache-line thesis is visible — not just in the compiler source but
+/// in the emitted output. Function prologues are the first structural point in every
+/// function body where the cache-line cost is documented.
+///
+/// The comment format: `// cache-line: prologue = N instr(s) × 4 bytes = M bytes — N of 16 slots in first cache line`.
+#[test]
+fn fn_prologue_emits_cache_line_note() {
+    let asm = compile_to_asm(
+        "fn foo(x: i32) -> i32 { x + 1 }\nfn main() -> i32 { foo(1) }\n",
+    );
+    assert!(
+        asm.contains("cache-line: prologue"),
+        "expected 'cache-line: prologue' comment in function prologues; got:\n{asm}"
+    );
+}
+
+/// Loop boundary labels (§6.15.x) must emit a cache-line note in the assembly output.
+///
+/// Loop headers and back-edges are cache-line-relevant boundaries. The emitted .s file
+/// must show that galvanic tracked this — not just in the compiler source. Labels annotated
+/// with §6.15 (while, infinite loop, for, break, continue) are tagged "loop boundary"
+/// with a cache-line note so the Cache-Line Researcher can find them in a search.
+#[test]
+fn loop_label_emits_cache_line_note() {
+    let asm = compile_to_asm(
+        "fn f(n: i32) -> i32 { let mut i = 0; while i < n { i = i + 1; } i }\n\
+         fn main() -> i32 { f(0) }\n",
+    );
+    assert!(
+        asm.contains("§6.15") && asm.contains("loop boundary"),
+        "expected 'loop boundary' cache-line annotation on §6.15 labels; got:\n{asm}"
+    );
+}
+
+/// _galvanic_panic must emit a cache-line note documenting its 3-instruction footprint.
+///
+/// The panic handler is exactly 3 × 4-byte instructions = 12 bytes — it fits in one
+/// 64-byte cache line. This is a structural claim about galvanic's codegen. The claim
+/// must be visible in the emitted assembly, not only in the compiler source.
+///
+/// The comment format: `// cache-line: _galvanic_panic = 3 instructions × 4 bytes = 12 bytes — fits in one 64-byte cache line`.
+#[test]
+fn galvanic_panic_emits_cache_line_note() {
+    // i32 arithmetic triggers the overflow guard that emits _galvanic_panic.
+    let asm = compile_to_asm(
+        "fn f(a: i32, b: i32) -> i32 { a + b }\nfn main() -> i32 { f(1, 2) }\n",
+    );
+    assert!(
+        asm.contains("_galvanic_panic = 3 instructions"),
+        "expected '_galvanic_panic = 3 instructions' cache-line note; got:\n{asm}"
+    );
+}
+
+/// _start must emit a cache-line note documenting its 4-instruction footprint.
+///
+/// The _start entry point is exactly 4 × 4-byte instructions = 16 bytes — fits in one
+/// 64-byte cache line. This is a structural claim that must be visible in the emitted
+/// assembly so the Cache-Line Researcher can verify it without reading the compiler source.
+///
+/// The comment format: `// cache-line: _start = 4 instructions × 4 bytes = 16 bytes — fits in one 64-byte cache line`.
+#[test]
+fn start_emits_cache_line_note() {
+    let asm = compile_to_asm("fn main() -> i32 { 0 }\n");
+    assert!(
+        asm.contains("_start = 4 instructions"),
+        "expected '_start = 4 instructions' cache-line note; got:\n{asm}"
+    );
+}
