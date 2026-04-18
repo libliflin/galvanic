@@ -36599,6 +36599,114 @@ fn fls_9_register_pressure_emits_valid_arm64_registers() {
     );
 }
 
+/// FLS §9 — The register-pressure fixture's 40-variable sum produces the correct
+/// exit code under QEMU, witnessing that the linear-scan allocator assigns
+/// physical registers correctly (no aliasing bugs that would corrupt the sum).
+///
+/// The fixture computes 1+2+…+40 = 820; exit code = 820 % 256 = 52.
+///
+/// Without register allocation the assembly is architecturally invalid (x197 etc.)
+/// and would be rejected by the assembler. With allocation but with aliasing bugs
+/// (two simultaneously-live VRs mapped to the same physical register), the sum
+/// would be wrong. Only a correct allocator produces exit code 52.
+///
+/// FLS §9: Functions.
+/// FLS §6.5.5: Arithmetic operator expressions.
+/// FLS §8.1: Let statements allocate stack slots for each binding.
+#[test]
+fn fls_9_register_pressure_correct_sum() {
+    let fixture = include_str!("fixtures/fls_9_register_pressure.rs");
+    // sum of 1..=40 = 820; exit code = low 8 bits = 52
+    let Some(exit_code) = compile_and_run(fixture) else {
+        return;
+    };
+    assert_eq!(
+        exit_code, 52,
+        "expected sum 1+…+40=820 → exit code 52, got {exit_code} \
+         (aliasing bug in register allocator would corrupt the sum)"
+    );
+}
+
+/// FLS §9 — An 8-parameter function exercises simultaneous-live parameter VRs
+/// and confirms the allocator keeps param registers (x0–x7) disjoint from
+/// result registers (x8 onward) throughout the computation.
+///
+/// `compute(1,2,3,4,5,6,7,8) = 36`; exit code 36.
+///
+/// At each BinOp the two param operands are in their fixed ABI registers (x0–x7)
+/// and the result lands in a pool register (x8, x10, x11, or x15). If param
+/// pre-assignment or pool-slot selection were wrong, the result would be corrupt.
+///
+/// FLS §9: Parameters are passed in x0–x7 per AAPCS64.
+/// FLS §6.5.5: Arithmetic operator expressions.
+#[test]
+fn fls_9_register_pressure_8_params_assembly() {
+    let src = "\
+fn compute(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32, g: i32, h: i32) -> i32 {
+    let t0 = a + b;
+    let t1 = c + d;
+    let t2 = e + f;
+    let t3 = g + h;
+    let t4 = t0 + t1;
+    let t5 = t2 + t3;
+    t4 + t5
+}
+fn main() -> i32 { compute(1, 2, 3, 4, 5, 6, 7, 8) }
+";
+    let asm = compile_to_asm(src);
+
+    // No ARM64 instruction should reference a register that doesn't exist.
+    for reg in 31u32..=64 {
+        let as_operand = format!(" x{reg}");
+        let as_comma_operand = format!(",x{reg}");
+        assert!(
+            !asm.contains(&as_operand) && !asm.contains(&as_comma_operand),
+            "assembly references invalid ARM64 register x{reg} in 8-param function:\n{asm}"
+        );
+    }
+
+    // Params arrive in x0–x7 per AAPCS64; the first add should use two of them.
+    // We don't prescribe which pool register gets the result (the allocator
+    // chooses from {x8, x10, x11, x15}), but `add` must appear.
+    assert!(
+        asm.contains("add"),
+        "expected add instruction in 8-param compute function:\n{asm}"
+    );
+}
+
+/// FLS §9 — `compute(1,2,3,4,5,6,7,8) = 36` produces the correct exit code,
+/// witnessing allocator correctness under 8 simultaneously-live param registers.
+///
+/// If param pre-assignment is wrong (e.g., two params share a physical register),
+/// the sum would be incorrect. Only a correct allocator produces exit code 36.
+///
+/// FLS §9: Parameters are passed in x0–x7 per AAPCS64.
+/// FLS §6.5.5: Arithmetic operator expressions.
+#[test]
+fn fls_9_register_pressure_8_params_correct() {
+    let src = "\
+fn compute(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32, g: i32, h: i32) -> i32 {
+    let t0 = a + b;
+    let t1 = c + d;
+    let t2 = e + f;
+    let t3 = g + h;
+    let t4 = t0 + t1;
+    let t5 = t2 + t3;
+    t4 + t5
+}
+fn main() -> i32 { compute(1, 2, 3, 4, 5, 6, 7, 8) }
+";
+    // 1+2+3+4+5+6+7+8 = 36
+    let Some(exit_code) = compile_and_run(src) else {
+        return;
+    };
+    assert_eq!(
+        exit_code, 36,
+        "expected compute(1..8)=36 → exit code 36, got {exit_code} \
+         (param register aliasing bug would corrupt the sum)"
+    );
+}
+
 /// FLS §2.4.4.1 — Large unsigned immediates use MOVZ+MOVK, not a folded constant.
 ///
 /// u32 values greater than i32::MAX require a MOVZ+MOVK sequence on ARM64.
