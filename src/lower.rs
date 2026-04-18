@@ -6154,7 +6154,7 @@ impl<'src> LowerCtx<'src> {
                     let ExprKind::Tuple(inner_exprs) = &elem_expr.kind else {
                         return Err(LowerError::Unsupported(
                             "nested tuple pattern requires a tuple literal initializer; \
-                             variable-init nested tuples are not yet supported"
+                             variable-init nested tuples are not yet supported (FLS §5.10.3, §8.1)"
                                 .into(),
                         ));
                     };
@@ -18482,7 +18482,7 @@ impl<'src> LowerCtx<'src> {
                         // Verify this variable is a known array.
                         if !self.local_array_lens.contains_key(&slot) {
                             return Err(LowerError::Unsupported(format!(
-                                "variable `{var_name}` is not an array (indexing non-arrays not yet supported, FLS §6.9)"
+                                "variable `{var_name}` is not an array: indexing non-arrays not yet supported (FLS §6.9)"
                             )));
                         }
                         slot
