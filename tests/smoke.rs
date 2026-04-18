@@ -51,11 +51,20 @@ fn lower_error_shows_summary_line() {
     // When at least one function fails, galvanic must print a summary line of
     // the form "lowered N of M functions (K failed)" so the Lead Researcher
     // can read progress in a single run.
-    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/fls_6_18_match_expressions.rs");
+    // Uses a tuple-parameter function (still unsupported) alongside a trivial
+    // success so the summary shows partial success.
+    let mut tmp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
+    write!(
+        tmp,
+        r#"
+fn fail(t: (i32, i32)) -> i32 {{ t.0 }}
+fn succeed() -> i32 {{ 42 }}
+"#
+    )
+    .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_galvanic"))
-        .arg(&fixture)
+        .arg(tmp.path())
         .output()
         .expect("failed to run galvanic");
 
@@ -65,7 +74,7 @@ fn lower_error_shows_summary_line() {
         stderr.contains("lowered ") && stderr.contains(" functions (") && stderr.contains(" failed)"),
         "expected summary line in stderr, got: {stderr}"
     );
-    // At least one success should be reported (fixture has 10+ working functions)
+    // At least one success should be reported (succeed() compiles fine).
     assert!(
         !stderr.contains("lowered 0 of "),
         "expected some successes in summary, got: {stderr}"
@@ -78,18 +87,14 @@ fn lower_error_reports_all_failures() {
     // When multiple functions fail, ALL errors must be reported — not just the
     // first — so the researcher sees the full error landscape in a single run.
     let mut tmp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
-    // Two functions that both use a tuple expression as a match scrutinee —
-    // an unsupported construct at this milestone. The third function is trivial
-    // and must succeed, so the summary shows "1 of 3" rather than "0 of 3".
+    // Two functions that both use a tuple parameter — still unsupported.
+    // The third function is trivial and must succeed, so the summary shows
+    // "1 of 3" rather than "0 of 3".
     write!(
         tmp,
         r#"
-fn fail_a(x: i32, y: i32) -> i32 {{
-    match (x, y) {{ (0, 0) => 0, _ => 1 }}
-}}
-fn fail_b(x: i32, y: i32) -> i32 {{
-    match (x, y) {{ (1, 1) => 1, _ => 0 }}
-}}
+fn fail_a(t: (i32, i32)) -> i32 {{ t.0 }}
+fn fail_b(t: (i32, i32)) -> i32 {{ t.1 }}
 fn succeed() -> i32 {{
     42
 }}
@@ -123,6 +128,7 @@ fn partial_lower_emits_assembly_for_successful_fns() {
     // needs the artifact to inspect, even when one unsupported construct blocks
     // a minority of functions.
     // Exit code must remain non-zero (partial failure), but the file is written.
+    // Uses a tuple-parameter function (still unsupported) as the failing case.
     let tmp_dir = tempfile::tempdir().unwrap();
     let src = tmp_dir.path().join("partial.rs");
     std::fs::write(
@@ -131,8 +137,8 @@ fn partial_lower_emits_assembly_for_successful_fns() {
 fn main() -> i32 {
     42
 }
-fn unsupported(x: i32, y: i32) -> i32 {
-    match (x, y) { (0, 0) => 0, _ => 1 }
+fn unsupported(t: (i32, i32)) -> i32 {
+    t.0
 }
 "#,
     )
@@ -279,14 +285,12 @@ fn lower_error_includes_fls_citation() {
 }
 
 #[test]
-fn tuple_scrutinee_error_names_fls_sections_and_fix_site() {
-    // Cycle 028 goal: when a contributor writes `match (x, y) { ... }`, the
-    // error must come from the ExprKind::Match handler — naming FLS §6.18
-    // (Match expressions) and §6.10 (Tuple expressions) and pointing to the
-    // enum_base_slot / struct_base_slot pattern to extend.
+fn tuple_scrutinee_match_compiles_and_emits_asm() {
+    // Cycle 028 added the error message; this cycle implements tuple scrutinee
+    // match. Verify the program now compiles successfully and emits assembly.
     //
-    // Before cycle 028 this error came from the generic ExprKind::Tuple fallback
-    // with no FLS citation and no guidance. Both are now required.
+    // FLS §6.18, §6.10: `match (x, y) { (0, 0) => 0, _ => 1 }` — tuple
+    // expression as scrutinee with Pat::Tuple arm and wildcard default arm.
     let mut tmp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
     write!(
         tmp,
@@ -294,6 +298,7 @@ fn tuple_scrutinee_error_names_fls_sections_and_fix_site() {
 fn match_tuple(x: i32, y: i32) -> i32 {{
     match (x, y) {{ (0, 0) => 0, _ => 1 }}
 }}
+fn main() {{}}
 "#
     )
     .unwrap();
@@ -303,22 +308,11 @@ fn match_tuple(x: i32, y: i32) -> i32 {{
         .output()
         .expect("failed to run galvanic");
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    // Must cite both FLS sections the goal named.
     assert!(
-        stderr.contains("FLS §6.18"),
-        "expected FLS §6.18 citation in tuple scrutinee error, got: {stderr}"
+        output.status.success(),
+        "expected zero exit for tuple scrutinee match, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        stderr.contains("§6.10"),
-        "expected §6.10 citation in tuple scrutinee error, got: {stderr}"
-    );
-    // Must point the contributor to the right fix site.
-    assert!(
-        stderr.contains("enum_base_slot"),
-        "expected fix-site hint 'enum_base_slot' in tuple scrutinee error, got: {stderr}"
-    );
-    assert!(!output.status.success(), "expected non-zero exit");
 }
 
 #[test]

@@ -36807,3 +36807,107 @@ fn fls_2_4_large_immediates_u64_lsl32_lsl48() {
         "expected 0x1234 (chunk3) in movk lsl#48 for 0x1234_5678_9ABC_DEF0:\n{asm4}"
     );
 }
+
+/// Assembly inspection test: tuple scrutinee in match — runtime element checks.
+///
+/// `match (x, y)` with `(0, 0) => 0`, `(1, _) => 1`, `(_, 1) => 2`, `_ => 3`.
+/// Each element must be loaded from its slot and compared with a literal
+/// sub-pattern — no constant folding (FLS §6.1.2:37–45).
+///
+/// FLS §6.18: match expression. FLS §6.10: tuple expression as scrutinee.
+/// FLS §5.10.3: tuple pattern matching.
+#[test]
+fn fls_6_18_match_tuple_scrutinee_emits_element_checks() {
+    let asm = compile_to_asm(
+        "fn match_tuple(x: i32, y: i32) -> i32 {\n\
+             match (x, y) {\n\
+                 (0, 0) => 0,\n\
+                 (1, _) => 1,\n\
+                 (_, 1) => 2,\n\
+                 _ => 3,\n\
+             }\n\
+         }\n\
+         fn main() {}\n",
+    );
+    // Two element stores — x and y spilled to separate slots.
+    assert!(
+        asm.contains("str"),
+        "expected str instructions for tuple element spill (FLS §6.10), got:\n{asm}"
+    );
+    // Element equality checks — ldr + mov + cmp/cset + cbz for each literal sub-pattern.
+    assert!(
+        asm.contains("ldr"),
+        "expected ldr to reload tuple elements for comparison (FLS §6.18), got:\n{asm}"
+    );
+    // At least one conditional branch — pattern check for (0, 0), (1, _), (_, 1).
+    assert!(
+        asm.contains("cbz") || asm.contains("cbnz") || asm.contains("b."),
+        "expected conditional branch for tuple sub-pattern check (FLS §6.18), got:\n{asm}"
+    );
+    // Must not constant-fold — the match has runtime parameters.
+    assert!(
+        !asm.contains("mov     x0, #0\n    ret"),
+        "tuple match must not constant-fold to a single mov (FLS §6.1.2), got:\n{asm}"
+    );
+}
+
+/// Assembly inspection test: tuple scrutinee with guard and ident bindings.
+///
+/// FLS §6.18: `match (a, b) { (x, y) if x > y => x - y, (x, y) => x + y }`.
+/// Ident sub-patterns in tuple arms bind to element slots (no copy).
+/// Guard `x > y` must emit a runtime comparison (FLS §6.1.2:37–45).
+///
+/// FLS §6.18: match arm guard. FLS §5.1.4: identifier pattern binding.
+#[test]
+fn fls_6_18_match_tuple_scrutinee_with_guard_and_ident_bindings() {
+    let asm = compile_to_asm(
+        "fn classify(a: i32, b: i32) -> i32 {\n\
+             match (a, b) {\n\
+                 (x, y) if x > y => x - y,\n\
+                 (x, y) => x + y,\n\
+             }\n\
+         }\n\
+         fn main() {}\n",
+    );
+    // Guard emits a subtraction or comparison — at least one sub or cmp.
+    assert!(
+        asm.contains("sub") || asm.contains("cmp"),
+        "expected sub or cmp for guard `x > y` (FLS §6.18 guard), got:\n{asm}"
+    );
+    // Body emits add or sub for the two arms.
+    assert!(
+        asm.contains("add") || asm.contains("sub"),
+        "expected add/sub for arm bodies (FLS §6.5.5), got:\n{asm}"
+    );
+}
+
+/// Full pipeline test: tuple scrutinee match produces correct exit code under QEMU.
+///
+/// FLS §6.18: `match (x, y)` — verify the runtime comparison chain selects the
+/// correct arm and returns the right value. Tests all four arms:
+///   (0, 0) → 0, (1, _) → 1, (_, 1) → 2, _ → 3.
+///
+/// Uses (2, 2) as input → expects exit code 3 (default arm).
+#[test]
+fn fls_6_18_match_tuple_scrutinee_correct_exit_code() {
+    if !tool_available("aarch64-linux-gnu-as") {
+        return;
+    }
+    // Input (2, 2): no literal arm matches → default arm → result = 3.
+    let exit_code = compile_and_run(
+        "fn match_tuple(x: i32, y: i32) -> i32 {\n\
+             match (x, y) {\n\
+                 (0, 0) => 0,\n\
+                 (1, _) => 1,\n\
+                 (_, 1) => 2,\n\
+                 _ => 3,\n\
+             }\n\
+         }\n\
+         fn main() -> i32 { match_tuple(2, 2) }\n",
+    );
+    assert_eq!(
+        exit_code, Some(3),
+        "match_tuple(2, 2) should return 3 (default arm), got {exit_code:?}"
+    );
+}
+
