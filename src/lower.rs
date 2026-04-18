@@ -2865,7 +2865,7 @@ fn lower_fn(
                                 )));
                             }
                         } else {
-                            return Err(LowerError::Unsupported("multi-segment return type".into()));
+                            return Err(LowerError::Unsupported("multi-segment return type not yet supported (FLS §9, §4)".into()));
                         }
                     } else if let TyKind::ImplTrait(_) = &ty.kind {
                         // FLS §9, §11: `impl Trait` in return position — opaque return type
@@ -2895,11 +2895,11 @@ fn lower_fn(
                             }
                         } else {
                             return Err(LowerError::Unsupported(
-                                "impl Trait return: only struct-literal tail expressions are supported".into(),
+                                "impl Trait return: only struct-literal tail expressions are supported (FLS §9, §11)".into(),
                             ));
                         }
                     } else {
-                        return Err(LowerError::Unsupported("complex return type".into()));
+                        return Err(LowerError::Unsupported("complex return type not yet supported (FLS §9, §4)".into()));
                     }
                 }
             }
@@ -3799,7 +3799,7 @@ fn lower_fn(
         let type_name = impl_type.expect("impl_type must be set when self_kind is RefMut");
         if enum_defs.contains_key(type_name) {
             return Err(LowerError::Unsupported(
-                "&mut self methods on enum types not yet supported".into(),
+                "&mut self methods on enum types not yet supported (FLS §6.12.2, §10.1)".into(),
             ));
         }
         let n_fields = if let Some(f) = struct_defs.get(type_name) {
@@ -6403,7 +6403,7 @@ impl<'src> LowerCtx<'src> {
         // The initializer must be a struct literal for the same type.
         let ExprKind::StructLit { fields: lit_fields, .. } = &expr.kind else {
             return Err(LowerError::Unsupported(format!(
-                "expected struct literal `{struct_name} {{ .. }}` for nested struct field"
+                "expected struct literal `{struct_name} {{ .. }}` for nested struct field (FLS §6.11, §5.10.2)"
             )));
         };
 
@@ -7221,7 +7221,7 @@ impl<'src> LowerCtx<'src> {
 
                         _ => {
                             return Err(LowerError::Unsupported(
-                                "match arm pattern type not yet supported in enum-returning match".into(),
+                                "match arm pattern type not yet supported in enum-returning match (FLS §6.18)".into(),
                             ));
                         }
                     }
@@ -7470,7 +7470,7 @@ impl<'src> LowerCtx<'src> {
 
                         _ => {
                             return Err(LowerError::Unsupported(
-                                "match arm pattern type not yet supported in tuple-returning match".into(),
+                                "match arm pattern type not yet supported in tuple-returning match (FLS §6.18)".into(),
                             ));
                         }
                     }
@@ -7806,7 +7806,7 @@ impl<'src> LowerCtx<'src> {
 
                         _ => {
                             return Err(LowerError::Unsupported(
-                                "match arm pattern type not yet supported in struct-returning match".into(),
+                                "match arm pattern type not yet supported in struct-returning match (FLS §6.18)".into(),
                             ));
                         }
                     }
@@ -8239,7 +8239,7 @@ impl<'src> LowerCtx<'src> {
                                 Pat::Wildcard => {}
                                 _ => {
                                     return Err(LowerError::Unsupported(
-                                        "nested tuple pattern not yet supported".into(),
+                                        "nested tuple pattern not yet supported (FLS §5.10.3, §8.1)".into(),
                                     ));
                                 }
                             }
@@ -8812,7 +8812,7 @@ impl<'src> LowerCtx<'src> {
                     }
                     _ => {
                         return Err(LowerError::Unsupported(
-                            "complex let pattern not yet supported".into(),
+                            "complex let pattern not yet supported (FLS §8.1, §5)".into(),
                         ));
                     }
                 };
@@ -10584,7 +10584,7 @@ impl<'src> LowerCtx<'src> {
                     IrTy::U32 => {
                         if *n > i32::MAX as u128 {
                             return Err(LowerError::Unsupported(format!(
-                                "unsigned literal {n} > {}: MOVZ+MOVK not yet supported",
+                                "unsigned literal {n} > {}: MOVZ+MOVK not yet supported (FLS §2.4.4.1)",
                                 i32::MAX
                             )));
                         }
@@ -11955,12 +11955,12 @@ impl<'src> LowerCtx<'src> {
                     }
                     Pat::Tuple(_) => {
                         return Err(LowerError::Unsupported(
-                            "tuple pattern in if-let not yet supported".into(),
+                            "tuple pattern in if-let not yet supported (FLS §6.17, §5.10.3)".into(),
                         ));
                     }
                     Pat::Slice(_) => {
                         return Err(LowerError::Unsupported(
-                            "slice/array pattern in if-let not yet supported".into(),
+                            "slice/array pattern in if-let not yet supported (FLS §6.17, §5)".into(),
                         ));
                     }
                     // FLS §5.1.4: @ binding pattern in if-let.
@@ -12055,7 +12055,7 @@ impl<'src> LowerCtx<'src> {
                                 self.instrs.push(Instr::CondBranch { reg: matched_reg, label: else_label });
                             }
                             other => return Err(LowerError::Unsupported(format!(
-                                "@ binding sub-pattern not yet supported in if-let: {other:?}"
+                                "@ binding sub-pattern not yet supported in if-let (FLS §6.17, §5.1.4): {other:?}"
                             ))),
                         }
                         // Install the binding (valid in then block only; removed below).
@@ -12960,7 +12960,7 @@ impl<'src> LowerCtx<'src> {
                                             self.instrs.push(Instr::CondBranch { reg: matched_reg, label: next_label });
                                         }
                                         other => return Err(LowerError::Unsupported(format!(
-                                            "@ binding sub-pattern not yet supported: {other:?}"
+                                            "@ binding sub-pattern not yet supported in match (FLS §6.18, §5.1.4): {other:?}"
                                         ))),
                                     }
                                 }
@@ -13639,7 +13639,7 @@ impl<'src> LowerCtx<'src> {
                                             self.instrs.push(Instr::CondBranch { reg: matched_reg, label: next_label });
                                         }
                                         other => return Err(LowerError::Unsupported(format!(
-                                            "@ binding sub-pattern not yet supported in unit match: {other:?}"
+                                            "@ binding sub-pattern not yet supported in unit match (FLS §6.18, §5.1.4): {other:?}"
                                         ))),
                                     }
                                 }
@@ -14882,7 +14882,7 @@ impl<'src> LowerCtx<'src> {
                             }
                             _ => {
                                 return Err(LowerError::Unsupported(
-                                    "index assignment on non-variable base not yet supported"
+                                    "index assignment on non-variable base not yet supported (FLS §6.9, §6.5.10)"
                                         .into(),
                                 ));
                             }
@@ -14947,7 +14947,7 @@ impl<'src> LowerCtx<'src> {
                     }
                     _ => {
                         return Err(LowerError::Unsupported(
-                            "assignment to non-variable place expression not yet supported".into(),
+                            "assignment to non-variable place expression not yet supported (FLS §6.5.10)".into(),
                         ));
                     }
                 };
@@ -15163,7 +15163,7 @@ impl<'src> LowerCtx<'src> {
                     }
                     _ => {
                         return Err(LowerError::Unsupported(
-                            "compound assignment to non-variable place expression not yet supported".into(),
+                            "compound assignment to non-variable place expression not yet supported (FLS §6.5.11)".into(),
                         ));
                     }
                 };
@@ -15966,12 +15966,12 @@ impl<'src> LowerCtx<'src> {
                     }
                     Pat::Tuple(_) => {
                         return Err(LowerError::Unsupported(
-                            "tuple pattern in while-let not yet supported".into(),
+                            "tuple pattern in while-let not yet supported (FLS §6.15.4, §5.10.3)".into(),
                         ));
                     }
                     Pat::Slice(_) => {
                         return Err(LowerError::Unsupported(
-                            "slice/array pattern in while-let not yet supported".into(),
+                            "slice/array pattern in while-let not yet supported (FLS §6.15.4, §5)".into(),
                         ));
                     }
                     // FLS §5.1.4: @ binding pattern in while-let.
@@ -16027,7 +16027,7 @@ impl<'src> LowerCtx<'src> {
                                 self.instrs.push(Instr::CondBranch { reg: matched_reg, label: exit_label });
                             }
                             other => return Err(LowerError::Unsupported(format!(
-                                "@ binding sub-pattern not yet supported in while-let: {other:?}"
+                                "@ binding sub-pattern not yet supported in while-let (FLS §6.15.4, §5.1.4): {other:?}"
                             ))),
                         }
                         let bind_name = name.text(self.source);
@@ -17977,7 +17977,7 @@ impl<'src> LowerCtx<'src> {
                             )))?;
                         if !args.is_empty() {
                             return Err(LowerError::Unsupported(
-                                "dyn Trait method calls with extra arguments not yet supported".into(),
+                                "dyn Trait method calls with extra arguments not yet supported (FLS §6.12.2, §4.13)".into(),
                             ));
                         }
                         let dst = self.alloc_reg()?;
@@ -18010,7 +18010,7 @@ impl<'src> LowerCtx<'src> {
                             .ok_or_else(|| {
                                 LowerError::Unsupported(format!(
                                     "variable `{var_name}` is not a struct, enum, or tuple struct; \
-                                     method calls on primitive types are not yet supported"
+                                     method calls on primitive types are not yet supported (FLS §6.12.2)"
                                 ))
                             })?
                             .clone();
@@ -18051,7 +18051,7 @@ impl<'src> LowerCtx<'src> {
                     }
                     _ => {
                         return Err(LowerError::Unsupported(
-                            "method call on non-variable receiver not yet supported".into(),
+                            "method call on non-variable receiver not yet supported (FLS §6.12.2)".into(),
                         ));
                     }
                 };
@@ -18482,14 +18482,14 @@ impl<'src> LowerCtx<'src> {
                         // Verify this variable is a known array.
                         if !self.local_array_lens.contains_key(&slot) {
                             return Err(LowerError::Unsupported(format!(
-                                "variable `{var_name}` is not an array (indexing non-arrays not yet supported)"
+                                "variable `{var_name}` is not an array (indexing non-arrays not yet supported, FLS §6.9)"
                             )));
                         }
                         slot
                     }
                     _ => {
                         return Err(LowerError::Unsupported(
-                            "index expression on non-variable base not yet supported".into(),
+                            "index expression on non-variable base not yet supported (FLS §6.9)".into(),
                         ));
                     }
                 };
