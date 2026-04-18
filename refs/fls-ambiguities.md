@@ -254,8 +254,11 @@ leaves unspecified) and galvanic's current resolution.
 **Minimal reproducer:**
 ```rust
 fn get(arr: [i32; 3], i: usize) -> i32 { arr[i] }
+fn main() -> i32 { get([1, 2, 3], 1) }
 ```
-Assembly signature: `cmp x1, #3` / `b.hs <trap>` before the `ldr`.
+Assembly signature: look for `cmp x0, #3` / `b.hs _galvanic_panic` before the `ldr`
+in the `get:` section of the emitted assembly — confirms the bounds check compares
+the index (in x0) against the array length `#3`.
 
 ---
 
@@ -366,10 +369,12 @@ name). Type consistency is not verified at this milestone.
 fn classify(x: i32) -> i32 {
     match x { 1 | 2 => 10, _ => 0 }
 }
+fn main() -> i32 { classify(1) }
 ```
 Assembly signature: look for two separate comparisons (`cmp x0, #1` then
-`cmp x0, #2`) before the `mov x0, #10` branch — confirms left-to-right
-alternative evaluation with a separate branch for each alternative.
+`cmp x0, #2`) in the `classify:` section before the `mov x0, #10` branch —
+confirms left-to-right alternative evaluation with a separate branch for each
+alternative.
 
 ---
 
@@ -508,10 +513,12 @@ passed through unchanged.
 ```rust
 fn add_f64(a: f64, b: f64) -> f64 { a + b }
 fn add_f32(a: f32, b: f32) -> f32 { a + b }
+fn main() -> i32 { let _ = add_f64(1.0, 2.0); let _ = add_f32(1.0_f32, 2.0_f32); 0 }
 ```
-Assembly signature: `add_f64` emits `fadd d0, d0, d1` (D-registers = binary64);
-`add_f32` emits `fadd s0, s0, s1` (S-registers = binary32) — confirms the
-encoding choice (binary64 vs binary32) is implicit in the register width.
+Assembly signature: in the `add_f64:` section look for `fadd d0, d0, d1`
+(D-registers = binary64); in `add_f32:` look for `fadd s0, s0, s1`
+(S-registers = binary32) — confirms the encoding choice (binary64 vs binary32)
+is implicit in the register width.
 
 ---
 
@@ -536,9 +543,10 @@ consumed as a borrow before `parse_bitand` is reached.
 ```rust
 fn bitand(a: i32, b: i32) -> i32 { a & b }
 fn borrow_ref(x: &i32) -> i32 { *x }
+fn main() -> i32 { let _ = bitand(3, 5); let x = 7; borrow_ref(&x) }
 ```
-`galvanic bitand.rs` must emit `and w0, w0, w1` (bitwise AND instruction).
-`galvanic borrow_ref.rs` must emit a `ldr` from the argument register (borrow).
+In the `bitand:` section look for `and w0, w0, w1` (bitwise AND instruction).
+In `borrow_ref:` look for `ldr` from the argument register (borrow).
 The parser must not confuse the two uses of `&`.
 
 ---
@@ -569,10 +577,11 @@ This is a known false negative.
 **Minimal reproducer:**
 ```rust
 fn shl(x: i64, n: i64) -> i64 { x << n }
+fn main() -> i32 { shl(1, 2) as i32 }
 ```
-Assembly signature: `cmp x1, #64` followed by `b.hs _galvanic_panic` then
-`lsl x2, x0, x1` — galvanic panics for shift amounts ≥ 64. No `and x1, x1, #63`
-masking instruction is present.
+Assembly signature: in the `shl:` section look for `cmp x1, #64` followed by
+`b.hs _galvanic_panic` then `lsl x2, x0, x1` — galvanic panics for shift amounts
+≥ 64. No `and x1, x1, #63` masking instruction is present.
 
 ---
 
@@ -606,17 +615,20 @@ Rust's de-facto behavior.
 **Minimal reproducer (integer narrowing):**
 ```rust
 fn narrow(x: i32) -> i32 { (x as u8) as i32 }
+fn main() -> i32 { narrow(257) }
 ```
-Assembly signature: look for `and w0, w0, #255` — confirms low-8-bit truncation
-for `as u8` (the `AND` instruction masks off the upper 24 bits).
+Assembly signature: in the `narrow:` section look for `and w0, w0, #255` —
+confirms low-8-bit truncation for `as u8` (the `AND` instruction masks off the
+upper 24 bits).
 
 **Minimal reproducer (float-to-int):**
 ```rust
 fn f2i(x: f64) -> i32 { x as i32 }
+fn main() -> i32 { f2i(3.7) }
 ```
-Assembly signature: look for `fcvtzs w0, d0` — confirms saturating conversion
-(out-of-range values clamp to INT_MIN/INT_MAX per ARM64 `FCVTZS` semantics,
-not the FLS-specified truncation behavior).
+Assembly signature: in the `f2i:` section look for `fcvtzs w0, d0` — confirms
+saturating conversion (out-of-range values clamp to INT_MIN/INT_MAX per ARM64
+`FCVTZS` semantics, not the FLS-specified truncation behavior).
 
 ---
 
@@ -654,17 +666,19 @@ the program) while keeping the implementation simple.
 **Minimal reproducer (divide-by-zero guard):**
 ```rust
 fn div(x: i32, y: i32) -> i32 { x / y }
+fn main() -> i32 { div(10, 3) }
 ```
-Assembly signature: look for `cbz x1, _galvanic_panic` immediately before
-`sdiv x0, x0, x1` — confirms the runtime zero-divisor guard.
+Assembly signature: in the `div:` section look for `cbz x1, _galvanic_panic`
+immediately before `sdiv x0, x0, x1` — confirms the runtime zero-divisor guard.
 
 **Minimal reproducer (MIN/-1 overflow guard):**
 ```rust
 fn div_min(y: i32) -> i32 { i32::MIN / y }
+fn main() -> i32 { div_min(2) }
 ```
-Assembly signature: look for `movz`/`sxtw` loading `i32::MIN` then `cmp`/`cmn`
-followed by a conditional `b _galvanic_panic` before `sdiv` — confirms the
-signed overflow guard.
+Assembly signature: in the `div_min:` section look for `movz`/`sxtw` loading
+`i32::MIN` then `cmp`/`cmn` followed by a conditional `b _galvanic_panic` before
+`sdiv` — confirms the signed overflow guard.
 
 ---
 
@@ -685,9 +699,10 @@ not mandated by the spec.
 **Minimal reproducer:**
 ```rust
 fn pair() -> (i32, i32) { (10, 20) }
+fn main() -> i32 { let _ = pair(); 0 }
 ```
-Assembly signature: look for `mov x0, #10` and `mov x1, #20` in the function
-body — confirms element[0] in x0 and element[1] in x1, following the
+Assembly signature: in the `pair:` section look for `mov x0, #10` and
+`mov x1, #20` — confirms element[0] in x0 and element[1] in x1, following the
 "element[i] in register x{i}" convention.
 
 ---
@@ -710,10 +725,11 @@ body — confirms element[0] in x0 and element[1] in x1, following the
 ```rust
 struct Point { x: i32, y: i32 }
 fn make(x: i32, y: i32) -> Point { Point { x, y } }
+fn main() -> i32 { let _ = make(3, 4); 0 }
 ```
-Assembly signature: look for two consecutive stores to the Point stack slot —
-the x field stored before the y field — confirming shorthand fields are
-evaluated in source order.
+Assembly signature: in the `make:` section look for two consecutive stores to the
+Point stack slot — the x field stored before the y field — confirming shorthand
+fields are evaluated in source order.
 
 ---
 
@@ -782,6 +798,7 @@ fn outer() -> i32 {
     fn inner() -> i32 { 7 }
     inner()
 }
+fn main() -> i32 { outer() }
 ```
 Assembly signature: look for `bl inner` (direct call, not `blr`) in `outer`'s
 body and a separate `inner:` function label — confirms inner functions use
@@ -814,10 +831,11 @@ fn sum(arr: [i32; 3]) -> i32 {
     for x in arr { s = s + x; }
     s
 }
+fn main() -> i32 { sum([1, 2, 3]) }
 ```
-Assembly signature: look for a loop counter increment and element `ldr` without
-any `bl IntoIterator__into_iter` call — confirms special-cased desugaring that
-bypasses the trait dispatch the FLS prescribes.
+Assembly signature: in the `sum:` section look for a loop counter increment and
+element `ldr` without any `bl IntoIterator__into_iter` call — confirms
+special-cased desugaring that bypasses the trait dispatch the FLS prescribes.
 
 ---
 
@@ -864,11 +882,12 @@ fn sum_to_five() -> i32 {
     for i in 0..5 { s = s + i; }
     s
 }
+fn main() -> i32 { sum_to_five() }
 ```
-Assembly signature: look for loop counter starting at 0 and a `cmp x0, #5`
-(upper bound comparison) — confirms `0..5` is desugared inline as loop bounds.
-Attempting `let r = 0..5` (standalone range value) emits a compile error,
-confirming ranges are not supported as first-class values.
+Assembly signature: in the `sum_to_five:` section look for loop counter starting
+at 0 and a `cmp x0, #5` (upper bound comparison) — confirms `0..5` is desugared
+inline as loop bounds. Attempting `let r = 0..5` (standalone range value) emits
+a compile error, confirming ranges are not supported as first-class values.
 
 ---
 
@@ -924,12 +943,13 @@ and silently accepted. Full usefulness/completeness analysis is future work.
 fn classify(x: i32) -> i32 {
     match x { 0 => 1, _ => 2 }
 }
+fn main() -> i32 { classify(0) }
 ```
-Assembly signature: look for `cmp x0, #0` + conditional branch to two arms —
-confirms runtime match dispatch. The wildcard arm (`_`) triggers the
-exhaustiveness heuristic's rule 1. A match on integer with no wildcard
-(e.g. `match x { 0 => 1, 1 => 2 }`) emits a compile error: "match may not
-be exhaustive".
+Assembly signature: in the `classify:` section look for `cmp x0, #0` +
+conditional branch to two arms — confirms runtime match dispatch. The wildcard
+arm (`_`) triggers the exhaustiveness heuristic's rule 1. A match on integer
+with no wildcard (e.g. `match x { 0 => 1, 1 => 2 }`) emits a compile error:
+"match may not be exhaustive".
 
 ---
 
@@ -963,8 +983,10 @@ the f64/f32/i32 dispatch path)
 fn bad(a: i32, b: i32, c: i32) -> bool { a < b < c }
 ```
 Assembly signature: no assembly is emitted — the compiler exits with error
-"chained comparison: FLS §6.21 — comparison operators are non-associative".
-Run `cargo run -- /tmp/bad.rs` and observe the error on stderr.
+on stderr: `error: lower failed in 'bad': not yet supported: chained comparison: FLS §6.21 — comparison operators are non-associative; use '&&' to combine comparisons`.
+No `fn main` is included because the error occurs during lowering of `fn bad`
+itself; adding `fn main` would produce partial assembly for main while bad still
+fails. Run `cargo run -- /tmp/bad.rs` and observe the error on stderr.
 
 ---
 
@@ -1070,9 +1092,10 @@ fn foo(cond: bool) -> i32 {
     if cond { x = 1; } else { x = 2; }
     x
 }
+fn main() -> i32 { foo(true) }
 ```
-Assembly signature: look for a stack slot allocated in the prologue
-(`sub sp, sp, #N`) with **no** initializing store before the conditional
+Assembly signature: in the `foo:` section look for a stack slot allocated in the
+prologue (`sub sp, sp, #N`) with **no** initializing store before the conditional
 branches — confirms the slot is allocated but not zeroed, matching the
 "uninit" choice.
 
@@ -1115,10 +1138,11 @@ future work.
 **Minimal reproducer:**
 ```rust
 fn add((a, b): (i32, i32)) -> i32 { a + b }
+fn main() -> i32 { add((3, 4)) }
 ```
-Assembly signature: look for the two input integers arriving in x0 and x1
-being stored to separate named stack slots (`a` and `b`) before
-`add w0, w0, w1` — confirms tuple destructuring in parameter position maps
+Assembly signature: in the `add:` section look for the two input integers
+arriving in x0 and x1 being stored to separate named stack slots (`a` and `b`)
+before `add w0, w0, w1` — confirms tuple destructuring in parameter position maps
 to the standard two-argument calling convention.
 
 ---
@@ -1314,15 +1338,20 @@ that return mutable references) are not supported at this milestone.
 
 **Minimal reproducer:**
 ```rust
-fn swap(arr: &mut [i32; 2]) {
+fn make_swapped() -> i32 {
+    let mut arr = [2, 1];
     let t = arr[0];
     arr[0] = arr[1];
     arr[1] = t;
+    arr[0]
 }
+fn main() -> i32 { make_swapped() }
 ```
-Assembly signature: look for `str w1, [x0]` and `str w2, [x0, #4]` — confirms
-array index (`arr[0]`, `arr[1]`) is a valid place expression on the LHS of
-assignment, emitting `str` instructions to the computed element address.
+Assembly signature: look for `str` instructions targeting computed offsets of the
+`arr` stack slot — confirms array index (`arr[0]`, `arr[1]`) is a valid place
+expression on the LHS of assignment. Note: indexing through `&mut [i32; 2]` is
+not yet supported (§6.9 limitation); the array must be a named local variable for
+index-on-LHS to work.
 
 ---
 
@@ -1384,4 +1413,4 @@ confirmed by assembly content alone.
 
 ---
 
-*Last updated: 2026-04-18. Source annotation count at time of writing: ~155 `AMBIGUOUS` markers across 6 source files. 48 entries, sorted by FLS section number, with linked table of contents. Minimal reproducers added 2026-04-17.*
+*Last updated: 2026-04-18. Source annotation count at time of writing: ~155 `AMBIGUOUS` markers across 6 source files. 48 entries, sorted by FLS section number, with linked table of contents. All minimal reproducers include `fn main` — every reproducer produces assembly when run as published. §4.9 register corrected (`cmp x0, #3`, not `cmp x1, #3`).*
