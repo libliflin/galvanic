@@ -260,6 +260,11 @@ fn fls_6_11_nested_struct_call() {
 }
 
 #[test]
+fn fls_6_11_nested_struct_if() {
+    assert_galvanic_accepts("fls_6_11_nested_struct_if.rs");
+}
+
+#[test]
 fn fls_6_14_closure_expressions() {
     assert_galvanic_accepts("fls_6_14_closure_expressions.rs");
 }

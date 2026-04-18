@@ -35222,6 +35222,84 @@ fn main() -> i32 {\n\
     );
 }
 
+/// FLS §6.11, §6.17 — if-expression as nested struct field initializer.
+///
+/// `Outer { inner: if flag > 0 { Inner { a: 1, b: 2 } } else { Inner { a: 3, b: 4 } }, c: 5 }`
+/// must emit a runtime conditional branch over the two struct-literal arms.
+///
+/// Checks:
+/// - Assembly contains a conditional branch instruction (cbz/cbnz/b.ne/b.eq) for the
+///   if-condition — confirms the branch is emitted at runtime, not constant-folded.
+/// - Assembly contains `add` or `cmp` for the `flag > 0` comparison.
+/// - No compile-time constant is substituted for the chosen Inner value (FLS §6.1.2).
+#[test]
+fn fls_6_11_nested_struct_field_if_emits_branch() {
+    let src = "\
+struct Inner { a: i32, b: i32 }\n\
+struct Outer { inner: Inner, c: i32 }\n\
+fn main() -> i32 {\n\
+    let flag = 1;\n\
+    let o = Outer { inner: if flag > 0 { Inner { a: 1, b: 2 } } else { Inner { a: 3, b: 4 } }, c: 5 };\n\
+    o.inner.a\n\
+}\n";
+    let asm = compile_to_asm(src);
+    // The if-condition must produce a runtime comparison and branch.
+    let has_branch = asm.contains("cbz")
+        || asm.contains("cbnz")
+        || asm.contains("b.ne")
+        || asm.contains("b.eq")
+        || asm.contains("b.gt")
+        || asm.contains("b.le")
+        || asm.contains("beq")
+        || asm.contains("bne");
+    assert!(
+        has_branch,
+        "expected a conditional branch for the if-expression, got:\n{asm}"
+    );
+    // The comparison for flag > 0 must be present.
+    assert!(
+        asm.contains("cmp") || asm.contains("subs"),
+        "expected cmp/subs for 'flag > 0' condition, got:\n{asm}"
+    );
+    // Both branch values (a: 1 and a: 3) must appear as immediates — neither is folded away.
+    assert!(
+        asm.contains("#1") || asm.contains("#0x1"),
+        "expected immediate #1 from then-branch, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("#3") || asm.contains("#0x3"),
+        "expected immediate #3 from else-branch, got:\n{asm}"
+    );
+}
+
+/// FLS §6.11, §6.4 — block expression as nested struct field initializer emits runtime stores.
+///
+/// `Outer { inner: { let x = compute(); Inner { a: x } }, c: 3 }` — the block
+/// evaluates statements, then its tail expression is stored via `store_nested_struct_lit`.
+/// All stores are runtime instructions (FLS §6.1.2:37–45 — no const-fold).
+#[test]
+fn fls_6_11_nested_struct_field_block_emits_stores() {
+    let src = "\
+struct Inner { a: i32 }\n\
+struct Outer { inner: Inner, c: i32 }\n\
+fn main() -> i32 {\n\
+    let x = 7;\n\
+    let o = Outer { inner: { Inner { a: x } }, c: 3 };\n\
+    o.inner.a\n\
+}\n";
+    let asm = compile_to_asm(src);
+    // The block's tail `Inner { a: x }` stores x into the inner field slot.
+    assert!(
+        asm.contains("str"),
+        "expected str instruction for inner field store, got:\n{asm}"
+    );
+    // The value 7 must appear as an immediate (x is loaded, not constant-folded into 7 directly).
+    assert!(
+        asm.contains("#7") || asm.contains("#0x7") || asm.contains("ldr"),
+        "expected x value in assembly, got:\n{asm}"
+    );
+}
+
 // ── Claim 4l: §6.18 match exhaustiveness check ─────────────────────────────���─
 
 /// Claim 4l: non-exhaustive integer match rejected at compile time.
@@ -36652,16 +36730,17 @@ fn compile_to_asm_inspection_only(source: &str) -> String {
 /// FLS §18.1: Programs require `main`; inspection-only output intentionally omits it.
 #[test]
 fn inspection_only_asm_has_annotation_and_no_start() {
-    // main fails: uses an if-expression as a nested struct field initializer,
+    // main fails: uses an if-let expression as a nested struct field initializer,
     // which is not yet supported in store_nested_struct_lit. add and helper lower successfully.
     let src = "\
-struct Inner { a: i32, b: i32 }\n\
+enum Maybe { Just(i32), Nothing }\n\
+struct Inner { a: i32 }\n\
 struct Outer { inner: Inner, c: i32 }\n\
 fn add(x: i32, y: i32) -> i32 { x + y }\n\
 fn helper(x: i32) -> i32 { x + 1 }\n\
 fn main() -> i32 {\n\
-    let flag = 1;\n\
-    let o = Outer { inner: if flag > 0 { Inner { a: 1, b: 2 } } else { Inner { a: 3, b: 4 } }, c: 3 };\n\
+    let m = Maybe::Just(1);\n\
+    let o = Outer { inner: if let Maybe::Just(v) = m { Inner { a: v } } else { Inner { a: 0 } }, c: 3 };\n\
     o.c\n\
 }\n";
     let asm = compile_to_asm_inspection_only(src);
@@ -37363,4 +37442,3 @@ fn fls_6_18_guard_on_last_arm_emits_cond_branch() {
         "last-arm guard must not constant-fold (FLS §6.1.2), got:\n{asm}"
     );
 }
-

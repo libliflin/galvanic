@@ -6618,8 +6618,87 @@ impl<'src> LowerCtx<'src> {
                 }
             }
 
+            // FLS §6.4, §6.11: Block expression in nested struct field position.
+            //
+            // `Outer { inner: { let x = f(); Inner { a: x } }, c: 3 }` — lower
+            // any statements in the block, then recurse on the tail expression.
+            //
+            // This arm is also the canonical path for `else { ... }` branches of
+            // if-expressions: the parser wraps the else-body in `ExprKind::Block`.
+            //
+            // FLS §6.4: "A block expression evaluates to the value of its final
+            // expression, or the unit value if there is no final expression."
+            // The block must have a tail expression of the expected struct type.
+            //
+            // Cache-line note: cost equals the sum of block contents.
+            ExprKind::Block(block) | ExprKind::UnsafeBlock(block) => {
+                for stmt in &block.stmts {
+                    self.lower_stmt(stmt)?;
+                }
+                match block.tail.as_deref() {
+                    Some(tail) => self.store_nested_struct_lit(tail, base_slot, struct_name),
+                    None => Err(LowerError::Unsupported(format!(
+                        "nested struct field `{struct_name}`: block must have a tail expression of type `{struct_name}` (FLS §6.11, §6.4)"
+                    ))),
+                }
+            }
+
+            // FLS §6.17, §6.11: If-expression in nested struct field position.
+            //
+            // `Outer { inner: if cond { A { .. } } else { B { .. } }, c: 3 }` —
+            // evaluate the condition at runtime, then store the chosen branch's
+            // result into `base_slot` via recursive `store_nested_struct_lit`.
+            //
+            // Both branches must produce the same struct type (`struct_name`).
+            // The condition check is runtime (FLS §6.1.2:37–45 — no const-fold).
+            //
+            // FLS §6.17: "The condition operand must be of type bool." Each branch
+            // body that yields the struct is a block expression whose tail is the
+            // struct initializer (or any other supported nested-field form).
+            //
+            // FLS §6.11 AMBIGUOUS: evaluation order of nested field initializers
+            // is left-to-right; the spec does not mandate it. See fls-ambiguities.md §6.11.
+            //
+            // Cache-line note: ~4 instructions for cond+branch + N stores per branch.
+            ExprKind::If { cond, then_block, else_expr } => {
+                let else_label = self.alloc_label();
+                let end_label = self.alloc_label();
+
+                // FLS §6.17: Evaluate the condition as a bool at runtime.
+                let cond_val = self.lower_expr(cond, &IrTy::Bool)?;
+                let cond_reg = self.val_to_reg(cond_val)?;
+                self.instrs.push(Instr::CondBranch { reg: cond_reg, label: else_label, fls: "§6.17" });
+
+                // Then-branch: lower any statements, then recurse on the tail.
+                for stmt in &then_block.stmts {
+                    self.lower_stmt(stmt)?;
+                }
+                match then_block.tail.as_deref() {
+                    Some(tail) => self.store_nested_struct_lit(tail, base_slot, struct_name)?,
+                    None => {
+                        return Err(LowerError::Unsupported(format!(
+                            "nested struct field `{struct_name}`: if-expression then-block must have a tail expression (FLS §6.11, §6.17)"
+                        )));
+                    }
+                }
+                self.instrs.push(Instr::Branch { target: end_label, fls: "§6.17" });
+
+                // Else-branch: required for struct-producing if expressions.
+                self.instrs.push(Instr::Label { id: else_label, fls: "§6.17" });
+                match else_expr {
+                    Some(e) => self.store_nested_struct_lit(e, base_slot, struct_name)?,
+                    None => {
+                        return Err(LowerError::Unsupported(format!(
+                            "nested struct field `{struct_name}`: struct-producing if expression must have an else branch (FLS §6.11, §6.17)"
+                        )));
+                    }
+                }
+                self.instrs.push(Instr::Label { id: end_label, fls: "§6.17" });
+                Ok(())
+            }
+
             _ => Err(LowerError::Unsupported(format!(
-                "nested struct field `{struct_name}`: expected struct literal, variable, or struct-returning call (FLS §6.11)"
+                "nested struct field `{struct_name}`: expected struct literal, variable, struct-returning call, or if expression (FLS §6.11)"
             ))),
         }
     }
