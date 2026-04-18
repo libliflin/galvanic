@@ -354,6 +354,7 @@ pub enum IrBinOp {
 /// Milestone 14 adds `Call` for function call expressions (FLS §6.12.1).
 /// Milestone 16 adds comparison ops to `IrBinOp` and while loop lowering.
 /// Milestone 21 adds bitwise and shift ops to `IrBinOp` (FLS §6.5.6, §6.5.7).
+#[derive(Clone)]
 pub enum Instr {
     /// Return a value to the caller.
     ///

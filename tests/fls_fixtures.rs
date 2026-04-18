@@ -258,3 +258,11 @@ fn fls_6_8_array_expressions() {
 fn fls_6_9_indexing_expressions() {
     assert_galvanic_accepts("fls_6_9_indexing_expressions.rs");
 }
+
+#[test]
+fn fls_9_register_pressure() {
+    // FLS §9: Function with 40 sequential let-bindings, producing virtual
+    // register indices well above 30. The allocator must map them to valid
+    // ARM64 physical registers (x0–x30) without emitting x31+ names.
+    assert_galvanic_accepts("fls_9_register_pressure.rs");
+}

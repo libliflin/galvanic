@@ -340,6 +340,364 @@ fn emit_asm_impl(module: &Module, include_entrypoint: bool) -> Result<String, Co
     Ok(out)
 }
 
+// ── Register allocation ───────────────────────────────────────────────────────
+//
+// ARM64 has x0–x30 as writable general-purpose integer registers; x31 is sp/xzr
+// (not a writable GPR); x32+ do not exist. When a function has many let-bindings,
+// virtual register (VR) indices can exceed 30, producing architecturally invalid
+// assembly like `add x198, x196, x197`.
+//
+// This allocator maps virtual registers to physical registers from INT_ALLOC_POOL
+// using a linear-scan algorithm (Poletto & Sarkar 1999). It runs as a pre-pass in
+// `emit_fn` when `max_int_vr_in_body` detects that any VR index ≥ VR_PHYS_LIMIT.
+//
+// AAPCS64 register roles for our pool decision:
+//   In pool:  x0–x8, x10, x11, x15   (12 registers)
+//   Excluded: x9   — caller-saved scratch reused in CallIndirect/LoadIndexedF64/F32
+//             x12–x14 — reserved for future spill-scratch use
+//             x16–x17 — ABI scratch (ip0/ip1) used in LoadStatic/LoadFnAddr/vtable shims
+//             x18  — platform register (AAPCS64 §5.1.2)
+//             x19–x28 — callee-saved; galvanic emits no callee-save prologue/epilogue
+//             x29  — frame pointer
+//             x30  — link register, managed separately via saves_lr
+//             x31  — sp/xzr, not a writable GPR
+//
+// Galvanic's IR uses a store-then-load pattern for every let-binding:
+//   LoadImm/BinOp(VR) → Store(VR, slot)   define and immediately store
+//   Load(VR, slot) → BinOp/Store(VR, …)   load and immediately consume
+// Peak simultaneous live VRs is therefore ≤ 3, well within the 12-register pool.
+// The pool of 12 is sufficient for all programs galvanic can currently lower.
+
+/// Physical ARM64 integer registers available for allocation, in preference order.
+const INT_ALLOC_POOL: &[u8] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 15];
+
+/// Any VR index ≥ this value is architecturally invalid as an ARM64 GPR name.
+/// x0–x30 are valid writable GPRs; x31 = sp/xzr; x32+ do not exist.
+const VR_PHYS_LIMIT: u8 = 31;
+
+/// Returns the maximum integer VR index referenced in the function body, or 0.
+fn max_int_vr_in_body(body: &[Instr]) -> u8 {
+    let mut max = 0u8;
+    for instr in body {
+        let (uses, defs) = int_vr_uses_defs(instr);
+        for vr in uses.into_iter().chain(defs) {
+            if vr > max {
+                max = vr;
+            }
+        }
+    }
+    max
+}
+
+/// Returns `(uses, defs)` of integer virtual registers for one instruction.
+///
+/// "Defs" are integer VRs written (defined) by this instruction.
+/// "Uses" are integer VRs read as inputs by this instruction.
+/// Float registers (d/s) and stack-slot indices are not integer VRs and are excluded.
+fn int_vr_uses_defs(instr: &Instr) -> (Vec<u8>, Vec<u8>) {
+    use Instr::*;
+    match instr {
+        Ret(IrValue::Reg(r)) => (vec![*r], vec![]),
+        Ret(_) => (vec![], vec![]),
+        LoadImm(dst, _) => (vec![], vec![*dst]),
+        BinOp { dst, lhs, rhs, .. } => (vec![*lhs, *rhs], vec![*dst]),
+        Store { src, .. } => (vec![*src], vec![]),
+        Load { dst, .. } => (vec![], vec![*dst]),
+        Label { .. } | Branch { .. } => (vec![], vec![]),
+        CondBranch { reg, .. } => (vec![*reg], vec![]),
+        Neg { dst, src }
+        | Not { dst, src }
+        | BoolNot { dst, src }
+        | TruncU8 { dst, src }
+        | SextI8 { dst, src }
+        | TruncU16 { dst, src }
+        | SextI16 { dst, src }
+        | LoadPtr { dst, src } => (vec![*src], vec![*dst]),
+        Call { dst, args, float_ret, .. } => {
+            let defs = if float_ret.is_none() { vec![*dst] } else { vec![] };
+            (args.clone(), defs)
+        }
+        RetFields { .. } => (vec![], vec![]),
+        LoadIndexed { dst, index_reg, .. } => (vec![*index_reg], vec![*dst]),
+        StoreIndexed { src, index_reg, scratch, .. } => {
+            (vec![*src, *index_reg], vec![*scratch])
+        }
+        LoadIndexedF64 { index_reg, .. } | LoadIndexedF32 { index_reg, .. } => {
+            (vec![*index_reg], vec![])
+        }
+        LoadStatic { dst, .. } | LoadFnAddr { dst, .. } | AddrOf { dst, .. } => {
+            (vec![], vec![*dst])
+        }
+        F64ToI32 { dst, .. }
+        | F32ToI32 { dst, .. }
+        | FCmpF64 { dst, .. }
+        | FCmpF32 { dst, .. }
+        | CallVtable { dst, .. } => (vec![], vec![*dst]),
+        CallIndirect { dst, args, .. } => (args.clone(), vec![*dst]),
+        CallRetFatPtr { args, .. } => (args.clone(), vec![]),
+        CallMut { args, .. } => (args.clone(), vec![]),
+        RetFieldsAndValue { val_reg, .. } => (vec![*val_reg], vec![]),
+        CallMutReturn { args, dst, .. } => (args.clone(), vec![*dst]),
+        AddrOfIndexed { dst, index_reg, scratch, .. } => {
+            (vec![*index_reg], vec![*dst, *scratch])
+        }
+        StorePtr { src, addr } => (vec![*src, *addr], vec![]),
+        I32ToF64 { src, .. } | I32ToF32 { src, .. } => (vec![*src], vec![]),
+        // Pure-float and no-integer-VR instructions.
+        FNegF64 { .. }
+        | FNegF32 { .. }
+        | LoadStaticF64 { .. }
+        | LoadStaticF32 { .. }
+        | LoadF64Const { .. }
+        | LoadF32Const { .. }
+        | StoreF64 { .. }
+        | LoadF64Slot { .. }
+        | StoreF32 { .. }
+        | LoadF32Slot { .. }
+        | F64BinOp { .. }
+        | F32BinOp { .. }
+        | F32ToF64 { .. }
+        | F64ToF32 { .. } => (vec![], vec![]),
+    }
+}
+
+/// Identifies integer VRs that are used before any definition in the body.
+///
+/// Such VRs arrive from the caller in their ABI registers (VR N → xN per
+/// AAPCS64). They are pre-assigned to those physical registers before the
+/// linear-scan pass to preserve the calling convention.
+fn identify_param_vrs(body: &[Instr]) -> Vec<u8> {
+    let mut defined: std::collections::HashSet<u8> = std::collections::HashSet::new();
+    let mut params: Vec<u8> = Vec::new();
+    for instr in body {
+        let (uses, defs) = int_vr_uses_defs(instr);
+        for vr in uses {
+            if !defined.contains(&vr) && !params.contains(&vr) {
+                params.push(vr);
+            }
+        }
+        for vr in defs {
+            defined.insert(vr);
+        }
+    }
+    params
+}
+
+/// Computes live intervals for all integer VRs in the body.
+///
+/// Returns a vec of `(vr, start, end)` triples sorted by `start`, where
+/// `start` and `end` are instruction indices into `body`. The interval
+/// `[start, end]` is inclusive: the VR is considered live from its first
+/// appearance to its last appearance at any use or def site.
+fn compute_live_intervals(body: &[Instr]) -> Vec<(u8, usize, usize)> {
+    let mut intervals: std::collections::HashMap<u8, (usize, usize)> =
+        std::collections::HashMap::new();
+    for (i, instr) in body.iter().enumerate() {
+        let (uses, defs) = int_vr_uses_defs(instr);
+        for vr in uses.into_iter().chain(defs) {
+            let entry = intervals.entry(vr).or_insert((i, i));
+            if i < entry.0 {
+                entry.0 = i;
+            }
+            if i > entry.1 {
+                entry.1 = i;
+            }
+        }
+    }
+    let mut result: Vec<(u8, usize, usize)> =
+        intervals.into_iter().map(|(vr, (s, e))| (vr, s, e)).collect();
+    result.sort_by_key(|&(_, s, _)| s);
+    result
+}
+
+/// Linear-scan register allocator.
+///
+/// Assigns physical registers from `INT_ALLOC_POOL` to virtual registers based
+/// on live intervals. Returns a `phys` vec where `phys[vr]` is the physical
+/// register number assigned to VR `vr` (`u8::MAX` = unassigned/unused).
+///
+/// Parameter VRs (those in `params`) are pre-assigned to their ABI registers
+/// (VR N → xN) before the scan, consuming those pool slots for the full body.
+///
+/// Returns `CodegenError::Unsupported` if register pressure exceeds pool size.
+/// In practice this does not occur: galvanic's store-then-load IR pattern keeps
+/// peak simultaneous live VR count ≤ 3, well within the 12-register pool.
+fn linear_scan_alloc(
+    intervals: &[(u8, usize, usize)],
+    params: &[u8],
+    n_vrs: usize,
+) -> Result<Vec<u8>, CodegenError> {
+    let mut phys = vec![u8::MAX; n_vrs];
+
+    // Pre-assign parameter VRs: VR N → xN (ABI calling convention).
+    let mut free: Vec<u8> = INT_ALLOC_POOL.to_vec();
+    for &p in params {
+        if (p as usize) < n_vrs {
+            phys[p as usize] = p;
+        }
+        free.retain(|&r| r != p);
+    }
+
+    // active: (vr, end) for currently-assigned non-param VRs, sorted by end.
+    let mut active: Vec<(u8, usize)> = Vec::new();
+
+    for &(vr, start, end) in intervals {
+        if (vr as usize) < n_vrs && phys[vr as usize] != u8::MAX {
+            // Already assigned (parameter) — skip; param regs are not recycled.
+            continue;
+        }
+
+        // Expire intervals that ended before this one starts; return their regs.
+        let mut newly_free: Vec<u8> = Vec::new();
+        active.retain(|&(avr, aend)| {
+            if aend < start {
+                if !params.contains(&avr) {
+                    newly_free.push(phys[avr as usize]);
+                }
+                false
+            } else {
+                true
+            }
+        });
+        free.extend(newly_free);
+        free.sort_unstable();
+
+        if free.is_empty() {
+            return Err(CodegenError::Unsupported(format!(
+                "register pressure too high: {} simultaneous live integer VRs exceed \
+                 pool size {} (pool: x0–x8, x10, x11, x15)",
+                active.len() + 1,
+                INT_ALLOC_POOL.len(),
+            )));
+        }
+
+        let preg = free.remove(0);
+        if (vr as usize) < n_vrs {
+            phys[vr as usize] = preg;
+        }
+        // Keep active sorted by end point for correct expiry ordering.
+        let pos = active.partition_point(|&(_, e)| e <= end);
+        active.insert(pos, (vr, end));
+    }
+
+    Ok(phys)
+}
+
+/// Rewrites integer VRs in a single instruction using the physical register map.
+///
+/// Each integer VR `v` is replaced by `phys[v]`. Float registers (`d`/`s`),
+/// stack-slot indices, and all non-VR fields are passed through unchanged.
+fn rewrite_int_vr_in_instr(instr: Instr, phys: &[u8]) -> Instr {
+    let rr = |vr: u8| -> u8 {
+        let idx = vr as usize;
+        if idx < phys.len() && phys[idx] != u8::MAX { phys[idx] } else { vr }
+    };
+    use Instr::*;
+    match instr {
+        Ret(IrValue::Reg(reg)) => Ret(IrValue::Reg(rr(reg))),
+        LoadImm(dst, n) => LoadImm(rr(dst), n),
+        BinOp { op, dst, lhs, rhs, ty } => BinOp { op, dst: rr(dst), lhs: rr(lhs), rhs: rr(rhs), ty },
+        Store { src, slot } => Store { src: rr(src), slot },
+        Load { dst, slot } => Load { dst: rr(dst), slot },
+        CondBranch { reg, label, fls } => CondBranch { reg: rr(reg), label, fls },
+        Neg { dst, src } => Neg { dst: rr(dst), src: rr(src) },
+        Not { dst, src } => Not { dst: rr(dst), src: rr(src) },
+        BoolNot { dst, src } => BoolNot { dst: rr(dst), src: rr(src) },
+        TruncU8 { dst, src } => TruncU8 { dst: rr(dst), src: rr(src) },
+        SextI8 { dst, src } => SextI8 { dst: rr(dst), src: rr(src) },
+        TruncU16 { dst, src } => TruncU16 { dst: rr(dst), src: rr(src) },
+        SextI16 { dst, src } => SextI16 { dst: rr(dst), src: rr(src) },
+        Call { dst, name, args, float_args, float_ret } => {
+            let new_dst = if float_ret.is_none() { rr(dst) } else { dst };
+            let new_args: Vec<u8> = args.into_iter().map(|a| rr(a)).collect();
+            Call { dst: new_dst, name, args: new_args, float_args, float_ret }
+        }
+        LoadIndexed { dst, base_slot, index_reg, len } => {
+            LoadIndexed { dst: rr(dst), base_slot, index_reg: rr(index_reg), len }
+        }
+        StoreIndexed { src, base_slot, index_reg, scratch, len } => {
+            StoreIndexed { src: rr(src), base_slot, index_reg: rr(index_reg), scratch: rr(scratch), len }
+        }
+        LoadIndexedF64 { dst, base_slot, index_reg, len } => {
+            LoadIndexedF64 { dst, base_slot, index_reg: rr(index_reg), len }
+        }
+        LoadIndexedF32 { dst, base_slot, index_reg, len } => {
+            LoadIndexedF32 { dst, base_slot, index_reg: rr(index_reg), len }
+        }
+        LoadStatic { dst, name } => LoadStatic { dst: rr(dst), name },
+        LoadFnAddr { dst, name } => LoadFnAddr { dst: rr(dst), name },
+        CallIndirect { dst, ptr_slot, args } => {
+            let new_args: Vec<u8> = args.into_iter().map(|a| rr(a)).collect();
+            CallIndirect { dst: rr(dst), ptr_slot, args: new_args }
+        }
+        CallVtable { dst, data_slot, vtable_slot, method_idx } => {
+            CallVtable { dst: rr(dst), data_slot, vtable_slot, method_idx }
+        }
+        CallRetFatPtr { name, args, dst_data_slot } => {
+            let new_args: Vec<u8> = args.into_iter().map(|a| rr(a)).collect();
+            CallRetFatPtr { name, args: new_args, dst_data_slot }
+        }
+        CallMut { name, args, write_back_slot, n_fields } => {
+            let new_args: Vec<u8> = args.into_iter().map(|a| rr(a)).collect();
+            CallMut { name, args: new_args, write_back_slot, n_fields }
+        }
+        RetFieldsAndValue { base_slot, n_fields, val_reg } => {
+            RetFieldsAndValue { base_slot, n_fields, val_reg: rr(val_reg) }
+        }
+        CallMutReturn { name, args, write_back_slot, n_fields, dst } => {
+            let new_args: Vec<u8> = args.into_iter().map(|a| rr(a)).collect();
+            CallMutReturn { name, args: new_args, write_back_slot, n_fields, dst: rr(dst) }
+        }
+        AddrOf { dst, slot } => AddrOf { dst: rr(dst), slot },
+        AddrOfIndexed { dst, base_slot, index_reg, scratch } => {
+            AddrOfIndexed { dst: rr(dst), base_slot, index_reg: rr(index_reg), scratch: rr(scratch) }
+        }
+        LoadPtr { dst, src } => LoadPtr { dst: rr(dst), src: rr(src) },
+        StorePtr { src, addr } => StorePtr { src: rr(src), addr: rr(addr) },
+        F64ToI32 { dst, src } => F64ToI32 { dst: rr(dst), src },
+        F32ToI32 { dst, src } => F32ToI32 { dst: rr(dst), src },
+        I32ToF64 { dst, src } => I32ToF64 { dst, src: rr(src) },
+        I32ToF32 { dst, src } => I32ToF32 { dst, src: rr(src) },
+        FCmpF64 { op, dst, lhs, rhs } => FCmpF64 { op, dst: rr(dst), lhs, rhs },
+        FCmpF32 { op, dst, lhs, rhs } => FCmpF32 { op, dst: rr(dst), lhs, rhs },
+        // Pass through all variants with no integer VRs:
+        // Ret(non-Reg), Label, Branch, RetFields, FNegF64, FNegF32,
+        // LoadStaticF64/F32, LoadF64/F32Const, StoreF64/F32, LoadF64/F32Slot,
+        // F64/F32BinOp, F32ToF64, F64ToF32.
+        other => other,
+    }
+}
+
+/// Register-allocation pre-pass for a function body.
+///
+/// If the maximum integer VR index in `body` is less than `VR_PHYS_LIMIT` (31),
+/// returns a clone of the body unchanged — the identity mapping is safe because
+/// all VR indices are valid ARM64 physical register names.
+///
+/// Otherwise, runs linear-scan allocation over the live intervals and returns a
+/// new body with every integer VR replaced by its assigned physical register.
+/// Returns `CodegenError::Unsupported` if register pressure exceeds pool size.
+fn allocate_registers(
+    body: &[Instr],
+    func_name: &str,
+) -> Result<Vec<Instr>, CodegenError> {
+    let max_vr = max_int_vr_in_body(body);
+    if max_vr < VR_PHYS_LIMIT {
+        return Ok(body.to_vec());
+    }
+
+    let params = identify_param_vrs(body);
+    let intervals = compute_live_intervals(body);
+    let n_vrs = max_vr as usize + 1;
+    let phys = linear_scan_alloc(&intervals, &params, n_vrs).map_err(|e| {
+        CodegenError::Unsupported(format!(
+            "register allocation failed for `{func_name}`: {e}"
+        ))
+    })?;
+
+    Ok(body.iter().cloned().map(|instr| rewrite_int_vr_in_instr(instr, &phys)).collect())
+}
+
 // ── Function emission ─────────────────────────────────────────────────────────
 
 /// Compute the ARM64 stack frame size for a given number of 8-byte slots.
@@ -418,6 +776,15 @@ fn emit_fn(out: &mut String, func: &crate::ir::IrFn) -> Result<(), CodegenError>
         )?;
     }
 
+    // Register-allocation pre-pass: map virtual registers to physical ARM64 registers.
+    //
+    // ARM64 has x0–x30 as writable GPRs; x31 = sp/xzr; x32+ do not exist.
+    // Virtual register index N may exceed 30 in functions with many let-bindings,
+    // which would produce architecturally invalid assembly (e.g., `add x198, …`).
+    // `allocate_registers` returns the body unchanged when max VR < 31 (identity
+    // mapping is safe), or applies linear-scan allocation when needed.
+    let body = allocate_registers(&func.body, &func.name)?;
+
     // Pre-scan the body to map label IDs to cumulative ARM64 instruction counts.
     //
     // This enables back-edge detection: a Branch whose target label has a smaller
@@ -434,7 +801,7 @@ fn emit_fn(out: &mut String, func: &crate::ir::IrFn) -> Result<(), CodegenError>
         std::collections::HashMap::new();
     {
         let mut cum: u32 = 0;
-        for instr in &func.body {
+        for instr in &body {
             if let Instr::Label { id, .. } = instr {
                 label_cumulative.insert(*id, cum);
             }
@@ -447,7 +814,7 @@ fn emit_fn(out: &mut String, func: &crate::ir::IrFn) -> Result<(), CodegenError>
     // generates `.Lsdiv_ok_{fn_name}_{n}` / `.Lsrem_ok_{fn_name}_{n}`.
     let mut label_ctr: usize = 0;
     let mut cumulative: u32 = 0;
-    for instr in &func.body {
+    for instr in &body {
         // Back-edge detection: an unconditional Branch whose target label appears
         // earlier in the instruction stream (label_cumulative[target] < cumulative)
         // is a loop back-edge. Emit the loop body cache-line footprint annotation
