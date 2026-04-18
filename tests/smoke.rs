@@ -457,30 +457,62 @@ fn main() -> i32 {{
 
 #[test]
 fn lower_source_all_unsupported_strings_cite_fls() {
-    // Static invariant: every non-comment line in src/lower.rs containing
-    // "not yet supported" must also contain "(FLS §" on the same line.
-    // This complements the runtime smoke test by catching new uncited strings
-    // before they reach an exercised code path. The Display impl format string
-    // (`write!(f, "not yet supported: {msg}")`) is excluded — it is the prefix
-    // machinery, not a message payload.
+    // Static invariant: every LowerError::Unsupported( call site in src/lower.rs
+    // must supply a message string that contains "(FLS §". This ensures every
+    // "not yet supported" error emitted to users names the spec section.
+    //
+    // The previous version of this test scanned for the literal text
+    // "not yet supported" in source lines — a string that appears only in the
+    // Display impl (`write!(f, "not yet supported: {msg}")`), never in the
+    // message payloads themselves. That scan matched zero call sites and the
+    // test passed vacuously while hundreds of messages lacked FLS citations.
+    //
+    // This version scans for `LowerError::Unsupported(` and inspects a window
+    // of lines around each call site for `(FLS §`. New call sites without a
+    // citation will push the violation count above MAX_UNCITED_VIOLATIONS and
+    // fail CI — a ratchet. As citations are added, lower MAX_UNCITED_VIOLATIONS.
+    //
+    // Known debt as of cycle 030: 348 call sites still lack FLS citations.
+    // Every new Unsupported call must include a citation; reduce the debt
+    // incrementally by adding citations when touching the surrounding code.
+    const MAX_UNCITED_VIOLATIONS: usize = 348;
+
     let src = std::fs::read_to_string(
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/lower.rs"),
     )
     .expect("failed to read src/lower.rs");
 
+    let lines: Vec<&str> = src.lines().collect();
     let mut violations = Vec::new();
-    for (i, line) in src.lines().enumerate() {
+
+    for (i, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
-        if trimmed.starts_with("//") || trimmed.starts_with('*') || trimmed.contains("write!(f,") {
+        // Skip comments and the Display impl which holds the prefix machinery.
+        if trimmed.starts_with("//")
+            || trimmed.starts_with('*')
+            || trimmed.contains("write!(f,")
+        {
             continue;
         }
-        if trimmed.contains("not yet supported") && !trimmed.contains("(FLS §") {
-            violations.push(format!("lower.rs:{}: {trimmed}", i + 1));
+        if trimmed.contains("LowerError::Unsupported(") {
+            // Inspect a 3-line window (the call line plus the next two) for
+            // a FLS citation. Most call sites are single-line or two-line;
+            // three lines covers all observed patterns.
+            let window_end = (i + 3).min(lines.len());
+            let window = lines[i..window_end].join(" ");
+            if !window.contains("(FLS §") {
+                violations.push(format!("lower.rs:{}: {}", i + 1, trimmed));
+            }
         }
     }
+
     assert!(
-        violations.is_empty(),
-        "lower.rs has 'not yet supported' strings without FLS citations:\n{}",
-        violations.join("\n")
+        violations.len() <= MAX_UNCITED_VIOLATIONS,
+        "lower.rs has {} LowerError::Unsupported call site(s) without FLS citations \
+         (max allowed: {}). New call sites must include a citation. \
+         Reduce MAX_UNCITED_VIOLATIONS as debt is paid down.\nFirst new violation(s):\n{}",
+        violations.len(),
+        MAX_UNCITED_VIOLATIONS,
+        violations[violations.len().saturating_sub(5)..].join("\n")
     );
 }

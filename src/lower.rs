@@ -4434,7 +4434,7 @@ fn lower_ty(
         // FLS §4.4: Tuple types — used only in parameter position for tuple patterns.
         // A tuple type as a scalar return/local is not yet supported.
         TyKind::Tuple(_) => Err(LowerError::Unsupported(
-            "tuple type in scalar context (use tuple pattern parameter instead)".into(),
+            "tuple type in scalar context (FLS §4.4, §6.10)".into(),
         )),
         // FLS §4.9: Function pointer types `fn(T1, ...) -> R`.
         // A function pointer is a 64-bit address — one register, like a scalar.
@@ -6785,7 +6785,7 @@ impl<'src> LowerCtx<'src> {
                 // FLS §6.13: Named struct field — look up field index and offset.
                 let type_name = recv_ty.ok_or_else(|| {
                     LowerError::Unsupported(format!(
-                        "field access on scalar value (field `{field_name}`)"
+                        "field access on scalar value: `{field_name}` (FLS §6.13)"
                     ))
                 })?;
 
