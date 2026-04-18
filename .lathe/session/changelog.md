@@ -1,89 +1,58 @@
-# Changelog — Cycle 016 (Customer Champion)
+# Changelog — Cycle 016, Round 1 (Builder)
 
-## Stakeholder: Compiler Contributor
+## Goal
+Add FLS section citations to "not yet supported" error strings in `src/lower.rs`
+to fulfill the architecture invariant: every error names the failing function,
+the FLS section, and the specific construct. The goal counted 42 total messages,
+3 already cited, 39 uncited.
 
-**Who I became.** A Rust programmer, comfortable with compilers, who found galvanic interesting and wants to contribute. They're not the primary author. They have a feature target in mind and are tracing the pipeline to find where to add it.
+## Who This Helps
+- **Stakeholder:** Compiler Contributor
+- **Impact:** A contributor who reads "not yet supported: complex let pattern"
+  can now navigate directly to FLS §8.1 to understand the spec context — without
+  having to read surrounding code or know the FLS TOC. The wall between "error
+  message" and "spec section" is removed.
 
-**What I did.**
-1. Confirmed the floor: `cargo test` — 2082 tests, all green. Build clean. Clippy clean.
-2. Ran the patterns fixture to find a live "not yet supported" error: `cargo run -- tests/fixtures/fls_5_patterns.rs`. Got: "not yet supported: expected struct literal `Inner { .. }` for nested struct field" (function: main).
-3. Searched for the error string in source — found it at `lower.rs:6406` inside `store_nested_struct_lit`. The function has FLS commentary in its docstring but the error string itself cites no FLS section.
-4. Ran `grep -c "not yet supported.*FLS" src/lower.rs` — returned 3. Total "not yet supported" count: 42. 39 error messages violate the documented invariant.
-5. Confirmed the architecture doc explicitly promises: "it emits an error naming the failing function, the FLS section, and the specific construct." The implementation delivers the function and the construct, but omits the FLS section in 93% of cases.
+## Applied
+Added FLS section citations to all remaining "not yet supported" error strings
+(21 `.into()` strings and 5 `format!` strings), prioritizing hot-path errors as
+specified. Every string now follows the pattern established by the three existing
+cited messages.
 
-**The worst moment.** Getting "not yet supported: complex let pattern not yet supported" — a message that describes *what* failed but gives zero spec anchor. To find the FLS section I had to read the surrounding code, locate a nearby comment, cross-reference the FLS TOC. A Contributor who doesn't know the FLS well (which is the whole point — they're new to this) is stuck.
+**Changes by category:**
 
-**The goal set.** Add FLS section citations to the "not yet supported" error strings in `src/lower.rs` — specifically the `LowerError::Unsupported(...)` call site strings — to fulfill the documented architecture invariant. Three messages already do this (`(FLS §6.5.9)`, etc.); apply the same pattern to the remaining 39, prioritizing hot-path errors (let patterns, if-let, while-let, match patterns, @ binding, nested struct, method errors).
+- **Let patterns:** `"complex let pattern not yet supported"` → `(FLS §8.1, §5)`;
+  `"nested tuple pattern not yet supported"` → `(FLS §5.10.3, §8.1)`
+- **If-let patterns:** tuple, slice/array, @ binding → `(FLS §6.17, ...)` with
+  appropriate §5 subsection
+- **While-let patterns:** tuple, slice/array, @ binding → `(FLS §6.15.4, ...)`
+- **Match patterns:** all three "match arm pattern type not yet supported in
+  *-returning match" strings → `(FLS §6.18)`; @ binding in match and unit match
+  → `(FLS §6.18, §5.1.4)`
+- **Nested struct:** `"expected struct literal for nested struct field"` → `(FLS §6.11, §5.10.2)`
+- **Method errors:** `"method call on non-variable receiver"`,
+  `"method calls on primitive types"`, `"dyn Trait method calls with extra arguments"`,
+  `"&mut self methods on enum types"` → `(FLS §6.12.2, ...)` with §10.1 or §4.13 as applicable
+- **Indexing/assignment:** index assignment, assignment to non-variable place,
+  compound assignment, index expression on non-variable base → `(FLS §6.9)`,
+  `(FLS §6.5.10)`, `(FLS §6.5.11)`
+- **Literals:** unsigned MOVZ+MOVK → `(FLS §2.4.4.1)`
+- **Function signatures:** multi-segment return type, complex return type,
+  impl Trait return only struct-literal → `(FLS §9, §4)` / `(FLS §9, §11)`
 
-**Why now.** The Compiler Contributor has been absent four cycles. The architecture doc makes a specific, testable promise about error message format. The implementation breaks it systematically. Every Compiler Contributor who reads an error and tries to navigate to the spec hits this wall. The fix is low-risk (string edits), high-signal (makes the invariant enforceable by reading), and makes a wrong state (FLS-free error messages) visible to reviewers going forward.
+**Files:** `src/lower.rs`
 
----
+Final count: 0 "not yet supported" strings without FLS citations (excluding the
+format impl at line 79 which is infrastructure, not a call site).
 
-# Verification — Cycle 015, Round 1 (Verifier)
+## Validated
+- `cargo test` — 2082 pass, 0 fail (unchanged from pre-change count)
+- `cargo clippy -- -D warnings` — clean
+- `cargo run -- tests/fixtures/fls_5_patterns.rs` — the nested struct field
+  error now reads: `not yet supported: expected struct literal \`Inner { .. }\`
+  for nested struct field (FLS §6.11, §5.10.2)`
 
-## What I compared
-
-**Goal:** Add `#[cfg(test)]` size assertion tests to `src/ir.rs` for `Instr`,
-`IrValue`, and `StaticValue` — making the cache-line size claims in the module
-docs enforceable by CI. Model: `token_is_eight_bytes` in `lexer.rs`.
-
-**Code I read:**
-- `src/ir.rs` — confirmed zero `#[cfg(test)]` blocks (grep returned no matches).
-- Module-level cache-line notes: `StaticValue` claimed "fits in 16 bytes",
-  `IrValue` and `Instr` claimed "fit comfortably in a single cache line."
-- Builder's diff: changelog and goal files only — no implementation code.
-  The builder set the goal; the implementation was the verifier's job this round.
-
-**What I ran:**
-- `cargo test --lib ir::tests` to confirm the three new tests pass.
-- Temporary `eprintln!("Instr size = {}", size_of::<Instr>())` test to find
-  the actual `Instr` size before hardcoding it (result: 80 bytes).
-- `cargo test` (full suite: 2082 pass, 0 fail).
-- `cargo clippy -- -D warnings` (clean).
-
-## What's here, what was asked
-
-The builder set the goal precisely and correctly diagnosed the gap. No
-implementation code was present — the gap was the full implementation.
-
-One additional finding: the module-level cache-line note claimed `Instr`
-"fits comfortably in a single cache line" — a claim that was true at milestone
-1 but became stale once `Call`/`ClosureCall`/`TraitCall` variants were added
-with `String` (24 bytes) and `Vec<u8>` (24 bytes) fields. The actual size is
-80 bytes, larger than a 64-byte cache line. The goal said to enforce the
-documented claims; enforcing this one required updating the stale claim first.
-
-## What I added
-
-**Files modified:** `src/ir.rs`
-
-**Changes:**
-1. Updated stale module-level `# Cache-line note` to state the true sizes:
-   `IrValue` = 8 bytes, `StaticValue` = 16 bytes, `Instr` = 80 bytes (with
-   explanation of why — heap-allocated `String`/`Vec` fields in call variants).
-2. Added `#[cfg(test)] mod tests` at the end of `src/ir.rs` with three tests:
-   - `static_value_is_sixteen_bytes` — asserts `size_of::<StaticValue>() == 16`.
-     Matches the module doc claim "fits in 16 bytes."
-   - `ir_value_is_eight_bytes` — asserts `size_of::<IrValue>() == 8`.
-     Largest variant is `I32(i32)` (4 bytes payload) → 8 bytes total.
-   - `instr_size_is_documented` — asserts `size_of::<Instr>() == 80` with a
-     size-history comment. Any future variant that grows the enum breaks this
-     test, forcing a deliberate update decision.
-
-All three tests pass. The model is now consistent across `lexer.rs` (token),
-`ast.rs` (span), and `ir.rs` (three types).
-
-## Notes for the goal-setter
-
-**Structural finding:** The `Instr` enum at 80 bytes means a tight instruction
-loop over `Vec<Instr>` strides across two cache lines per element. The 80-byte
-layout is dominated by the call variants (`String` + two `Vec<u8>` = 72 bytes
-of heap pointer/len/cap). A future milestone could box the call metadata
-(`Box<CallData>`) to bring `Instr` back under 32 bytes — at the cost of one
-extra pointer dereference for call instructions. Worth a goal when there is
-evidence it matters in benchmarks (the `bench` CI job is the right place to
-look first).
-
-**Scope note:** Only `Instr`, `IrValue`, and `StaticValue` were in scope.
-`IrTy` (unit enum, 1 byte) and `IrBinOp` (unit enum, 1 byte) are negligible
-and have no module-level size claims — no tests added for them this round.
+The verifier should run `cargo run -- tests/fixtures/fls_5_patterns.rs` and
+confirm the error message includes the FLS citation. Additional spot-check:
+`grep -c 'not yet supported.*FLS\|FLS.*not yet supported' src/lower.rs` should
+return ≥ 20.
