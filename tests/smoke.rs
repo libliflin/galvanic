@@ -322,6 +322,47 @@ fn match_tuple(x: i32, y: i32) -> i32 {{
 }
 
 #[test]
+fn tuple_parameter_error_names_fls_sections_and_fix_site() {
+    // Cycle 031 goal: when a contributor writes `fn first(t: (i32, i32)) -> i32 { t.0 }`,
+    // the error must cite FLS §4.4 and §6.10 AND point to the tuple_struct_defs branch
+    // in lower_fn as the fix site — mirroring the tuple scrutinee guidance from cycle 028.
+    //
+    // Before this cycle the error had the right citations but no fix-site hint.
+    // A contributor following the error hit lower_ty (a leaf function, not the fix site)
+    // and had no path to the parameter-handling dispatch in lower_fn ~750 lines away.
+    let mut tmp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
+    write!(
+        tmp,
+        r#"
+fn first(t: (i32, i32)) -> i32 {{ t.0 }}
+"#
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_galvanic"))
+        .arg(tmp.path())
+        .output()
+        .expect("failed to run galvanic");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Must cite both FLS sections.
+    assert!(
+        stderr.contains("FLS §4.4"),
+        "expected FLS §4.4 citation in tuple parameter error, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("§6.10"),
+        "expected §6.10 citation in tuple parameter error, got: {stderr}"
+    );
+    // Must point the contributor to the right fix site.
+    assert!(
+        stderr.contains("tuple_struct_defs"),
+        "expected fix-site hint 'tuple_struct_defs' in tuple parameter error, got: {stderr}"
+    );
+    assert!(!output.status.success(), "expected non-zero exit");
+}
+
+#[test]
 fn partial_lower_no_main_emits_inspection_assembly() {
     // When fn main fails to lower but other functions succeed, galvanic must
     // emit a partial .s file annotated "inspection-only" so the Lead Researcher

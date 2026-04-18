@@ -4434,7 +4434,10 @@ fn lower_ty(
         // FLS §4.4: Tuple types — used only in parameter position for tuple patterns.
         // A tuple type as a scalar return/local is not yet supported.
         TyKind::Tuple(_) => Err(LowerError::Unsupported(
-            "tuple type in scalar context (FLS §4.4, §6.10)".into(),
+            "tuple type in scalar context (FLS §4.4, §6.10) — \
+             extend the tuple-struct parameter path in lower_fn \
+             (see tuple_struct_defs branch)"
+                .into(),
         )),
         // FLS §4.9: Function pointer types `fn(T1, ...) -> R`.
         // A function pointer is a 64-bit address — one register, like a scalar.
