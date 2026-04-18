@@ -1,39 +1,60 @@
-# Changelog — Cycle 017, Round 3 (Builder)
+# Verification — Cycle 017, Round 3 (Verifier)
 
-## Goal
-Fix the stale §4.9 entry so a Spec Researcher reads a clean, citable finding.
-The verifier fixed `LoadIndexed` in `codegen.rs` (Round 2). This round
-addresses the parallel defect in `StoreIndexed`.
+## What I compared
 
-## Who This Helps
-- Stakeholder: Spec Researcher, Compiler Contributor
-- Impact: The `StoreIndexed` AMBIGUOUS annotation now matches the `LoadIndexed`
-  pattern across both `ir.rs` and `codegen.rs`. A Compiler Contributor reading
-  either file sees consistent resolution statements — no second contradiction
-  to stumble over.
+- Goal: Fix the stale §4.9 entry so a Spec Researcher reads a clean, citable finding.
+  Builder's Round 3 addressed `StoreIndexed` in `ir.rs` and `codegen.rs` — the parallel
+  defect to the `LoadIndexed` fixes from Rounds 1–2.
+- Code: `src/ir.rs` (`StoreIndexed` AMBIGUOUS comment), `src/codegen.rs` (StoreIndexed block),
+  and a scan of all four files that carry §6.9 annotations: `ast.rs`, `ir.rs`, `lower.rs`, `codegen.rs`.
+- Ran: `cargo test` (2084 pass), `cargo clippy -- -D warnings` (clean).
+- Witnessed: grepped `FLS §6.9 AMBIGUOUS` across `src/`. Found the builder's changes in
+  `ir.rs:788` and `codegen.rs:1179` — both correctly state the `cmp`/`b.hs` resolution with
+  the deferred-slice caveat. Confirmed `lower.rs` was already current.
 
-## Applied
-The `LoadIndexed` case in `ir.rs` was fixed (builder Round 1) and `codegen.rs`
-was fixed (verifier Round 2). The `StoreIndexed` case carried the same "No
-bounds check is emitted at this milestone" stale text and had no AMBIGUOUS
-comment in `codegen.rs` at all.
+## What's here, what was asked
 
-**`src/ir.rs` — `StoreIndexed` AMBIGUOUS comment:**
-Before: "No bounds check is emitted at this milestone."
-After: Names the current resolution — `cmp`/`b.hs` when `len > 0`, deferred for
-slice params with unknown length. Same structure as `LoadIndexed`.
+Builder's changes match the goal for `ir.rs` and `codegen.rs`. One instance missed:
 
-**`src/codegen.rs` — `StoreIndexed` section:**
-Before: Plain comments ("Bounds check when len > 0: cmp + b.hs before the store")
-with no AMBIGUOUS annotation.
-After: Full `FLS §6.9 AMBIGUOUS:` comment with resolution stated, matching the
-`LoadIndexed` block above it.
+`src/ast.rs:1385–1388` still read:
+> "Bounds checking is not yet emitted — this is FLS §6.9 AMBIGUOUS: the spec does not
+> specify the panic mechanism for out-of-bounds access without the standard library."
 
-- Files: `src/ir.rs`, `src/codegen.rs`
+This is the same stale-claim defect the builder fixed in `ir.rs` (Round 1). `ast.rs` is the
+AST definition file; a Compiler Contributor reading it before touching `lower.rs` or
+`codegen.rs` would hit the identical wall the Spec Researcher hit in the original
+`fls-ambiguities.md` entry. Four files carry §6.9 annotations; three were updated; one remained.
 
-## Validated
-- `cargo test`: 2084 passed, 0 failed.
-- Three-file consistency (ir.rs / codegen.rs / fls-ambiguities.md) now holds
-  for both `LoadIndexed` and `StoreIndexed`.
-- Verifier: grep for `FLS §6.9 AMBIGUOUS` in `src/ir.rs` and `src/codegen.rs` —
-  both should name the cmp/b.hs resolution with the deferred-slice caveat.
+## What I added
+
+Fixed `src/ast.rs:1385–1388`: replaced "Bounds checking is not yet emitted" with the
+resolution-form comment consistent with `ir.rs`, `lower.rs`, and `codegen.rs`:
+
+**Before:**
+```
+/// At this milestone the index is treated as an `i32` (runtime value).
+/// Bounds checking is not yet emitted — this is
+/// FLS §6.9 AMBIGUOUS: the spec does not specify the panic mechanism for
+/// out-of-bounds access without the standard library.
+```
+
+**After:**
+```
+/// At this milestone the index is treated as an `i32` (runtime value).
+/// FLS §6.9 AMBIGUOUS: The spec requires a panic on out-of-bounds access
+/// but does not specify the panic mechanism. Galvanic's resolution: codegen
+/// emits `cmp x{index}, #{len}; b.hs _galvanic_panic` before each indexed
+/// load/store when the array length is statically known (`len > 0`).
+/// Slice parameters with unknown length receive no check (deferred).
+```
+
+- **Files:** `src/ast.rs`
+- All tests pass (2084), clippy clean.
+
+## Notes for the goal-setter
+
+- The four-file consistency (ast.rs / ir.rs / lower.rs / codegen.rs) for §6.9 AMBIGUOUS
+  now holds across all sites. The builder's three-file check (ir.rs / codegen.rs /
+  fls-ambiguities.md) was the right scope; `ast.rs` was the one site not in scope.
+- The "at this milestone" sweep (§4.14, §5.1.3, §6.22) flagged in earlier rounds remains
+  a candidate for the next Spec Researcher cycle.
