@@ -795,7 +795,7 @@ fn main() -> i32 {
 }
 ```
 Run: `cargo run -- /tmp/failing.rs` →
-`error: lower failed in 'main': not yet supported: tuple index access on non-destructured binding: '0' (FLS §6.10, §6.13)`
+`error: lower failed in 'main': not yet supported: tuple index access on non-destructured binding: \`0\` (FLS §6.10, §6.13)`
 
 Working alternative — use tuple destructuring in the let pattern:
 ```rust

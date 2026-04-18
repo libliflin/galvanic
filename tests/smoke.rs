@@ -566,6 +566,48 @@ fn bad_field(x: i32) -> i32 {{ x.foo }}
 }
 
 #[test]
+fn tuple_index_access_error_cites_fls_sections() {
+    // Cycle 031 goal: when a named binding holds a tuple return value and the
+    // caller accesses it via numeric index (`p.0`), the error must cite both
+    // FLS §6.10 (Tuple Expressions) and §6.13 (Field Access Expressions) and
+    // name the construct "tuple index access on non-destructured binding".
+    // Before this cycle the message was the generic "field access on scalar
+    // value: `0` (FLS §6.13)" — no §6.10 cite, no guidance toward destructuring.
+    let mut tmp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
+    write!(
+        tmp,
+        r#"
+fn make_pair(a: i32, b: i32) -> (i32, i32) {{ (a, b) }}
+fn main() -> i32 {{
+    let p = make_pair(3, 7);
+    p.0 + p.1 - 10
+}}
+"#
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_galvanic"))
+        .arg(tmp.path())
+        .output()
+        .expect("failed to run galvanic");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FLS §6.10"),
+        "expected FLS §6.10 citation in tuple-index error, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("§6.13"),
+        "expected §6.13 citation in tuple-index error, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("tuple index access on non-destructured binding"),
+        "expected 'tuple index access on non-destructured binding' construct name in error, got: {stderr}"
+    );
+    assert!(!output.status.success(), "expected non-zero exit");
+}
+
+#[test]
 fn lower_source_all_unsupported_strings_cite_fls() {
     // Static invariant: every LowerError::Unsupported( call site in src/lower.rs
     // must supply a message string that contains "(FLS §". This ensures every
