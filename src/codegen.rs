@@ -1125,7 +1125,10 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
         // pass guarantees `dst` is a freshly allocated register that does not
         // alias `index_reg` (both come from `alloc_reg()` in sequence).
         //
-        // FLS §6.9 AMBIGUOUS: Out-of-bounds access must panic; no check is emitted.
+        // FLS §6.9 AMBIGUOUS: Out-of-bounds access must panic; the spec does not
+        // specify the panic mechanism. Galvanic's resolution: when `len > 0`,
+        // emit `cmp x{index_reg}, #{len}; b.hs _galvanic_panic` before the load.
+        // Slice parameters with unknown length (`len == 0`) receive no check (deferred).
         //
         // Cache-line note: add + ldr = two 4-byte instructions = 8 bytes,
         // fitting in one adjacent instruction slot pair in a 64-byte cache line.
