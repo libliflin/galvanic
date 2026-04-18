@@ -237,3 +237,38 @@ fn helper(x: i32) -> i32 {{
         "expected no-main note in stdout, got: {stdout}"
     );
 }
+
+#[test]
+fn lower_error_includes_fls_citation() {
+    // Architecture invariant: every "not yet supported" error message must
+    // include a FLS section citation so a Compiler Contributor can navigate
+    // directly to the spec without reading surrounding code.
+    // Expected form: "not yet supported: <construct> (FLS §X.Y)"
+    //
+    // This test exercises the nested-struct-field error in fls_5_patterns.rs,
+    // which was the "worst moment" identified during cycle 016 customer
+    // champion walk: a contributor hitting the error had no spec anchor.
+    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/fls_5_patterns.rs");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_galvanic"))
+        .arg(&fixture)
+        .output()
+        .expect("failed to run galvanic");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // At least one "not yet supported" error is expected from this fixture.
+    assert!(
+        stderr.contains("not yet supported"),
+        "expected at least one unsupported error from patterns fixture, got: {stderr}"
+    );
+    // Every "not yet supported" line must carry a FLS section citation.
+    for line in stderr.lines() {
+        if line.contains("not yet supported") {
+            assert!(
+                line.contains("(FLS §"),
+                "error line missing FLS citation: {line}"
+            );
+        }
+    }
+}
