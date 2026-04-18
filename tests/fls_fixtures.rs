@@ -153,6 +153,11 @@ fn fls_8_1_let_else() {
 }
 
 #[test]
+fn fls_8_2_expression_statements() {
+    assert_galvanic_accepts("fls_8_2_expression_statements.rs");
+}
+
+#[test]
 fn fls_4_14_supertrait_bounds() {
     assert_galvanic_accepts("fls_4_14_supertrait_bounds.rs");
 }

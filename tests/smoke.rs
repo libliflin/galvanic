@@ -22,8 +22,13 @@ fn lower_error_names_failing_item() {
     // the compiler contributor can navigate directly to the problem without
     // binary-searching through a multi-item fixture.
     // Format: "error: lower failed in '<name>': not yet supported: ..."
+    //
+    // Uses fls_4_14_where_clauses_on_types.rs because it contains constructs
+    // not yet supported (method calls on primitive types), which produce a
+    // reliable lower-error. fls_9_functions.rs now lowers cleanly after the
+    // §8.2 expression-statement fix in cycle 026.
     let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/fls_9_functions.rs");
+        .join("tests/fixtures/fls_4_14_where_clauses_on_types.rs");
 
     let output = Command::new(env!("CARGO_BIN_EXE_galvanic"))
         .arg(&fixture)

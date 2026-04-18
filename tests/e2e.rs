@@ -36411,3 +36411,46 @@ fn main() -> i32 {\n\
         "expected helper function 'helper' in inspection-only assembly; got:\n{asm}"
     );
 }
+
+/// FLS §8.2: Integer literal as an expression statement must emit a runtime
+/// LoadImm instruction even though the result is discarded.
+///
+/// `fn returns_unit() { 42; }` must lower successfully and emit `mov` for the
+/// literal. The result is unused but the instruction must be present — the
+/// expression executes at runtime per FLS §6.1.2:37–45.
+#[test]
+fn fls_8_2_integer_literal_stmt_emits_runtime_instr() {
+    let asm = compile_to_asm("fn returns_unit() { 42; }\nfn main() -> i32 { 0 }\n");
+    assert!(
+        asm.contains("returns_unit:"),
+        "expected `returns_unit` function in assembly; got:\n{asm}"
+    );
+    // The literal 42 must appear as a runtime immediate in the function body.
+    assert!(
+        asm.contains("#42"),
+        "expected runtime `mov #42` in `returns_unit`; literal must not be silently dropped:\n{asm}"
+    );
+}
+
+/// FLS §8.2: Binary expression as a statement must emit runtime arithmetic
+/// instructions even though the result is discarded.
+///
+/// `fn discard_add(x: i32) { x + 1; }` must emit a runtime `add` for the
+/// addition. FLS §6.1.2:37–45: non-const code executes at runtime.
+#[test]
+fn fls_8_2_binary_expr_stmt_emits_runtime_instr() {
+    let asm = compile_to_asm("fn discard_add(x: i32) { x + 1; }\nfn main() -> i32 { 0 }\n");
+    assert!(
+        asm.contains("discard_add:"),
+        "expected `discard_add` function in assembly; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("add"),
+        "expected runtime `add` instruction in `discard_add`; got:\n{asm}"
+    );
+    // Must not fold `x + 1` to a constant — `x` is a parameter, not a literal.
+    assert!(
+        !asm.contains("mov     x0, #1") || asm.contains("add"),
+        "must not constant-fold `x + 1`:\n{asm}"
+    );
+}

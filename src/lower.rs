@@ -10472,15 +10472,18 @@ impl<'src> LowerCtx<'src> {
 
             // FLS §8.2: Expression statement — evaluate for side effects, discard value.
             //
-            // Assignment and call expressions are the primary expression statements
-            // at this milestone. `lower_expr` is called with `IrTy::Unit` as the
-            // type hint; assignment and call handlers ignore `ret_ty`, so this is
-            // safe. Unsupported expression kinds will propagate their own errors.
+            // The expression is lowered with its natural type (inferred via
+            // `infer_natural_ty`) rather than `IrTy::Unit`. Passing `IrTy::Unit`
+            // caused literal expressions (e.g. `42;`) and binary expressions (e.g.
+            // `x + 1;`) to fail because their `lower_expr` arms match on the type
+            // hint to select runtime instructions. The value is unused — the result
+            // register is allocated but not stored anywhere.
             //
             // FLS §6.1.2:37–45: The expression executes at runtime; its result
             // (if any) is discarded.
             StmtKind::Expr(expr) => {
-                self.lower_expr(expr, &IrTy::Unit)?;
+                let ty = self.infer_natural_ty(expr);
+                self.lower_expr(expr, &ty)?;
                 Ok(())
             }
 
@@ -10631,6 +10634,68 @@ impl<'src> LowerCtx<'src> {
     }
 
     // ── Expression lowering ──────────────────────────────────────────────────
+
+    /// Infer the natural type of an expression for use in statement position.
+    ///
+    /// FLS §8.2: An expression statement evaluates its operand for side effects
+    /// and discards the result. The result is unused, but `lower_expr` still needs
+    /// a plausible type hint to select runtime instructions (e.g. which LoadImm
+    /// variant, which BinOp path). This method provides that hint without a full
+    /// type-inference pass.
+    ///
+    /// Rules (applied in priority order):
+    /// - Integer literal → `IrTy::I32` (Rust default for unsuffixed integer literals)
+    /// - Float literal with `f32`/`_f32` suffix → `IrTy::F32`; otherwise `IrTy::F64`
+    /// - Bool literal → `IrTy::Bool`
+    /// - Char/byte literal → `IrTy::U32`
+    /// - String literal → `IrTy::I32` (length)
+    /// - Assignment expression → `IrTy::Unit` (assignment is unit-typed; existing
+    ///   handler ignores `ret_ty`, so `Unit` is correct here)
+    /// - Binary/unary arithmetic → recurse into the left operand (propagates the
+    ///   operand type up through the expression tree)
+    /// - Path (single-segment) → `IrTy::F64` if in `float_locals`, `IrTy::F32` if
+    ///   in `float32_locals`, otherwise `IrTy::I32`
+    /// - Everything else (calls, method calls, compound assign, if, loop, return,
+    ///   break, continue, etc.) → `IrTy::Unit`; those expression kinds were already
+    ///   handled correctly with `IrTy::Unit` and their handlers expect or ignore it
+    fn infer_natural_ty(&self, expr: &Expr) -> IrTy {
+        match &expr.kind {
+            ExprKind::LitInt(_) => IrTy::I32,
+            ExprKind::LitFloat => {
+                let text = expr.span.text(self.source);
+                if text.ends_with("_f32") || text.ends_with("f32") {
+                    IrTy::F32
+                } else {
+                    IrTy::F64
+                }
+            }
+            ExprKind::LitBool(_) => IrTy::Bool,
+            ExprKind::LitChar => IrTy::U32,
+            ExprKind::LitStr => IrTy::I32,
+            // Assignment is unit-typed; the handler ignores ret_ty.
+            ExprKind::Binary { op: BinOp::Assign, .. } => IrTy::Unit,
+            // Arithmetic/bitwise binary: operand type determined by left operand.
+            ExprKind::Binary { lhs, .. } => self.infer_natural_ty(lhs),
+            // Unary: same type as the operand.
+            ExprKind::Unary { operand, .. } => self.infer_natural_ty(operand),
+            // Single-segment path (variable reference): check float locals first.
+            ExprKind::Path(segs) if segs.len() == 1 => {
+                let name = segs[0].text(self.source);
+                if self.float_locals.contains_key(name) {
+                    IrTy::F64
+                } else if self.float32_locals.contains_key(name) {
+                    IrTy::F32
+                } else {
+                    IrTy::I32
+                }
+            }
+            // Calls, method calls, compound-assign, if, loop, match, block,
+            // return, break, continue, etc.: these were already handled
+            // correctly with IrTy::Unit. Preserve that default here so their
+            // existing `lower_expr` handlers are unaffected.
+            _ => IrTy::Unit,
+        }
+    }
 
     /// **Tier-1 scalar handler.** Lower an expression to runtime IR instructions.
     ///
