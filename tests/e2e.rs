@@ -36598,3 +36598,44 @@ fn fls_9_register_pressure_emits_valid_arm64_registers() {
         "aarch64-linux-gnu-as rejected assembly for fls_9_register_pressure.rs — invalid register names"
     );
 }
+
+/// FLS §2.4.4.1 — Large unsigned immediates use MOVZ+MOVK, not a folded constant.
+///
+/// u32 values greater than i32::MAX require a MOVZ+MOVK sequence on ARM64.
+/// Galvanic must emit runtime MOVZ/MOVK instructions, not a compile-time
+/// constant, satisfying FLS §6.1.2:37–45 (non-const code must emit runtime
+/// instructions).
+///
+/// Values checked:
+///   2147483648 (0x8000_0000) — single MOVZ lsl#16 (one non-zero 16-bit chunk)
+///   4294967295 (0xFFFF_FFFF) — MOVZ + MOVK (two non-zero 16-bit chunks)
+#[test]
+fn fls_2_4_large_immediates_emit_movz_movk() {
+    // 0x8000_0000: chunk0=0, chunk1=0x8000 → single movz lsl#16 (no sxtw).
+    let asm = compile_to_asm("fn f() -> u32 { 2147483648_u32 }\nfn main() {}\n");
+    assert!(
+        asm.contains("movz"),
+        "expected movz for large u32 literal 2147483648 (0x8000_0000), got:\n{asm}"
+    );
+    // No sign-extension: this is an unsigned value, sxtw would be incorrect.
+    assert!(
+        !asm.contains("sxtw"),
+        "unexpected sxtw for unsigned literal 2147483648 — LoadImm64 must not sign-extend:\n{asm}"
+    );
+
+    // 0xFFFF_FFFF: chunk0=0xFFFF, chunk1=0xFFFF → movz + movk (two chunks).
+    let asm2 = compile_to_asm("fn f() -> u32 { 4294967295_u32 }\nfn main() {}\n");
+    assert!(
+        asm2.contains("movz"),
+        "expected movz for u32::MAX literal 4294967295 (0xFFFF_FFFF), got:\n{asm2}"
+    );
+    assert!(
+        asm2.contains("movk"),
+        "expected movk for u32::MAX literal 4294967295 (chunk1=0xFFFF requires movk), got:\n{asm2}"
+    );
+    // Verify the correct immediate values appear in the assembly.
+    assert!(
+        asm2.contains("0xffff"),
+        "expected 0xffff in movz/movk for u32::MAX, got:\n{asm2}"
+    );
+}

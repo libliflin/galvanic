@@ -373,6 +373,23 @@ pub enum Instr {
     /// Cache-line note: ARM64 `mov` (MOVZ) is 4 bytes — one instruction slot.
     LoadImm(u8, i32),
 
+    /// Load a 64-bit unsigned immediate into a virtual register.
+    ///
+    /// `LoadImm64(dst, n)` → MOVZ + up to three MOVK instructions on ARM64.
+    ///
+    /// FLS §2.4.4.1: Large integer literal materialization — unsigned 32-bit
+    /// values in (i32::MAX, u32::MAX] and full 64-bit unsigned values use
+    /// this instruction. Unlike `LoadImm(i32)`, no `sxtw` is emitted: the
+    /// value is the correct unsigned bit pattern across all 64 register bits.
+    ///
+    /// ARM64 encoding: one MOVZ for the first non-zero 16-bit chunk, then
+    /// one MOVK per additional non-zero chunk (lsl #16, #32, #48).
+    ///
+    /// Cache-line note: 1 instruction when value ≤ 0xFFFF; 2–4 instructions
+    /// for larger values. A 4-instruction sequence (16 bytes) fits within
+    /// one 64-byte cache line.
+    LoadImm64(u8, u64),
+
     /// Integer binary arithmetic: `dst = lhs op rhs`.
     ///
     /// `BinOp { Add, d, l, r }` → `add x{d}, x{l}, x{r}` on ARM64.
