@@ -1332,7 +1332,7 @@ itself is the observable behavior. Run:
 
 ```
 echo "fn longest<'a>(x: &'a i32, y: &'a i32) -> i32 { *x }" | cargo run -- /dev/stdin
-# → error: parse error at byte 10: lifetime parameters not yet supported (FLS §12.1, §4.14)
+# → error: parse error at byte 11: lifetime parameters not yet supported (FLS §12.1, §4.14)
 ```
 
 The same rejection applies to structs (`struct Ref<'a> { ... }`), enums
@@ -1548,4 +1548,4 @@ confirmed by assembly content alone.
 
 ---
 
-*Last updated: 2026-04-18. Source annotation count at time of writing: ~155 `AMBIGUOUS` markers across 6 source files. 49 entries, sorted by FLS section number, with linked table of contents. All minimal reproducers include `fn main` — every reproducer produces assembly when run as published. §4.9 register corrected (`cmp x0, #3`, not `cmp x1, #3`).*
+*Last updated: 2026-04-18. Source annotation count at time of writing: ~155 `AMBIGUOUS` markers across 6 source files. 49 entries, sorted by FLS section number, with linked table of contents. Most minimal reproducers include `fn main` and produce assembly when run as published; entries that document parse-time rejections (e.g., §12.1/§4.14 lifetime parameters) produce cited error output rather than assembly — the rejection itself is the observable finding. §4.9 register corrected (`cmp x0, #3`, not `cmp x1, #3`).*
