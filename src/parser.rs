@@ -973,6 +973,17 @@ impl<'src> Parser<'src> {
             // Consume the `:` and bounds.
             if self.eat(TokenKind::Colon) {
                 loop {
+                    // FLS §4.14: Lifetime bounds (`T: 'static`, `T: 'a`) are valid
+                    // where-clause predicates. galvanic discards all where-clause
+                    // bounds; lifetime bounds are consumed silently here so the
+                    // caller can continue parsing the item body.
+                    if self.peek_kind() == TokenKind::Lifetime {
+                        self.advance(); // consume the lifetime bound (e.g. `'static`, `'a`)
+                        if !self.eat(TokenKind::Plus) {
+                            break;
+                        }
+                        continue;
+                    }
                     // Consume a bound identifier (plain trait name, e.g. `Scalable`).
                     if self.peek_kind() == TokenKind::Ident {
                         self.advance(); // skip bound trait name
