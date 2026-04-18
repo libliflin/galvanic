@@ -746,6 +746,31 @@ fn where_clause_mixed_lifetime_and_trait_bound_parses_cleanly() {
 }
 
 #[test]
+fn where_clause_lifetime_lhs_parses_cleanly() {
+    // FLS §4.14: `where 'static: 'static` — a lifetime outlives predicate with a
+    // bare lifetime on the LHS. galvanic discards where-clause bounds; the Lifetime
+    // token in LHS position must be consumed silently rather than producing
+    // "expected OpenBrace, found Lifetime".
+    let mut tmp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
+    write!(
+        tmp,
+        "fn foo<T>(x: i32) -> i32 where 'static: 'static {{ x }}\nfn main() {{}}\n"
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_galvanic"))
+        .arg(tmp.path())
+        .output()
+        .expect("failed to run galvanic");
+
+    assert!(
+        output.status.success(),
+        "expected exit 0 for where 'static: 'static, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn lower_source_all_unsupported_strings_cite_fls() {
     // Static invariant: every LowerError::Unsupported( call site in src/lower.rs
     // must supply a message string that contains "(FLS §". This ensures every

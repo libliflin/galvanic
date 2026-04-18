@@ -966,6 +966,11 @@ impl<'src> Parser<'src> {
                 ) {
                     self.advance(); // skip the type after `&`
                 }
+            } else if self.peek_kind() == TokenKind::Lifetime {
+                // FLS §4.14: `where 'a: 'b` — a lifetime outlives predicate. galvanic
+                // discards where-clause bounds; consume the LHS lifetime silently so
+                // the caller can continue parsing the item body.
+                self.advance(); // skip the LHS lifetime (e.g. `'static`, `'a`)
             } else {
                 // Unexpected token — stop consuming to avoid runaway parsing.
                 break;
