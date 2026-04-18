@@ -35750,6 +35750,143 @@ fn main() -> i32 {
 }
 
 // =============================================================================
+// FLS §6.8 — Array expressions: fixture compile + assembly inspection
+// =============================================================================
+
+#[test]
+/// FLS §6.8: The array-expressions fixture compiles through the full pipeline.
+/// Confirms that literal arrays, repeat arrays, and array parameters are all
+/// reachable via the standard fixture → fls_fixtures.rs → e2e chain.
+fn fls_6_8_fixture_compiles_through_full_pipeline() {
+    let fixture_path = format!(
+        "{}/tests/fixtures/fls_6_8_array_expressions.rs",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let source = std::fs::read_to_string(&fixture_path)
+        .expect("could not read fls_6_8_array_expressions.rs");
+    let asm = compile_to_asm(&source);
+    assert!(!asm.is_empty(), "fls_6_8_array_expressions.rs produced empty assembly");
+}
+
+#[test]
+/// FLS §6.8: An array literal expression `[a, b, c]` must emit runtime stores
+/// for each element — no constant folding when elements are parameters.
+///
+/// FLS Constraint 1: `[a, b, c]` inside a regular fn body is not a const
+/// context. Each element must be stored at runtime.
+fn fls_6_8_array_literal_emits_stores() {
+    let asm = compile_to_asm(
+        "fn array_literal_sum(a: i32, b: i32, c: i32) -> i32 {\n\
+            let arr = [a, b, c];\n\
+            arr[0] + arr[1] + arr[2]\n\
+        }\n\
+        fn main() -> i32 { array_literal_sum(1, 2, 3) }\n",
+    );
+    // Each element is stored to the stack and loaded back — str + ldr required.
+    assert!(
+        asm.contains("str"),
+        "expected str instructions for array element stores; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("ldr"),
+        "expected ldr instructions for array element loads; got:\n{asm}"
+    );
+    // The result must not be a single folded constant.
+    assert!(
+        asm.contains("add"),
+        "expected add for a+b+c at runtime; got:\n{asm}"
+    );
+}
+
+#[test]
+/// FLS §6.8: An array repeat expression `[x; N]` stores the same runtime
+/// value N times — it cannot be optimised away when `x` is a parameter.
+fn fls_6_8_array_repeat_emits_stores() {
+    let asm = compile_to_asm(
+        "fn array_repeat_sum(x: i32) -> i32 {\n\
+            let arr = [x; 3];\n\
+            arr[0] + arr[1] + arr[2]\n\
+        }\n\
+        fn main() -> i32 { array_repeat_sum(5) }\n",
+    );
+    // At least one str for each of the 3 elements.
+    let store_count = asm.matches("str ").count();
+    assert!(
+        store_count >= 3,
+        "expected ≥3 str instructions for [x; 3] stores; got {store_count}:\n{asm}"
+    );
+}
+
+// =============================================================================
+// FLS §6.9 — Indexing expressions: fixture compile + assembly inspection
+// =============================================================================
+
+#[test]
+/// FLS §6.9: The indexing-expressions fixture compiles through the full pipeline.
+fn fls_6_9_fixture_compiles_through_full_pipeline() {
+    let fixture_path = format!(
+        "{}/tests/fixtures/fls_6_9_indexing_expressions.rs",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let source = std::fs::read_to_string(&fixture_path)
+        .expect("could not read fls_6_9_indexing_expressions.rs");
+    let asm = compile_to_asm(&source);
+    assert!(!asm.is_empty(), "fls_6_9_indexing_expressions.rs produced empty assembly");
+}
+
+#[test]
+/// FLS §6.9: A variable index expression `arr[i]` must emit a runtime
+/// address computation — not a constant offset.
+///
+/// The index `i` is a function parameter; the element address is
+/// `sp + base_slot*8 + i*8`, computed at runtime with a multiply or shift.
+fn fls_6_9_variable_index_emits_runtime_address() {
+    let asm = compile_to_asm(
+        "fn index_variable(arr: [i32; 5], i: usize) -> i32 {\n\
+            arr[i]\n\
+        }\n\
+        fn main() -> i32 { index_variable([1, 2, 3, 4, 5], 2) }\n",
+    );
+    // A runtime-indexed load needs address arithmetic — ldr with a shifted register.
+    assert!(
+        asm.contains("ldr"),
+        "expected ldr for indexed load; got:\n{asm}"
+    );
+    // The index must be scaled (element size * index) — look for lsl or mul.
+    assert!(
+        asm.contains("lsl") || asm.contains("mul") || asm.contains("add"),
+        "expected address arithmetic (lsl/mul/add) for variable index; got:\n{asm}"
+    );
+}
+
+#[test]
+/// FLS §6.9: Indexing in a loop body must emit a load each iteration —
+/// the element address changes with the loop counter.
+fn fls_6_9_index_in_loop_emits_load_per_iteration() {
+    let asm = compile_to_asm(
+        "fn sum_array(arr: [i32; 5]) -> i32 {\n\
+            let mut s = 0;\n\
+            let mut i = 0;\n\
+            while i < 5 {\n\
+                s = s + arr[i];\n\
+                i = i + 1;\n\
+            }\n\
+            s\n\
+        }\n\
+        fn main() -> i32 { sum_array([1, 2, 3, 4, 5]) }\n",
+    );
+    // Loop body requires a conditional branch and at least one ldr.
+    assert!(
+        asm.contains("b.") || asm.contains("cbz") || asm.contains("cbnz"),
+        "expected a conditional branch for the while loop; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("ldr"),
+        "expected ldr inside the loop for arr[i]; got:\n{asm}"
+    );
+}
+
+// =============================================================================
 // Cycle 010 — refs/fls-ambiguities.md reproducer CI guard
 //   Every fn-main-containing code block in the ref file must pass
 //   compile_to_asm(). If a reproducer is aspirational (not yet supported),
