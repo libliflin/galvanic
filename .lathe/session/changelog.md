@@ -1,3 +1,27 @@
+# Changelog — Cycle 018 (Customer Champion)
+
+## Stakeholder: Lead Researcher
+
+**Who I became.** The project's primary author — a systems programmer who runs galvanic daily and whose job is to advance FLS coverage. Their emotional signal is momentum: each run should tell them something true, and the assembly output is the research artifact.
+
+**What I did.**
+1. Confirmed the floor: `cargo test` — 2084 tests, all green. Build clean. Clippy clean.
+2. Picked the loop expressions fixture (`tests/fixtures/fls_6_15_loop_expressions.rs`) — covers §6.15.2, §6.15.3, §6.15.6, §6.15.7.
+3. Ran `cargo run -- tests/fixtures/fls_6_15_loop_expressions.rs`. Clean compile: "emitted fls_6_15_loop_expressions.s".
+4. Opened the `.s` file. Searched for `§6.15` in the assembly comments. Zero matches.
+5. Searched for all FLS citations. Found that every label (`.L0:`, `.L1:`), every conditional branch (`cbz`), and every unconditional branch (`b`) — all the control-flow instructions in the while loops, infinite loops, and break/continue — are annotated `FLS §6.17: branch target`, `FLS §6.17: branch if false`, `FLS §6.17: branch to end`.
+6. Confirmed: §6.17 is if/if let expressions. The while loop belongs to §6.15.3.
+7. Traced the root cause: `codegen.rs` lines 974–998 hardcode `§6.17` for all `Label`, `Branch`, and `CondBranch` instructions. The IR docstrings (`ir.rs` lines 440–482) describe these instructions exclusively in terms of §6.17 if-expression control flow, even though they're also used for all loop constructs.
+8. Ran the litmus test with a parameter-driven while loop — the loop body executes correctly at runtime (runtime `add`, `cmp`, `b` instructions). The codegen is correct. The FLS citations in the comments are wrong.
+
+**The worst moment.** Opening the `.s` file for the loop expressions fixture and finding `FLS §6.17` on every control-flow instruction. The fixture is explicitly titled `FLS §6.15 — Loop expressions`. The assembly correctly implements §6.15.3 while-loop behavior. But as a research artifact it claims §6.17 throughout. A researcher tracing §6.15 implementation through the assembly has no way to find it: the correct section is invisible.
+
+**The goal set.** Add FLS provenance to the control-flow IR instructions (`Label`, `Branch`, `CondBranch`) so that assembly comments cite the correct FLS section — §6.15.3 for while loop branches, §6.15.2 for infinite loop back-edges, §6.15.6 for break, §6.15.7 for continue, §6.17 for if/if let — based on which lowering site emitted the instruction.
+
+**Why now.** The Lead Researcher was last served at cycle 014 — the most under-served stakeholder. The issue is structural: the `Label`/`Branch`/`CondBranch` IR instructions were introduced for if-expression control flow and their §6.17 provenance was never updated when loop lowering reused them. Every loop-containing fixture has the same wrong citations. The assembly is correct; only the research traceability is broken.
+
+---
+
 # Verification — Cycle 017, Round 4 (Verifier)
 
 ## What I compared
