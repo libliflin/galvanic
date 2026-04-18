@@ -36638,4 +36638,64 @@ fn fls_2_4_large_immediates_emit_movz_movk() {
         asm2.contains("0xffff"),
         "expected 0xffff in movz/movk for u32::MAX, got:\n{asm2}"
     );
+    // No sign-extension for the 2-chunk case either.
+    assert!(
+        !asm2.contains("sxtw"),
+        "unexpected sxtw for unsigned u32::MAX — LoadImm64 must not sign-extend:\n{asm2}"
+    );
+}
+
+/// FLS §2.4.4.1 — u64 values above u32::MAX emit MOVZ+MOVK with lsl#32 and lsl#48.
+///
+/// Values with non-zero bits in chunks 2 (bits 32–47) and 3 (bits 48–63)
+/// require `movk lsl #32` and `movk lsl #48` respectively. This tests
+/// the full 3-chunk and 4-chunk arms of `emit_imm64` — paths not reached by
+/// u32-range values.
+///
+/// FLS §6.1.2:37–45: runtime instructions must be emitted even for literals.
+#[test]
+fn fls_2_4_large_immediates_u64_lsl32_lsl48() {
+    // 5_000_000_000 = 0x0001_2A05_F200 — 3 non-zero chunks (0, 1, 2); lsl#32 required.
+    let asm3 = compile_to_asm("fn f() -> u64 { 5000000000_u64 }\nfn main() {}\n");
+    assert!(
+        asm3.contains("movz"),
+        "expected movz for 5000000000 (0x0001_2A05_F200), got:\n{asm3}"
+    );
+    assert!(
+        asm3.contains("lsl #32"),
+        "expected lsl #32 for 5000000000 (chunk2=0x0001 is non-zero), got:\n{asm3}"
+    );
+    assert!(
+        !asm3.contains("sxtw"),
+        "unexpected sxtw for u64 literal 5000000000 — LoadImm64 must not sign-extend:\n{asm3}"
+    );
+    // lsl #48 must not appear: chunk3 is zero for 5_000_000_000.
+    assert!(
+        !asm3.contains("lsl #48"),
+        "unexpected lsl #48 for 5000000000 — chunk3 is zero, should be skipped:\n{asm3}"
+    );
+
+    // 0x1234_5678_9ABC_DEF0 — all four chunks non-zero; movz + movk lsl#16 + movk lsl#32 + movk lsl#48.
+    let asm4 = compile_to_asm("fn f() -> u64 { 1311768467463790320_u64 }\nfn main() {}\n");
+    assert!(
+        asm4.contains("movz"),
+        "expected movz for 0x1234_5678_9ABC_DEF0, got:\n{asm4}"
+    );
+    assert!(
+        asm4.contains("lsl #32"),
+        "expected lsl #32 for 0x1234_5678_9ABC_DEF0 (chunk2=0x5678), got:\n{asm4}"
+    );
+    assert!(
+        asm4.contains("lsl #48"),
+        "expected lsl #48 for 0x1234_5678_9ABC_DEF0 (chunk3=0x1234), got:\n{asm4}"
+    );
+    assert!(
+        !asm4.contains("sxtw"),
+        "unexpected sxtw for u64 literal 0x1234_5678_9ABC_DEF0:\n{asm4}"
+    );
+    // Verify the high chunk value appears.
+    assert!(
+        asm4.contains("0x1234"),
+        "expected 0x1234 (chunk3) in movk lsl#48 for 0x1234_5678_9ABC_DEF0:\n{asm4}"
+    );
 }
