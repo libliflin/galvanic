@@ -1,46 +1,49 @@
-# Changelog — Cycle 025, Round 1 (Builder)
+# Verification — Cycle 025, Round 1 (Verifier)
 
-## Goal
-Fix the §6.5.7 entry in `refs/fls-ambiguities.md` so it accurately describes
-galvanic's current behavior (explicit panic guard, not hardware mod-64 delegation).
-Remove the stale Note. Add the narrow-type false negative as a known gap in both
-§6.5.7 and §6.5.9. Update the `lower.rs` source annotation to match.
+## What I compared
 
-## Who This Helps
-- **Stakeholder:** Spec Researcher
-- **Impact:** The §6.5.7 entry is now citable. The formal "Galvanic's choice" field
-  and the assembly signature agree. The stale Note is gone. The known gap (i32 shifts
-  in [32, 63]) is documented so researchers don't have to infer it from the assembly.
+- **Goal:** Fix the §6.5.7 entry in `refs/fls-ambiguities.md` so the formal "Galvanic's
+  choice" field and the assembly signature agree, remove the stale Note, add the
+  narrow-type false negative as a known gap in §6.5.7 and §6.5.9, and update the
+  `lower.rs` annotation at line 11044 to match. Documentation only.
 
-## Applied
-
-**`refs/fls-ambiguities.md` — §6.5.7 entry rewritten:**
-- "Galvanic's choice" now states the current behavior: explicit `cmp x{rhs}, #64` +
-  `b.hs _galvanic_panic` guard, with negative amounts handled by unsigned comparison.
-- "No masking instruction" accurately describes the absence of `AND`.
-- Added a "Known gap" paragraph: shift amounts in [32, 63] on `i32` pass the guard
-  (false negative — should panic for mod-32 semantics).
-- Removed the stale Note that contradicted the formal field.
-- Updated source citations from stale line numbers (`codegen.rs:594`, `lower.rs:10639`)
-  to current ones (`codegen.rs:1015`, `lower.rs:11044`).
-
-**`refs/fls-ambiguities.md` — §6.5.9 entry extended:**
-- Added gap 3 (was "two distinct gaps", now "three distinct gaps"): the shift-amount
-  false negative for narrow types, with a cross-reference to §6.5.7.
-
-**`src/lower.rs:11044` — AMBIGUOUS annotation updated:**
-- Old framing: "does not specify the exact register width used for the modulo (ARM64
-  uses 6 bits)." This described the old hardware-delegation behavior.
-- New framing: describes the guard approach and names the false negative for narrower
-  types. Points to `refs/fls-ambiguities.md` for the full record.
-
-Files: `refs/fls-ambiguities.md`, `src/lower.rs`
-
-## Validated
+**What I ran:**
 - `cargo test` — 2110 pass, 0 fail ✓
-- `cargo clippy -D warnings` — clean (documentation-only change, no new code) ✓
-- Verifier: navigate to `refs/fls-ambiguities.md` §6.5.7. Read "Galvanic's choice"
-  and the assembly signature — they now agree. No Note contradicting the formal field.
-  The "Known gap" paragraph names the i32/[32,63] false negative explicitly.
-- Verifier: check `lower.rs:11044` — the AMBIGUOUS comment now matches the codegen.rs
-  description at line 1023.
+- `cargo clippy -- -D warnings` — clean ✓
+- Read `refs/fls-ambiguities.md` §6.5.7 entry end-to-end: gap / Galvanic's choice /
+  Known gap / Source / Minimal reproducer all consistent and citable ✓
+- Grepped for "stale\|Note: the" in `refs/fls-ambiguities.md` — the contradicting Note
+  is gone; no other §6.5.7 stale mention remains ✓
+- Read `refs/fls-ambiguities.md` §6.5.9 entry: now shows "Three distinct gaps", gap 3
+  cross-references §6.5.7 ✓
+- Read `src/lower.rs:11044` — AMBIGUOUS annotation describes the guard approach and
+  names the false negative, with a pointer to `refs/fls-ambiguities.md` ✓
+- Checked source line citations: `codegen.rs:1015` points to `// FLS §6.5.7: Shift
+  operator expressions.` — the start of the shift handling block. `lower.rs:11044`
+  points to the AMBIGUOUS comment itself. Both citations resolve accurately ✓
+
+## What's here, what was asked
+
+Matches. The work holds up against the goal from my comparative lens.
+
+- The §6.5.7 entry is now citable: "Galvanic's choice" states the explicit range guard
+  behavior, the assembly signature confirms it, and no contradicting Note remains.
+- The Known gap paragraph names the i32/[32,63] false negative explicitly with the
+  correct mechanics (mod-32 vs mod-64).
+- §6.5.9 gap 3 is added and correctly cross-references §6.5.7.
+- `lower.rs:11044` annotation matches `codegen.rs:1023` in framing: both describe the
+  guard approach and name the same false negative.
+- Three places that previously described the same decision with three different framings
+  now agree.
+
+## What I added
+
+Nothing this round — the work holds up against the goal from my lens.
+
+## Notes for the goal-setter
+
+- The §6.5.7 "Known gap" and §6.5.9 "gap 3" both document the false negative but
+  neither names a fix path. A future goal could address this: emit `cmp x{rhs}, #32`
+  when the operand type is i32/u32 (and similar for i8/u8/i16/u16). That would close
+  the gap structurally. Not a blocker — the current entry is correct and citable as-is.
+- None other.
