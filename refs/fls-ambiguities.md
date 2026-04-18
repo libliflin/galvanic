@@ -238,10 +238,16 @@ the two-slot fat pointer (base, length) ABI.
 not specify the panic mechanism — whether it is a library call, a trap
 instruction, or something else.
 
-**Galvanic's choice:** No bounds check is emitted at this milestone. Out-of-
-bounds access produces undefined behavior at the assembly level (load/store at
-wrong address). This is a known deviation; the check is deferred until a panic
-infrastructure is in place.
+**Galvanic's choice (current):** A `cmp`/`b.hs` bounds check is emitted
+before every array and slice index access (Claims 4m/4p). Out-of-bounds
+access branches to a trap path. The panic mechanism is a bare `brk #1`
+instruction — not a library call — because galvanic has no runtime library.
+See also the §6.9/§6.23 entry for the full mechanism.
+
+**Historical note:** Prior to Claims 4m/4p, no bounds check was emitted.
+Out-of-bounds access produced undefined behavior at the assembly level.
+That deviation is resolved; this entry documents the gap (what the FLS
+leaves unspecified) and galvanic's current resolution.
 
 **Source:** `src/ir.rs:730`, `src/codegen.rs:926`, `src/lower.rs:17880`
 
@@ -249,10 +255,7 @@ infrastructure is in place.
 ```rust
 fn get(arr: [i32; 3], i: usize) -> i32 { arr[i] }
 ```
-Assembly signature: look for `cmp`/`b.hs` before the `ldr` — bounds checks
-**are** now emitted (see §6.9/§6.23 entry for the full mechanism added in
-later claims). The §4.9 entry documents the original decision before the panic
-infrastructure was added.
+Assembly signature: `cmp x1, #3` / `b.hs <trap>` before the `ldr`.
 
 ---
 
