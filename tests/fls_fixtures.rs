@@ -143,6 +143,11 @@ fn fls_4_14_where_clauses_on_types() {
 }
 
 #[test]
+fn fls_4_14_where_lifetime_bounds() {
+    assert_galvanic_accepts("fls_4_14_where_lifetime_bounds.rs");
+}
+
+#[test]
 fn fls_11_impl_trait() {
     assert_galvanic_accepts("fls_11_impl_trait.rs");
 }
