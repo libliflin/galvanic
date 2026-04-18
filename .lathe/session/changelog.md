@@ -1,3 +1,95 @@
+# Verification — Cycle 021, Round 1 (Verifier)
+
+## What I compared
+
+- Goal: fix `refs/fls-constraints.md` Constraint 3 so it no longer contradicts `refs/fls-ambiguities.md` on divide-by-zero guards. Remove "no guard instruction is emitted" and "No panic infrastructure exists at this milestone." Update closing paragraph to name the one genuine remaining gap accurately. Remove Constraint 8 from the FLS summary table.
+- Builder's change: pure documentation edit to `refs/fls-constraints.md`. No source code touched.
+- Ran: `cargo test` — 2102 pass (215 + 1833 + 45 + 9), 0 fail.
+- Verified facts:
+  - Grepped `src/codegen.rs` for `cbz.*galvanic_panic` — 6 occurrences at lines 626, 652, 675, 690, 813, 818. Guards exist exactly as the updated Constraint 3 states. ✓
+  - Checked `refs/fls-ambiguities.md` §6.9/§6.23 claims: 4m (literal zero caught at compile time), 4o (cbz guard before sdiv/srem/udiv), 4p (bounds-check before array/slice access), 4q (MIN/-1 guard). All four confirmed implemented.
+  - Closing paragraph says "Division-by-zero and bounds-check panics are implemented" — cross-referenced against fls-ambiguities.md §4.9 (bounds checking, Claim 4p). Accurate. ✓
+  - Summary table row 3 now reads "Partial (div-by-zero guarded; +/-/* overflow panic deferred)." Matches the body of Constraint 3. ✓
+  - Constraint 8 removed from table; separator note added above Constraint 8 body. ✓
+
+## What's here, what was asked
+
+Matches: the work holds up against the goal from my lens.
+
+Before the fix, the two primary research artifacts directly contradicted each other on a concrete claim: constraints file said "no guard," ambiguities file said "cbz guard before every sdiv/srem/udiv." After the fix, both files give the same answer. The closing paragraph previously said "the one genuine gap — panic infrastructure for overflow and bounds checking" — incorrect on bounds checking (implemented). The fix correctly narrows the gap to arithmetic +/-/* overflow in debug mode only.
+
+The separation of Constraint 8 from the FLS summary table is complete and well-marked.
+
+## What I added
+
+Nothing this round — the work holds up against the goal from my lens.
+
+## Notes for the goal-setter
+
+- Line 88 of the updated Constraint 3 cites "Claims 4m, 4o, 4q" for the division guards. The `i32::MIN / -1` case is Claim 4q ✓, the cbz guard before runtime division is Claim 4o ✓, and literal-zero compile-time rejection is Claim 4m ✓. The citation is accurate.
+- The phrase "bounds-check panics are implemented" in the closing paragraph (line 169) is accurate — but a future Spec Researcher might ask where this is stated in Constraint 3's body. Constraint 3 itself only mentions division-by-zero and MIN/-1; bounds checking is a §4.9 concern, not a §6.23 concern. The closing paragraph's mention of "bounds-check panics" could point to the §4.9 entry more explicitly. Low urgency — it's findable via the TOC.
+- None otherwise.
+
+---
+
+# Changelog — Cycle 021, Round 1 (Builder)
+
+## Goal
+Fix `refs/fls-constraints.md` Constraint 3 to reflect the current divide-by-zero
+implementation. Remove "no guard instruction is emitted" and "No panic infrastructure
+exists at this milestone" — both are factually wrong. Update the summary table to
+remove Constraint 8 (a project design principle) from the FLS compliance rows.
+Name the genuine remaining gap accurately: debug-mode panic-on-overflow for +/-/*.
+
+## Who This Helps
+- **Stakeholder:** Spec Researcher
+- **Impact:** A researcher reading `refs/fls-constraints.md` as the compliance
+  reference will no longer find it directly contradicting `refs/fls-ambiguities.md`
+  on a concrete, testable claim. Before this fix, the constraints file said
+  "no guard instruction is emitted"; the ambiguities file said "a `cbz xRHS,
+  _galvanic_panic` guard is emitted before every `sdiv`, `srem`, and `udiv`
+  instruction." A researcher noting "unguarded division" from the constraints file
+  would take incorrect information to a spec discussion.
+
+## Applied
+
+**`refs/fls-constraints.md`** — Three changes:
+
+1. **Constraint 3 status section** — Removed the two wrong statements:
+   - "No panic infrastructure exists at this milestone" — false since `_galvanic_panic`
+     was implemented.
+   - "Division-by-zero: no guard instruction is emitted. ARM64 `udiv` produces zero;
+     `sdiv` behavior is undefined." — false since Claims 4o and 4q.
+
+   Replaced with accurate description: `cbz xRHS, _galvanic_panic` guard before every
+   `sdiv`/`srem`/`udiv`; literal zero divisors rejected by the lowering pass; `i32::MIN
+   / -1` also guarded; full details pointer to §6.9/§6.23 Claims 4m, 4o, 4q.
+
+2. **Summary table** — Updated row 3 to "Partial (div-by-zero guarded; +/-/* overflow
+   panic deferred)". Removed row 8 (Constraint 8 is not an FLS constraint).
+
+3. **Closing paragraph** — Updated "the one genuine gap" to name only debug-mode
+   arithmetic overflow (+, -, *). Division-by-zero and bounds-check panics are now
+   correctly noted as implemented.
+
+4. **Constraint 8 separator** — Added a note before Constraint 8 making explicit it
+   is a project design principle, not an FLS requirement, so future readers don't
+   confuse it for a conformance claim.
+
+- **Files:** `refs/fls-constraints.md`
+- **PR:** libliflin/galvanic#436
+
+## Validated
+- `cargo test` — 2102 pass, 0 fail (pure documentation change; no code touched)
+- Cross-checked against `refs/fls-ambiguities.md` §6.9/§6.23: both files now agree
+  that `cbz` guards exist before division instructions.
+- Verifier: open `refs/fls-constraints.md` Constraint 3. The status section should
+  state that guards ARE emitted. Cross-reference with `refs/fls-ambiguities.md`
+  §6.9/§6.23 — both files should give the same answer on divide-by-zero.
+  Grep `src/codegen.rs` for `cbz.*galvanic_panic` — six occurrences confirm guards.
+
+---
+
 # Changelog — Cycle 021 (Customer Champion)
 
 ## Stakeholder: Spec Researcher
