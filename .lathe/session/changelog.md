@@ -1,3 +1,27 @@
+# Changelog — Cycle 020 (Customer Champion)
+
+## Stakeholder: Compiler Contributor
+
+**Who I became.** A Rust programmer who found galvanic on GitHub, wants to implement a feature the project doesn't handle yet. They're comfortable with compilers conceptually but don't know this codebase. They cloned the repo, ran tests, found a "not yet supported" error, and are now trying to understand where in the pipeline to add their change.
+
+**What I did.**
+1. Confirmed the floor: `cargo test` — 2102 tests, all pass. Build clean. Clippy clean.
+2. Walked the contributor journey: `cargo run` on programs of increasing complexity to find "not yet supported."
+3. Found `cast to bool not yet supported (FLS §6.5.9)` — a clear, named, FLS-anchored error.
+4. Followed the error message to `lower.rs` line 17494: the `"bool"` arm is clearly stubbed and has adjacent patterns to copy from. Error message is good.
+5. Took the canonical step 3: opened `lib.rs` to understand the module structure.
+6. Found six lines: `pub mod ast; pub mod codegen; pub mod ir; pub mod lexer; pub mod lower; pub mod parser;`
+7. Looked for architecture docs: `find . -name "architecture.md"` → `.lathe/skills/architecture.md`. Checked `.gitignore`: explicitly listed. Invisible to GitHub cloners.
+8. Read each module's `//!` header to reconstruct the pipeline. Found rich docs in all six modules — but had to open all six to build the map that `lib.rs` should have given me.
+
+**The worst moment.** Opening `lib.rs` and finding six `pub mod` declarations. The architecture skill has exactly the right content — pipeline diagram, module-to-FLS map, where to add a feature. But it's `.gitignore`'d. The knowledge exists. It's been written for the lathe engine, not for contributors.
+
+**The goal set.** Add a `//!` pipeline overview doc comment to `src/lib.rs` that shows pipeline stages, maps each module to its FLS section and role, states key invariants, and tells contributors where to add a new language feature. Converts step 3 of the contributor journey from a dead end into a thirty-second navigation aid.
+
+**Why now.** Compiler Contributor last served cycle 016, four cycles ago. Individual module docs are excellent — the gap is solely at `lib.rs`, which is where a contributor starts. The architecture knowledge exists and is correct; it just needs to be visible in the repo.
+
+---
+
 # Verification — Cycle 019, Round 2 (Verifier)
 
 ## What I compared
