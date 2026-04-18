@@ -256,17 +256,18 @@ fn lower_error_includes_fls_citation() {
     // directly to the spec without reading surrounding code.
     // Expected form: "not yet supported: <construct> (FLS §X.Y)"
     //
-    // Uses an if-expression as a nested struct field initializer — this form
+    // Uses an if-let expression as a nested struct field initializer — this form
     // is not yet handled by store_nested_struct_lit and produces a cited error.
     let mut tmp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
     write!(
         tmp,
         r#"
-struct Inner {{ a: i32, b: i32 }}
+enum Maybe {{ Just(i32), Nothing }}
+struct Inner {{ a: i32 }}
 struct Outer {{ inner: Inner, c: i32 }}
 fn main() -> i32 {{
-    let flag = 1;
-    let o = Outer {{ inner: if flag > 0 {{ Inner {{ a: 1, b: 2 }} }} else {{ Inner {{ a: 3, b: 4 }} }}, c: 3 }};
+    let m = Maybe::Just(1);
+    let o = Outer {{ inner: if let Maybe::Just(v) = m {{ Inner {{ a: v }} }} else {{ Inner {{ a: 0 }} }}, c: 3 }};
     o.c
 }}
 "#
@@ -374,19 +375,20 @@ fn partial_lower_no_main_emits_inspection_assembly() {
     // has an artifact to inspect. Exit code must be non-zero (lower errors occurred).
     //
     // Uses an inline program: add and helper lower cleanly; main fails because
-    // it uses an if-expression as a nested struct field initializer (not yet supported).
+    // it uses an if-let expression as a nested struct field initializer (not yet supported).
     // This exercises the inspection-only path independent of fixture evolution.
     let mut tmp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
     write!(
         tmp,
         r#"
-struct Inner {{ a: i32, b: i32 }}
+enum Maybe {{ Just(i32), Nothing }}
+struct Inner {{ a: i32 }}
 struct Outer {{ inner: Inner, c: i32 }}
 fn add(x: i32, y: i32) -> i32 {{ x + y }}
 fn helper(x: i32) -> i32 {{ x + 1 }}
 fn main() -> i32 {{
-    let flag = 1;
-    let o = Outer {{ inner: if flag > 0 {{ Inner {{ a: 1, b: 2 }} }} else {{ Inner {{ a: 3, b: 4 }} }}, c: 3 }};
+    let m = Maybe::Just(1);
+    let o = Outer {{ inner: if let Maybe::Just(v) = m {{ Inner {{ a: v }} }} else {{ Inner {{ a: 0 }} }}, c: 3 }};
     o.c
 }}
 "#
@@ -459,16 +461,17 @@ fn main() -> i32 {{
 #[test]
 fn main_only_fails_emits_no_assembly() {
     // A file with struct defs and only fn main, where main fails to lower.
-    // If-expression as nested struct field initializer — not yet supported.
+    // If-let expression as nested struct field initializer — not yet supported.
     let mut tmp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
     write!(
         tmp,
         r#"
+enum Maybe {{ Just(i32), Nothing }}
 struct Inner {{ a: i32 }}
 struct Outer {{ inner: Inner }}
 fn main() -> i32 {{
-    let flag = 1;
-    let o = Outer {{ inner: if flag > 0 {{ Inner {{ a: 1 }} }} else {{ Inner {{ a: 2 }} }} }};
+    let m = Maybe::Just(1);
+    let o = Outer {{ inner: if let Maybe::Just(v) = m {{ Inner {{ a: v }} }} else {{ Inner {{ a: 0 }} }} }};
     o.inner.a
 }}
 "#
