@@ -35184,6 +35184,44 @@ fn main() -> i32 { compose(2, 3) }\n",
     );
 }
 
+/// FLS §6.11, §4.1: A variable of a different struct type used as a nested
+/// struct field initializer must be rejected — even when both structs have
+/// the same number of fields (same slot count). Without a type check, the
+/// slots would be silently aliased, producing a type-confused value.
+///
+/// This is the adversarial boundary test for the Path arm of
+/// `store_nested_struct_lit`. The type check uses `local_struct_types` to
+/// compare the variable's registered type against the expected struct name.
+#[test]
+fn fls_6_11_nested_struct_field_wrong_type_rejected() {
+    // Pair and Point both have 2 fields — same slot count, different types.
+    let src = "\
+struct Point { x: i32, y: i32 }\n\
+struct Pair  { a: i32, b: i32 }\n\
+struct Rect  { top_left: Point, width: i32, height: i32 }\n\
+fn main() -> i32 {\n\
+    let p = Pair { a: 10, b: 20 };\n\
+    let r = Rect { top_left: p, width: 5, height: 3 };\n\
+    r.top_left.x\n\
+}\n";
+    let tokens = galvanic::lexer::tokenize(src).expect("lex failed");
+    let sf = galvanic::parser::parse(&tokens, src).expect("parse should succeed");
+    let result = galvanic::lower::lower(&sf, src);
+    assert!(
+        result.is_err(),
+        "expected lower to fail: Pair cannot be used where Point is expected (FLS §6.11, §4.1)"
+    );
+    let msg = result.err().unwrap().to_string();
+    assert!(
+        msg.contains("Pair") && msg.contains("Point"),
+        "error must name both the actual type (Pair) and expected type (Point); got: {msg}"
+    );
+    assert!(
+        msg.contains("FLS"),
+        "error must cite an FLS section; got: {msg}"
+    );
+}
+
 // ── Claim 4l: §6.18 match exhaustiveness check ─────────────────────────────���─
 
 /// Claim 4l: non-exhaustive integer match rejected at compile time.
