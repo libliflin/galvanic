@@ -376,9 +376,21 @@ impl<'src> Parser<'src> {
                     self.advance(); // eat `>`
                     break;
                 }
+                if self.peek_kind() == TokenKind::Lifetime {
+                    // FLS §12.1, §4.14: Lifetime parameters ('a) are valid Rust but
+                    // not yet implemented in galvanic. The fix site is
+                    // `parse_fn_def()` in `src/parser.rs`, the generic parameter loop.
+                    return Err(self.error(
+                        "lifetime parameters not yet supported (FLS §12.1, §4.14) — \
+                         galvanic handles type parameters (`<T>`) but not lifetime \
+                         annotations (`<'a>`); remove the lifetime parameters to \
+                         continue"
+                            .to_owned(),
+                    ));
+                }
                 if self.peek_kind() != TokenKind::Ident {
                     return Err(self.error(format!(
-                        "expected type parameter name or `>`, found {:?}",
+                        "expected type parameter name or `>`, found {:?} (FLS §12.1)",
                         self.peek_kind()
                     )));
                 }

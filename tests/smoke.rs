@@ -602,6 +602,42 @@ fn main() -> i32 {{
 }
 
 #[test]
+fn lifetime_parameter_parse_error_cites_fls() {
+    // FLS §12.1, §4.14: When the parser sees a lifetime parameter (`'a`)
+    // in a generic parameter list, the error message must cite the FLS section
+    // so a Compiler Contributor can navigate directly to the spec.
+    //
+    // Contributor journey: they write `fn longest<'a>(...)` and get an error.
+    // The error must say "(FLS §12.1" so they know which section to read and
+    // which file to fix (parse_fn_def() in parser.rs).
+    let mut tmp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
+    write!(
+        tmp,
+        r#"fn longest<'a>(x: &'a str, y: &'a str) -> &'a str {{ x }}
+fn main() {{}}
+"#
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_galvanic"))
+        .arg(tmp.path())
+        .output()
+        .expect("failed to run galvanic");
+
+    assert!(!output.status.success(), "expected non-zero exit for lifetime params");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FLS §12.1"),
+        "expected FLS §12.1 citation in lifetime parameter error, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("lifetime"),
+        "expected 'lifetime' in error message, got: {stderr}"
+    );
+}
+
+#[test]
 fn lower_source_all_unsupported_strings_cite_fls() {
     // Static invariant: every LowerError::Unsupported( call site in src/lower.rs
     // must supply a message string that contains "(FLS §". This ensures every
@@ -618,10 +654,10 @@ fn lower_source_all_unsupported_strings_cite_fls() {
     // citation will push the violation count above MAX_UNCITED_VIOLATIONS and
     // fail CI — a ratchet. As citations are added, lower MAX_UNCITED_VIOLATIONS.
     //
-    // Known debt as of cycle 030: 348 call sites still lack FLS citations.
+    // Known debt as of cycle 031: 287 call sites still lack FLS citations.
     // Every new Unsupported call must include a citation; reduce the debt
     // incrementally by adding citations when touching the surrounding code.
-    const MAX_UNCITED_VIOLATIONS: usize = 348;
+    const MAX_UNCITED_VIOLATIONS: usize = 287;
 
     let src = std::fs::read_to_string(
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/lower.rs"),
