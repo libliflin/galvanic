@@ -110,8 +110,31 @@ fn compile(args: Vec<String>) -> i32 {
         }
     };
 
-    // Nothing to compile if there is no entry point.
+    // Handle the "no fn main" case.
     if !module.fns.iter().any(|f| f.name == "main") {
+        // When lower errors occurred and functions did lower successfully,
+        // emit inspection-only assembly so the Lead Researcher has an artifact
+        // to inspect — successful lowerings must never be silently discarded.
+        if had_lower_errors && !module.fns.is_empty() {
+            let asm = match galvanic::codegen::emit_asm_inspection_only(&module) {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return 1;
+                }
+            };
+            let out_path = source_path.with_extension("s");
+            if let Err(e) = std::fs::write(&out_path, &asm) {
+                eprintln!("error: could not write {}: {e}", out_path.display());
+                return 1;
+            }
+            println!(
+                "galvanic: emitted {} (inspection-only — no fn main; this assembly has no entry point)",
+                out_path.display()
+            );
+            return 1; // always non-zero: lower errors occurred
+        }
+        // Clean compile with no fn main (library-only file): note and exit 0.
         println!(
             "galvanic: lowered {} function(s) — no fn main, no assembly emitted",
             module.fns.len()

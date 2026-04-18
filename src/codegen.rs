@@ -70,8 +70,30 @@ pub fn emit_asm(module: &Module) -> Result<String, CodegenError> {
     if !has_main {
         return Err(CodegenError::Unsupported("no `main` function in module".into()));
     }
+    emit_asm_impl(module, true)
+}
 
+/// Emit a partial module as ARM64 assembly text without an entry point.
+///
+/// Used when `main` failed to lower but other functions succeeded. The output
+/// is annotated at the top as inspection-only so the researcher knows it cannot
+/// be assembled into a runnable binary. No `_start` symbol is emitted.
+///
+/// FLS §18.1: Programs require `main`; this output intentionally omits it.
+pub fn emit_asm_inspection_only(module: &Module) -> Result<String, CodegenError> {
+    emit_asm_impl(module, false)
+}
+
+fn emit_asm_impl(module: &Module, include_entrypoint: bool) -> Result<String, CodegenError> {
     let mut out = String::new();
+
+    if !include_entrypoint {
+        writeln!(
+            out,
+            "    // inspection-only — no fn main; this assembly has no entry point"
+        )?;
+        writeln!(out)?;
+    }
 
     writeln!(out, "    .text")?;
 
@@ -139,9 +161,11 @@ pub fn emit_asm(module: &Module) -> Result<String, CodegenError> {
         }
     }
 
-    // Emit the bare _start entry point.
-    writeln!(out)?;
-    emit_start(&mut out)?;
+    // Emit the bare _start entry point (only for full compilations with fn main).
+    if include_entrypoint {
+        writeln!(out)?;
+        emit_start(&mut out)?;
+    }
 
     // Emit the _galvanic_panic primitive only when needed.
     //
