@@ -6930,6 +6930,9 @@ impl<'src> LowerCtx<'src> {
     /// - Match expression — handles each arm body recursively
     ///
     /// FLS §6.1.2:37–45: All stores are runtime instructions.
+    /// FLS §6.17: If-else expressions — both branches store into the same slots.
+    /// FLS §6.4: Block expressions — statements then tail.
+    /// FLS §6.18: Match expressions — each arm body stores discriminant + fields.
     /// FLS §15 AMBIGUOUS: The spec does not define a calling convention for
     /// enum-returning functions. Galvanic uses discriminant in x0, fields in x1..xN.
     fn lower_enum_expr_into(
@@ -7342,6 +7345,12 @@ impl<'src> LowerCtx<'src> {
     /// Store instructions to fill them. After this returns, `lower_fn` emits
     /// `RetFields` to pack those slots into x0..x{N-1} for the caller.
     ///
+    /// Handles:
+    /// - Tuple literal `(e0, e1, ...)` — stores each element left-to-right
+    /// - If-else expression — each branch stores into the same slots
+    /// - Block expression — lowers statements then handles tail
+    /// - Match expression — handles each arm body recursively
+    ///
     /// FLS §6.10: Tuple expressions evaluate each element left-to-right.
     /// FLS §6.17: If/else expressions where both branches produce tuples.
     /// FLS §6.4: Block expressions whose tail produces a tuple.
@@ -7612,6 +7621,7 @@ impl<'src> LowerCtx<'src> {
     /// stored in declaration order for layout stability.
     /// FLS §6.17: If-else expression — both branches must yield the same struct type.
     /// FLS §6.4: Block expressions — statements then tail.
+    /// FLS §6.18: Match expressions — each arm body stores all N fields.
     /// FLS §6.1.2:37–45: All stores are runtime instructions.
     ///
     /// Cache-line note: a 2-field struct literal emits 2 store instructions = 8 bytes,
