@@ -3,6 +3,46 @@
 //! Translates a parsed `SourceFile` into the minimal IR needed for ARM64
 //! code generation. Each lowering function corresponds to a FLS section.
 //!
+//! # Two-tier lowering architecture
+//!
+//! Expression lowering uses two tiers depending on the return type of the
+//! enclosing function:
+//!
+//! **Tier 1 — scalar path: `lower_expr`**
+//!
+//! Called for expressions that produce a single scalar value: `i32`, `bool`,
+//! `f32`, `f64`, pointer types, etc. Returns an `IrValue` (register or
+//! constant) that the caller can store, pass, or return directly.
+//!
+//! This is the default path. Every `ExprKind` variant that does not require
+//! special calling-convention treatment goes through `lower_expr`.
+//!
+//! **Tier 2 — composite path: `lower_*_expr_into`**
+//!
+//! Called when the enclosing function's declared return type is a composite
+//! (struct, enum, or tuple). These functions *write into pre-allocated stack
+//! slots* rather than returning a value — they implement galvanic's
+//! register-packing calling convention for multi-register returns.
+//!
+//! | Function | When called |
+//! |---|---|
+//! | `lower_struct_expr_into` | Function return type is a named struct (FLS §9, §6.11) |
+//! | `lower_enum_expr_into`   | Function return type is a named enum (FLS §9, §15) |
+//! | `lower_tuple_expr_into`  | Function return type is a tuple (FLS §9, §6.10) |
+//!
+//! Each tier-2 function is called once, from `lower_fn`, on the tail
+//! expression of the function body. Inside each function, recursive
+//! expression kinds (if/else, block, match) call the same tier-2 function
+//! again so every branch stores into the same slots. Scalar sub-expressions
+//! within a tier-2 context (e.g., each field initializer inside a struct
+//! literal) call back into `lower_expr`.
+//!
+//! **Decision point:** `lower_fn` inspects the function's declared return
+//! type and routes to one of the four paths. To add a new expression case
+//! for a composite-returning function, add a match arm in the relevant
+//! `lower_*_expr_into` function. To add a new case for scalar-returning
+//! functions, add a match arm in `lower_expr`.
+//!
 //! # FLS constraint compliance (fls-constraints.md)
 //!
 //! This module emits **runtime instructions** for all non-const code.
@@ -60,6 +100,11 @@ type EnumDefs = HashMap<String, HashMap<String, EnumVariantInfo>>;
 // FLS §6.5.6: Bit operator expressions — `lower_expr` handles BitAnd/BitOr/BitXor.
 // FLS §6.5.7: Shift operator expressions — `lower_expr` handles Shl/Shr.
 // FLS §6.18: Match expressions — `lower_expr` handles `ExprKind::Match`.
+//
+// ── Two-tier composite-return handlers (see module-level doc) ─────────────────
+// FLS §6.11, §9: Struct return — `lower_struct_expr_into` stores N fields into slots.
+// FLS §15, §9:   Enum return  — `lower_enum_expr_into` stores discriminant + fields.
+// FLS §6.10, §9: Tuple return — `lower_tuple_expr_into` stores N elements into slots.
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
@@ -6859,10 +6904,22 @@ impl<'src> LowerCtx<'src> {
         Ok(())
     }
 
-    /// Lower an expression that returns an enum value into pre-allocated stack slots.
+    /// **Tier-2 composite handler.** Lower an expression that returns an enum
+    /// value into pre-allocated stack slots.
+    ///
+    /// Called by: `lower_fn` (once, on the function body's tail expression)
+    /// when the function's declared return type is a named enum. Also called
+    /// recursively for each branch of an if/else, block tail, or match arm.
+    /// Sub-expressions that produce scalar values (discriminants, field values)
+    /// call back into `lower_expr`.
+    ///
+    /// Do **not** call this from `lower_expr`. The scalar path (`lower_expr`)
+    /// handles expressions that return a single `IrValue`; this function handles
+    /// the composite path where the result spans `1 + max_fields` stack slots.
     ///
     /// Stores discriminant at `base_slot`, positional fields at `base_slot+1..`.
-    /// Used for functions returning enum types (FLS §9, §15).
+    /// After this returns, `lower_fn` emits `RetFields` to pack those slots into
+    /// x0..x{n_ret-1} for the caller.
     ///
     /// Handles:
     /// - Tuple variant constructor `Enum::Variant(field, ...)` — stores discriminant + fields
@@ -7268,16 +7325,25 @@ impl<'src> LowerCtx<'src> {
         }
     }
 
-    /// Lower an expression that must produce a tuple value into consecutive
-    /// stack slots `base_slot..base_slot+n_elems`.
+    /// **Tier-2 composite handler.** Lower an expression that must produce a
+    /// tuple value into consecutive stack slots `base_slot..base_slot+n_elems`.
+    ///
+    /// Called by: `lower_fn` (once, on the function body's tail expression)
+    /// when the function's declared return type is a tuple. Also called
+    /// recursively for each branch of an if/else, block tail, or match arm.
+    /// Each element's scalar value is computed via `lower_expr`.
+    ///
+    /// Do **not** call this from `lower_expr`. The scalar path (`lower_expr`)
+    /// handles expressions that return a single `IrValue`; this function handles
+    /// the composite path where the result spans `n_elems` stack slots.
+    ///
+    /// The slots are pre-allocated by the caller; this function only emits
+    /// Store instructions to fill them. After this returns, `lower_fn` emits
+    /// `RetFields` to pack those slots into x0..x{N-1} for the caller.
     ///
     /// FLS §6.10: Tuple expressions evaluate each element left-to-right.
     /// FLS §6.17: If/else expressions where both branches produce tuples.
     /// FLS §6.4: Block expressions whose tail produces a tuple.
-    ///
-    /// This follows the same "expr-into-slots" pattern as `lower_enum_expr_into`
-    /// but for tuple types. The slots are pre-allocated by the caller; this
-    /// function only emits Store instructions to fill them.
     fn lower_tuple_expr_into(
         &mut self,
         expr: &Expr,
@@ -7517,11 +7583,21 @@ impl<'src> LowerCtx<'src> {
         }
     }
 
-    /// Lower an expression that produces a named struct value into pre-allocated
-    /// stack slots.
+    /// **Tier-2 composite handler.** Lower an expression that produces a named
+    /// struct value into pre-allocated stack slots.
     ///
-    /// Stores the N fields of `struct_name` into `base_slot..base_slot+n_fields-1`.
-    /// Used for functions returning named struct types (FLS §9, §6.11, §6.17).
+    /// Called by: `lower_fn` (once, on the function body's tail expression)
+    /// when the function's declared return type is a named struct. Also called
+    /// recursively for each branch of an if/else, block tail, or match arm.
+    /// Each field initializer's scalar value is computed via `lower_expr`.
+    ///
+    /// Do **not** call this from `lower_expr`. The scalar path (`lower_expr`)
+    /// handles expressions that return a single `IrValue`; this function handles
+    /// the composite path where the result spans `n_fields` stack slots.
+    ///
+    /// Stores the N fields of `struct_name` into `base_slot..base_slot+n_fields-1`
+    /// in declaration order. After this returns, `lower_fn` emits `RetFields` to
+    /// pack those slots into x0..x{N-1} for the caller.
     ///
     /// Handles:
     /// - Struct literal `S { field: expr, ... }` — stores fields in declaration order
@@ -10543,10 +10619,17 @@ impl<'src> LowerCtx<'src> {
 
     // ── Expression lowering ──────────────────────────────────────────────────
 
-    /// Lower an expression to runtime IR instructions.
+    /// **Tier-1 scalar handler.** Lower an expression to runtime IR instructions.
     ///
-    /// Returns the `IrValue` holding the result. Emits `LoadImm`, `BinOp`,
-    /// `Load`, `Label`, `Branch`, `CondBranch`, etc. into `self.instrs`.
+    /// Returns the `IrValue` holding the result — a register or constant. Emits
+    /// `LoadImm`, `BinOp`, `Load`, `Label`, `Branch`, `CondBranch`, etc. into
+    /// `self.instrs`.
+    ///
+    /// This is the default lowering path for all expressions that produce a
+    /// single scalar value. For functions whose return type is a composite (struct,
+    /// enum, or tuple), `lower_fn` bypasses this and calls the corresponding
+    /// tier-2 handler (`lower_struct_expr_into`, `lower_enum_expr_into`, or
+    /// `lower_tuple_expr_into`) on the function body's tail expression instead.
     ///
     /// `ret_ty` is the expected type of this expression. Used to select which
     /// variant of a literal or operator to emit.
