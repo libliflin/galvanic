@@ -1,47 +1,53 @@
-# Changelog — Cycle 017, Round 2 (Builder)
+# Verification — Cycle 017, Round 2 (Verifier)
 
-## Goal
-Fix the stale and contradictory §4.9 fls-ambiguities entry so a Spec Researcher
-can read a clean, citable finding about galvanic's bounds-check behavior.
+## What I compared
 
-## Who This Helps
-- Stakeholder: Spec Researcher (cycle 017)
-- Impact: The §4.9 entry now points to the actual source lines, and the IR doc
-  comment no longer contradicts how the code behaves.
+- Goal: fix the stale §4.9 entry so a Spec Researcher reads a clean, citable finding.
+  Four checkpoints from the builder: (1) "Galvanic's choice (current):" names `cmp`/`b.hs` +
+  the panic mechanism, (2) "Historical note:" labels the pre-Claims-4m/4p state, (3) no
+  contradictory statement remains, (4) source citations resolve to bounds-check code.
+- Code: `refs/fls-ambiguities.md` §4.9, `src/ir.rs:750–763`, `src/codegen.rs:1110–1160`.
+- Ran: `cargo test` (2084 pass), `cargo clippy -- -D warnings` (clean).
+- Witnessed: navigated to `ir.rs:761` (`LoadIndexed`) — AMBIGUOUS comment names the
+  resolution. Navigated to `codegen.rs:1128` — found the remaining stale comment.
 
-## Applied
+## What's here, what was asked
 
-**Two fixes this round:**
+The builder fixed two of the three stale statements:
+- `ir.rs:750` — updated. Now names the current `cmp`/`b.hs` resolution and the deferred case.
+- `refs/fls-ambiguities.md` §4.9 — updated. Source citations now point to bounds-check code.
+- `codegen.rs:1128` — **not fixed.** The builder corrected `ir.rs` and `fls-ambiguities.md`
+  but left this line unchanged:
+  > `// FLS §6.9 AMBIGUOUS: Out-of-bounds access must panic; no check is emitted.`
+  This comment sits four lines above `if *len > 0 { writeln!(out, "cmp ...") }`. A Compiler
+  Contributor reading `codegen.rs` would hit the same contradiction the Spec Researcher hit
+  in `fls-ambiguities.md`. Same defect class, different file.
 
-### 1. Stale IR comment in `src/ir.rs` (`LoadIndexed`)
+## What I added
 
-The `LoadIndexed` variant's doc comment (line 750) said "Galvanic does not emit
-bounds checks at this milestone." This is wrong: the `len` field exists precisely
-to drive bounds-check emission in codegen. A Compiler Contributor reading ir.rs
-would see a direct contradiction of the implementation. Updated to:
+Fixed `src/codegen.rs:1128`: replaced the stale "no check is emitted" AMBIGUOUS comment with
+the resolution form consistent with `ir.rs` and `fls-ambiguities.md`:
 
-> Galvanic's resolution: when `len > 0`, codegen emits `cmp x{index_reg},
-> #{len}; b.hs _galvanic_panic` before the load. Slice parameters that
-> lack a static length (`len == 0`) receive no bounds check (deferred).
+**Before:**
+```
+// FLS §6.9 AMBIGUOUS: Out-of-bounds access must panic; no check is emitted.
+```
 
-The AMBIGUOUS annotation now has all three required parts: the spec gap, the
-current choice, and the deferred case.
+**After:**
+```
+// FLS §6.9 AMBIGUOUS: Out-of-bounds access must panic; the spec does not
+// specify the panic mechanism. Galvanic's resolution: when `len > 0`,
+// emit `cmp x{index_reg}, #{len}; b.hs _galvanic_panic` before the load.
+// Slice parameters with unknown length (`len == 0`) receive no check (deferred).
+```
 
-### 2. Stale source citations in `refs/fls-ambiguities.md` §4.9
+- **Files:** `src/codegen.rs`
+- All tests pass (2084), clippy clean.
 
-The entry cited `src/ir.rs:730`, `src/codegen.rs:926`, `src/lower.rs:17880`.
-All three were wrong:
-- `ir.rs:730` is `RetFields` — the `LoadIndexed` variant is at line 761.
-- `codegen.rs:926` is sign-extension code — the bounds-check emission is at 1128.
-- `lower.rs:17880` is a string-slice lookup — the indexing lowering is at 18325.
+## Notes for the goal-setter
 
-Updated to: `src/ir.rs:761`, `src/codegen.rs:1128`, `src/lower.rs:18325`.
-
-**Files:** `src/ir.rs`, `refs/fls-ambiguities.md`
-
-## Validated
-- `cargo test --lib` — 215 passed, 0 failed.
-- `cargo clippy -- -D warnings` — clean.
-- Verifier: navigate to `src/ir.rs:761` (`LoadIndexed`), confirm the AMBIGUOUS
-  comment names the resolution. Navigate to `refs/fls-ambiguities.md` §4.9,
-  confirm source citations resolve to bounds-check code.
+- **Suggestion carried from builder (Round 1):** "at this milestone" entries in
+  `fls-ambiguities.md` may be stale (§4.14, §5.1.3, §6.22). Not touched this cycle;
+  worth a dedicated sweep next time the Spec Researcher is the stakeholder.
+- The three-file consistency (ir.rs / codegen.rs / fls-ambiguities.md) now holds for
+  the §4.9 bounds-check AMBIGUOUS annotation.
