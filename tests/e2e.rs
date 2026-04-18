@@ -24711,6 +24711,100 @@ fn main() -> i32 {
     assert_eq!(exit_code, 23); // 4*2 + 15 = 8 + 15 = 23
 }
 
+/// Assembly inspection: `n @ _` in match emits binding without any check.
+///
+/// Wildcard sub-pattern always matches — no cmp or cbz should be emitted for
+/// the sub-pattern. The binding itself requires ldr + str. No constant folding.
+///
+/// FLS §5.1.4: `@` binds the matched value. FLS §5.1: wildcard `_` always matches.
+#[test]
+fn fls_5_1_4_bound_wildcard_subpat_emits_binding_no_check() {
+    let asm = compile_to_asm(
+        "fn tag(x: i32) -> i32 {\n\
+             match x {\n\
+                 n @ _ => n + 1,\n\
+             }\n\
+         }\n\
+         fn main() {}\n",
+    );
+    // Binding requires a load from the scrutinee slot.
+    assert!(asm.contains("ldr"), "@ _ must emit ldr to load scrutinee: {asm}");
+    // No constant folding — result must not be a literal.
+    assert!(
+        !asm.contains("mov     x0, #2"),
+        "@ _ result must NOT be constant-folded: {asm}"
+    );
+}
+
+/// QEMU: `n @ _` in match binds unconditionally and uses binding in body.
+///
+/// FLS §5.1.4: wildcard sub-pattern always matches; binding is installed.
+#[test]
+fn fls_5_1_4_bound_wildcard_subpat_correct() {
+    let src = r#"
+fn tag(x: i32) -> i32 {
+    match x {
+        n @ _ => n + 1,
+    }
+}
+fn main() -> i32 {
+    tag(6)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 7); // 6 + 1 = 7
+}
+
+/// QEMU: `if let n @ _ = x` binds unconditionally in if-let position.
+///
+/// FLS §6.17: if-let with @ wildcard. FLS §5.1: wildcard always matches,
+/// so the then branch is always taken.
+#[test]
+fn fls_5_1_4_bound_wildcard_if_let_correct() {
+    let src = r#"
+fn tag(x: i32) -> i32 {
+    if let n @ _ = x { n * 2 } else { 0 }
+}
+fn main() -> i32 {
+    tag(5)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 10); // 5 * 2 = 10
+}
+
+/// QEMU: `if let n @ true = b` binds when b is true (LitBool sub-pattern in if-let).
+///
+/// FLS §5.1.4: LitBool sub-pattern in if-let @ binding — parity with match support.
+#[test]
+fn fls_5_1_4_bound_litbool_if_let_correct() {
+    let src = r#"
+fn check(b: bool) -> i32 {
+    if let n @ true = b { 1 } else { 0 }
+}
+fn main() -> i32 {
+    check(true)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 1);
+}
+
+/// QEMU: `if let n @ true = b` else branch taken when b is false.
+#[test]
+fn fls_5_1_4_bound_litbool_if_let_not_taken() {
+    let src = r#"
+fn check(b: bool) -> i32 {
+    if let n @ true = b { 1 } else { 0 }
+}
+fn main() -> i32 {
+    check(false)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0);
+}
+
 // ── Milestone 151: `impl FnOnce` in parameter position (FLS §6.14, §4.13) ─────
 //
 // FnOnce is the base trait of the closure trait hierarchy. Every closure
@@ -36960,6 +37054,35 @@ fn fls_6_18_match_tuple_scrutinee_wildcard_arm_exit_code() {
     assert_eq!(
         exit_code, Some(1),
         "match_tuple(1, 99) should return 1 (second arm, wildcard y), got {exit_code:?}"
+    );
+}
+
+/// QEMU test: tuple scrutinee match — third arm `(_, 1) => 2`.
+///
+/// Witnesses that a wildcard-first tuple arm matches when y==1 regardless of x.
+/// Arm order: (0,0)→0, (1,_)→1, (_,1)→2, _→3. Call with (42,1) hits arm 3.
+///
+/// FLS §6.18: match arms are tested top-to-bottom; first match wins.
+/// FLS §5.10.3: wildcard sub-pattern matches any element.
+#[test]
+fn fls_6_18_match_tuple_scrutinee_third_arm_exit_code() {
+    if !tool_available("aarch64-linux-gnu-as") {
+        return;
+    }
+    let exit_code = compile_and_run(
+        "fn match_tuple(x: i32, y: i32) -> i32 {\n\
+             match (x, y) {\n\
+                 (0, 0) => 0,\n\
+                 (1, _) => 1,\n\
+                 (_, 1) => 2,\n\
+                 _ => 3,\n\
+             }\n\
+         }\n\
+         fn main() -> i32 { match_tuple(42, 1) }\n",
+    );
+    assert_eq!(
+        exit_code, Some(2),
+        "match_tuple(42, 1) should return 2 (third arm, wildcard x), got {exit_code:?}"
     );
 }
 
