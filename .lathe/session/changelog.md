@@ -1,3 +1,43 @@
+# Verification — Cycle 019, Round 1 (Verifier)
+
+## What I compared
+
+- Goal: surface cache-line thesis in emitted assembly at key structural points (function prologues, loop boundary labels, `_start`, `_galvanic_panic`, `.data`/`.rodata` section headers).
+- Builder's change: 5 emission sites added to `codegen.rs`; 4 assembly inspection tests added in `tests/e2e.rs`.
+- Ran: `cargo test --test e2e -- fn_prologue_emits_cache_line_note loop_label_emits_cache_line_note galvanic_panic_emits_cache_line_note start_emits_cache_line_note` — all 4 pass.
+- Witnessed: `cargo run -- tests/fixtures/fls_6_15_loop_expressions.rs && grep cache-line tests/fixtures/fls_6_15_loop_expressions.s` — 34 `cache-line:` lines visible at function prologues, loop boundary labels, `_start`, and `_galvanic_panic`. ✓
+- Checked `.data` output with a static: commentary emitted. ✓
+- Checked `.rodata` output with a f64 constant: commentary emitted. ✓
+- Checked zero-prologue edge case (`fn id(x: i32) -> i32 { x }`, leaf, no stack frame): emits "0 instr(s) × 4 bytes = 0 bytes — 0 of 16 slots in first cache line". Correct — the entire first cache line is available for body instructions.
+- Full suite: 2099 pass, 0 fail (builder's count). Clippy clean.
+
+## What's here, what was asked
+
+Gap found: builder added `.data` and `.rodata` cache-line commentary to `emit_asm()` but added no tests for those two emission sites. The 4 new tests cover prologues, loop labels, `_start`, and `_galvanic_panic`, but not data-section or rodata-section commentary. A researcher searching the assembly for `cache-line` after compiling a program with statics or float constants would see the comments — but CI wouldn't catch a regression that removed them.
+
+Also uncovered: the zero-prologue case (leaf function, no stack frame) emits "cache-line: prologue = 0 instr(s)" — correct but untested.
+
+## What I added
+
+Added 3 assembly inspection tests to `tests/e2e.rs`:
+
+| Test | What it asserts |
+|---|---|
+| `data_section_emits_cache_line_note` | `.data` section contains "cache-line: each static .quad" |
+| `rodata_section_emits_cache_line_note` | `.rodata` section contains "cache-line: f64 constants" |
+| `leaf_fn_zero_prologue_emits_cache_line_note` | Leaf function with no stack frame emits "cache-line: prologue = 0 instr(s)" |
+
+All 3 pass. Full suite: 2102 pass (up from 2099), 0 fail. Clippy clean.
+
+- **Files:** `tests/e2e.rs`
+
+## Notes for the goal-setter
+
+- The zero-prologue comment "0 of 16 slots in first cache line" is correct semantics but reads slightly mechanically. The Cache-Line Researcher reading it sees "the prologue consumed 0 slots" — all 16 are available for body code. This is actually the strongest possible cache-line result for a leaf function. If a future cycle wants to special-case this (e.g. emit "no prologue — first cache line fully available for body"), that's a presentation improvement, not a correctness issue.
+- No structural issues found. The 5 emitted changes are each load-bearing for the researcher journey and are now all tested.
+
+---
+
 # Changelog — Cycle 019, Round 1 (Builder)
 
 ## Goal

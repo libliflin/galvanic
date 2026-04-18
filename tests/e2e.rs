@@ -36174,3 +36174,49 @@ fn start_emits_cache_line_note() {
         "expected '_start = 4 instructions' cache-line note; got:\n{asm}"
     );
 }
+
+/// The .data section must emit a cache-line comment documenting static layout.
+///
+/// When a program has static items, the emitted .data section should show the
+/// Cache-Line Researcher how many statics fit per cache line. The claim:
+/// `.quad` is 8 bytes, `.align 3` → 8 statics per 64-byte data cache line.
+#[test]
+fn data_section_emits_cache_line_note() {
+    let asm = compile_to_asm(
+        "static X: i64 = 42;\nfn main() -> i32 { 0 }\n",
+    );
+    assert!(
+        asm.contains("cache-line: each static .quad"),
+        "expected data section cache-line note on .data; got:\n{asm}"
+    );
+}
+
+/// The .rodata section must emit a cache-line comment documenting float constant layout.
+///
+/// f64 constants are 8 bytes (.align 3) → 8 per 64-byte cache line; f32 are 4 bytes
+/// (.align 2) → 16 per line. This must be visible in the emitted .s file.
+#[test]
+fn rodata_section_emits_cache_line_note() {
+    let asm = compile_to_asm(
+        "fn foo(x: f64) -> f64 { x + 1.5 }\nfn main() -> i32 { 0 }\n",
+    );
+    assert!(
+        asm.contains("cache-line: f64 constants"),
+        "expected .rodata section cache-line note for f64 constants; got:\n{asm}"
+    );
+}
+
+/// A leaf function with no stack frame must emit a zero-prologue cache-line note.
+///
+/// When saves_lr=false and stack_slots=0, the prologue has 0 instructions.
+/// The comment "0 of 16 slots in first cache line" is correct — the entire first
+/// cache line is available for function body instructions. This edge case must
+/// not panic or be omitted.
+#[test]
+fn leaf_fn_zero_prologue_emits_cache_line_note() {
+    let asm = compile_to_asm("fn id(x: i32) -> i32 { x }\nfn main() -> i32 { 0 }\n");
+    assert!(
+        asm.contains("cache-line: prologue = 0 instr(s)"),
+        "expected zero-prologue cache-line note for leaf function; got:\n{asm}"
+    );
+}
