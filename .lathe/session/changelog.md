@@ -1,3 +1,63 @@
+# Cycle 026 — Customer Champion
+
+## Stakeholder
+
+**Lead Researcher** — last served cycle 022, most under-served in the current rotation.
+
+## Experience
+
+Walked the Lead Researcher's first-encounter journey. Ran `cargo test` (2110 pass, clean
+floor). Picked `fls_9_functions.rs` as the target fixture — §9 (Functions) is the spine
+of the spec. Ran `cargo run -- tests/fixtures/fls_9_functions.rs`.
+
+Output:
+
+```
+galvanic: compiling fls_9_functions.rs
+parsed 19 item(s)
+error: lower failed in 'returns_unit': not yet supported: integer literal with non-integer type
+lowered 19 of 20 functions (1 failed)
+galvanic: emitted tests/fixtures/fls_9_functions.s (partial — some functions failed)
+```
+
+The failing function:
+
+```rust
+fn returns_unit() {
+    42;
+}
+```
+
+Traced the root cause to `src/lower.rs:10482–10484`: `StmtKind::Expr` calls
+`lower_expr(expr, &IrTy::Unit)` for all expression statements. The `LitInt` arm at
+line 10654 dispatches on the type hint and has no case for `IrTy::Unit`, hitting the
+catch-all `_ => Err("integer literal with non-integer type")`. The error has no FLS
+citation, violating the architecture invariant — and the static citation check
+(`lower_source_all_unsupported_strings_cite_fls`) doesn't catch this because the check
+looks for the text "not yet supported" in source lines, but message payloads don't contain
+that prefix (it's added by Display).
+
+## Goal Set
+
+**Fix expression statement lowering (FLS §8.2)** so that any expression can appear as a
+statement. `fn returns_unit() { 42; }` and `fn foo(x: i32) { x + 1; }` must lower
+successfully, emitting runtime instructions for the discarded expressions without folding.
+
+The fix is in `StmtKind::Expr` handling: do not pass `IrTy::Unit` as the type hint for
+expressions whose values are discarded. The expression should be lowered with its natural
+type, since the statement context only means the result is unused — not that the expression
+is unit-typed.
+
+## Why Now
+
+FLS §9 (Functions) is the core section. A failure on a three-line function with an
+expression statement is a wall, not a partial limitation. The error message gives the
+researcher nothing to navigate with: no FLS citation, no context, no spec anchor. And
+the failing construct — an integer literal as a statement — is one of the most common
+patterns in real Rust code.
+
+---
+
 # Verification — Cycle 025, Round 2 (Verifier)
 
 ## What I compared
