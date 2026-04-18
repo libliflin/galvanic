@@ -1,3 +1,65 @@
+# Cycle 025 — Customer Champion Changelog
+
+## Stakeholder: Spec Researcher
+
+**Rotation basis:** Cycles 024 = Compiler Contributor, 023 = Cache-Line Researcher,
+022 = Lead Researcher, 021 = Spec Researcher. Spec Researcher is the most under-served
+(last served four cycles ago).
+
+## What I experienced
+
+I became the Spec Researcher. I opened `refs/fls-ambiguities.md` knowing nothing about its
+history. I verified the TOC is in sync with 48 body entries, entries are in section-number
+order, and the file has a working table of contents. That part works.
+
+I chose float and numeric-operator semantics as my topic — §6.5.x — and ran a two-minute
+clock. The first two entries I found (§6.5.3 NaN, §6.5.5 IEEE 754) were clean and citable.
+The third (§6.5.7 Shift Amount Modulo Behavior) was not.
+
+The §6.5.7 entry has three parts that actively contradict each other:
+1. **Galvanic's choice** (formal field): "No explicit masking instruction is emitted"
+   (old behavior — hardware mod-64 delegation)
+2. **Minimal reproducer assembly signature**: shows `cmp x1, #64` + `b.hs _galvanic_panic`
+   (current behavior — explicit panic guard)
+3. **Note**: "the **Galvanic's choice** description above is stale"
+
+The formal description is wrong. The Note acknowledges it. The assembly signature shows
+the actual current behavior. But the reader is left unable to cite anything — the
+authoritative field says one thing, the Note says it's wrong, and the Note's own
+description of the current behavior is informal.
+
+Cross-referencing source files:
+- `lower.rs:11044`: still frames the ambiguity in old terms ("ARM64 uses 6 bits for mod-64")
+- `codegen.rs:1023`: correctly describes the current state (`FLS §6.5.9 AMBIGUOUS:
+  galvanic checks against 64, not bit_width`)
+
+Three places describe the same design decision with three different framings. The research
+document's formal description is the most wrong.
+
+**Hollowest moment:** Writing down "galvanic: no guard, uses hardware mod" from the
+**Galvanic's choice** field, then finding the assembly signature shows the opposite, then
+reading "Note: the field above is stale." Crossing out my note. Not knowing what to write
+instead.
+
+## Goal set
+
+Fix the §6.5.7 entry to reflect current behavior (explicit panic guard for shift amounts ≥
+64). Remove the stale Note. Add the narrow-type false negative (shifts of i32 in [32, 63]
+are not caught by the guard) as a known gap. Extend the §6.5.9 entry with this same
+false-negative as a third gap. Update the lower.rs source annotation at line 11044 to
+match. No functional code changes — documentation only. Goal: after this fix, the §6.5.7
+entry is citable.
+
+## Why this and not something else
+
+The TOC/body sync is fine (48 entries, in order). Other entries I checked (§6.22 Closures,
+§6.18 Match Exhaustiveness) are clear and citable. The §6.5.7 entry is uniquely broken
+because it acknowledges its own staleness in the body without correcting it. That's a
+different class of problem from a missing entry — it's an entry that actively misleads
+while also warning the reader it's misleading them.
+
+---
+
 # Verification — Cycle 024, Round 2 (Verifier)
 
 ## What I compared
