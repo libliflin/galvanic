@@ -1,3 +1,38 @@
+# Verification — Cycle 027, Round 2 (Verifier)
+
+## What I compared
+
+- **Goal:** Add a `full_pipeline` benchmark to `benches/throughput.rs` covering lex → parse → lower → emit_asm, reporting throughput in bytes/sec. Closes the broken claim→code→test→benchmark chain for `Instr` (80 bytes, cache-line-spanning).
+- **Round 1 verifier:** Found no gaps, made no commit.
+
+**What I ran:**
+- `cargo test` — 2115 pass, 0 fail ✓ (1842 e2e + 46 fls_fixtures + 11 smoke + 216 lib)
+- `cargo clippy -- -D warnings` — clean ✓
+- `cargo bench --bench throughput -- full_pipeline`:
+  - `end_to_end/full_pipeline/fls_functions`: `[101.97 MiB/s 102.36 MiB/s 102.67 MiB/s]` ✓
+  - `end_to_end/full_pipeline/fls_expressions`: `[90.159 MiB/s 90.572 MiB/s 90.872 MiB/s]` ✓
+- Read `benches/throughput.rs` end-to-end: `full_pipeline` entries run all four pipeline stages with `Throughput::Bytes` already set by the surrounding loop ✓
+
+## What's here, what was asked
+
+Matches. The work holds up against the goal from my comparative lens.
+
+- `bench_end_to_end` now contains both `lex_and_parse` and `full_pipeline` for each fixture — the group name delivers on its promise.
+- `full_pipeline` runs `lexer::tokenize` → `parser::parse` → `lower::lower` → `codegen::emit_asm` — all four stages, including the codegen stage that embodies the cache-line thesis.
+- Criterion reports throughput in bytes/sec via the `Throughput::Bytes` already set in the surrounding loop — no additional setup needed.
+- The Cache-Line Performance Researcher can now run `cargo bench --bench throughput -- full_pipeline` and see a citable MiB/s number.
+
+## What I added
+
+Nothing this round — the work holds up against the goal from my lens.
+
+## Notes for the goal-setter
+
+- `fls_literals` is used in `bench_lexer` but not in `bench_end_to_end`. Adding it there would give a literals-heavy codegen throughput number — a one-line addition if the fixture lowers cleanly. Not a gap for this goal.
+- The `.unwrap()` calls in the `full_pipeline` bench will panic if a future fixture gains unsupported constructs. Standard bench practice: fixtures used in benchmarks should lower cleanly. Worth noting when new fixtures are added to the bench group.
+
+---
+
 # Verification — Cycle 027, Round 1 (Verifier)
 
 ## What I compared
