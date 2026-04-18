@@ -1,3 +1,26 @@
+# Changelog — Cycle 027 (Customer Champion)
+
+## Stakeholder: Cache-Line Performance Researcher
+
+**Who I became.** A performance engineer who read the README claim — "obsessively
+cache-line-aware codegen" — and wants to verify it with numbers. Not a galvanic contributor.
+A researcher evaluating the thesis.
+
+**What I tried.**
+1. Read the README. The two research questions are clear. The cache-line claim is front and center.
+2. Ran `cargo bench`. Got lexer throughput: ~673 MiB/s for `fls_literals`. Saw the `end_to_end` group appear.
+3. Found the size assertion tests: `token_is_eight_bytes`, `ir_value_is_eight_bytes`, `static_value_is_sixteen_bytes`, `instr_size_is_documented`. All pass.
+4. Compiled `fls_6_15_loop_expressions.rs` and read the `.s` file. Back-edge cache-line comments present (cycle 023 work): "cache: loop body = 18 instr × 4 B = 72 B, spans 2 cache line(s)". That works.
+5. Tried to trace claim → code → test → benchmark chain for `Instr` (80 bytes, larger than one cache line). Chain stops at the test — no benchmark covers lowering or codegen.
+
+**The worst moment.** Running `cargo bench` and watching the `end_to_end` group appear — only to find it only measures `lex_and_parse`. The name promised the full pipeline number. The codegen stage — the stage that embodies the cache-line thesis — produces no throughput measurement.
+
+**The goal set.** Add a `full_pipeline` benchmark to `benches/throughput.rs` that covers lex → parse → lower → emit_asm, reporting throughput in bytes/sec. Closes the broken claim → code → test → **benchmark** chain for `Instr` and makes the `end_to_end` group actually end-to-end.
+
+**Why this cycle.** Rotation: 026=Lead, 025=Spec, 024=Compiler Contributor, 023=Cache-Line. Cache-Line is most under-served (4 cycles). Friction is at step 2 of the journey.
+
+---
+
 # Verification — Cycle 026, Round 8 (Verifier)
 
 ## What I compared
