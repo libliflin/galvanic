@@ -300,6 +300,11 @@ fn fls_6_9_indexing_expressions() {
 }
 
 #[test]
+fn fls_6_18_bound_in_tuple() {
+    assert_galvanic_accepts("fls_6_18_bound_in_tuple.rs");
+}
+
+#[test]
 fn fls_9_register_pressure() {
     // FLS §9: Function with 40 sequential let-bindings, producing virtual
     // register indices well above 30. The allocator must map them to valid

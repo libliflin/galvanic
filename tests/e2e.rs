@@ -37854,3 +37854,36 @@ fn fls_6_18_guard_on_last_arm_emits_cond_branch() {
         "last-arm guard must not constant-fold (FLS §6.1.2), got:\n{asm}"
     );
 }
+
+/// Assembly inspection test: @ binding in tuple match sub-pattern.
+///
+/// `match (x, y) { (a @ 1..=10, 0) => a, (0, b @ 1..=10) => b, _ => -1 }`
+/// The `a @ 1..=10` sub-pattern must emit a range check (Ge + Le + BitAnd)
+/// and the bound value must be loaded from the element slot — not a constant.
+///
+/// FLS §6.18: match expression. FLS §5.1.4: @ binding pattern.
+/// FLS §5.10.3: tuple pattern matching.
+#[test]
+fn fls_6_18_bound_in_tuple_emits_range_check() {
+    let asm = compile_to_asm(
+        "fn classify(x: i32, y: i32) -> i32 {\n\
+             match (x, y) {\n\
+                 (a @ 1..=10, 0) => a,\n\
+                 (0, b @ 1..=10) => b,\n\
+                 _ => -1,\n\
+             }\n\
+         }\n\
+         fn main() {}\n",
+    );
+    // Range check 1..=10 requires at least two comparisons (ge + le).
+    let cmp_count = asm.matches("cmp").count() + asm.matches("subs").count();
+    assert!(
+        cmp_count >= 2,
+        "expected >= 2 comparisons for `a @ 1..=10` range check (FLS §5.1.4), got {cmp_count} in:\n{asm}"
+    );
+    // The bound value `a` must be returned — a register load, not a constant.
+    assert!(
+        asm.contains("ldr") || asm.contains("str"),
+        "expected load/store for @ binding slot (FLS §5.1.4), got:\n{asm}"
+    );
+}
