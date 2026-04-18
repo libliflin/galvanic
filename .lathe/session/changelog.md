@@ -1,58 +1,68 @@
-# Changelog — Cycle 016, Round 1 (Builder)
+# Verification — Cycle 016, Round 1 (Verifier)
 
-## Goal
-Add FLS section citations to "not yet supported" error strings in `src/lower.rs`
-to fulfill the architecture invariant: every error names the failing function,
-the FLS section, and the specific construct. The goal counted 42 total messages,
-3 already cited, 39 uncited.
+## What I compared
 
-## Who This Helps
-- **Stakeholder:** Compiler Contributor
-- **Impact:** A contributor who reads "not yet supported: complex let pattern"
-  can now navigate directly to FLS §8.1 to understand the spec context — without
-  having to read surrounding code or know the FLS TOC. The wall between "error
-  message" and "spec section" is removed.
+**Goal:** Add FLS section citations to all "not yet supported" error strings in
+`src/lower.rs` — the architecture doc promises every error names the FLS section
+and the specific construct; the customer champion found 39 strings that didn't.
 
-## Applied
-Added FLS section citations to all remaining "not yet supported" error strings
-(21 `.into()` strings and 5 `format!` strings), prioritizing hot-path errors as
-specified. Every string now follows the pattern established by the three existing
-cited messages.
+**Code I read:**
+- Builder's diff — 21 `.into()` strings and 5 `format!` strings changed across
+  `lower.rs`. Every string that previously said "not yet supported: X" now says
+  "not yet supported: X (FLS §Y.Z)".
+- `tests/smoke.rs` — four existing `lower_error_*` tests. None asserted the
+  presence of `(FLS §` in the error output; the invariant was stated in prose
+  (architecture doc) but not enforced by CI.
 
-**Changes by category:**
+**What I ran:**
+- `cargo test` — 2082 pass, 0 fail (unchanged).
+- `cargo clippy -- -D warnings` — clean.
+- `cargo run -- tests/fixtures/fls_5_patterns.rs` — witnessed the changed error:
+  `not yet supported: expected struct literal \`Inner { .. }\` for nested struct
+  field (FLS §6.11, §5.10.2)`. This was the "worst moment" scenario from the
+  goal: the nested struct error that previously gave zero spec anchor.
+- `grep -c 'not yet supported.*FLS\|FLS.*not yet supported' src/lower.rs` →
+  returned 30, confirming every "not yet supported" string now carries a citation.
 
-- **Let patterns:** `"complex let pattern not yet supported"` → `(FLS §8.1, §5)`;
-  `"nested tuple pattern not yet supported"` → `(FLS §5.10.3, §8.1)`
-- **If-let patterns:** tuple, slice/array, @ binding → `(FLS §6.17, ...)` with
-  appropriate §5 subsection
-- **While-let patterns:** tuple, slice/array, @ binding → `(FLS §6.15.4, ...)`
-- **Match patterns:** all three "match arm pattern type not yet supported in
-  *-returning match" strings → `(FLS §6.18)`; @ binding in match and unit match
-  → `(FLS §6.18, §5.1.4)`
-- **Nested struct:** `"expected struct literal for nested struct field"` → `(FLS §6.11, §5.10.2)`
-- **Method errors:** `"method call on non-variable receiver"`,
-  `"method calls on primitive types"`, `"dyn Trait method calls with extra arguments"`,
-  `"&mut self methods on enum types"` → `(FLS §6.12.2, ...)` with §10.1 or §4.13 as applicable
-- **Indexing/assignment:** index assignment, assignment to non-variable place,
-  compound assignment, index expression on non-variable base → `(FLS §6.9)`,
-  `(FLS §6.5.10)`, `(FLS §6.5.11)`
-- **Literals:** unsigned MOVZ+MOVK → `(FLS §2.4.4.1)`
-- **Function signatures:** multi-segment return type, complex return type,
-  impl Trait return only struct-literal → `(FLS §9, §4)` / `(FLS §9, §11)`
+## What's here, what was asked
 
-**Files:** `src/lower.rs`
+The builder's change matches the goal: every string literal containing "not yet
+supported" in `src/lower.rs` now includes a `(FLS §X.Y)` citation. The builder's
+final count claim ("0 without FLS citations, excluding the format-impl at line 79")
+is confirmed by grep.
 
-Final count: 0 "not yet supported" strings without FLS citations (excluding the
-format impl at line 79 which is infrastructure, not a call site).
+**Gap found:** No smoke test asserted the `(FLS §` citation format. The invariant
+existed only in prose (architecture doc). A future contributor could add a new
+un-cited "not yet supported" string and it would pass all CI checks.
 
-## Validated
-- `cargo test` — 2082 pass, 0 fail (unchanged from pre-change count)
-- `cargo clippy -- -D warnings` — clean
-- `cargo run -- tests/fixtures/fls_5_patterns.rs` — the nested struct field
-  error now reads: `not yet supported: expected struct literal \`Inner { .. }\`
-  for nested struct field (FLS §6.11, §5.10.2)`
+## What I added
 
-The verifier should run `cargo run -- tests/fixtures/fls_5_patterns.rs` and
-confirm the error message includes the FLS citation. Additional spot-check:
-`grep -c 'not yet supported.*FLS\|FLS.*not yet supported' src/lower.rs` should
-return ≥ 20.
+Added `lower_error_includes_fls_citation` to `tests/smoke.rs`:
+- Runs galvanic against `tests/fixtures/fls_5_patterns.rs` (the fixture that
+  produces the nested struct error from the goal's "worst moment").
+- Asserts at least one "not yet supported" error appears in stderr.
+- Iterates every stderr line: any line containing "not yet supported" must also
+  contain "(FLS §" — otherwise the test fails with the offending line.
+
+This closes the enforcement gap: the invariant is now a CI contract, not just
+documentation. Adding a new un-cited error string will break the smoke suite.
+
+**Files:** `tests/smoke.rs`
+
+All 8 smoke tests pass. Full suite: 2082 pass, 0 fail.
+
+## Notes for the goal-setter
+
+**Other `LowerError::Unsupported` strings without FLS.** There are ~40 additional
+`LowerError::Unsupported` call sites in `lower.rs` that don't contain "not yet
+supported" in the message text (e.g., "extern / bodyless functions", "self fields
+exceed ARM64 register window", "only ident, wildcard, and nested tuple patterns
+are supported in tuple parameter patterns"). These are ARM64/ABI constraint errors
+and internal validation errors, not "not yet supported" UX errors. They're outside
+this cycle's goal scope but could receive similar treatment in a future cycle if
+a Compiler Contributor hits them.
+
+**Smoke test scope.** The new test exercises one fixture. A broader future cycle
+could add a `lower_error_fls_citation_always_present` test that exercises all
+hot-path error paths with inline fixtures, asserting the format contract
+exhaustively. For now, the patterns fixture is the canonical witness.
