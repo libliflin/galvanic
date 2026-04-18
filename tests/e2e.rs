@@ -36159,19 +36159,20 @@ fn galvanic_panic_emits_cache_line_note() {
     );
 }
 
-/// _start must emit a cache-line note documenting its 4-instruction footprint.
+/// _start must emit a cache-line note documenting its 3-instruction footprint.
 ///
-/// The _start entry point is exactly 4 × 4-byte instructions = 16 bytes — fits in one
-/// 64-byte cache line. This is a structural claim that must be visible in the emitted
-/// assembly so the Cache-Line Researcher can verify it without reading the compiler source.
+/// The _start entry point is exactly 3 × 4-byte instructions = 12 bytes (`bl main`,
+/// `mov x8, #93`, `svc #0`) — fits in the first quarter of a 64-byte cache line.
+/// This is a structural claim that must be visible in the emitted assembly so the
+/// Cache-Line Researcher can verify it without reading the compiler source.
 ///
-/// The comment format: `// cache-line: _start = 4 instructions × 4 bytes = 16 bytes — fits in one 64-byte cache line`.
+/// The comment format: `// cache-line: _start = 3 instructions × 4 bytes = 12 bytes — fits in one 64-byte cache line`.
 #[test]
 fn start_emits_cache_line_note() {
     let asm = compile_to_asm("fn main() -> i32 { 0 }\n");
     assert!(
-        asm.contains("_start = 4 instructions"),
-        "expected '_start = 4 instructions' cache-line note; got:\n{asm}"
+        asm.contains("_start = 3 instructions"),
+        "expected '_start = 3 instructions' cache-line note; got:\n{asm}"
     );
 }
 

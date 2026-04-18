@@ -2012,9 +2012,9 @@ fn emit_trampoline(
 /// first quarter of a 64-byte cache line.
 fn emit_start(out: &mut String) -> Result<(), CodegenError> {
     writeln!(out, "    // ELF entry point — FLS §18.1")?;
-    // _start is 4 instructions × 4 bytes = 16 bytes — fits entirely within one 64-byte
+    // _start is 3 instructions × 4 bytes = 12 bytes — fits entirely within one 64-byte
     // instruction cache line. The bl + mov + svc sequence has no cache-line crossing.
-    writeln!(out, "    // cache-line: _start = 4 instructions × 4 bytes = 16 bytes — fits in one 64-byte cache line")?;
+    writeln!(out, "    // cache-line: _start = 3 instructions × 4 bytes = 12 bytes — fits in one 64-byte cache line")?;
     writeln!(out, "    .global _start")?;
     writeln!(out, "_start:")?;
     writeln!(out, "    bl      main            // call fn main()")?;
