@@ -456,6 +456,75 @@ fn main() -> i32 {{
 }
 
 #[test]
+fn tuple_type_error_cites_fls_sections() {
+    // Cycle 030 goal: the error for a function with a tuple parameter or return
+    // type must cite FLS §4.4 (Tuple types) and §6.10 (Tuple expressions).
+    // Before this cycle the message was "tuple type in scalar context (use tuple
+    // pattern parameter instead)" — a workaround hint with no FLS citation.
+    // The static ratchet test alone doesn't pin the runtime form; this does.
+    let mut tmp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
+    write!(
+        tmp,
+        r#"
+fn swap(pair: (i32, i32)) -> (i32, i32) {{ (pair.1, pair.0) }}
+"#
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_galvanic"))
+        .arg(tmp.path())
+        .output()
+        .expect("failed to run galvanic");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FLS §4.4"),
+        "expected FLS §4.4 citation in tuple type error, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("§6.10"),
+        "expected §6.10 citation in tuple type error, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("tuple type in scalar context"),
+        "expected 'tuple type in scalar context' construct name in error, got: {stderr}"
+    );
+    assert!(!output.status.success(), "expected non-zero exit");
+}
+
+#[test]
+fn field_access_on_scalar_error_cites_fls_section() {
+    // Cycle 030 goal: the error for field access on a non-struct (scalar) value
+    // must cite FLS §6.13 (Field access expressions).
+    // Before this cycle the message was "field access on scalar value (field `X`)"
+    // with no FLS citation.
+    let mut tmp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
+    write!(
+        tmp,
+        r#"
+fn bad_field(x: i32) -> i32 {{ x.foo }}
+"#
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_galvanic"))
+        .arg(tmp.path())
+        .output()
+        .expect("failed to run galvanic");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FLS §6.13"),
+        "expected FLS §6.13 citation in field-access-on-scalar error, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("field access on scalar value"),
+        "expected 'field access on scalar value' construct name in error, got: {stderr}"
+    );
+    assert!(!output.status.success(), "expected non-zero exit");
+}
+
+#[test]
 fn lower_source_all_unsupported_strings_cite_fls() {
     // Static invariant: every LowerError::Unsupported( call site in src/lower.rs
     // must supply a message string that contains "(FLS §". This ensures every
