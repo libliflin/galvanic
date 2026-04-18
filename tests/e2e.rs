@@ -35450,6 +35450,80 @@ fn main() -> i32 {\n\
     );
 }
 
+/// FLS §6.11, §6.18: Non-exhaustive match as nested struct field is rejected.
+///
+/// A match with only literal-integer arms and no wildcard cannot cover all i32
+/// values. Galvanic must propagate the exhaustiveness check through
+/// `store_nested_struct_lit` and return a compile error.
+#[test]
+fn fls_6_11_nested_struct_field_match_non_exhaustive_rejected() {
+    let src = "\
+struct Inner { a: i32 }\n\
+struct Outer { inner: Inner, c: i32 }\n\
+fn main() -> i32 {\n\
+    let flag = 1;\n\
+    let o = Outer {\n\
+        inner: match flag {\n\
+            1 => Inner { a: 10 },\n\
+            2 => Inner { a: 20 },\n\
+        },\n\
+        c: 3,\n\
+    };\n\
+    o.inner.a\n\
+}\n";
+    let tokens = galvanic::lexer::tokenize(src).expect("lex failed");
+    let sf = galvanic::parser::parse(&tokens, src).expect("parse failed");
+    let result = galvanic::lower::lower(&sf, src);
+    assert!(
+        result.is_err(),
+        "expected exhaustiveness error for literal-only match in nested struct field, but lower() returned Ok"
+    );
+    let msg = result.err().unwrap().to_string();
+    assert!(
+        msg.contains("exhaustive"),
+        "expected error mentioning 'exhaustive', got: {msg}"
+    );
+}
+
+/// FLS §6.11, §6.18: Unsupported pattern (range) in nested struct field match
+/// is rejected with a cited error.
+///
+/// Range patterns (`1..=5`) are not yet supported in `store_nested_struct_lit`.
+/// The error must name the struct and cite FLS §6.18 and §6.11.
+#[test]
+fn fls_6_11_nested_struct_field_match_unsupported_pattern_rejected() {
+    let src = "\
+struct Inner { a: i32 }\n\
+struct Outer { inner: Inner, c: i32 }\n\
+fn main() -> i32 {\n\
+    let x = 3;\n\
+    let o = Outer {\n\
+        inner: match x {\n\
+            1..=5 => Inner { a: 1 },\n\
+            _ => Inner { a: 0 },\n\
+        },\n\
+        c: 0,\n\
+    };\n\
+    o.inner.a\n\
+}\n";
+    let tokens = galvanic::lexer::tokenize(src).expect("lex failed");
+    let sf = galvanic::parser::parse(&tokens, src).expect("parse failed");
+    let result = galvanic::lower::lower(&sf, src);
+    assert!(
+        result.is_err(),
+        "expected error for unsupported range pattern in nested struct field match, but lower() returned Ok"
+    );
+    let msg = result.err().unwrap().to_string();
+    assert!(
+        msg.contains("§6.18") || msg.contains("§6.11"),
+        "expected FLS citation in error, got: {msg}"
+    );
+    assert!(
+        msg.contains("unsupported") || msg.contains("pattern"),
+        "expected 'unsupported' or 'pattern' in error, got: {msg}"
+    );
+}
+
 // ── Claim 4l: §6.18 match exhaustiveness check ─────────────────────────────────
 
 /// Claim 4l: non-exhaustive integer match rejected at compile time.
