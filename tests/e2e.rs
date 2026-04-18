@@ -36911,3 +36911,149 @@ fn fls_6_18_match_tuple_scrutinee_correct_exit_code() {
     );
 }
 
+/// Full pipeline: tuple scrutinee match — first arm `(0, 0) => 0` selected.
+///
+/// FLS §6.18: verifies the first literal arm is actually taken at runtime —
+/// tests the first-arm path that the default-arm test does not cover.
+#[test]
+fn fls_6_18_match_tuple_scrutinee_first_arm_exit_code() {
+    if !tool_available("aarch64-linux-gnu-as") {
+        return;
+    }
+    let exit_code = compile_and_run(
+        "fn match_tuple(x: i32, y: i32) -> i32 {\n\
+             match (x, y) {\n\
+                 (0, 0) => 0,\n\
+                 (1, _) => 1,\n\
+                 (_, 1) => 2,\n\
+                 _ => 3,\n\
+             }\n\
+         }\n\
+         fn main() -> i32 { match_tuple(0, 0) }\n",
+    );
+    assert_eq!(
+        exit_code, Some(0),
+        "match_tuple(0, 0) should return 0 (first arm), got {exit_code:?}"
+    );
+}
+
+/// Full pipeline: tuple scrutinee match — second arm `(1, _) => 1` selected.
+///
+/// FLS §6.18, §5.10.3: wildcard sub-pattern `_` matches any second element.
+/// Input (1, 99): first element matches 1, second element ignored → returns 1.
+#[test]
+fn fls_6_18_match_tuple_scrutinee_wildcard_arm_exit_code() {
+    if !tool_available("aarch64-linux-gnu-as") {
+        return;
+    }
+    let exit_code = compile_and_run(
+        "fn match_tuple(x: i32, y: i32) -> i32 {\n\
+             match (x, y) {\n\
+                 (0, 0) => 0,\n\
+                 (1, _) => 1,\n\
+                 (_, 1) => 2,\n\
+                 _ => 3,\n\
+             }\n\
+         }\n\
+         fn main() -> i32 { match_tuple(1, 99) }\n",
+    );
+    assert_eq!(
+        exit_code, Some(1),
+        "match_tuple(1, 99) should return 1 (second arm, wildcard y), got {exit_code:?}"
+    );
+}
+
+/// Assembly inspection test: if-let with tuple pattern — runtime slot checks.
+///
+/// `if let (a, b) = t { a + b } else { 0 }` where `t` is a tuple variable.
+/// Each element must be loaded from its slot — ident sub-patterns alias slots,
+/// no copy instructions, no constant folding (FLS §6.1.2:37–45).
+///
+/// FLS §6.17: if-let expression. FLS §5.10.3: tuple pattern.
+#[test]
+fn fls_6_17_if_let_tuple_pattern_emits_runtime_load() {
+    let asm = compile_to_asm(
+        "fn sum_pair(x: i32, y: i32) -> i32 {\n\
+             let t = (x, y);\n\
+             if let (a, b) = t { a + b } else { 0 }\n\
+         }\n\
+         fn main() {}\n",
+    );
+    // Tuple elements were stored to slots — ldr must reload them for the add.
+    assert!(
+        asm.contains("ldr"),
+        "expected ldr to reload tuple elements from slots (FLS §5.10.3), got:\n{asm}"
+    );
+    // add for `a + b` in the then branch.
+    assert!(
+        asm.contains("add"),
+        "expected add for `a + b` in then branch (FLS §6.5.5), got:\n{asm}"
+    );
+    // Must not fold: with runtime parameters the result can't be known at compile time.
+    assert!(
+        !asm.contains("mov     x0, #0\n    ret"),
+        "if-let tuple must not constant-fold to mov+ret (FLS §6.1.2), got:\n{asm}"
+    );
+}
+
+/// Assembly inspection test: if-let with literal sub-patterns — equality checks.
+///
+/// `if let (0, b) = t { b } else { 99 }` must emit a runtime comparison for
+/// the literal 0 check before entering the then block (FLS §6.1.2:37–45).
+///
+/// FLS §6.17: if-let. FLS §5.10.3: literal sub-pattern check.
+#[test]
+fn fls_6_17_if_let_tuple_literal_subpat_emits_cmp() {
+    let asm = compile_to_asm(
+        "fn probe(x: i32, y: i32) -> i32 {\n\
+             let t = (x, y);\n\
+             if let (0, b) = t { b } else { 99 }\n\
+         }\n\
+         fn main() {}\n",
+    );
+    // Literal 0 check: ldr element + mov immediate + cmp + cbz.
+    assert!(
+        asm.contains("cmp") || asm.contains("cbz"),
+        "expected cmp/cbz for literal 0 check in if-let tuple (FLS §5.10.3), got:\n{asm}"
+    );
+    // Conditional branch to else — pattern mismatch takes the else path.
+    assert!(
+        asm.contains("cbz") || asm.contains("b."),
+        "expected conditional branch on pattern failure (FLS §6.17), got:\n{asm}"
+    );
+}
+
+/// Assembly inspection test: guard on last match arm emits a conditional branch.
+///
+/// Before this cycle, a guard on the last arm returned `Unsupported`. Now it
+/// must emit a runtime conditional branch. The guard `n > 0` checks the binding
+/// at runtime — not a compile-time constant (FLS §6.1.2:37–45).
+///
+/// FLS §6.18: match arm guard. FLS §6.1.2: runtime instructions only.
+#[test]
+fn fls_6_18_guard_on_last_arm_emits_cond_branch() {
+    let asm = compile_to_asm(
+        "fn classify(x: i32) -> i32 {\n\
+             match x {\n\
+                 0 => 0,\n\
+                 n if n > 0 => 1,\n\
+             }\n\
+         }\n\
+         fn main() {}\n",
+    );
+    // Guard `n > 0` must emit a comparison and conditional branch.
+    assert!(
+        asm.contains("cmp") || asm.contains("subs"),
+        "expected cmp/subs for guard `n > 0` on last arm (FLS §6.18), got:\n{asm}"
+    );
+    assert!(
+        asm.contains("cbz") || asm.contains("cbnz") || asm.contains("b."),
+        "expected conditional branch for last-arm guard (FLS §6.18), got:\n{asm}"
+    );
+    // Must not fold to a constant — x is a runtime parameter.
+    assert!(
+        !asm.contains("mov     x0, #1\n    ret"),
+        "last-arm guard must not constant-fold (FLS §6.1.2), got:\n{asm}"
+    );
+}
+
