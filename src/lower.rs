@@ -6697,8 +6697,149 @@ impl<'src> LowerCtx<'src> {
                 Ok(())
             }
 
+            // FLS §6.18, §6.11: Match expression in nested struct field position.
+            //
+            // `Outer { inner: match flag { 1 => Inner { a: 1 }, _ => Inner { a: 2 } }, c: 3 }`
+            // The scrutinee is evaluated once; arms are tested in source order.
+            // Each arm body is dispatched via `store_nested_struct_lit`, so all
+            // supported nested-field forms (struct literal, variable, call, block,
+            // if-expression, nested match) are valid as arm bodies.
+            //
+            // FLS §6.18: "A match expression is used to branch over the possible
+            // values of the scrutinee operand." Arms are tried in source order.
+            // FLS §6.1.2:37–45: All comparisons and stores are runtime instructions.
+            //
+            // Cache-line note: each literal-pattern arm emits ~4 instructions
+            // (ldr + mov + cmp + cbz) before the arm body.
+            ExprKind::Match { scrutinee, arms } => {
+                if arms.is_empty() {
+                    return Err(LowerError::Unsupported(format!(
+                        "nested struct field `{struct_name}`: match expression with no arms (FLS §6.18)"
+                    )));
+                }
+                // FLS §6.18: Exhaustiveness check.
+                check_match_exhaustiveness(arms, self.source, self.enum_defs)?;
+
+                // FLS §6.18: Evaluate scrutinee once; spill to stack so each arm
+                // can reload it without re-evaluating.
+                let scrut_val = self.lower_expr(scrutinee, &IrTy::I32)?;
+                let scrut_reg = self.val_to_reg(scrut_val)?;
+                let scrut_slot = self.alloc_slot()?;
+                self.instrs.push(Instr::Store { src: scrut_reg, slot: scrut_slot });
+
+                let (checked_arms, default_arm) = arms.split_at(arms.len() - 1);
+                let exit_label = self.alloc_label();
+
+                for arm in checked_arms {
+                    let next_label = self.alloc_label();
+
+                    match &arm.pat {
+                        // FLS §5.1: Wildcard — always matches. Check guard only.
+                        Pat::Wildcard => {
+                            if let Some(guard) = &arm.guard {
+                                let gv = self.lower_expr(guard, &IrTy::Bool)?;
+                                let gr = self.val_to_reg(gv)?;
+                                self.instrs.push(Instr::CondBranch { reg: gr, label: next_label, fls: "§6.18" });
+                            }
+                            self.store_nested_struct_lit(&arm.body, base_slot, struct_name)?;
+                            self.instrs.push(Instr::Branch { target: exit_label, fls: "§6.18" });
+                            self.instrs.push(Instr::Label { id: next_label, fls: "§6.18" });
+                            continue;
+                        }
+
+                        // FLS §5.1.4: Identifier pattern — always matches, binds the name.
+                        Pat::Ident(span) => {
+                            let name = span.text(self.source);
+                            let bind_slot = self.alloc_slot()?;
+                            let bind_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst: bind_reg, slot: scrut_slot });
+                            self.instrs.push(Instr::Store { src: bind_reg, slot: bind_slot });
+                            self.locals.insert(name, bind_slot);
+                            if let Some(guard) = &arm.guard {
+                                let gv = self.lower_expr(guard, &IrTy::Bool)?;
+                                let gr = self.val_to_reg(gv)?;
+                                self.instrs.push(Instr::CondBranch { reg: gr, label: next_label, fls: "§6.18" });
+                            }
+                            self.store_nested_struct_lit(&arm.body, base_slot, struct_name)?;
+                            self.locals.remove(name);
+                            self.instrs.push(Instr::Branch { target: exit_label, fls: "§6.18" });
+                            self.instrs.push(Instr::Label { id: next_label, fls: "§6.18" });
+                            continue;
+                        }
+
+                        // FLS §5.4: Integer literal pattern — emit equality check.
+                        Pat::LitInt(n) => {
+                            let s_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                            let p_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::LoadImm(p_reg, *n as i32));
+                            let eq_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg, ty: IrTy::Bool });
+                            self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label, fls: "§6.18" });
+                        }
+
+                        Pat::NegLitInt(n) => {
+                            let s_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                            let p_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::LoadImm(p_reg, -(*n as i32)));
+                            let eq_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg, ty: IrTy::Bool });
+                            self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label, fls: "§6.18" });
+                        }
+
+                        Pat::LitBool(b) => {
+                            let s_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
+                            let p_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::LoadImm(p_reg, *b as i32));
+                            let eq_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg, ty: IrTy::Bool });
+                            self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label, fls: "§6.18" });
+                        }
+
+                        _ => {
+                            return Err(LowerError::Unsupported(format!(
+                                "nested struct field `{struct_name}`: unsupported match arm pattern (FLS §6.18, §6.11)"
+                            )));
+                        }
+                    }
+
+                    // Pattern matched: check guard, then lower arm body.
+                    if let Some(guard) = &arm.guard {
+                        let gv = self.lower_expr(guard, &IrTy::Bool)?;
+                        let gr = self.val_to_reg(gv)?;
+                        self.instrs.push(Instr::CondBranch { reg: gr, label: next_label, fls: "§6.18" });
+                    }
+                    self.store_nested_struct_lit(&arm.body, base_slot, struct_name)?;
+                    self.instrs.push(Instr::Branch { target: exit_label, fls: "§6.18" });
+                    self.instrs.push(Instr::Label { id: next_label, fls: "§6.18" });
+                }
+
+                // Default (last) arm — no pattern check.
+                let default = &default_arm[0];
+                match &default.pat {
+                    Pat::Ident(span) => {
+                        let name = span.text(self.source);
+                        let bind_slot = self.alloc_slot()?;
+                        let bind_reg = self.alloc_reg()?;
+                        self.instrs.push(Instr::Load { dst: bind_reg, slot: scrut_slot });
+                        self.instrs.push(Instr::Store { src: bind_reg, slot: bind_slot });
+                        self.locals.insert(name, bind_slot);
+                        self.store_nested_struct_lit(&default.body, base_slot, struct_name)?;
+                        self.locals.remove(name);
+                    }
+                    _ => {
+                        self.store_nested_struct_lit(&default.body, base_slot, struct_name)?;
+                    }
+                }
+
+                self.instrs.push(Instr::Label { id: exit_label, fls: "§6.18" });
+                Ok(())
+            }
+
             _ => Err(LowerError::Unsupported(format!(
-                "nested struct field `{struct_name}`: expected struct literal, variable, struct-returning call, or if expression (FLS §6.11)"
+                "nested struct field `{struct_name}`: expected struct literal, variable, struct-returning call, block, if, or match expression (FLS §6.11)"
             ))),
         }
     }

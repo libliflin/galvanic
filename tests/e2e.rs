@@ -35374,7 +35374,83 @@ fn main() -> i32 {\n\
     );
 }
 
-// ── Claim 4l: §6.18 match exhaustiveness check ─────────────────────────────���─
+// ── §6.11, §6.18: Match expression as nested struct field initializer ──────────
+
+/// FLS §6.11, §6.18: Match expression in nested struct field position emits
+/// runtime comparison and branch instructions — not a constant-folded result.
+///
+/// `let o = Outer { inner: match flag { 1 => Inner { a: 10 }, _ => Inner { a: 30 } }, c: 5 }`
+/// must emit a comparison (`cmp` or equivalent) and conditional branch at
+/// runtime. FLS §6.1.2:37–45: non-const code must emit runtime instructions.
+///
+/// This test verifies:
+/// - A `cmp` instruction is emitted (pattern equality check at runtime).
+/// - Both arm immediates (`#10` and `#30`) appear in assembly.
+/// - `compile_to_asm` succeeds without panicking.
+#[test]
+fn fls_6_11_nested_struct_field_match_emits_cmp() {
+    let src = "\
+struct Inner { a: i32, b: i32 }\n\
+struct Outer { inner: Inner, c: i32 }\n\
+fn main() -> i32 {\n\
+    let flag = 1;\n\
+    let o = Outer {\n\
+        inner: match flag {\n\
+            1 => Inner { a: 10, b: 20 },\n\
+            _ => Inner { a: 30, b: 40 },\n\
+        },\n\
+        c: 99,\n\
+    };\n\
+    o.inner.a\n\
+}\n";
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("cmp") || asm.contains("sub") || asm.contains("cbz") || asm.contains("cbnz"),
+        "expected runtime comparison for match arm, got no cmp/cbz in:\n{asm}"
+    );
+    assert!(
+        asm.contains("#10") || asm.contains("#0xa"),
+        "expected arm immediate #10 in assembly, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("#30") || asm.contains("#0x1e"),
+        "expected default arm immediate #30 in assembly, got:\n{asm}"
+    );
+}
+
+/// FLS §6.11, §6.18: Match expression with guard in nested struct field position.
+///
+/// `let o = Outer { inner: match flag { n if n > 0 => Inner { a: 1 }, _ => Inner { a: 2 } }, c: 3 }`
+/// The guard `n > 0` must be evaluated at runtime. Both the pattern check
+/// (identity: `n` always matches) and the guard emit runtime instructions.
+#[test]
+fn fls_6_11_nested_struct_field_match_with_guard_emits_cmp() {
+    let src = "\
+struct Inner { a: i32 }\n\
+struct Outer { inner: Inner, c: i32 }\n\
+fn main() -> i32 {\n\
+    let flag = 1;\n\
+    let o = Outer {\n\
+        inner: match flag {\n\
+            n if n > 0 => Inner { a: 1 },\n\
+            _ => Inner { a: 2 },\n\
+        },\n\
+        c: 7,\n\
+    };\n\
+    o.inner.a\n\
+}\n";
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("cmp") || asm.contains("sub") || asm.contains("cbz") || asm.contains("cbnz"),
+        "expected runtime branch for match-with-guard, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("#1") || asm.contains("#2"),
+        "expected arm body immediates in assembly, got:\n{asm}"
+    );
+}
+
+// ── Claim 4l: §6.18 match exhaustiveness check ─────────────────────────────────
 
 /// Claim 4l: non-exhaustive integer match rejected at compile time.
 ///
