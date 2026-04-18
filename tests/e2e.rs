@@ -35300,6 +35300,80 @@ fn main() -> i32 {\n\
     );
 }
 
+/// FLS §6.11, §6.4 — block with statements before tail in nested struct field.
+///
+/// `Outer { inner: { let y = compute(6); Inner { a: y } }, c: 3 }` — the block
+/// contains a `let` statement that calls `compute`, then the tail is stored.
+/// This exercises the `for stmt in &block.stmts { self.lower_stmt(stmt) }` path
+/// in `store_nested_struct_lit`.
+///
+/// Checks:
+/// - `bl compute` appears — the call inside the block actually executes at runtime.
+/// - `str` appears — the result is stored into the inner field slot.
+/// - No compile-time constant `#7` substituted for `y` (FLS §6.1.2).
+#[test]
+fn fls_6_11_nested_struct_field_block_with_stmts_calls_fn() {
+    let src = "\
+struct Inner { a: i32 }\n\
+struct Outer { inner: Inner, c: i32 }\n\
+fn compute(x: i32) -> i32 { x + 1 }\n\
+fn main() -> i32 {\n\
+    let o = Outer { inner: { let y = compute(6); Inner { a: y } }, c: 3 };\n\
+    o.inner.a\n\
+}\n";
+    let asm = compile_to_asm(src);
+    // The call inside the block must be emitted as a `bl` instruction.
+    assert!(
+        asm.contains("bl      compute"),
+        "expected 'bl compute' for call inside block, got:\n{asm}"
+    );
+    // The result must be stored into the inner field slot.
+    assert!(
+        asm.contains("str"),
+        "expected str instruction for inner field store, got:\n{asm}"
+    );
+    // The value #7 must NOT appear as a bare immediate — `y = compute(6)` is a
+    // runtime call, so galvanic must not substitute the result at compile time.
+    assert!(
+        !asm.contains("mov     x0, #7"),
+        "constant-folded compute(6) to #7 — must emit runtime call (FLS §6.1.2), got:\n{asm}"
+    );
+}
+
+/// FLS §6.11, §6.17 — if-expression without else branch in nested struct field
+/// must be rejected with a cited error (FLS §6.11, §6.17).
+///
+/// A struct-producing if expression must have an else branch — otherwise the
+/// nested field value is undefined on the false path. Galvanic must error rather
+/// than silently leaving the slot uninitialised.
+#[test]
+fn fls_6_11_nested_struct_field_if_no_else_rejected() {
+    let src = "\
+struct Inner { a: i32 }\n\
+struct Outer { inner: Inner, c: i32 }\n\
+fn main() -> i32 {\n\
+    let flag = 1;\n\
+    let o = Outer { inner: if flag > 0 { Inner { a: 1 } }, c: 5 };\n\
+    o.inner.a\n\
+}\n";
+    let tokens = galvanic::lexer::tokenize(src).expect("lex failed");
+    let sf = galvanic::parser::parse(&tokens, src).expect("parse failed");
+    let result = galvanic::lower::lower(&sf, src);
+    assert!(
+        result.is_err(),
+        "expected error for if-expression without else in nested struct field, but lower() returned Ok"
+    );
+    let err_str = result.err().unwrap().to_string();
+    assert!(
+        err_str.contains("FLS") && (err_str.contains("§6.11") || err_str.contains("§6.17")),
+        "error must cite FLS §6.11 or §6.17, got: {err_str}"
+    );
+    assert!(
+        err_str.contains("else"),
+        "error message must mention else branch requirement, got: {err_str}"
+    );
+}
+
 // ── Claim 4l: §6.18 match exhaustiveness check ─────────────────────────────���─
 
 /// Claim 4l: non-exhaustive integer match rejected at compile time.
