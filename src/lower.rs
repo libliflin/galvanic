@@ -7072,7 +7072,7 @@ impl<'src> LowerCtx<'src> {
 
                 let cond_val = self.lower_expr(cond, &IrTy::Bool)?;
                 let cond_reg = self.val_to_reg(cond_val)?;
-                self.instrs.push(Instr::CondBranch { reg: cond_reg, label: else_label });
+                self.instrs.push(Instr::CondBranch { reg: cond_reg, label: else_label, fls: "§6.17" });
 
                 // Then branch.
                 for stmt in &then_block.stmts {
@@ -7081,10 +7081,10 @@ impl<'src> LowerCtx<'src> {
                 if let Some(tail) = then_block.tail.as_deref() {
                     self.lower_enum_expr_into(tail, base_slot, max_fields)?;
                 }
-                self.instrs.push(Instr::Branch(end_label));
+                self.instrs.push(Instr::Branch { target: end_label, fls: "§6.17" });
 
                 // Else branch.
-                self.instrs.push(Instr::Label(else_label));
+                self.instrs.push(Instr::Label { id: else_label, fls: "§6.17" });
                 match else_expr {
                     Some(e) => self.lower_enum_expr_into(e, base_slot, max_fields)?,
                     None => {
@@ -7094,7 +7094,7 @@ impl<'src> LowerCtx<'src> {
                     }
                 }
 
-                self.instrs.push(Instr::Label(end_label));
+                self.instrs.push(Instr::Label { id: end_label, fls: "§6.17" });
                 Ok(())
             }
 
@@ -7159,11 +7159,11 @@ impl<'src> LowerCtx<'src> {
                             if let Some(guard) = &arm.guard {
                                 let gv = self.lower_expr(guard, &IrTy::Bool)?;
                                 let gr = self.val_to_reg(gv)?;
-                                self.instrs.push(Instr::CondBranch { reg: gr, label: next_label });
+                                self.instrs.push(Instr::CondBranch { reg: gr, label: next_label, fls: "§6.18" });
                             }
                             self.lower_enum_expr_into(&arm.body, base_slot, max_fields)?;
-                            self.instrs.push(Instr::Branch(exit_label));
-                            self.instrs.push(Instr::Label(next_label));
+                            self.instrs.push(Instr::Branch { target: exit_label, fls: "§6.18" });
+                            self.instrs.push(Instr::Label { id: next_label, fls: "§6.18" });
                             continue;
                         }
 
@@ -7179,12 +7179,12 @@ impl<'src> LowerCtx<'src> {
                             if let Some(guard) = &arm.guard {
                                 let gv = self.lower_expr(guard, &IrTy::Bool)?;
                                 let gr = self.val_to_reg(gv)?;
-                                self.instrs.push(Instr::CondBranch { reg: gr, label: next_label });
+                                self.instrs.push(Instr::CondBranch { reg: gr, label: next_label, fls: "§6.18" });
                             }
                             self.lower_enum_expr_into(&arm.body, base_slot, max_fields)?;
                             self.locals.remove(name);
-                            self.instrs.push(Instr::Branch(exit_label));
-                            self.instrs.push(Instr::Label(next_label));
+                            self.instrs.push(Instr::Branch { target: exit_label, fls: "§6.18" });
+                            self.instrs.push(Instr::Label { id: next_label, fls: "§6.18" });
                             continue;
                         }
 
@@ -7196,7 +7196,7 @@ impl<'src> LowerCtx<'src> {
                             self.instrs.push(Instr::LoadImm(p_reg, *n as i32));
                             let eq_reg = self.alloc_reg()?;
                             self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg, ty: IrTy::Bool });
-                            self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label });
+                            self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label, fls: "§6.18" });
                         }
 
                         Pat::NegLitInt(n) => {
@@ -7206,7 +7206,7 @@ impl<'src> LowerCtx<'src> {
                             self.instrs.push(Instr::LoadImm(p_reg, -(*n as i32)));
                             let eq_reg = self.alloc_reg()?;
                             self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg, ty: IrTy::Bool });
-                            self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label });
+                            self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label, fls: "§6.18" });
                         }
 
                         Pat::LitBool(b) => {
@@ -7216,7 +7216,7 @@ impl<'src> LowerCtx<'src> {
                             self.instrs.push(Instr::LoadImm(p_reg, *b as i32));
                             let eq_reg = self.alloc_reg()?;
                             self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg, ty: IrTy::Bool });
-                            self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label });
+                            self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label, fls: "§6.18" });
                         }
 
                         _ => {
@@ -7230,11 +7230,11 @@ impl<'src> LowerCtx<'src> {
                     if let Some(guard) = &arm.guard {
                         let gv = self.lower_expr(guard, &IrTy::Bool)?;
                         let gr = self.val_to_reg(gv)?;
-                        self.instrs.push(Instr::CondBranch { reg: gr, label: next_label });
+                        self.instrs.push(Instr::CondBranch { reg: gr, label: next_label, fls: "§6.18" });
                     }
                     self.lower_enum_expr_into(&arm.body, base_slot, max_fields)?;
-                    self.instrs.push(Instr::Branch(exit_label));
-                    self.instrs.push(Instr::Label(next_label));
+                    self.instrs.push(Instr::Branch { target: exit_label, fls: "§6.18" });
+                    self.instrs.push(Instr::Label { id: next_label, fls: "§6.18" });
                 }
 
                 // Default (last) arm — no pattern check.
@@ -7258,7 +7258,7 @@ impl<'src> LowerCtx<'src> {
                     }
                 }
 
-                self.instrs.push(Instr::Label(exit_label));
+                self.instrs.push(Instr::Label { id: exit_label, fls: "§6.18" });
                 Ok(())
             }
 
@@ -7316,7 +7316,7 @@ impl<'src> LowerCtx<'src> {
 
                 let cond_val = self.lower_expr(cond, &IrTy::Bool)?;
                 let cond_reg = self.val_to_reg(cond_val)?;
-                self.instrs.push(Instr::CondBranch { reg: cond_reg, label: else_label });
+                self.instrs.push(Instr::CondBranch { reg: cond_reg, label: else_label, fls: "§6.17" });
 
                 // Then branch: lower stmts, then store tuple result.
                 for stmt in &then_block.stmts {
@@ -7329,10 +7329,10 @@ impl<'src> LowerCtx<'src> {
                         "tuple-returning if expression: then branch must have a tail".into(),
                     ));
                 }
-                self.instrs.push(Instr::Branch(end_label));
+                self.instrs.push(Instr::Branch { target: end_label, fls: "§6.17" });
 
                 // Else branch: store tuple result.
-                self.instrs.push(Instr::Label(else_label));
+                self.instrs.push(Instr::Label { id: else_label, fls: "§6.17" });
                 match else_expr {
                     Some(e) => self.lower_tuple_expr_into(e, base_slot, n_elems)?,
                     None => {
@@ -7342,7 +7342,7 @@ impl<'src> LowerCtx<'src> {
                     }
                 }
 
-                self.instrs.push(Instr::Label(end_label));
+                self.instrs.push(Instr::Label { id: end_label, fls: "§6.17" });
                 Ok(())
             }
 
@@ -7407,11 +7407,11 @@ impl<'src> LowerCtx<'src> {
                             if let Some(guard) = &arm.guard {
                                 let gv = self.lower_expr(guard, &IrTy::Bool)?;
                                 let gr = self.val_to_reg(gv)?;
-                                self.instrs.push(Instr::CondBranch { reg: gr, label: next_label });
+                                self.instrs.push(Instr::CondBranch { reg: gr, label: next_label, fls: "§6.18" });
                             }
                             self.lower_tuple_expr_into(&arm.body, base_slot, n_elems)?;
-                            self.instrs.push(Instr::Branch(exit_label));
-                            self.instrs.push(Instr::Label(next_label));
+                            self.instrs.push(Instr::Branch { target: exit_label, fls: "§6.18" });
+                            self.instrs.push(Instr::Label { id: next_label, fls: "§6.18" });
                             continue;
                         }
 
@@ -7427,12 +7427,12 @@ impl<'src> LowerCtx<'src> {
                             if let Some(guard) = &arm.guard {
                                 let gv = self.lower_expr(guard, &IrTy::Bool)?;
                                 let gr = self.val_to_reg(gv)?;
-                                self.instrs.push(Instr::CondBranch { reg: gr, label: next_label });
+                                self.instrs.push(Instr::CondBranch { reg: gr, label: next_label, fls: "§6.18" });
                             }
                             self.lower_tuple_expr_into(&arm.body, base_slot, n_elems)?;
                             self.locals.remove(name);
-                            self.instrs.push(Instr::Branch(exit_label));
-                            self.instrs.push(Instr::Label(next_label));
+                            self.instrs.push(Instr::Branch { target: exit_label, fls: "§6.18" });
+                            self.instrs.push(Instr::Label { id: next_label, fls: "§6.18" });
                             continue;
                         }
 
@@ -7445,7 +7445,7 @@ impl<'src> LowerCtx<'src> {
                             self.instrs.push(Instr::LoadImm(p_reg, *n as i32));
                             let eq_reg = self.alloc_reg()?;
                             self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg, ty: IrTy::Bool });
-                            self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label });
+                            self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label, fls: "§6.18" });
                         }
 
                         Pat::NegLitInt(n) => {
@@ -7455,7 +7455,7 @@ impl<'src> LowerCtx<'src> {
                             self.instrs.push(Instr::LoadImm(p_reg, -(*n as i32)));
                             let eq_reg = self.alloc_reg()?;
                             self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg, ty: IrTy::Bool });
-                            self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label });
+                            self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label, fls: "§6.18" });
                         }
 
                         Pat::LitBool(b) => {
@@ -7465,7 +7465,7 @@ impl<'src> LowerCtx<'src> {
                             self.instrs.push(Instr::LoadImm(p_reg, *b as i32));
                             let eq_reg = self.alloc_reg()?;
                             self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg, ty: IrTy::Bool });
-                            self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label });
+                            self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label, fls: "§6.18" });
                         }
 
                         _ => {
@@ -7479,11 +7479,11 @@ impl<'src> LowerCtx<'src> {
                     if let Some(guard) = &arm.guard {
                         let gv = self.lower_expr(guard, &IrTy::Bool)?;
                         let gr = self.val_to_reg(gv)?;
-                        self.instrs.push(Instr::CondBranch { reg: gr, label: next_label });
+                        self.instrs.push(Instr::CondBranch { reg: gr, label: next_label, fls: "§6.18" });
                     }
                     self.lower_tuple_expr_into(&arm.body, base_slot, n_elems)?;
-                    self.instrs.push(Instr::Branch(exit_label));
-                    self.instrs.push(Instr::Label(next_label));
+                    self.instrs.push(Instr::Branch { target: exit_label, fls: "§6.18" });
+                    self.instrs.push(Instr::Label { id: next_label, fls: "§6.18" });
                 }
 
                 // Default (last) arm — no pattern check.
@@ -7507,7 +7507,7 @@ impl<'src> LowerCtx<'src> {
                     }
                 }
 
-                self.instrs.push(Instr::Label(exit_label));
+                self.instrs.push(Instr::Label { id: exit_label, fls: "§6.18" });
                 Ok(())
             }
 
@@ -7629,7 +7629,7 @@ impl<'src> LowerCtx<'src> {
 
                 let cond_val = self.lower_expr(cond, &IrTy::Bool)?;
                 let cond_reg = self.val_to_reg(cond_val)?;
-                self.instrs.push(Instr::CondBranch { reg: cond_reg, label: else_label });
+                self.instrs.push(Instr::CondBranch { reg: cond_reg, label: else_label, fls: "§6.17" });
 
                 // Then branch: lower statements then store struct result.
                 for stmt in &then_block.stmts {
@@ -7642,10 +7642,10 @@ impl<'src> LowerCtx<'src> {
                         "struct-returning if expression: then branch must have a tail".into(),
                     ));
                 }
-                self.instrs.push(Instr::Branch(end_label));
+                self.instrs.push(Instr::Branch { target: end_label, fls: "§6.17" });
 
                 // Else branch: store struct result.
-                self.instrs.push(Instr::Label(else_label));
+                self.instrs.push(Instr::Label { id: else_label, fls: "§6.17" });
                 match else_expr {
                     Some(e) => self.lower_struct_expr_into(e, base_slot, n_fields, struct_name)?,
                     None => {
@@ -7655,7 +7655,7 @@ impl<'src> LowerCtx<'src> {
                     }
                 }
 
-                self.instrs.push(Instr::Label(end_label));
+                self.instrs.push(Instr::Label { id: end_label, fls: "§6.17" });
                 Ok(())
             }
 
@@ -7744,11 +7744,11 @@ impl<'src> LowerCtx<'src> {
                             if let Some(guard) = &arm.guard {
                                 let gv = self.lower_expr(guard, &IrTy::Bool)?;
                                 let gr = self.val_to_reg(gv)?;
-                                self.instrs.push(Instr::CondBranch { reg: gr, label: next_label });
+                                self.instrs.push(Instr::CondBranch { reg: gr, label: next_label, fls: "§6.18" });
                             }
                             self.lower_struct_expr_into(&arm.body, base_slot, n_fields, struct_name)?;
-                            self.instrs.push(Instr::Branch(exit_label));
-                            self.instrs.push(Instr::Label(next_label));
+                            self.instrs.push(Instr::Branch { target: exit_label, fls: "§6.18" });
+                            self.instrs.push(Instr::Label { id: next_label, fls: "§6.18" });
                             continue;
                         }
 
@@ -7764,12 +7764,12 @@ impl<'src> LowerCtx<'src> {
                             if let Some(guard) = &arm.guard {
                                 let gv = self.lower_expr(guard, &IrTy::Bool)?;
                                 let gr = self.val_to_reg(gv)?;
-                                self.instrs.push(Instr::CondBranch { reg: gr, label: next_label });
+                                self.instrs.push(Instr::CondBranch { reg: gr, label: next_label, fls: "§6.18" });
                             }
                             self.lower_struct_expr_into(&arm.body, base_slot, n_fields, struct_name)?;
                             self.locals.remove(name);
-                            self.instrs.push(Instr::Branch(exit_label));
-                            self.instrs.push(Instr::Label(next_label));
+                            self.instrs.push(Instr::Branch { target: exit_label, fls: "§6.18" });
+                            self.instrs.push(Instr::Label { id: next_label, fls: "§6.18" });
                             continue;
                         }
 
@@ -7781,7 +7781,7 @@ impl<'src> LowerCtx<'src> {
                             self.instrs.push(Instr::LoadImm(p_reg, *n as i32));
                             let eq_reg = self.alloc_reg()?;
                             self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg, ty: IrTy::Bool });
-                            self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label });
+                            self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label, fls: "§6.18" });
                         }
 
                         Pat::NegLitInt(n) => {
@@ -7791,7 +7791,7 @@ impl<'src> LowerCtx<'src> {
                             self.instrs.push(Instr::LoadImm(p_reg, -(*n as i32)));
                             let eq_reg = self.alloc_reg()?;
                             self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg, ty: IrTy::Bool });
-                            self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label });
+                            self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label, fls: "§6.18" });
                         }
 
                         Pat::LitBool(b) => {
@@ -7801,7 +7801,7 @@ impl<'src> LowerCtx<'src> {
                             self.instrs.push(Instr::LoadImm(p_reg, *b as i32));
                             let eq_reg = self.alloc_reg()?;
                             self.instrs.push(Instr::BinOp { op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg, ty: IrTy::Bool });
-                            self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label });
+                            self.instrs.push(Instr::CondBranch { reg: eq_reg, label: next_label, fls: "§6.18" });
                         }
 
                         _ => {
@@ -7815,11 +7815,11 @@ impl<'src> LowerCtx<'src> {
                     if let Some(guard) = &arm.guard {
                         let gv = self.lower_expr(guard, &IrTy::Bool)?;
                         let gr = self.val_to_reg(gv)?;
-                        self.instrs.push(Instr::CondBranch { reg: gr, label: next_label });
+                        self.instrs.push(Instr::CondBranch { reg: gr, label: next_label, fls: "§6.18" });
                     }
                     self.lower_struct_expr_into(&arm.body, base_slot, n_fields, struct_name)?;
-                    self.instrs.push(Instr::Branch(exit_label));
-                    self.instrs.push(Instr::Label(next_label));
+                    self.instrs.push(Instr::Branch { target: exit_label, fls: "§6.18" });
+                    self.instrs.push(Instr::Label { id: next_label, fls: "§6.18" });
                 }
 
                 // Default (last) arm — no pattern check.
@@ -7843,7 +7843,7 @@ impl<'src> LowerCtx<'src> {
                     }
                 }
 
-                self.instrs.push(Instr::Label(exit_label));
+                self.instrs.push(Instr::Label { id: exit_label, fls: "§6.18" });
                 Ok(())
             }
 
@@ -8028,10 +8028,7 @@ impl<'src> LowerCtx<'src> {
                                 ty: IrTy::Bool,
                             });
                             // CondBranch branches when reg == 0 (false), i.e., no match.
-                            self.instrs.push(Instr::CondBranch {
-                                reg: cmp_reg,
-                                label: else_label,
-                            });
+                            self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: else_label, fls: "§8.1" });
 
                             // Match succeeded: install field bindings in outer scope.
                             // FLS §8.1: Bindings are visible after the let-else statement.
@@ -8096,10 +8093,7 @@ impl<'src> LowerCtx<'src> {
                                 }
                             }
                             // CondBranch: cbz branches when matched_reg == 0 (no match).
-                            self.instrs.push(Instr::CondBranch {
-                                reg: matched_reg,
-                                label: else_label,
-                            });
+                            self.instrs.push(Instr::CondBranch { reg: matched_reg, label: else_label, fls: "§6.17" });
                             // No bindings: OR scalar/enum-unit patterns bind nothing.
                         }
                         // FLS §5.1.4 + §8.1: `@` binding pattern in let-else.
@@ -8128,10 +8122,7 @@ impl<'src> LowerCtx<'src> {
                             self.accum_or_alt(subpat, scrut_slot, matched_reg)?;
 
                             // Step 2: Branch to else on mismatch (matched_reg == 0).
-                            self.instrs.push(Instr::CondBranch {
-                                reg: matched_reg,
-                                label: else_label,
-                            });
+                            self.instrs.push(Instr::CondBranch { reg: matched_reg, label: else_label, fls: "§6.17" });
 
                             // Step 3: Match succeeded — bind scrutinee value to name.
                             let binding_slot = self.alloc_slot()?;
@@ -8151,16 +8142,16 @@ impl<'src> LowerCtx<'src> {
                     }
 
                     // Jump over the else block (pattern matched, bindings valid).
-                    self.instrs.push(Instr::Branch(end_label));
+                    self.instrs.push(Instr::Branch { target: end_label, fls: "§6.17" });
 
                     // Else block (diverges via return/break/continue).
                     // FLS §8.1: The else block must be a diverging expression.
                     // FLS §6.19: return expressions emit Ret instructions.
-                    self.instrs.push(Instr::Label(else_label));
+                    self.instrs.push(Instr::Label { id: else_label, fls: "§6.17" });
                     let _ = self.lower_block_to_value(else_blk, &IrTy::I32)?;
 
                     // Continuation point: bindings are in scope.
-                    self.instrs.push(Instr::Label(end_label));
+                    self.instrs.push(Instr::Label { id: end_label, fls: "§6.17" });
                     return Ok(());
                 }
 
@@ -11289,16 +11280,16 @@ impl<'src> LowerCtx<'src> {
                         let cond_reg = self.val_to_reg(cond_val)?;
 
                         // CondBranch: jump to else_label if condition is false (0).
-                        self.instrs.push(Instr::CondBranch { reg: cond_reg, label: else_label });
+                        self.instrs.push(Instr::CondBranch { reg: cond_reg, label: else_label, fls: "§6.17" });
 
                         // ── Then branch ───────────────────────────────────────────
                         let then_val = self.lower_block_to_value(then_block, ret_ty)?;
                         let then_reg = self.val_to_reg(then_val)?;
                         self.instrs.push(Instr::Store { src: then_reg, slot: phi_slot });
-                        self.instrs.push(Instr::Branch(end_label));
+                        self.instrs.push(Instr::Branch { target: end_label, fls: "§6.17" });
 
                         // ── Else branch ───────────────────────────────────────────
-                        self.instrs.push(Instr::Label(else_label));
+                        self.instrs.push(Instr::Label { id: else_label, fls: "§6.17" });
                         let else_val = match else_expr {
                             Some(e) => self.lower_expr(e, ret_ty)?,
                             None => {
@@ -11313,7 +11304,7 @@ impl<'src> LowerCtx<'src> {
                         self.instrs.push(Instr::Store { src: else_reg, slot: phi_slot });
 
                         // ── End ───────────────────────────────────────────────────
-                        self.instrs.push(Instr::Label(end_label));
+                        self.instrs.push(Instr::Label { id: end_label, fls: "§6.17" });
                         let result_reg = self.alloc_reg()?;
                         self.instrs.push(Instr::Load { dst: result_reg, slot: phi_slot });
                         Ok(IrValue::Reg(result_reg))
@@ -11344,19 +11335,19 @@ impl<'src> LowerCtx<'src> {
                         let cond_reg = self.val_to_reg(cond_val)?;
 
                         // Jump to else (or end) if condition is false.
-                        self.instrs.push(Instr::CondBranch { reg: cond_reg, label: else_label });
+                        self.instrs.push(Instr::CondBranch { reg: cond_reg, label: else_label, fls: "§6.17" });
 
                         // ── Then branch (unit, side effects only) ─────────────────
                         self.lower_block_to_value(then_block, &IrTy::Unit)?;
-                        self.instrs.push(Instr::Branch(end_label));
+                        self.instrs.push(Instr::Branch { target: end_label, fls: "§6.17" });
 
                         // ── Else branch ───────────────────────────────────────────
-                        self.instrs.push(Instr::Label(else_label));
+                        self.instrs.push(Instr::Label { id: else_label, fls: "§6.17" });
                         if let Some(e) = else_expr {
                             self.lower_expr(e, &IrTy::Unit)?;
                         }
 
-                        self.instrs.push(Instr::Label(end_label));
+                        self.instrs.push(Instr::Label { id: end_label, fls: "§6.17" });
                         Ok(IrValue::Unit)
                     }
 
@@ -11379,7 +11370,7 @@ impl<'src> LowerCtx<'src> {
 
                         let cond_val = self.lower_expr(cond, &IrTy::Bool)?;
                         let cond_reg = self.val_to_reg(cond_val)?;
-                        self.instrs.push(Instr::CondBranch { reg: cond_reg, label: else_label });
+                        self.instrs.push(Instr::CondBranch { reg: cond_reg, label: else_label, fls: "§6.17" });
 
                         // Then branch.
                         let then_val = self.lower_block_to_value(then_block, &IrTy::F64)?;
@@ -11390,10 +11381,10 @@ impl<'src> LowerCtx<'src> {
                             )),
                         };
                         self.instrs.push(Instr::StoreF64 { src: then_freg, slot: phi_slot });
-                        self.instrs.push(Instr::Branch(end_label));
+                        self.instrs.push(Instr::Branch { target: end_label, fls: "§6.17" });
 
                         // Else branch.
-                        self.instrs.push(Instr::Label(else_label));
+                        self.instrs.push(Instr::Label { id: else_label, fls: "§6.17" });
                         let else_val = match else_expr {
                             Some(e) => self.lower_expr(e, &IrTy::F64)?,
                             None => return Err(LowerError::Unsupported(
@@ -11408,7 +11399,7 @@ impl<'src> LowerCtx<'src> {
                         };
                         self.instrs.push(Instr::StoreF64 { src: else_freg, slot: phi_slot });
 
-                        self.instrs.push(Instr::Label(end_label));
+                        self.instrs.push(Instr::Label { id: end_label, fls: "§6.17" });
                         let result_freg = self.alloc_reg()?;
                         self.instrs.push(Instr::LoadF64Slot { dst: result_freg, slot: phi_slot });
                         Ok(IrValue::FReg(result_freg))
@@ -11430,7 +11421,7 @@ impl<'src> LowerCtx<'src> {
 
                         let cond_val = self.lower_expr(cond, &IrTy::Bool)?;
                         let cond_reg = self.val_to_reg(cond_val)?;
-                        self.instrs.push(Instr::CondBranch { reg: cond_reg, label: else_label });
+                        self.instrs.push(Instr::CondBranch { reg: cond_reg, label: else_label, fls: "§6.17" });
 
                         // Then branch.
                         let then_val = self.lower_block_to_value(then_block, &IrTy::F32)?;
@@ -11441,10 +11432,10 @@ impl<'src> LowerCtx<'src> {
                             )),
                         };
                         self.instrs.push(Instr::StoreF32 { src: then_freg, slot: phi_slot });
-                        self.instrs.push(Instr::Branch(end_label));
+                        self.instrs.push(Instr::Branch { target: end_label, fls: "§6.17" });
 
                         // Else branch.
-                        self.instrs.push(Instr::Label(else_label));
+                        self.instrs.push(Instr::Label { id: else_label, fls: "§6.17" });
                         let else_val = match else_expr {
                             Some(e) => self.lower_expr(e, &IrTy::F32)?,
                             None => return Err(LowerError::Unsupported(
@@ -11459,7 +11450,7 @@ impl<'src> LowerCtx<'src> {
                         };
                         self.instrs.push(Instr::StoreF32 { src: else_freg, slot: phi_slot });
 
-                        self.instrs.push(Instr::Label(end_label));
+                        self.instrs.push(Instr::Label { id: end_label, fls: "§6.17" });
                         let result_freg = self.alloc_reg()?;
                         self.instrs.push(Instr::LoadF32Slot { dst: result_freg, slot: phi_slot });
                         Ok(IrValue::F32Reg(result_freg))
@@ -11568,7 +11559,7 @@ impl<'src> LowerCtx<'src> {
                             rhs: p_reg,
                             ty: IrTy::Bool,
                         });
-                        self.instrs.push(Instr::CondBranch { reg: eq_reg, label: else_label });
+                        self.instrs.push(Instr::CondBranch { reg: eq_reg, label: else_label, fls: "§6.17" });
                     }
                     Pat::NegLitInt(n) => {
                         let s_reg = self.alloc_reg()?;
@@ -11583,7 +11574,7 @@ impl<'src> LowerCtx<'src> {
                             rhs: p_reg,
                             ty: IrTy::Bool,
                         });
-                        self.instrs.push(Instr::CondBranch { reg: eq_reg, label: else_label });
+                        self.instrs.push(Instr::CondBranch { reg: eq_reg, label: else_label, fls: "§6.17" });
                     }
                     Pat::LitBool(b) => {
                         let s_reg = self.alloc_reg()?;
@@ -11598,7 +11589,7 @@ impl<'src> LowerCtx<'src> {
                             rhs: p_reg,
                             ty: IrTy::Bool,
                         });
-                        self.instrs.push(Instr::CondBranch { reg: eq_reg, label: else_label });
+                        self.instrs.push(Instr::CondBranch { reg: eq_reg, label: else_label, fls: "§6.17" });
                     }
                     // FLS §5.5 + §15: Path pattern — enum unit variant.
                     // Resolves to the variant's integer discriminant; then compares
@@ -11625,7 +11616,7 @@ impl<'src> LowerCtx<'src> {
                             rhs: p_reg,
                             ty: IrTy::Bool,
                         });
-                        self.instrs.push(Instr::CondBranch { reg: eq_reg, label: else_label });
+                        self.instrs.push(Instr::CondBranch { reg: eq_reg, label: else_label, fls: "§6.17" });
                     }
                     Pat::Path(_) => {
                         return Err(LowerError::Unsupported(
@@ -11663,7 +11654,7 @@ impl<'src> LowerCtx<'src> {
                             rhs: cmp2,
                             ty: IrTy::Bool,
                         });
-                        self.instrs.push(Instr::CondBranch { reg: matched, label: else_label });
+                        self.instrs.push(Instr::CondBranch { reg: matched, label: else_label, fls: "§6.17" });
                     }
                     Pat::RangeExclusive { lo, hi } => {
                         let s_reg = self.alloc_reg()?;
@@ -11696,7 +11687,7 @@ impl<'src> LowerCtx<'src> {
                             rhs: cmp2,
                             ty: IrTy::Bool,
                         });
-                        self.instrs.push(Instr::CondBranch { reg: matched, label: else_label });
+                        self.instrs.push(Instr::CondBranch { reg: matched, label: else_label, fls: "§6.17" });
                     }
                     Pat::Or(alts) => {
                         // FLS §5.1.11: OR pattern in if-let — match if any alternative matches.
@@ -11721,10 +11712,7 @@ impl<'src> LowerCtx<'src> {
                                 }
                             }
                         }
-                        self.instrs.push(Instr::CondBranch {
-                            reg: matched_reg,
-                            label: else_label,
-                        });
+                        self.instrs.push(Instr::CondBranch { reg: matched_reg, label: else_label, fls: "§6.17" });
                     }
                     // FLS §5.4 + §15: TupleStruct pattern in if-let.
                     //
@@ -11773,7 +11761,7 @@ impl<'src> LowerCtx<'src> {
                             rhs: p_reg,
                             ty: IrTy::Bool,
                         });
-                        self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: else_label });
+                        self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: else_label, fls: "§6.17" });
                         // Install positional field bindings into bound_names.
                         // FLS §4.2, §15: Float fields use LoadF64Slot/LoadF32Slot.
                         // FLS §4.2: Register f64/f32 bindings in float_locals/float32_locals so
@@ -11897,7 +11885,7 @@ impl<'src> LowerCtx<'src> {
                                 rhs: p_reg,
                                 ty: IrTy::Bool,
                             });
-                            self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: else_label });
+                            self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: else_label, fls: "§6.17" });
                             // Install named field bindings by declaration order.
                             // FLS §4.2, §15: Float fields use LoadF64Slot/LoadF32Slot
                             // and register in float_locals so path expressions emit
@@ -11980,7 +11968,7 @@ impl<'src> LowerCtx<'src> {
                                     op: IrBinOp::Eq, dst: cmp_reg, lhs: s_reg, rhs: p_reg,
                                     ty: IrTy::Bool,
                                 });
-                                self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: else_label });
+                                self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: else_label, fls: "§6.17" });
                             }
                             Pat::NegLitInt(n) => {
                                 let s_reg = self.alloc_reg()?;
@@ -11992,7 +11980,7 @@ impl<'src> LowerCtx<'src> {
                                     op: IrBinOp::Eq, dst: cmp_reg, lhs: s_reg, rhs: p_reg,
                                     ty: IrTy::Bool,
                                 });
-                                self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: else_label });
+                                self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: else_label, fls: "§6.17" });
                             }
                             Pat::RangeInclusive { lo, hi } => {
                                 let s_reg = self.alloc_reg()?;
@@ -12016,7 +12004,7 @@ impl<'src> LowerCtx<'src> {
                                     op: IrBinOp::BitAnd, dst: matched, lhs: cmp1, rhs: cmp2,
                                     ty: IrTy::Bool,
                                 });
-                                self.instrs.push(Instr::CondBranch { reg: matched, label: else_label });
+                                self.instrs.push(Instr::CondBranch { reg: matched, label: else_label, fls: "§6.17" });
                             }
                             Pat::RangeExclusive { lo, hi } => {
                                 let s_reg = self.alloc_reg()?;
@@ -12040,7 +12028,7 @@ impl<'src> LowerCtx<'src> {
                                     op: IrBinOp::BitAnd, dst: matched, lhs: cmp1, rhs: cmp2,
                                     ty: IrTy::Bool,
                                 });
-                                self.instrs.push(Instr::CondBranch { reg: matched, label: else_label });
+                                self.instrs.push(Instr::CondBranch { reg: matched, label: else_label, fls: "§6.17" });
                             }
                             // FLS §5.1.4 + §5.1.11: `n @ (pat1 | pat2)` — OR sub-pattern.
                             // Accumulate alternatives into matched_reg; branch to else_label
@@ -12052,7 +12040,7 @@ impl<'src> LowerCtx<'src> {
                                 for alt in alts {
                                     self.accum_or_alt(alt, scrut_slot, matched_reg)?;
                                 }
-                                self.instrs.push(Instr::CondBranch { reg: matched_reg, label: else_label });
+                                self.instrs.push(Instr::CondBranch { reg: matched_reg, label: else_label, fls: "§6.17" });
                             }
                             other => return Err(LowerError::Unsupported(format!(
                                 "@ binding sub-pattern not yet supported in if-let (FLS §6.17, §5.1.4): {other:?}"
@@ -12096,10 +12084,10 @@ impl<'src> LowerCtx<'src> {
                         }
                         let then_reg = self.val_to_reg(then_val)?;
                         self.instrs.push(Instr::Store { src: then_reg, slot: phi_slot });
-                        self.instrs.push(Instr::Branch(end_label));
+                        self.instrs.push(Instr::Branch { target: end_label, fls: "§6.17" });
 
                         // Else branch.
-                        self.instrs.push(Instr::Label(else_label));
+                        self.instrs.push(Instr::Label { id: else_label, fls: "§6.17" });
                         let else_val = match else_expr {
                             Some(e) => self.lower_expr(e, ret_ty)?,
                             None => {
@@ -12111,7 +12099,7 @@ impl<'src> LowerCtx<'src> {
                         let else_reg = self.val_to_reg(else_val)?;
                         self.instrs.push(Instr::Store { src: else_reg, slot: phi_slot });
 
-                        self.instrs.push(Instr::Label(end_label));
+                        self.instrs.push(Instr::Label { id: end_label, fls: "§6.17" });
                         let result_reg = self.alloc_reg()?;
                         self.instrs.push(Instr::Load { dst: result_reg, slot: phi_slot });
                         Ok(IrValue::Reg(result_reg))
@@ -12124,15 +12112,15 @@ impl<'src> LowerCtx<'src> {
                             self.float_locals.remove(*name);
                             self.float32_locals.remove(*name);
                         }
-                        self.instrs.push(Instr::Branch(end_label));
+                        self.instrs.push(Instr::Branch { target: end_label, fls: "§6.17" });
 
                         // Else branch.
-                        self.instrs.push(Instr::Label(else_label));
+                        self.instrs.push(Instr::Label { id: else_label, fls: "§6.17" });
                         if let Some(e) = else_expr {
                             self.lower_expr(e, &IrTy::Unit)?;
                         }
 
-                        self.instrs.push(Instr::Label(end_label));
+                        self.instrs.push(Instr::Label { id: end_label, fls: "§6.17" });
                         Ok(IrValue::Unit)
                     }
                     // FLS §6.17: If-let expressions returning f64.
@@ -12157,10 +12145,10 @@ impl<'src> LowerCtx<'src> {
                             )),
                         };
                         self.instrs.push(Instr::StoreF64 { src: then_freg, slot: phi_slot });
-                        self.instrs.push(Instr::Branch(end_label));
+                        self.instrs.push(Instr::Branch { target: end_label, fls: "§6.17" });
 
                         // Else branch.
-                        self.instrs.push(Instr::Label(else_label));
+                        self.instrs.push(Instr::Label { id: else_label, fls: "§6.17" });
                         let else_val = match else_expr {
                             Some(e) => self.lower_expr(e, &IrTy::F64)?,
                             None => return Err(LowerError::Unsupported(
@@ -12175,7 +12163,7 @@ impl<'src> LowerCtx<'src> {
                         };
                         self.instrs.push(Instr::StoreF64 { src: else_freg, slot: phi_slot });
 
-                        self.instrs.push(Instr::Label(end_label));
+                        self.instrs.push(Instr::Label { id: end_label, fls: "§6.17" });
                         let result_freg = self.alloc_reg()?;
                         self.instrs.push(Instr::LoadF64Slot { dst: result_freg, slot: phi_slot });
                         Ok(IrValue::FReg(result_freg))
@@ -12203,10 +12191,10 @@ impl<'src> LowerCtx<'src> {
                             )),
                         };
                         self.instrs.push(Instr::StoreF32 { src: then_freg, slot: phi_slot });
-                        self.instrs.push(Instr::Branch(end_label));
+                        self.instrs.push(Instr::Branch { target: end_label, fls: "§6.17" });
 
                         // Else branch.
-                        self.instrs.push(Instr::Label(else_label));
+                        self.instrs.push(Instr::Label { id: else_label, fls: "§6.17" });
                         let else_val = match else_expr {
                             Some(e) => self.lower_expr(e, &IrTy::F32)?,
                             None => return Err(LowerError::Unsupported(
@@ -12221,7 +12209,7 @@ impl<'src> LowerCtx<'src> {
                         };
                         self.instrs.push(Instr::StoreF32 { src: else_freg, slot: phi_slot });
 
-                        self.instrs.push(Instr::Label(end_label));
+                        self.instrs.push(Instr::Label { id: end_label, fls: "§6.17" });
                         let result_freg = self.alloc_reg()?;
                         self.instrs.push(Instr::LoadF32Slot { dst: result_freg, slot: phi_slot });
                         Ok(IrValue::F32Reg(result_freg))
@@ -12358,16 +12346,13 @@ impl<'src> LowerCtx<'src> {
                                     if let Some(guard) = &arm.guard {
                                         let gv = self.lower_expr(guard, &IrTy::Bool)?;
                                         let gr = self.val_to_reg(gv)?;
-                                        self.instrs.push(Instr::CondBranch {
-                                            reg: gr,
-                                            label: next_label,
-                                        });
+                                        self.instrs.push(Instr::CondBranch { reg: gr, label: next_label, fls: "§6.18" });
                                     }
                                     let body_val = self.lower_expr(&arm.body, ret_ty)?;
                                     let body_reg = self.val_to_reg(body_val)?;
                                     self.instrs.push(Instr::Store { src: body_reg, slot: phi_slot });
-                                    self.instrs.push(Instr::Branch(exit_label));
-                                    self.instrs.push(Instr::Label(next_label));
+                                    self.instrs.push(Instr::Branch { target: exit_label, fls: "§6.18" });
+                                    self.instrs.push(Instr::Label { id: next_label, fls: "§6.18" });
                                     continue;
                                 }
                                 // FLS §5.1.4: Identifier pattern in non-last position —
@@ -12396,19 +12381,16 @@ impl<'src> LowerCtx<'src> {
                                     if let Some(guard) = &arm.guard {
                                         let gv = self.lower_expr(guard, &IrTy::Bool)?;
                                         let gr = self.val_to_reg(gv)?;
-                                        self.instrs.push(Instr::CondBranch {
-                                            reg: gr,
-                                            label: next_label,
-                                        });
+                                        self.instrs.push(Instr::CondBranch { reg: gr, label: next_label, fls: "§6.18" });
                                     }
                                     let body_val = self.lower_expr(&arm.body, ret_ty)?;
                                     let body_reg = self.val_to_reg(body_val)?;
                                     self.instrs.push(Instr::Store { src: body_reg, slot: phi_slot });
-                                    self.instrs.push(Instr::Branch(exit_label));
+                                    self.instrs.push(Instr::Branch { target: exit_label, fls: "§6.18" });
                                     // Remove binding before the label so subsequent arms
                                     // do not see a stale entry in `self.locals`.
                                     self.locals.remove(name);
-                                    self.instrs.push(Instr::Label(next_label));
+                                    self.instrs.push(Instr::Label { id: next_label, fls: "§6.18" });
                                     continue;
                                 }
                                 // FLS §5.1.11: OR pattern — accumulate equality results.
@@ -12452,10 +12434,7 @@ impl<'src> LowerCtx<'src> {
                                         }
                                     }
                                     // cbz: skip arm if no alternative matched.
-                                    self.instrs.push(Instr::CondBranch {
-                                        reg: matched_reg,
-                                        label: next_label,
-                                    });
+                                    self.instrs.push(Instr::CondBranch { reg: matched_reg, label: next_label, fls: "§6.18" });
                                 }
                                 // FLS §5.1.9: Inclusive range pattern `lo..=hi`.
                                 //
@@ -12499,10 +12478,7 @@ impl<'src> LowerCtx<'src> {
                                         rhs: cmp2,
                                         ty: IrTy::Bool,
                                     });
-                                    self.instrs.push(Instr::CondBranch {
-                                        reg: matched,
-                                        label: next_label,
-                                    });
+                                    self.instrs.push(Instr::CondBranch { reg: matched, label: next_label, fls: "§6.18" });
                                 }
                                 // FLS §5.1.9: Exclusive range pattern `lo..hi`.
                                 //
@@ -12539,10 +12515,7 @@ impl<'src> LowerCtx<'src> {
                                         rhs: cmp2,
                                         ty: IrTy::Bool,
                                     });
-                                    self.instrs.push(Instr::CondBranch {
-                                        reg: matched,
-                                        label: next_label,
-                                    });
+                                    self.instrs.push(Instr::CondBranch { reg: matched, label: next_label, fls: "§6.17" });
                                 }
                                 // FLS §5.5 + §15: Path pattern — enum unit variant.
                                 // Resolve to discriminant; emit equality check like LitInt.
@@ -12575,10 +12548,7 @@ impl<'src> LowerCtx<'src> {
                                         rhs: pat_reg,
                                         ty: IrTy::Bool,
                                     });
-                                    self.instrs.push(Instr::CondBranch {
-                                        reg: cmp_reg,
-                                        label: next_label,
-                                    });
+                                    self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label, fls: "§6.17" });
                                 }
                                 // FLS §5.4 + §15: Tuple struct/variant pattern.
                                 //
@@ -12622,7 +12592,7 @@ impl<'src> LowerCtx<'src> {
                                         rhs: p_reg,
                                         ty: IrTy::Bool,
                                     });
-                                    self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
+                                    self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label, fls: "§6.17" });
                                     // Install field bindings.
                                     // FLS §4.2, §15: Float fields use LoadF64Slot/LoadF32Slot.
                                     // FLS §4.2: Register f64/f32 bindings in float_locals/float32_locals.
@@ -12664,18 +12634,18 @@ impl<'src> LowerCtx<'src> {
                                     if let Some(guard) = &arm.guard {
                                         let gv = self.lower_expr(guard, &IrTy::Bool)?;
                                         let gr = self.val_to_reg(gv)?;
-                                        self.instrs.push(Instr::CondBranch { reg: gr, label: next_label });
+                                        self.instrs.push(Instr::CondBranch { reg: gr, label: next_label, fls: "§6.17" });
                                     }
                                     let body_val = self.lower_expr(&arm.body, ret_ty)?;
                                     let body_reg = self.val_to_reg(body_val)?;
                                     self.instrs.push(Instr::Store { src: body_reg, slot: phi_slot });
-                                    self.instrs.push(Instr::Branch(exit_label));
+                                    self.instrs.push(Instr::Branch { target: exit_label, fls: "§6.17" });
                                     for name in &bound {
                                         self.locals.remove(*name);
                                         self.float_locals.remove(*name);
                                         self.float32_locals.remove(*name);
                                     }
-                                    self.instrs.push(Instr::Label(next_label));
+                                    self.instrs.push(Instr::Label { id: next_label, fls: "§6.17" });
                                     continue;
                                 }
                                 // FLS §5.3 + §15.3: Named-field struct or enum variant pattern
@@ -12759,7 +12729,7 @@ impl<'src> LowerCtx<'src> {
                                             rhs: p_reg,
                                             ty: IrTy::Bool,
                                         });
-                                        self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
+                                        self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label, fls: "§6.17" });
                                         // Install named field bindings by declaration order.
                                         // FLS §4.2, §15: Float fields use float loads/stores.
                                         for (fname_span, fp) in pat_fields.iter() {
@@ -12811,14 +12781,14 @@ impl<'src> LowerCtx<'src> {
                                     if let Some(guard) = &arm.guard {
                                         let gv = self.lower_expr(guard, &IrTy::Bool)?;
                                         let gr = self.val_to_reg(gv)?;
-                                        self.instrs.push(Instr::CondBranch { reg: gr, label: next_label });
+                                        self.instrs.push(Instr::CondBranch { reg: gr, label: next_label, fls: "§6.17" });
                                     }
                                     let body_val = self.lower_expr(&arm.body, ret_ty)?;
                                     let body_reg = self.val_to_reg(body_val)?;
                                     self.instrs.push(Instr::Store { src: body_reg, slot: phi_slot });
-                                    self.instrs.push(Instr::Branch(exit_label));
+                                    self.instrs.push(Instr::Branch { target: exit_label, fls: "§6.17" });
                                     for name in &bound_sv { self.locals.remove(*name); }
-                                    self.instrs.push(Instr::Label(next_label));
+                                    self.instrs.push(Instr::Label { id: next_label, fls: "§6.17" });
                                     continue;
                                 }
                                 // FLS §5.1.4: Binding pattern `name @ subpat`.
@@ -12850,7 +12820,7 @@ impl<'src> LowerCtx<'src> {
                                                 rhs: p_reg,
                                                 ty: IrTy::Bool,
                                             });
-                                            self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
+                                            self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label, fls: "§6.17" });
                                         }
                                         Pat::NegLitInt(n) => {
                                             let s_reg = self.alloc_reg()?;
@@ -12865,7 +12835,7 @@ impl<'src> LowerCtx<'src> {
                                                 rhs: p_reg,
                                                 ty: IrTy::Bool,
                                             });
-                                            self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
+                                            self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label, fls: "§6.17" });
                                         }
                                         Pat::LitBool(b) => {
                                             let s_reg = self.alloc_reg()?;
@@ -12880,7 +12850,7 @@ impl<'src> LowerCtx<'src> {
                                                 rhs: p_reg,
                                                 ty: IrTy::Bool,
                                             });
-                                            self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
+                                            self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label, fls: "§6.17" });
                                         }
                                         Pat::RangeInclusive { lo, hi } => {
                                             let s_reg = self.alloc_reg()?;
@@ -12913,7 +12883,7 @@ impl<'src> LowerCtx<'src> {
                                                 rhs: cmp2,
                                                 ty: IrTy::Bool,
                                             });
-                                            self.instrs.push(Instr::CondBranch { reg: matched, label: next_label });
+                                            self.instrs.push(Instr::CondBranch { reg: matched, label: next_label, fls: "§6.17" });
                                         }
                                         Pat::RangeExclusive { lo, hi } => {
                                             let s_reg = self.alloc_reg()?;
@@ -12946,7 +12916,7 @@ impl<'src> LowerCtx<'src> {
                                                 rhs: cmp2,
                                                 ty: IrTy::Bool,
                                             });
-                                            self.instrs.push(Instr::CondBranch { reg: matched, label: next_label });
+                                            self.instrs.push(Instr::CondBranch { reg: matched, label: next_label, fls: "§6.17" });
                                         }
                                         // FLS §5.1.4 + §5.1.11: `n @ (pat1 | pat2)` — OR sub-pattern.
                                         // Accumulate alternatives; branch to next_label on no match.
@@ -12957,7 +12927,7 @@ impl<'src> LowerCtx<'src> {
                                             for alt in alts {
                                                 self.accum_or_alt(alt, scrut_slot, matched_reg)?;
                                             }
-                                            self.instrs.push(Instr::CondBranch { reg: matched_reg, label: next_label });
+                                            self.instrs.push(Instr::CondBranch { reg: matched_reg, label: next_label, fls: "§6.17" });
                                         }
                                         other => return Err(LowerError::Unsupported(format!(
                                             "@ binding sub-pattern not yet supported in match (FLS §6.18, §5.1.4): {other:?}"
@@ -12988,10 +12958,7 @@ impl<'src> LowerCtx<'src> {
                                         ty: IrTy::Bool,
                                     });
                                     // cbz: skip this arm if condition is 0 (not equal).
-                                    self.instrs.push(Instr::CondBranch {
-                                        reg: cmp_reg,
-                                        label: next_label,
-                                    });
+                                    self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label, fls: "§6.17" });
                                 }
                             }
 
@@ -13018,24 +12985,21 @@ impl<'src> LowerCtx<'src> {
                             if let Some(guard) = &arm.guard {
                                 let gv = self.lower_expr(guard, &IrTy::Bool)?;
                                 let gr = self.val_to_reg(gv)?;
-                                self.instrs.push(Instr::CondBranch {
-                                    reg: gr,
-                                    label: next_label,
-                                });
+                                self.instrs.push(Instr::CondBranch { reg: gr, label: next_label, fls: "§6.17" });
                             }
 
                             // Arm body (reached when pattern matched AND guard passed).
                             let body_val = self.lower_expr(&arm.body, ret_ty)?;
                             let body_reg = self.val_to_reg(body_val)?;
                             self.instrs.push(Instr::Store { src: body_reg, slot: phi_slot });
-                            self.instrs.push(Instr::Branch(exit_label));
+                            self.instrs.push(Instr::Branch { target: exit_label, fls: "§6.17" });
 
                             // Remove @ binding (if any) before the next-arm label.
                             // FLS §5.1.4: Binding scope ends at the arm boundary.
                             if let Some(span) = at_bind_span {
                                 self.locals.remove(span.text(self.source));
                             }
-                            self.instrs.push(Instr::Label(next_label));
+                            self.instrs.push(Instr::Label { id: next_label, fls: "§6.17" });
                         }
 
                         // Default arm — unconditional (guard on last arm is not yet supported).
@@ -13190,7 +13154,7 @@ impl<'src> LowerCtx<'src> {
                         let body_reg = self.val_to_reg(body_val)?;
                         self.instrs.push(Instr::Store { src: body_reg, slot: phi_slot });
 
-                        self.instrs.push(Instr::Label(exit_label));
+                        self.instrs.push(Instr::Label { id: exit_label, fls: "§6.17" });
                         let result_reg = self.alloc_reg()?;
                         self.instrs.push(Instr::Load { dst: result_reg, slot: phi_slot });
                         Ok(IrValue::Reg(result_reg))
@@ -13207,14 +13171,11 @@ impl<'src> LowerCtx<'src> {
                                     if let Some(guard) = &arm.guard {
                                         let gv = self.lower_expr(guard, &IrTy::Bool)?;
                                         let gr = self.val_to_reg(gv)?;
-                                        self.instrs.push(Instr::CondBranch {
-                                            reg: gr,
-                                            label: next_label,
-                                        });
+                                        self.instrs.push(Instr::CondBranch { reg: gr, label: next_label, fls: "§6.17" });
                                     }
                                     self.lower_expr(&arm.body, &IrTy::Unit)?;
-                                    self.instrs.push(Instr::Branch(exit_label));
-                                    self.instrs.push(Instr::Label(next_label));
+                                    self.instrs.push(Instr::Branch { target: exit_label, fls: "§6.17" });
+                                    self.instrs.push(Instr::Label { id: next_label, fls: "§6.17" });
                                     continue;
                                 }
                                 // FLS §5.1.4: Identifier pattern — always matches, binds name.
@@ -13229,15 +13190,12 @@ impl<'src> LowerCtx<'src> {
                                     if let Some(guard) = &arm.guard {
                                         let gv = self.lower_expr(guard, &IrTy::Bool)?;
                                         let gr = self.val_to_reg(gv)?;
-                                        self.instrs.push(Instr::CondBranch {
-                                            reg: gr,
-                                            label: next_label,
-                                        });
+                                        self.instrs.push(Instr::CondBranch { reg: gr, label: next_label, fls: "§6.17" });
                                     }
                                     self.lower_expr(&arm.body, &IrTy::Unit)?;
                                     self.locals.remove(name);
-                                    self.instrs.push(Instr::Branch(exit_label));
-                                    self.instrs.push(Instr::Label(next_label));
+                                    self.instrs.push(Instr::Branch { target: exit_label, fls: "§6.17" });
+                                    self.instrs.push(Instr::Label { id: next_label, fls: "§6.17" });
                                     continue;
                                 }
                                 // FLS §5.1.11: OR pattern — same accumulation strategy as
@@ -13267,10 +13225,7 @@ impl<'src> LowerCtx<'src> {
                                             }
                                         }
                                     }
-                                    self.instrs.push(Instr::CondBranch {
-                                        reg: matched_reg,
-                                        label: next_label,
-                                    });
+                                    self.instrs.push(Instr::CondBranch { reg: matched_reg, label: next_label, fls: "§6.17" });
                                 }
                                 // FLS §5.1.9: Inclusive range pattern `lo..=hi` (unit branch).
                                 Pat::RangeInclusive { lo, hi } => {
@@ -13304,10 +13259,7 @@ impl<'src> LowerCtx<'src> {
                                         rhs: cmp2,
                                         ty: IrTy::Bool,
                                     });
-                                    self.instrs.push(Instr::CondBranch {
-                                        reg: matched,
-                                        label: next_label,
-                                    });
+                                    self.instrs.push(Instr::CondBranch { reg: matched, label: next_label, fls: "§6.17" });
                                 }
                                 // FLS §5.1.9: Exclusive range pattern `lo..hi` (unit branch).
                                 Pat::RangeExclusive { lo, hi } => {
@@ -13341,10 +13293,7 @@ impl<'src> LowerCtx<'src> {
                                         rhs: cmp2,
                                         ty: IrTy::Bool,
                                     });
-                                    self.instrs.push(Instr::CondBranch {
-                                        reg: matched,
-                                        label: next_label,
-                                    });
+                                    self.instrs.push(Instr::CondBranch { reg: matched, label: next_label, fls: "§6.17" });
                                 }
                                 // FLS §5.5 + §15: Path pattern in unit-return match arm.
                                 Pat::Path(segs) => {
@@ -13375,10 +13324,7 @@ impl<'src> LowerCtx<'src> {
                                         rhs: pat_reg,
                                         ty: IrTy::Bool,
                                     });
-                                    self.instrs.push(Instr::CondBranch {
-                                        reg: cmp_reg,
-                                        label: next_label,
-                                    });
+                                    self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label, fls: "§6.17" });
                                 }
                                 // FLS §5.4 + §15: Tuple struct/variant pattern (unit return).
                                 Pat::TupleStruct { path: segs, fields } => {
@@ -13411,7 +13357,7 @@ impl<'src> LowerCtx<'src> {
                                         rhs: p_reg,
                                         ty: IrTy::Bool,
                                     });
-                                    self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
+                                    self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label, fls: "§6.17" });
                                     // Install field bindings.
                                     // FLS §4.2, §15: Float fields use LoadF64Slot/LoadF32Slot.
                                     // FLS §4.2: Register f64/f32 bindings in float_locals/float32_locals.
@@ -13453,16 +13399,16 @@ impl<'src> LowerCtx<'src> {
                                     if let Some(guard) = &arm.guard {
                                         let gv = self.lower_expr(guard, &IrTy::Bool)?;
                                         let gr = self.val_to_reg(gv)?;
-                                        self.instrs.push(Instr::CondBranch { reg: gr, label: next_label });
+                                        self.instrs.push(Instr::CondBranch { reg: gr, label: next_label, fls: "§6.17" });
                                     }
                                     self.lower_expr(&arm.body, &IrTy::Unit)?;
-                                    self.instrs.push(Instr::Branch(exit_label));
+                                    self.instrs.push(Instr::Branch { target: exit_label, fls: "§6.17" });
                                     for name in &bound {
                                         self.locals.remove(*name);
                                         self.float_locals.remove(*name);
                                         self.float32_locals.remove(*name);
                                     }
-                                    self.instrs.push(Instr::Label(next_label));
+                                    self.instrs.push(Instr::Label { id: next_label, fls: "§6.17" });
                                     continue;
                                 }
                                 // FLS §5.3 + §15.3: Named-field struct or variant pattern
@@ -13529,7 +13475,7 @@ impl<'src> LowerCtx<'src> {
                                             rhs: p_reg,
                                             ty: IrTy::Bool,
                                         });
-                                        self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
+                                        self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label, fls: "§6.17" });
                                         // FLS §4.2, §15: Float fields use float loads/stores.
                                         for (fname_span, fp) in pat_fields.iter() {
                                             let fname = fname_span.text(self.source);
@@ -13580,12 +13526,12 @@ impl<'src> LowerCtx<'src> {
                                     if let Some(guard) = &arm.guard {
                                         let gv = self.lower_expr(guard, &IrTy::Bool)?;
                                         let gr = self.val_to_reg(gv)?;
-                                        self.instrs.push(Instr::CondBranch { reg: gr, label: next_label });
+                                        self.instrs.push(Instr::CondBranch { reg: gr, label: next_label, fls: "§6.17" });
                                     }
                                     self.lower_expr(&arm.body, &IrTy::Unit)?;
-                                    self.instrs.push(Instr::Branch(exit_label));
+                                    self.instrs.push(Instr::Branch { target: exit_label, fls: "§6.17" });
                                     for name in &bound_sv { self.locals.remove(*name); }
-                                    self.instrs.push(Instr::Label(next_label));
+                                    self.instrs.push(Instr::Label { id: next_label, fls: "§6.17" });
                                     continue;
                                 }
                                 // FLS §5.1.4: @ binding pattern (unit-returning match).
@@ -13602,7 +13548,7 @@ impl<'src> LowerCtx<'src> {
                                                 op: IrBinOp::Eq, dst: cmp_reg, lhs: s_reg, rhs: p_reg,
                                                 ty: IrTy::Bool,
                                             });
-                                            self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label });
+                                            self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label, fls: "§6.17" });
                                         }
                                         Pat::RangeInclusive { lo, hi } => {
                                             let s_reg = self.alloc_reg()?;
@@ -13626,7 +13572,7 @@ impl<'src> LowerCtx<'src> {
                                                 op: IrBinOp::BitAnd, dst: matched, lhs: cmp1, rhs: cmp2,
                                                 ty: IrTy::Bool,
                                             });
-                                            self.instrs.push(Instr::CondBranch { reg: matched, label: next_label });
+                                            self.instrs.push(Instr::CondBranch { reg: matched, label: next_label, fls: "§6.17" });
                                         }
                                         // FLS §5.1.4 + §5.1.11: `n @ (pat1 | pat2)` — OR sub-pattern.
                                         // Accumulate alternatives; branch to next_label on no match.
@@ -13636,7 +13582,7 @@ impl<'src> LowerCtx<'src> {
                                             for alt in alts {
                                                 self.accum_or_alt(alt, scrut_slot, matched_reg)?;
                                             }
-                                            self.instrs.push(Instr::CondBranch { reg: matched_reg, label: next_label });
+                                            self.instrs.push(Instr::CondBranch { reg: matched_reg, label: next_label, fls: "§6.17" });
                                         }
                                         other => return Err(LowerError::Unsupported(format!(
                                             "@ binding sub-pattern not yet supported in unit match (FLS §6.18, §5.1.4): {other:?}"
@@ -13663,10 +13609,7 @@ impl<'src> LowerCtx<'src> {
                                         rhs: pat_reg,
                                         ty: IrTy::Bool,
                                     });
-                                    self.instrs.push(Instr::CondBranch {
-                                        reg: cmp_reg,
-                                        label: next_label,
-                                    });
+                                    self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label, fls: "§6.17" });
                                 }
                             }
 
@@ -13685,20 +13628,17 @@ impl<'src> LowerCtx<'src> {
                             if let Some(guard) = &arm.guard {
                                 let gv = self.lower_expr(guard, &IrTy::Bool)?;
                                 let gr = self.val_to_reg(gv)?;
-                                self.instrs.push(Instr::CondBranch {
-                                    reg: gr,
-                                    label: next_label,
-                                });
+                                self.instrs.push(Instr::CondBranch { reg: gr, label: next_label, fls: "§6.17" });
                             }
 
                             self.lower_expr(&arm.body, &IrTy::Unit)?;
-                            self.instrs.push(Instr::Branch(exit_label));
+                            self.instrs.push(Instr::Branch { target: exit_label, fls: "§6.17" });
 
                             // Remove @ binding (if any) before next-arm label.
                             if let Some(span) = at_bind_span_unit {
                                 self.locals.remove(span.text(self.source));
                             }
-                            self.instrs.push(Instr::Label(next_label));
+                            self.instrs.push(Instr::Label { id: next_label, fls: "§6.17" });
                         }
 
                         // Default arm — unconditional (guard on last arm not yet supported).
@@ -13837,7 +13777,7 @@ impl<'src> LowerCtx<'src> {
                             self.float_locals.remove(*name);
                             self.float32_locals.remove(*name);
                         }
-                        self.instrs.push(Instr::Label(exit_label));
+                        self.instrs.push(Instr::Label { id: exit_label, fls: "§6.17" });
                         Ok(IrValue::Unit)
                     }
                     // FLS §4.2: Match expressions producing float types are not yet
@@ -15444,7 +15384,7 @@ impl<'src> LowerCtx<'src> {
                 self.loop_stack.push(LoopCtx { label: label.clone(), header_label, exit_label, break_slot: None, break_ret_ty: IrTy::Unit, is_named_block: false });
 
                 // Loop top: the branch target for the back-edge.
-                self.instrs.push(Instr::Label(header_label));
+                self.instrs.push(Instr::Label { id: header_label, fls: "§6.15.3" });
 
                 // Evaluate condition as IrTy::Bool so that `!bool_var` used
                 // as a while condition emits logical NOT (BoolNot/eor) rather
@@ -15454,7 +15394,7 @@ impl<'src> LowerCtx<'src> {
                 let cond_reg = self.val_to_reg(cond_val)?;
 
                 // cbz: exit if condition is false (0).
-                self.instrs.push(Instr::CondBranch { reg: cond_reg, label: exit_label });
+                self.instrs.push(Instr::CondBranch { reg: cond_reg, label: exit_label, fls: "§6.15.3" });
 
                 // Execute body. The body has type `()` and its value is discarded.
                 // FLS §6.15.3: "The block of the while loop is repeatedly executed
@@ -15462,10 +15402,10 @@ impl<'src> LowerCtx<'src> {
                 self.lower_block_to_value(body, &IrTy::Unit)?;
 
                 // Back-edge: unconditionally re-evaluate the condition.
-                self.instrs.push(Instr::Branch(header_label));
+                self.instrs.push(Instr::Branch { target: header_label, fls: "§6.15.3" });
 
                 // Exit: the while expression produces `()`.
-                self.instrs.push(Instr::Label(exit_label));
+                self.instrs.push(Instr::Label { id: exit_label, fls: "§6.15.3" });
 
                 self.loop_stack.pop();
 
@@ -15556,7 +15496,7 @@ impl<'src> LowerCtx<'src> {
                     is_named_block: false,
                 });
 
-                self.instrs.push(Instr::Label(header_label));
+                self.instrs.push(Instr::Label { id: header_label, fls: "§6.15.4" });
 
                 // Infer scrutinee type from the pattern.
                 let scrut_ty = match pat {
@@ -15595,7 +15535,7 @@ impl<'src> LowerCtx<'src> {
                             rhs: p_reg,
                             ty: IrTy::Bool,
                         });
-                        self.instrs.push(Instr::CondBranch { reg: eq_reg, label: exit_label });
+                        self.instrs.push(Instr::CondBranch { reg: eq_reg, label: exit_label, fls: "§6.15.4" });
                     }
                     Pat::NegLitInt(n) => {
                         let s_reg = self.alloc_reg()?;
@@ -15610,7 +15550,7 @@ impl<'src> LowerCtx<'src> {
                             rhs: p_reg,
                             ty: IrTy::Bool,
                         });
-                        self.instrs.push(Instr::CondBranch { reg: eq_reg, label: exit_label });
+                        self.instrs.push(Instr::CondBranch { reg: eq_reg, label: exit_label, fls: "§6.15.4" });
                     }
                     Pat::LitBool(b) => {
                         let s_reg = self.alloc_reg()?;
@@ -15625,7 +15565,7 @@ impl<'src> LowerCtx<'src> {
                             rhs: p_reg,
                             ty: IrTy::Bool,
                         });
-                        self.instrs.push(Instr::CondBranch { reg: eq_reg, label: exit_label });
+                        self.instrs.push(Instr::CondBranch { reg: eq_reg, label: exit_label, fls: "§6.15.4" });
                     }
                     Pat::RangeInclusive { lo, hi } => {
                         let s_reg = self.alloc_reg()?;
@@ -15658,7 +15598,7 @@ impl<'src> LowerCtx<'src> {
                             rhs: cmp2,
                             ty: IrTy::Bool,
                         });
-                        self.instrs.push(Instr::CondBranch { reg: matched, label: exit_label });
+                        self.instrs.push(Instr::CondBranch { reg: matched, label: exit_label, fls: "§6.15.4" });
                     }
                     Pat::RangeExclusive { lo, hi } => {
                         let s_reg = self.alloc_reg()?;
@@ -15691,7 +15631,7 @@ impl<'src> LowerCtx<'src> {
                             rhs: cmp2,
                             ty: IrTy::Bool,
                         });
-                        self.instrs.push(Instr::CondBranch { reg: matched, label: exit_label });
+                        self.instrs.push(Instr::CondBranch { reg: matched, label: exit_label, fls: "§6.15.4" });
                     }
                     Pat::Or(alts) => {
                         let matched_reg = self.alloc_reg()?;
@@ -15712,10 +15652,7 @@ impl<'src> LowerCtx<'src> {
                                 }
                             }
                         }
-                        self.instrs.push(Instr::CondBranch {
-                            reg: matched_reg,
-                            label: exit_label,
-                        });
+                        self.instrs.push(Instr::CondBranch { reg: matched_reg, label: exit_label, fls: "§6.15.4" });
                     }
                     // FLS §5.5 + §15: Path pattern in while-let — enum unit variant.
                     Pat::Path(segs) => {
@@ -15746,7 +15683,7 @@ impl<'src> LowerCtx<'src> {
                             rhs: p_reg,
                             ty: IrTy::Bool,
                         });
-                        self.instrs.push(Instr::CondBranch { reg: eq_reg, label: exit_label });
+                        self.instrs.push(Instr::CondBranch { reg: eq_reg, label: exit_label, fls: "§6.15.4" });
                     }
                     // FLS §5.4 + §15: TupleStruct pattern in while-let.
                     //
@@ -15796,7 +15733,7 @@ impl<'src> LowerCtx<'src> {
                             rhs: p_reg,
                             ty: IrTy::Bool,
                         });
-                        self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: exit_label });
+                        self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: exit_label, fls: "§6.15.4" });
                         // Install positional field bindings into bound_names.
                         // FLS §4.2, §15: Float fields use LoadF64Slot/LoadF32Slot.
                         // FLS §4.2: Register f64/f32 bindings in float_locals/float32_locals.
@@ -15910,7 +15847,7 @@ impl<'src> LowerCtx<'src> {
                                 rhs: p_reg,
                                 ty: IrTy::Bool,
                             });
-                            self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: exit_label });
+                            self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: exit_label, fls: "§6.15.4" });
                             // Install named field bindings by declaration order.
                             // FLS §4.2, §15: Float fields use float loads/stores.
                             for (fname_span, fp) in pat_fields.iter() {
@@ -15988,7 +15925,7 @@ impl<'src> LowerCtx<'src> {
                                     op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg,
                                     ty: IrTy::Bool,
                                 });
-                                self.instrs.push(Instr::CondBranch { reg: eq_reg, label: exit_label });
+                                self.instrs.push(Instr::CondBranch { reg: eq_reg, label: exit_label, fls: "§6.15.4" });
                             }
                             Pat::RangeInclusive { lo, hi } => {
                                 let s_reg = self.alloc_reg()?;
@@ -16012,7 +15949,7 @@ impl<'src> LowerCtx<'src> {
                                     op: IrBinOp::BitAnd, dst: matched, lhs: cmp1, rhs: cmp2,
                                     ty: IrTy::Bool,
                                 });
-                                self.instrs.push(Instr::CondBranch { reg: matched, label: exit_label });
+                                self.instrs.push(Instr::CondBranch { reg: matched, label: exit_label, fls: "§6.15.4" });
                             }
                             // FLS §5.1.4 + §5.1.11: `n @ (pat1 | pat2)` — OR sub-pattern.
                             // Accumulate alternatives; branch to exit_label on no match
@@ -16024,7 +15961,7 @@ impl<'src> LowerCtx<'src> {
                                 for alt in alts {
                                     self.accum_or_alt(alt, scrut_slot, matched_reg)?;
                                 }
-                                self.instrs.push(Instr::CondBranch { reg: matched_reg, label: exit_label });
+                                self.instrs.push(Instr::CondBranch { reg: matched_reg, label: exit_label, fls: "§6.15.4" });
                             }
                             other => return Err(LowerError::Unsupported(format!(
                                 "@ binding sub-pattern not yet supported in while-let (FLS §6.15.4, §5.1.4): {other:?}"
@@ -16065,9 +16002,9 @@ impl<'src> LowerCtx<'src> {
                 }
 
                 // Back-edge: re-evaluate scrutinee and re-check pattern.
-                self.instrs.push(Instr::Branch(header_label));
+                self.instrs.push(Instr::Branch { target: header_label, fls: "§6.15.4" });
 
-                self.instrs.push(Instr::Label(exit_label));
+                self.instrs.push(Instr::Label { id: exit_label, fls: "§6.15.4" });
                 self.loop_stack.pop();
 
                 // Restore register watermark (see While above for rationale).
@@ -16200,7 +16137,7 @@ impl<'src> LowerCtx<'src> {
                     // ── Condition: counter < length ───────────────────────────────────
                     // FLS §4.9: Length lives at ptr_slot + 1 (runtime load).
                     // FLS §6.1.2:37–45: This load and compare are runtime instructions.
-                    self.instrs.push(Instr::Label(cond_label));
+                    self.instrs.push(Instr::Label { id: cond_label, fls: "§6.15.1" });
                     let r_counter = self.alloc_reg()?;
                     self.instrs.push(Instr::Load { dst: r_counter, slot: counter_slot });
                     let r_len = self.alloc_reg()?;
@@ -16208,7 +16145,7 @@ impl<'src> LowerCtx<'src> {
                     self.instrs.push(Instr::Load { dst: r_len, slot: ptr_slot + 1 });
                     let r_cmp = self.alloc_reg()?;
                     self.instrs.push(Instr::BinOp { op: IrBinOp::Lt, dst: r_cmp, lhs: r_counter, rhs: r_len, ty: IrTy::Bool });
-                    self.instrs.push(Instr::CondBranch { reg: r_cmp, label: exit_label });
+                    self.instrs.push(Instr::CondBranch { reg: r_cmp, label: exit_label, fls: "§6.15.1" });
 
                     // ── Bind element ──────────────────────────────────────────────────
                     // Compute base_ptr + counter * 8, then either:
@@ -16247,7 +16184,7 @@ impl<'src> LowerCtx<'src> {
                     self.lower_block_to_value(body, &IrTy::Unit)?;
 
                     // ── Increment: counter += 1 ───────────────────────────────────────
-                    self.instrs.push(Instr::Label(incr_label));
+                    self.instrs.push(Instr::Label { id: incr_label, fls: "§6.15.1" });
                     let r_cnt = self.alloc_reg()?;
                     self.instrs.push(Instr::Load { dst: r_cnt, slot: counter_slot });
                     let r_one = self.alloc_reg()?;
@@ -16255,10 +16192,10 @@ impl<'src> LowerCtx<'src> {
                     let r_next = self.alloc_reg()?;
                     self.instrs.push(Instr::BinOp { op: IrBinOp::Add, dst: r_next, lhs: r_cnt, rhs: r_one, ty: IrTy::Addr });
                     self.instrs.push(Instr::Store { src: r_next, slot: counter_slot });
-                    self.instrs.push(Instr::Branch(cond_label));
+                    self.instrs.push(Instr::Branch { target: cond_label, fls: "§6.15.1" });
 
                     // Exit.
-                    self.instrs.push(Instr::Label(exit_label));
+                    self.instrs.push(Instr::Label { id: exit_label, fls: "§6.15.1" });
                     self.loop_stack.pop();
                     self.next_reg = reg_mark;
 
@@ -16433,14 +16370,14 @@ impl<'src> LowerCtx<'src> {
 
                     // ── Condition: counter < arr_len ──────────────────────────────────
                     // FLS §6.15.1: The loop terminates when all elements have been visited.
-                    self.instrs.push(Instr::Label(cond_label));
+                    self.instrs.push(Instr::Label { id: cond_label, fls: "§6.15.1" });
                     let counter_reg = self.alloc_reg()?;
                     self.instrs.push(Instr::Load { dst: counter_reg, slot: counter_slot });
                     let len_reg = self.alloc_reg()?;
                     self.instrs.push(Instr::LoadImm(len_reg, arr_len as i32));
                     let cmp_reg = self.alloc_reg()?;
                     self.instrs.push(Instr::BinOp { op: IrBinOp::Lt, dst: cmp_reg, lhs: counter_reg, rhs: len_reg, ty: IrTy::Bool });
-                    self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: exit_label });
+                    self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: exit_label, fls: "§6.15.1" });
 
                     // ── Bind element ──────────────────────────────────────────────────
                     // For `arr` / `&arr`: load the element value into elem_slot.
@@ -16506,7 +16443,7 @@ impl<'src> LowerCtx<'src> {
                     // This is the `continue` target. After incrementing, execution falls
                     // through to the back-edge Branch → cond_label.
                     // FLS §6.15.7: `continue` transfers control to the loop increment.
-                    self.instrs.push(Instr::Label(incr_label));
+                    self.instrs.push(Instr::Label { id: incr_label, fls: "§6.15.1" });
                     let counter_reg2 = self.alloc_reg()?;
                     self.instrs.push(Instr::Load { dst: counter_reg2, slot: counter_slot });
                     let one_reg = self.alloc_reg()?;
@@ -16522,10 +16459,10 @@ impl<'src> LowerCtx<'src> {
                     self.instrs.push(Instr::Store { src: next_counter, slot: counter_slot });
 
                     // Back-edge to condition.
-                    self.instrs.push(Instr::Branch(cond_label));
+                    self.instrs.push(Instr::Branch { target: cond_label, fls: "§6.15.1" });
 
                     // Exit label: loop done, restore register watermark.
-                    self.instrs.push(Instr::Label(exit_label));
+                    self.instrs.push(Instr::Label { id: exit_label, fls: "§6.15.1" });
                     self.loop_stack.pop();
                     self.next_reg = reg_mark;
 
@@ -16583,7 +16520,7 @@ impl<'src> LowerCtx<'src> {
                 self.locals.insert(pat_name, i_slot);
 
                 // Condition check: load loop var and end bound, compare.
-                self.instrs.push(Instr::Label(cond_label));
+                self.instrs.push(Instr::Label { id: cond_label, fls: "§6.15.1" });
                 let i_reg = self.alloc_reg()?;
                 self.instrs.push(Instr::Load { dst: i_reg, slot: i_slot });
                 let end_reg2 = self.alloc_reg()?;
@@ -16594,7 +16531,7 @@ impl<'src> LowerCtx<'src> {
                 let cmp_op = if inclusive { IrBinOp::Le } else { IrBinOp::Lt };
                 self.instrs.push(Instr::BinOp { op: cmp_op, dst: cmp_reg, lhs: i_reg, rhs: end_reg2, ty: IrTy::Bool });
                 // Exit if condition is false (i >= end for exclusive, i > end for inclusive).
-                self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: exit_label });
+                self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: exit_label, fls: "§6.15.1" });
 
                 // Lower body. The body result is discarded (for loops yield `()`).
                 // FLS §6.15.1: "A for loop evaluates to the unit type."
@@ -16603,7 +16540,7 @@ impl<'src> LowerCtx<'src> {
                 // Increment step: i += 1. This is the `continue` target.
                 // FLS §6.15.7: After a `continue`, the loop variable is incremented
                 // before the condition is re-evaluated.
-                self.instrs.push(Instr::Label(incr_label));
+                self.instrs.push(Instr::Label { id: incr_label, fls: "§6.15.1" });
                 let i_reg2 = self.alloc_reg()?;
                 self.instrs.push(Instr::Load { dst: i_reg2, slot: i_slot });
                 let one_reg = self.alloc_reg()?;
@@ -16613,10 +16550,10 @@ impl<'src> LowerCtx<'src> {
                 self.instrs.push(Instr::Store { src: inc_reg, slot: i_slot });
 
                 // Back-edge: jump to condition check.
-                self.instrs.push(Instr::Branch(cond_label));
+                self.instrs.push(Instr::Branch { target: cond_label, fls: "§6.15.1" });
 
                 // Exit label: loop done.
-                self.instrs.push(Instr::Label(exit_label));
+                self.instrs.push(Instr::Label { id: exit_label, fls: "§6.15.1" });
 
                 self.loop_stack.pop();
 
@@ -16691,7 +16628,7 @@ impl<'src> LowerCtx<'src> {
                 self.loop_stack.push(LoopCtx { label: label.clone(), header_label, exit_label, break_slot, break_ret_ty: *ret_ty, is_named_block: false });
 
                 // Loop top: the branch-back target.
-                self.instrs.push(Instr::Label(header_label));
+                self.instrs.push(Instr::Label { id: header_label, fls: "§6.15.2" });
 
                 // Execute body. Value is discarded; only side effects matter.
                 // The `break <value>` arms inside lower_expr will store to break_slot.
@@ -16699,10 +16636,10 @@ impl<'src> LowerCtx<'src> {
 
                 // Back-edge: jump unconditionally to the top of the loop.
                 // FLS §6.15.2: execution continues indefinitely until `break`.
-                self.instrs.push(Instr::Branch(header_label));
+                self.instrs.push(Instr::Branch { target: header_label, fls: "§6.15.2" });
 
                 // Exit: where `break` transfers control.
-                self.instrs.push(Instr::Label(exit_label));
+                self.instrs.push(Instr::Label { id: exit_label, fls: "§6.15.2" });
 
                 self.loop_stack.pop();
 
@@ -16813,7 +16750,7 @@ impl<'src> LowerCtx<'src> {
 
                 // Exit label: where `break 'label` branches to.
                 // Fall-through also arrives here after the optional tail store above.
-                self.instrs.push(Instr::Label(exit_label));
+                self.instrs.push(Instr::Label { id: exit_label, fls: "§6.4.3" });
 
                 self.loop_stack.pop();
 
@@ -16968,7 +16905,7 @@ impl<'src> LowerCtx<'src> {
                 }
 
                 // Emit the branch to the loop exit.
-                self.instrs.push(Instr::Branch(exit_label));
+                self.instrs.push(Instr::Branch { target: exit_label, fls: "§6.15.6" });
 
                 // FLS §6.15.6: break has type `!` (never). Approximated as Unit.
                 Ok(IrValue::Unit)
@@ -17016,7 +16953,7 @@ impl<'src> LowerCtx<'src> {
                         ))?
                 };
 
-                self.instrs.push(Instr::Branch(header_label));
+                self.instrs.push(Instr::Branch { target: header_label, fls: "§6.15.7" });
 
                 // FLS §6.15.7: continue has type `!` (never). Approximated as Unit.
                 Ok(IrValue::Unit)
@@ -17105,22 +17042,22 @@ impl<'src> LowerCtx<'src> {
                 let lhs_reg = self.val_to_reg(lhs_val)?;
 
                 // Short-circuit: if LHS is false (0), skip RHS entirely.
-                self.instrs.push(Instr::CondBranch { reg: lhs_reg, label: false_label });
+                self.instrs.push(Instr::CondBranch { reg: lhs_reg, label: false_label, fls: "§6.17" });
 
                 // ── LHS is true: evaluate RHS and use it as the result ────────────
                 let rhs_val = self.lower_expr(rhs, &IrTy::I32)?;
                 let rhs_reg = self.val_to_reg(rhs_val)?;
                 self.instrs.push(Instr::Store { src: rhs_reg, slot: phi_slot });
-                self.instrs.push(Instr::Branch(end_label));
+                self.instrs.push(Instr::Branch { target: end_label, fls: "§6.17" });
 
                 // ── LHS was false: result = 0 ─────────────────────────────────────
-                self.instrs.push(Instr::Label(false_label));
+                self.instrs.push(Instr::Label { id: false_label, fls: "§6.17" });
                 let zero_reg = self.alloc_reg()?;
                 self.instrs.push(Instr::LoadImm(zero_reg, 0));
                 self.instrs.push(Instr::Store { src: zero_reg, slot: phi_slot });
 
                 // ── End: load and return result ───────────────────────────────────
-                self.instrs.push(Instr::Label(end_label));
+                self.instrs.push(Instr::Label { id: end_label, fls: "§6.17" });
                 let result_reg = self.alloc_reg()?;
                 self.instrs.push(Instr::Load { dst: result_reg, slot: phi_slot });
                 Ok(IrValue::Reg(result_reg))
@@ -17162,20 +17099,20 @@ impl<'src> LowerCtx<'src> {
                 let lhs_reg = self.val_to_reg(lhs_val)?;
 
                 // Short-circuit: if LHS is false (0), must evaluate RHS.
-                self.instrs.push(Instr::CondBranch { reg: lhs_reg, label: rhs_label });
+                self.instrs.push(Instr::CondBranch { reg: lhs_reg, label: rhs_label, fls: "§6.17" });
 
                 // ── LHS is true: result = LHS (which is 1) ───────────────────────
                 self.instrs.push(Instr::Store { src: lhs_reg, slot: phi_slot });
-                self.instrs.push(Instr::Branch(end_label));
+                self.instrs.push(Instr::Branch { target: end_label, fls: "§6.17" });
 
                 // ── LHS was false: evaluate RHS and use it as result ──────────────
-                self.instrs.push(Instr::Label(rhs_label));
+                self.instrs.push(Instr::Label { id: rhs_label, fls: "§6.17" });
                 let rhs_val = self.lower_expr(rhs, &IrTy::I32)?;
                 let rhs_reg = self.val_to_reg(rhs_val)?;
                 self.instrs.push(Instr::Store { src: rhs_reg, slot: phi_slot });
 
                 // ── End: load and return result ───────────────────────────────────
-                self.instrs.push(Instr::Label(end_label));
+                self.instrs.push(Instr::Label { id: end_label, fls: "§6.17" });
                 let result_reg = self.alloc_reg()?;
                 self.instrs.push(Instr::Load { dst: result_reg, slot: phi_slot });
                 Ok(IrValue::Reg(result_reg))

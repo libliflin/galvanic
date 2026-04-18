@@ -348,7 +348,9 @@ pub enum IrBinOp {
 /// Grows by exactly the instructions needed for each new milestone program.
 /// Milestone 11 adds `LoadImm` and `BinOp` to emit real arithmetic code.
 /// Milestone 12 adds `Store` and `Load` for let bindings.
-/// Milestone 13 adds `Label`, `Branch`, and `CondBranch` for if/else control flow.
+/// Milestone 13 adds `Label`, `Branch`, and `CondBranch` for control flow (§6.17 if/else,
+///   §6.15.x loops). Each carries a `fls: &'static str` provenance tag so assembly
+///   comments cite the correct FLS section at the site of emission.
 /// Milestone 14 adds `Call` for function call expressions (FLS §6.12.1).
 /// Milestone 16 adds comparison ops to `IrBinOp` and while loop lowering.
 /// Milestone 21 adds bitwise and shift ops to `IrBinOp` (FLS §6.5.6, §6.5.7).
@@ -439,8 +441,13 @@ pub enum Instr {
 
     /// Define a branch target label.
     ///
-    /// `Label(n)` emits `.L{n}:` in the assembly output. Labels are referenced
-    /// by `Branch` and `CondBranch` instructions.
+    /// `Label { id, fls }` emits `.L{id}:` in the assembly output. Labels are
+    /// referenced by `Branch` and `CondBranch` instructions.
+    ///
+    /// The `fls` field carries the FLS section that originated this label
+    /// (e.g., `"§6.17"` for if-expression targets, `"§6.15.3"` for while-loop
+    /// headers, `"§6.15.6"` for break exit points). Codegen uses it to emit
+    /// the correct FLS citation in the assembly comment.
     ///
     /// FLS §6.17: if expressions require forward labels for the else and end
     /// of the conditional. Labels have no runtime cost — they are assembler
@@ -448,25 +455,43 @@ pub enum Instr {
     ///
     /// Cache-line note: labels carry no machine code; they do not consume
     /// space in the instruction stream.
-    Label(u32),
+    Label {
+        /// The label ID — emitted as `.L{id}:`.
+        id: u32,
+        /// FLS section that originated this label (e.g., `"§6.15.3"`).
+        fls: &'static str,
+    },
 
     /// Unconditional branch to a label.
     ///
-    /// `Branch(n)` → `b .L{n}` on ARM64.
+    /// `Branch { target, fls }` → `b .L{target}` on ARM64.
+    ///
+    /// The `fls` field carries the FLS section that originated this branch
+    /// (e.g., `"§6.17"` for if-expression skip branches, `"§6.15.3"` for
+    /// while-loop back-edges, `"§6.15.6"` for break, `"§6.15.7"` for continue).
     ///
     /// FLS §6.17: After the then-branch of an if expression, the else-branch
     /// must be skipped via an unconditional branch to the end label.
     ///
     /// Cache-line note: ARM64 `b` is a 4-byte instruction.
-    Branch(u32),
+    Branch {
+        /// The label to branch to — emitted as `b .L{target}`.
+        target: u32,
+        /// FLS section that originated this branch (e.g., `"§6.15.6"`).
+        fls: &'static str,
+    },
 
     /// Conditional branch: jump to `label` if `reg` is zero (false).
     ///
-    /// `CondBranch { reg, label }` → `cbz x{reg}, .L{label}` on ARM64.
+    /// `CondBranch { reg, label, fls }` → `cbz x{reg}, .L{label}` on ARM64.
     ///
     /// ARM64 `cbz` ("compare and branch if zero") combines a compare-with-zero
     /// and a branch in a single 4-byte instruction, avoiding the need for a
     /// separate `cmp` instruction for boolean conditions.
+    ///
+    /// The `fls` field carries the FLS section that originated this branch
+    /// (e.g., `"§6.17"` for if-expression conditions, `"§6.15.3"` for while-loop
+    /// condition checks, `"§6.18"` for match-arm pattern checks).
     ///
     /// FLS §6.17: The condition expression of an if is a boolean value. The
     /// branch jumps to the else block (or past the if body) when the condition
@@ -479,6 +504,8 @@ pub enum Instr {
         reg: u8,
         /// The label to branch to when `reg` is zero (condition is false).
         label: u32,
+        /// FLS section that originated this conditional branch (e.g., `"§6.18"`).
+        fls: &'static str,
     },
 
     /// Arithmetic negation: `dst = -src` (two's complement).
