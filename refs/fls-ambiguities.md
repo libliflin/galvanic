@@ -769,16 +769,43 @@ require the auto-deref that is not yet implemented.
 lifetime of the temporary.
 
 **Galvanic's choice:** Field access is restricted to named local variables and
-chained field access expressions. Temporary struct values returned from
-function calls are not yet supported as receivers for field access — the
-caller must assign to a named binding first.
+chained field access expressions. Temporary values returned from function calls
+are not yet supported as receivers for field access — the caller must assign to
+a named binding first. This behavior differs by receiver type:
 
-**Source:** `src/lower.rs:17213`
+- **Struct field access** (`p.x`): works when the binding is a named local
+  with a known struct type. `let p = make_point(3, 7); p.x` compiles correctly.
+  `make_point(3, 7).x` (temporary receiver) does not.
 
-**Minimal reproducer:** Not demonstrable via assembly — the finding manifests as
-a compile error, not assembly output. `fn make() -> Point { ... }; make().x`
-is rejected by the lowering stage before any code is emitted. Assign to a
-binding first: `let p = make(); p.x` works correctly.
+- **Tuple index access** (`p.0`): not yet supported on named bindings from
+  call results. `let p = make_pair(3, 7); p.0` fails — the compiler does not
+  track that `p` is tuple-typed when binding from a call result. Use tuple
+  destructuring instead: `let (x, y) = make_pair(3, 7)` works correctly.
+
+**Source:** `src/lower.rs:6789`
+
+**Minimal reproducer:**
+
+Failing case — tuple index on named binding (compile error, not assembly):
+```text
+fn make_pair(a: i32, b: i32) -> (i32, i32) { (a, b) }
+fn main() -> i32 {
+    let p = make_pair(3, 7);
+    p.0 + p.1 - 10
+}
+```
+Run: `cargo run -- /tmp/failing.rs` →
+`error: lower failed in 'main': not yet supported: tuple index access on non-destructured binding: '0' (FLS §6.10, §6.13)`
+
+Working alternative — use tuple destructuring in the let pattern:
+```rust
+fn make_pair(a: i32, b: i32) -> (i32, i32) { (a, b) }
+fn main() -> i32 {
+    let (x, y) = make_pair(3, 7);
+    x + y - 10
+}
+```
+Run: `cargo run -- /tmp/working.rs` → compiles; `qemu-aarch64 ./out` exits 0.
 
 ---
 
