@@ -698,6 +698,54 @@ fn lifetime_bound_parse_error_cites_fls() {
 }
 
 #[test]
+fn where_clause_lifetime_bound_parses_cleanly() {
+    // FLS §4.14: `where T: 'static` and `where T: 'a + Trait` are valid
+    // where-clause predicates. galvanic discards all where-clause bounds —
+    // this test confirms the Lifetime token in bound position no longer
+    // produces "expected OpenBrace, found Lifetime".
+    let mut tmp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
+    write!(
+        tmp,
+        "fn foo<T>(x: T) -> i32 where T: 'static {{ 0 }}\nfn main() {{}}\n"
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_galvanic"))
+        .arg(tmp.path())
+        .output()
+        .expect("failed to run galvanic");
+
+    assert!(
+        output.status.success(),
+        "expected exit 0 for where T: 'static, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn where_clause_mixed_lifetime_and_trait_bound_parses_cleanly() {
+    // FLS §4.14: `where T: 'static + Clone` mixes a lifetime bound and a trait
+    // bound separated by `+`. Both tokens must be consumed correctly.
+    let mut tmp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
+    write!(
+        tmp,
+        "fn foo<T>(x: i32) -> i32 where T: 'static + Copy {{ x }}\nfn main() {{}}\n"
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_galvanic"))
+        .arg(tmp.path())
+        .output()
+        .expect("failed to run galvanic");
+
+    assert!(
+        output.status.success(),
+        "expected exit 0 for where T: 'static + Copy, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn lower_source_all_unsupported_strings_cite_fls() {
     // Static invariant: every LowerError::Unsupported( call site in src/lower.rs
     // must supply a message string that contains "(FLS §". This ensures every
