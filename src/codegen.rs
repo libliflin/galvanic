@@ -418,15 +418,237 @@ fn emit_fn(out: &mut String, func: &crate::ir::IrFn) -> Result<(), CodegenError>
         )?;
     }
 
+    // Pre-scan the body to map label IDs to cumulative ARM64 instruction counts.
+    //
+    // This enables back-edge detection: a Branch whose target label has a smaller
+    // cumulative count than the branch itself is a loop back-edge. The cumulative
+    // count at the label is the number of ARM64 instructions emitted before the
+    // loop header. The count at the Branch is the number emitted before the branch.
+    //
+    // Cache-line note: back-edge annotation documents the loop body footprint —
+    // specifically, how many ARM64 instructions span from the loop header label
+    // to the back-edge branch (inclusive), and how many 64-byte cache lines that
+    // occupies. A loop body that crosses a cache-line boundary requires the
+    // instruction fetch unit to issue two separate cache-line fills per iteration.
+    let mut label_cumulative: std::collections::HashMap<u32, u32> =
+        std::collections::HashMap::new();
+    {
+        let mut cum: u32 = 0;
+        for instr in &func.body {
+            if let Instr::Label { id, .. } = instr {
+                label_cumulative.insert(*id, cum);
+            }
+            cum += machine_instr_count(instr);
+        }
+    }
+
     // FLS §6.23: label counter for MIN/-1 overflow guards (Claim 4q).
     // Each `sdiv`/`srem` site needs a unique local label; this counter
     // generates `.Lsdiv_ok_{fn_name}_{n}` / `.Lsrem_ok_{fn_name}_{n}`.
     let mut label_ctr: usize = 0;
+    let mut cumulative: u32 = 0;
     for instr in &func.body {
+        // Back-edge detection: an unconditional Branch whose target label appears
+        // earlier in the instruction stream (label_cumulative[target] < cumulative)
+        // is a loop back-edge. Emit the loop body cache-line footprint annotation
+        // directly and skip the generic emit_instr path for this instruction.
+        if let Instr::Branch { target, fls } = instr
+            && let Some(&header_cum) = label_cumulative.get(target)
+            && header_cum < cumulative
+        {
+            // Count = instructions from loop header to back-edge inclusive.
+            // Formula: (instrs before branch) - (instrs before header) + 1 (branch itself).
+            let body_instrs = cumulative - header_cum + 1;
+            let body_bytes = body_instrs * 4;
+            let cache_lines = body_bytes.div_ceil(64);
+            writeln!(
+                out,
+                "    b       .L{target:<24} // FLS {fls}: back-edge — cache: loop body = {body_instrs} instr × 4 B = {body_bytes} B, spans {cache_lines} cache line(s)"
+            )?;
+            cumulative += 1;
+            continue;
+        }
         emit_instr(out, instr, fsize, func.saves_lr, &func.name, &mut label_ctr)?;
+        cumulative += machine_instr_count(instr);
     }
 
     Ok(())
+}
+
+/// Count the number of ARM64 machine instructions emitted by one IR instruction.
+///
+/// This mirrors the structure of `emit_instr` but returns a count instead of
+/// writing text. Used by `emit_fn` to detect back-edge branches and annotate
+/// them with the loop body's instruction count and cache-line footprint.
+///
+/// Labels are not machine instructions (they have zero footprint); all other
+/// IR instructions emit at least one ARM64 instruction. Some IR instructions
+/// expand into multiple machine instructions (e.g., `BinOp(Add, I32)` emits
+/// `add` + overflow guard `cmp` + `b.ne` = 3 instructions).
+///
+/// Cache-line note: ARM64 instructions are 4 bytes each; 16 fill one 64-byte
+/// cache line. Multiplying the returned count by 4 gives the byte footprint.
+fn machine_instr_count(instr: &Instr) -> u32 {
+    match instr {
+        // Labels have zero machine-instruction footprint.
+        Instr::Label { .. } => 0,
+
+        // Simple one-instruction forms.
+        Instr::Branch { .. }
+        | Instr::CondBranch { .. }
+        | Instr::Store { .. }
+        | Instr::Load { .. }
+        | Instr::StoreF64 { .. }
+        | Instr::LoadF64Slot { .. }
+        | Instr::StoreF32 { .. }
+        | Instr::LoadF32Slot { .. }
+        | Instr::StorePtr { .. }
+        | Instr::LoadPtr { .. }
+        | Instr::AddrOf { .. }
+        | Instr::Neg { .. }
+        | Instr::FNegF64 { .. }
+        | Instr::FNegF32 { .. }
+        | Instr::Not { .. }
+        | Instr::BoolNot { .. }
+        | Instr::TruncU8 { .. }
+        | Instr::SextI8 { .. }
+        | Instr::TruncU16 { .. }
+        | Instr::SextI16 { .. }
+        | Instr::F64ToI32 { .. }
+        | Instr::F32ToI32 { .. }
+        | Instr::I32ToF64 { .. }
+        | Instr::I32ToF32 { .. }
+        | Instr::F32ToF64 { .. }
+        | Instr::F64ToF32 { .. }
+        | Instr::F64BinOp { .. }
+        | Instr::F32BinOp { .. } => 1,
+
+        // Two-instruction forms.
+        Instr::AddrOfIndexed { .. }
+        | Instr::LoadFnAddr { .. }
+        | Instr::FCmpF64 { .. }
+        | Instr::FCmpF32 { .. } => 2,
+
+        // Three-instruction forms (ADRP + ADD + LDR/FMR).
+        Instr::LoadStatic { .. }
+        | Instr::LoadStaticF64 { .. }
+        | Instr::LoadStaticF32 { .. }
+        | Instr::LoadF64Const { .. }
+        | Instr::LoadF32Const { .. } => 3,
+
+        // LoadImm: small immediates = 1 instruction; large = 2 (hi16-only) or 3.
+        // Matches emit_imm32's branching: [-65536, 65535] → mov; else movz[+movk]+sxtw.
+        Instr::LoadImm(_, n) => {
+            if (-65536..=65535).contains(n) {
+                1
+            } else {
+                let lo16 = (*n as u32) & 0xFFFF;
+                if lo16 == 0 { 2 } else { 3 }
+            }
+        }
+
+        // Indexed load/store: base add + ldr/str = 2; with bounds check adds cmp + b.hs = 4.
+        Instr::LoadIndexed { len, .. }
+        | Instr::StoreIndexed { len, .. }
+        | Instr::LoadIndexedF64 { len, .. }
+        | Instr::LoadIndexedF32 { len, .. } => {
+            if *len > 0 { 4 } else { 2 }
+        }
+
+        // BinOp: count depends on operator and type.
+        Instr::BinOp { op, ty, .. } => match op {
+            // Add/Sub/Mul with I32: arith + cmp sxtw + b.ne = 3. Other types: 1.
+            IrBinOp::Add | IrBinOp::Sub | IrBinOp::Mul => {
+                if *ty == IrTy::I32 { 3 } else { 1 }
+            }
+            // Signed div: cbz + movz + sxtw + cmp + b.ne + cmn + b.ne + b + sdiv = 9.
+            IrBinOp::Div => 9,
+            // Signed rem: same guards + sdiv + msub = 11.
+            IrBinOp::Rem => 11,
+            // Unsigned div: cbz + udiv = 2.
+            IrBinOp::UDiv => 2,
+            // Comparison: cmp + cset = 2.
+            IrBinOp::Lt
+            | IrBinOp::Le
+            | IrBinOp::Gt
+            | IrBinOp::Ge
+            | IrBinOp::Eq
+            | IrBinOp::Ne => 2,
+            // Bitwise: one instruction.
+            IrBinOp::BitAnd | IrBinOp::BitOr | IrBinOp::BitXor => 1,
+            // Shifts: cmp + b.hs + shift = 3.
+            IrBinOp::Shl | IrBinOp::Shr | IrBinOp::UShr => 3,
+        },
+
+        // Call: moves for misplaced args + bl + optional result move.
+        Instr::Call { dst, args, float_args, float_ret, .. } => {
+            let int_moves = args
+                .iter()
+                .enumerate()
+                .filter(|(i, a)| **a as usize != *i)
+                .count() as u32;
+            let float_moves = float_args
+                .iter()
+                .enumerate()
+                .filter(|(i, a)| **a as usize != *i)
+                .count() as u32;
+            let result_move = match float_ret {
+                None => u32::from(*dst != 0),
+                Some(_) => u32::from(*dst != 0),
+            };
+            int_moves + float_moves + 1 + result_move
+        }
+
+        // Indirect call: arg moves + ldr (fn ptr) + blr + optional result move.
+        Instr::CallIndirect { dst, args, .. } => {
+            let moves = args
+                .iter()
+                .enumerate()
+                .filter(|(i, a)| **a as usize != *i)
+                .count() as u32;
+            moves + 2 + u32::from(*dst != 0)
+        }
+
+        // Vtable dispatch: ldr vtable + ldr method + ldr data + blr + optional mov.
+        Instr::CallVtable { dst, .. } => 4 + u32::from(*dst != 0),
+
+        // CallRetFatPtr: arg moves + bl + 2 stores (data ptr + vtable ptr).
+        Instr::CallRetFatPtr { args, .. } => {
+            let moves = args
+                .iter()
+                .enumerate()
+                .filter(|(i, a)| **a as usize != *i)
+                .count() as u32;
+            moves + 3
+        }
+
+        // CallMut: arg moves + bl + n_fields write-back stores.
+        Instr::CallMut { args, n_fields, .. } => {
+            let moves = args
+                .iter()
+                .enumerate()
+                .filter(|(i, a)| **a as usize != *i)
+                .count() as u32;
+            moves + 1 + *n_fields as u32
+        }
+
+        // CallMutReturn: arg moves + bl + n_fields stores + optional capture move.
+        Instr::CallMutReturn { args, n_fields, dst, .. } => {
+            let moves = args
+                .iter()
+                .enumerate()
+                .filter(|(i, a)| **a as usize != *i)
+                .count() as u32;
+            let capture = u32::from(*dst != *n_fields);
+            moves + 1 + *n_fields as u32 + capture
+        }
+
+        // RetFields: n_fields ldr + epilogue (add sp if frame > 0) + optional ldr x30 + ret.
+        // Ret/RetFields/RetFieldsAndValue won't appear in a loop body, but count them anyway.
+        Instr::RetFields { n_fields, .. } => *n_fields as u32 + 1, // +1 for ret (simplified)
+        Instr::RetFieldsAndValue { n_fields, .. } => *n_fields as u32 + 2,
+        Instr::Ret(_) => 1, // Simplified: ret + possible moves (never in a loop body)
+    }
 }
 
 /// Emit one instruction.
