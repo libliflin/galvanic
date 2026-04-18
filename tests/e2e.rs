@@ -35944,3 +35944,98 @@ fn refs_reproducers_all_compile() {
         let _asm = compile_to_asm(block.as_str());
     }
 }
+
+// =============================================================================
+// Cycle 018 — FLS provenance in control-flow IR (Label/Branch/CondBranch)
+//   Assert that emitted assembly cites the correct FLS section for each
+//   control-flow construct (§6.15.x for loops, §6.17 for if/if-let,
+//   §6.18 for match arms). Guards against the regression where all
+//   control-flow was incorrectly annotated §6.17.
+// =============================================================================
+
+/// While loop control flow must cite §6.15.3, not §6.17.
+///
+/// FLS §6.15.3: While loop condition, back-edge, and exit labels all belong
+/// to the while loop construct, not the if-expression construct.
+#[test]
+fn while_loop_branches_cite_fls_6_15_3() {
+    let asm = compile_to_asm("fn sum_to(n: i32) -> i32 { let mut i = 0; let mut acc = 0; while i < n { acc = acc + i; i = i + 1; } acc }\nfn main() -> i32 { sum_to(5) }\n");
+    assert!(asm.contains("§6.15.3"), "expected §6.15.3 citation on while loop branches, got:\n{asm}");
+    // The while loop back-edge and exit must not claim §6.17 (if-expression).
+    // Focus on the sum_to function only — main has no branches.
+    // Count §6.17 sites in the sum_to function (before main starts).
+    let sum_to_asm = asm.split("sum_to:").nth(1).unwrap_or("");
+    let count_617 = sum_to_asm.matches("§6.17").count();
+    assert_eq!(count_617, 0, "while-only function must have no §6.17 citations, found {count_617} in sum_to:\n{sum_to_asm}");
+}
+
+/// Infinite loop control flow must cite §6.15.2, not §6.17.
+///
+/// FLS §6.15.2: The loop back-edge and exit label belong to the infinite
+/// loop construct.
+#[test]
+fn infinite_loop_branches_cite_fls_6_15_2() {
+    let asm = compile_to_asm("fn count_up(limit: i32) -> i32 { let mut n = 0; loop { n = n + 1; if n >= limit { break; } } n }\nfn main() -> i32 { count_up(3) }\n");
+    assert!(asm.contains("§6.15.2"), "expected §6.15.2 citation on infinite loop back-edge/header, got:\n{asm}");
+}
+
+/// Break expression must cite §6.15.6.
+///
+/// FLS §6.15.6: The branch emitted for a break expression targets the loop
+/// exit and must carry the §6.15.6 provenance tag.
+#[test]
+fn break_branch_cites_fls_6_15_6() {
+    let asm = compile_to_asm("fn first_match(n: i32) -> i32 { let mut i = 0; loop { if i >= n { break; } i = i + 1; } i }\nfn main() -> i32 { first_match(5) }\n");
+    assert!(asm.contains("§6.15.6"), "expected §6.15.6 citation on break branch, got:\n{asm}");
+}
+
+/// Continue expression must cite §6.15.7.
+///
+/// FLS §6.15.7: The branch emitted for a continue expression transfers
+/// control to the loop header (or increment step for for-loops).
+#[test]
+fn continue_branch_cites_fls_6_15_7() {
+    let asm = compile_to_asm("fn skip_odds(n: i32) -> i32 { let mut i = 0; let mut acc = 0; while i < n { i = i + 1; if i == 3 { continue; } acc = acc + i; } acc }\nfn main() -> i32 { skip_odds(5) }\n");
+    assert!(asm.contains("§6.15.7"), "expected §6.15.7 citation on continue branch, got:\n{asm}");
+}
+
+/// For loop control flow must cite §6.15.1, not §6.17.
+///
+/// FLS §6.15.1: For loop condition, increment, and back-edge labels belong
+/// to the for loop construct.
+#[test]
+fn for_loop_branches_cite_fls_6_15_1() {
+    let asm = compile_to_asm("fn range_sum(n: i32) -> i32 { let mut acc = 0; for x in 0..n { acc = acc + x; } acc }\nfn main() -> i32 { range_sum(4) }\n");
+    assert!(asm.contains("§6.15.1"), "expected §6.15.1 citation on for loop branches, got:\n{asm}");
+    // A for-loop-only function must not cite §6.17 (reserved for if expressions).
+    let range_sum_asm = asm.split("range_sum:").nth(1).unwrap_or("");
+    let count_617 = range_sum_asm.matches("§6.17").count();
+    assert_eq!(count_617, 0, "for-loop-only function must have no §6.17 citations, found {count_617} in range_sum:\n{range_sum_asm}");
+}
+
+/// If expression control flow must still cite §6.17.
+///
+/// Verifies that the §6.17 provenance was not accidentally removed when
+/// fixing loop citations.
+#[test]
+fn if_expression_branches_cite_fls_6_17() {
+    let asm = compile_to_asm("fn maxval(a: i32, b: i32) -> i32 { if a > b { a } else { b } }\nfn main() -> i32 { maxval(3, 5) }\n");
+    assert!(asm.contains("§6.17"), "expected §6.17 citation on if expression branches, got:\n{asm}");
+    // The maxval function (if-only) must not cite §6.15 (reserved for loops).
+    let maxval_asm = asm.split("maxval:").nth(1).unwrap_or("");
+    assert!(!maxval_asm.contains("§6.15"), "if-only function must not cite §6.15, got:\n{maxval_asm}");
+}
+
+/// Match expression arm pattern checks must cite §6.18, not §6.17.
+///
+/// FLS §6.18: Match arm pattern evaluation and guard checks belong to the
+/// match expression construct.
+#[test]
+fn match_arm_branches_cite_fls_6_18() {
+    let asm = compile_to_asm("fn classify(x: i32) -> i32 { match x { 0 => 10, 1 => 20, _ => 30 } }\nfn main() -> i32 { classify(1) }\n");
+    assert!(asm.contains("§6.18"), "expected §6.18 citation on match arm branches, got:\n{asm}");
+    // The classify function (match-only) must not cite §6.17 (reserved for if expressions).
+    let classify_asm = asm.split("classify:").nth(1).unwrap_or("");
+    let count_617 = classify_asm.matches("§6.17").count();
+    assert_eq!(count_617, 0, "match-only function must have no §6.17 citations, found {count_617} in classify:\n{classify_asm}");
+}
