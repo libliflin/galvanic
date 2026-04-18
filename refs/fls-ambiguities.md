@@ -405,11 +405,11 @@ fn classify(x: i32) -> i32 {
 }
 fn main() -> i32 { classify(5) }
 ```
-Assembly signature: in `classify:`, the range check (`cmp x0, #1` /
-`b.lt` / `cmp x0, #10` / `b.gt`) appears *before* the binding store
-(`str x0, [sp, #N]`) — confirms check-first ordering. The mismatch path
-(value outside 1..=10) falls to the wildcard arm with no store to the
-binding slot.
+Assembly signature: in `classify:`, the range check (`cmp` for lower bound /
+`cset ge` / `cmp` for upper bound / `cset le` / `and` to combine / `cbz` on
+mismatch) appears *before* the binding store (`str x7, [sp, #N]`) — confirms
+check-first ordering. The mismatch path (value outside 1..=10) falls to the
+wildcard arm after the `cbz` with no store to the binding slot.
 
 ---
 
