@@ -36454,3 +36454,22 @@ fn fls_8_2_binary_expr_stmt_emits_runtime_instr() {
         "must not constant-fold `x + 1`:\n{asm}"
     );
 }
+
+/// FLS §8.2 + §6.4: Block expression as a statement must propagate the block's
+/// tail-expression type so that `{ 42 };` does not fail with "integer literal
+/// with non-integer type".
+///
+/// `infer_natural_ty` recurses into the block tail, inferring I32 for `42`,
+/// so `lower_block_to_value` receives I32 as `ret_ty` and emits a `mov #42`.
+#[test]
+fn fls_8_2_block_expr_stmt_emits_runtime_instr() {
+    let asm = compile_to_asm("fn block_stmt() { { 42 }; }\nfn main() -> i32 { 0 }\n");
+    assert!(
+        asm.contains("block_stmt:"),
+        "expected `block_stmt` function in assembly; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("#42"),
+        "expected runtime `mov #42` from block tail in `block_stmt`; got:\n{asm}"
+    );
+}

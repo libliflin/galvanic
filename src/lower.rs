@@ -10653,6 +10653,9 @@ impl<'src> LowerCtx<'src> {
     ///   handler ignores `ret_ty`, so `Unit` is correct here)
     /// - Binary/unary arithmetic → recurse into the left operand (propagates the
     ///   operand type up through the expression tree)
+    /// - Block expression → recurse into the tail expression (if any), else `IrTy::Unit`
+    ///   (a block's value is its tail expression's value; propagating the hint prevents
+    ///   `{ 42 };` from failing the same way `42;` did before §8.2 was fixed)
     /// - Path (single-segment) → `IrTy::F64` if in `float_locals`, `IrTy::F32` if
     ///   in `float32_locals`, otherwise `IrTy::I32`
     /// - Everything else (calls, method calls, compound assign, if, loop, return,
@@ -10678,6 +10681,14 @@ impl<'src> LowerCtx<'src> {
             ExprKind::Binary { lhs, .. } => self.infer_natural_ty(lhs),
             // Unary: same type as the operand.
             ExprKind::Unary { operand, .. } => self.infer_natural_ty(operand),
+            // FLS §6.4: Block expressions — value comes from the tail expression.
+            // Recurse so `{ 42 };` infers I32 from its tail `42`, rather than
+            // propagating IrTy::Unit which would cause the same failure as `42;`
+            // did before the §8.2 fix.
+            ExprKind::Block(block) | ExprKind::UnsafeBlock(block) => match &block.tail {
+                Some(tail) => self.infer_natural_ty(tail),
+                None => IrTy::Unit,
+            },
             // Single-segment path (variable reference): check float locals first.
             ExprKind::Path(segs) if segs.len() == 1 => {
                 let name = segs[0].text(self.source);
@@ -10689,7 +10700,7 @@ impl<'src> LowerCtx<'src> {
                     IrTy::I32
                 }
             }
-            // Calls, method calls, compound-assign, if, loop, match, block,
+            // Calls, method calls, compound-assign, if, loop, match, named block,
             // return, break, continue, etc.: these were already handled
             // correctly with IrTy::Unit. Preserve that default here so their
             // existing `lower_expr` handlers are unaffected.

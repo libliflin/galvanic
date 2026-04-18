@@ -43,3 +43,10 @@ fn helper(x: i32) -> i32 {
 fn discard_call_result(x: i32) {
     helper(x);
 }
+
+// FLS §8.2 + §6.4: Block expression as a statement. The block `{ 42 }` has
+// a tail expression `42`; the statement discards the block's value.
+// infer_natural_ty recurses into the block tail so `ret_ty` is I32, not Unit.
+fn discard_block_expr() {
+    { 42 };
+}
