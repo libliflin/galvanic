@@ -714,7 +714,7 @@ Assembly signature: in the `pair:` section look for `mov x0, #10` and
 
 ## §6.11 — Struct Expression Shorthand and Update Syntax
 
-**Two gaps:**
+**Three gaps:**
 
 1. **Shorthand evaluation:** The spec does not state whether `Foo { x }` is
    syntactic sugar evaluated at the point of the struct expression, or whether
@@ -724,9 +724,17 @@ Assembly signature: in the `pair:` section look for `mov x0, #10` and
    which types are copyable through struct update syntax. Galvanic copies all
    non-overridden fields as stack loads/stores; no move semantics are enforced.
 
-**Source:** `src/ast.rs:1093`, `src/ast.rs:1272`
+3. **Field initializer evaluation order for nested struct fields:** FLS §6.11
+   says field initializers are expressions but does not specify evaluation order
+   when initializers have side effects (e.g., multiple struct-returning calls as
+   field initializers). Galvanic evaluates nested struct field initializers
+   left-to-right in source order, consistent with its scalar field handling.
+   Applies to all three supported forms: struct literal, variable path, and
+   struct-returning call. Source: `src/lower.rs` `store_nested_struct_lit`.
 
-**Minimal reproducer:**
+**Source:** `src/ast.rs:1093`, `src/ast.rs:1272`, `src/lower.rs:6526`
+
+**Minimal reproducer (gap 1 and 2):**
 ```rust
 struct Point { x: i32, y: i32 }
 fn make(x: i32, y: i32) -> Point { Point { x, y } }
@@ -735,6 +743,20 @@ fn main() -> i32 { let _ = make(3, 4); 0 }
 Assembly signature: in the `make:` section look for two consecutive stores to the
 Point stack slot — the x field stored before the y field — confirming shorthand
 fields are evaluated in source order.
+
+**Minimal reproducer (gap 3 — evaluation order for nested field initializers):**
+```rust
+struct Point { x: i32, y: i32 }
+struct Rect { top_left: Point, width: i32, height: i32 }
+fn make_point(x: i32, y: i32) -> Point { Point { x, y } }
+fn main() -> i32 {
+    let r = Rect { top_left: make_point(3, 4), width: 10, height: 5 };
+    r.top_left.x + r.top_left.y
+}
+```
+Assembly signature: `bl make_point` appears before the `str` instructions for
+`width` and `height` — confirming `top_left`'s initializer (the call) is
+evaluated before the scalar fields, left-to-right in source order.
 
 ---
 

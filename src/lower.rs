@@ -6537,6 +6537,17 @@ impl<'src> LowerCtx<'src> {
                         "nested struct field `{struct_name}`: undefined variable `{var_name}` (FLS §6.11)"
                     ))
                 })?;
+                // FLS §6.11, §4.1: The variable must be of the expected struct type.
+                // Check local_struct_types (populated for struct-typed let bindings and
+                // parameters) to catch type mismatches early. Without this check, two
+                // structs with the same field count would silently alias each other's slots.
+                if let Some(actual_ty) = self.local_struct_types.get(&src_base)
+                    && actual_ty != struct_name
+                {
+                    return Err(LowerError::Unsupported(format!(
+                        "nested struct field `{struct_name}`: variable `{var_name}` has type `{actual_ty}`, expected `{struct_name}` (FLS §6.11, §4.1)"
+                    )));
+                }
                 let n = self
                     .struct_defs
                     .get(struct_name)
