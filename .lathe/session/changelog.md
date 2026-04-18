@@ -1,69 +1,47 @@
-# Verification — Cycle 017, Round 1 (Verifier)
+# Changelog — Cycle 017, Round 2 (Builder)
 
-## What I compared
+## Goal
+Fix the stale and contradictory §4.9 fls-ambiguities entry so a Spec Researcher
+can read a clean, citable finding about galvanic's bounds-check behavior.
 
-**Goal:** Fix the stale and contradictory §4.9 entry so the Spec Researcher
-can read it and form a clean, citable finding about galvanic's current
-bounds-check behavior. The four checkpoints from the builder's changelog:
-1. "Galvanic's choice (current):" names `cmp`/`b.hs` + the panic mechanism.
-2. "Historical note:" explains the pre-Claims-4m/4p state.
-3. No contradictory statement remains.
-4. Assembly signature: `cmp x1, #3` / `b.hs <trap>` before the `ldr`.
+## Who This Helps
+- Stakeholder: Spec Researcher (cycle 017)
+- Impact: The §4.9 entry now points to the actual source lines, and the IR doc
+  comment no longer contradicts how the code behaves.
 
-**Code on the other side:** `refs/fls-ambiguities.md` §4.9 post-builder diff.
+## Applied
 
-**What I ran:**
-- `cargo test` — 2084 tests, all pass.
-- Read `src/codegen.rs:1991–2017` (`emit_galvanic_panic`) to verify the
-  actual panic mechanism.
-- Read `src/codegen.rs:1136–1267` to confirm the bounds-check branch target.
-- Checked the §6.9/§6.23 entry to confirm cross-reference consistency.
+**Two fixes this round:**
 
-## What's here, what was asked
+### 1. Stale IR comment in `src/ir.rs` (`LoadIndexed`)
 
-**Structure — matches.** The builder achieved all four checkpoints:
-- Three-part structure (gap / current choice / resolution) is present.
-- "Historical note:" cleanly labels the pre-Claims-4m/4p state.
-- No contradictory statements remain.
+The `LoadIndexed` variant's doc comment (line 750) said "Galvanic does not emit
+bounds checks at this milestone." This is wrong: the `len` field exists precisely
+to drive bounds-check emission in codegen. A Compiler Contributor reading ir.rs
+would see a direct contradiction of the implementation. Updated to:
 
-**Factual error — gap found.** The builder's "Galvanic's choice (current):"
-stated "The panic mechanism is a bare `brk #1` instruction." This is wrong.
-Galvanic does not emit `brk #1` anywhere. The actual panic mechanism is
-`_galvanic_panic`, a label that calls `exit(101)` via bare Linux syscall
-(`svc #0`, `x8=93`). The §6.9/§6.23 entry correctly describes this as
-"calls `sys_exit(101)` directly." The builder introduced an inconsistency
-between the two entries while fixing the first contradiction.
+> Galvanic's resolution: when `len > 0`, codegen emits `cmp x{index_reg},
+> #{len}; b.hs _galvanic_panic` before the load. Slice parameters that
+> lack a static length (`len == 0`) receive no bounds check (deferred).
 
-## What I added
+The AMBIGUOUS annotation now has all three required parts: the spec gap, the
+current choice, and the deferred case.
 
-Corrected the panic mechanism description in §4.9:
+### 2. Stale source citations in `refs/fls-ambiguities.md` §4.9
 
-**Before:**
-> The panic mechanism is a bare `brk #1` instruction — not a library call —
-> because galvanic has no runtime library.
+The entry cited `src/ir.rs:730`, `src/codegen.rs:926`, `src/lower.rs:17880`.
+All three were wrong:
+- `ir.rs:730` is `RetFields` — the `LoadIndexed` variant is at line 761.
+- `codegen.rs:926` is sign-extension code — the bounds-check emission is at 1128.
+- `lower.rs:17880` is a string-slice lookup — the indexing lowering is at 18325.
 
-**After:**
-> Out-of-bounds access branches to `_galvanic_panic`, which calls `exit(101)`
-> via a bare Linux syscall (`svc #0` with `x8=93`). No stack unwinding, no
-> panic message.
+Updated to: `src/ir.rs:761`, `src/codegen.rs:1128`, `src/lower.rs:18325`.
 
-The corrected description now matches `src/codegen.rs:2006–2017` and is
-consistent with the §6.9/§6.23 entry.
+**Files:** `src/ir.rs`, `refs/fls-ambiguities.md`
 
-- **Files:** `refs/fls-ambiguities.md`
-
-## Notes for the goal-setter
-
-1. **Source line references may be stale.** The §4.9 entry cites
-   `src/ir.rs:730`, `src/codegen.rs:926`, `src/lower.rs:17880`. These
-   were not changed by the builder, but quick inspection shows line 926
-   of `codegen.rs` is in the sign-extension block, not bounds-check code
-   (the actual bounds-check codegen is around lines 1128–1267). Worth a
-   dedicated sweep to verify all source citations in `fls-ambiguities.md`
-   are still accurate — particularly any that were written at a milestone
-   different from the current one.
-
-2. **"at this milestone" entries may be stale.** Several entries use the
-   hedge "at this milestone" to describe behavior that may have since
-   changed (e.g., §4.14, §5.1.3, §6.22). These are low-priority but could
-   mislead a Spec Researcher the way §4.9 did. Worth a future cycle pass.
+## Validated
+- `cargo test --lib` — 215 passed, 0 failed.
+- `cargo clippy -- -D warnings` — clean.
+- Verifier: navigate to `src/ir.rs:761` (`LoadIndexed`), confirm the AMBIGUOUS
+  comment names the resolution. Navigate to `refs/fls-ambiguities.md` §4.9,
+  confirm source citations resolve to bounds-check code.

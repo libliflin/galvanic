@@ -249,7 +249,7 @@ Out-of-bounds access produced undefined behavior at the assembly level.
 That deviation is resolved; this entry documents the gap (what the FLS
 leaves unspecified) and galvanic's current resolution.
 
-**Source:** `src/ir.rs:730`, `src/codegen.rs:926`, `src/lower.rs:17880`
+**Source:** `src/ir.rs:761` (`LoadIndexed`), `src/codegen.rs:1128` (bounds-check emission), `src/lower.rs:18325` (indexing lowering)
 
 **Minimal reproducer:**
 ```rust
