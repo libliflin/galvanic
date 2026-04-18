@@ -626,19 +626,19 @@ not the FLS-specified truncation behavior).
 indexing (§6.9), and integer overflow in debug mode (§6.23), but does not
 specify the panic mechanism — library call, trap instruction, signal handler.
 
-**Galvanic's choice (updated — Claims 4m, 4o, 4p, 4q):**
+**Galvanic's choice:**
 - Divide-by-zero with a literal 0 divisor: **caught at compile time** in
   `src/lower.rs`. The lowering pass rejects integer `/` and `%` expressions
-  whose RHS is `LitInt(0)` before emitting any IR. (Claim 4m)
+  whose RHS is `LitInt(0)` before emitting any IR.
 - Non-literal zero divisors (`x / y` where `y` may be zero at runtime):
   a `cbz xRHS, _galvanic_panic` guard is emitted before every `sdiv`, `srem`,
-  and `udiv` instruction. (Claim 4o)
+  and `udiv` instruction.
 - `i32::MIN / -1` and `i32::MIN % -1` overflow guard: emitted before `sdiv`
   for both division and remainder. Uses `movz`/`sxtw` to materialise
   `i32::MIN` as a 64-bit sign-extended constant, then `cmp`/`cmn` to detect
-  the overflow case, branching to `_galvanic_panic`. (Claim 4q)
+  the overflow case, branching to `_galvanic_panic`.
 - Out-of-bounds indexing: `cmp`/`b.hs` bounds check before every array/slice
-  load and store; out-of-bounds branches to `_galvanic_panic`. (Claim 4p)
+  load and store; out-of-bounds branches to `_galvanic_panic`.
 - `+`, `-`, `*` overflow: no overflow check; arithmetic wraps per 64-bit
   hardware. This is a known deviation from debug-mode Rust semantics.
   FLS §6.23 AMBIGUOUS — spec requires debug-mode panic but galvanic uses 64-bit
@@ -946,7 +946,7 @@ Galvanic's recursive-descent parser does not yet enforce non-associativity at
 the grammar level; it silently parses `a < b < c` as `(a < b) < c`, producing
 an expression that compares a boolean (0 or 1) against `c`.
 
-**Galvanic's choice (Claim 4n):** Enforce non-associativity at the lowering
+**Galvanic's choice:** Enforce non-associativity at the lowering
 stage (`src/lower.rs`) by detecting when the LHS of any comparison operator is
 itself a comparison operator. Such expressions are rejected at compile time with
 the diagnostic "chained comparison: FLS §6.21 — comparison operators are
@@ -1384,4 +1384,4 @@ confirmed by assembly content alone.
 
 ---
 
-*Last updated: 2026-04-17. Source annotation count at time of writing: ~155 `AMBIGUOUS` markers across 6 source files. 46 entries, sorted by FLS section number, with linked table of contents. Minimal reproducers added 2026-04-17.*
+*Last updated: 2026-04-18. Source annotation count at time of writing: ~155 `AMBIGUOUS` markers across 6 source files. 48 entries, sorted by FLS section number, with linked table of contents. Minimal reproducers added 2026-04-17.*
