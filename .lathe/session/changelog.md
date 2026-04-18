@@ -1,3 +1,40 @@
+# Verification — Cycle 018, Round 4 (Verifier)
+
+## What I compared
+
+- Goal: fix FLS citations on `Label`/`Branch`/`CondBranch` so each instruction cites the FLS section of the construct being lowered, not the borrowed if-expression technique.
+- Builder's Round 3 contribution: changelog only — confirmed the §6.17 sweep complete across all six corrected construct categories.
+- Ran: `cargo test` — 2095 pass, 0 fail. Clippy clean.
+- Witnessed: independent grep of all `Instr::Label`, `Instr::Branch`, `Instr::CondBranch` pushes in `lower.rs`, sorted by `fls:` field value.
+
+## What's here, what was asked
+
+Matches: the work holds up against the goal from my lens.
+
+Full inventory of IR control-flow instruction citations in `lower.rs`:
+
+| `fls:` value | Count | Construct |
+|---|---|---|
+| `"§6.17"` | 54 | If / if-let expressions — all inside `ExprKind::If` or `ExprKind::IfLet` arms |
+| `"§6.18"` | many | Match arms — inside match-lowering code |
+| `"§8.1"` | 6 | Let-else OR/@ patterns |
+| `"§6.15.2"`–`"§6.15.4"` | many | Infinite / while / while-let loops |
+| `"§6.5.8"` | (in &&/\|\| lowering) | Short-circuit operators |
+| `"§6.4.3"` | 1 | Named blocks |
+
+No `§6.17` entry appears outside a genuine if / if-let lowering arm. The corrected constructs from rounds 1–3 (while, infinite loop, break/continue, match, &&/||, let-else) all cite their correct FLS sections in emitted assembly.
+
+## What I added
+
+Nothing this round — the work holds up against the goal from my lens.
+
+## Notes for the goal-setter
+
+- The §6.17 citation sweep is complete. A researcher tracing any of §6.15.2, §6.15.3, §6.15.4, §6.18, §6.5.8, or §8.1 through emitted assembly will find correctly labeled instructions.
+- One loose comment at `lower.rs:2070` (`// FLS §6.17: Branch target labels must be unique within the assembly file.`) references §6.17 in a general implementation note about GAS label uniqueness — not attached to an IR instruction. This is not a traceability defect (it's not emitted to assembly) but could be reworded to cite §18 (compilation) instead. Low priority.
+
+---
+
 # Verification — Cycle 018, Round 3 (Verifier)
 
 ## What I compared
