@@ -24805,6 +24805,84 @@ fn main() -> i32 {
     assert_eq!(exit_code, 0);
 }
 
+/// Assembly inspection: `n @ 5` in if-let emits equality check (LitInt sub-pattern).
+///
+/// Unlike wildcard, an integer literal sub-pattern requires a runtime comparison.
+/// The assembly must contain a `cmp` (via BinOp::Eq → cset) followed by a conditional
+/// branch on no match. No constant folding — input is a function parameter.
+///
+/// FLS §5.1.4: @ binds the value. FLS §5.2: integer literal pattern checks equality.
+#[test]
+fn fls_5_1_4_bound_litint_if_let_emits_cmp() {
+    let asm = compile_to_asm(
+        "fn check(x: i32) -> i32 {\n\
+             if let n @ 5 = x { n + 1 } else { 0 }\n\
+         }\n\
+         fn main() {}\n",
+    );
+    // Equality check must load the scrutinee and compare against 5.
+    assert!(asm.contains("ldr"), "@ 5 must emit ldr to load scrutinee: {asm}");
+    assert!(asm.contains("mov"), "@ 5 must emit mov to load literal 5: {asm}");
+    // Runtime branch — not constant-folded to a result.
+    assert!(
+        !asm.contains("mov     x0, #6"),
+        "@ 5 result must NOT be constant-folded: {asm}"
+    );
+}
+
+/// QEMU: `if let n @ 5 = x` then-branch taken when x == 5.
+///
+/// FLS §5.1.4 + §5.2: LitInt sub-pattern in if-let @ binding.
+#[test]
+fn fls_5_1_4_bound_litint_if_let_taken() {
+    let src = r#"
+fn check(x: i32) -> i32 {
+    if let n @ 5 = x { n + 1 } else { 0 }
+}
+fn main() -> i32 {
+    check(5)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 6); // 5 + 1 = 6
+}
+
+/// QEMU: `if let n @ 5 = x` else-branch taken when x != 5.
+///
+/// FLS §6.17: else branch executes when the pattern does not match.
+#[test]
+fn fls_5_1_4_bound_litint_if_let_not_taken() {
+    let src = r#"
+fn check(x: i32) -> i32 {
+    if let n @ 5 = x { n + 1 } else { 0 }
+}
+fn main() -> i32 {
+    check(9)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    assert_eq!(exit_code, 0); // no match → else → 0
+}
+
+/// QEMU: `if let n @ -3 = x` then-branch taken when x == -3.
+///
+/// FLS §5.1.4: negative integer literal sub-pattern in if-let @ binding.
+/// Parity with match NegLitInt support.
+#[test]
+fn fls_5_1_4_bound_neg_litint_if_let_taken() {
+    let src = r#"
+fn check(x: i32) -> i32 {
+    if let n @ -3 = x { n + 10 } else { 0 }
+}
+fn main() -> i32 {
+    check(-3)
+}
+"#;
+    let Some(exit_code) = compile_and_run(src) else { return; };
+    // -3 + 10 = 7; exit code is 7
+    assert_eq!(exit_code, 7);
+}
+
 // ── Milestone 151: `impl FnOnce` in parameter position (FLS §6.14, §4.13) ─────
 //
 // FnOnce is the base trait of the closure trait hierarchy. Every closure
