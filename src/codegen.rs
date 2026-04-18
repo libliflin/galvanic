@@ -1176,8 +1176,10 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
         //
         // FLS §6.5.10 + §6.9: Store to an indexed array element `arr[index] = src`.
         //
-        // Bounds check (when len > 0): cmp + b.hs before the store.
-        // FLS §6.9: Out-of-bounds store must panic at runtime.
+        // FLS §6.9 AMBIGUOUS: Out-of-bounds store must panic; the spec does not
+        // specify the panic mechanism. Galvanic's resolution: when `len > 0`,
+        // emit `cmp x{index_reg}, #{len}; b.hs _galvanic_panic` before the store.
+        // Slice parameters with unknown length (`len == 0`) receive no check (deferred).
         //
         // Cache-line note: bounds check adds 2 instructions (8 bytes) when present.
         // add + str = two 4-byte instructions = 8 bytes baseline.
