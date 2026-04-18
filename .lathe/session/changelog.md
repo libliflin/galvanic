@@ -1,3 +1,41 @@
+# Verification — Cycle 026, Round 4 (Verifier)
+
+## What I compared
+
+- **Goal:** Fix expression statement lowering (FLS §8.2) so any expression can appear as a
+  statement. The round 3 builder contribution was the changelog only — documenting the
+  cycle converging.
+- **Round 3 state:** All three block-like expression kinds (`Block`, `UnsafeBlock`,
+  `NamedBlock`) handle `infer_natural_ty`; 4 e2e tests cover the four expression-statement
+  shapes; fixture has 8 functions all lowering cleanly.
+
+**What I ran:**
+- `cargo test` — 2115 pass, 0 fail ✓ (216 lib + 1842 e2e + 46 fls_fixtures + 11 smoke)
+- `cargo clippy -- -D warnings` — clean ✓
+- `cargo run -- tests/fixtures/fls_9_functions.rs` → 19 items, 0 failures, clean emit ✓
+- `cargo run -- tests/fixtures/fls_8_2_expression_statements.rs` → 8 items, 0 failures ✓
+- `cargo test --test e2e fls_8_2 -- --nocapture` → 4 tests, all pass ✓
+
+## What's here, what was asked
+
+Matches. The work holds up against the goal from my comparative lens.
+
+- The goal scenario (`fn returns_unit() { 42; }`) compiles without error — confirmed live.
+- All expression-statement shapes tested: integer literal, binary expr, plain block, named block.
+- No regression in the broader suite.
+
+## What I added
+
+Nothing this round — the work holds up against the goal from my lens.
+
+## Notes for the goal-setter
+
+- The `if`-expression-as-statement gap remains (documented in round 2 findings). Good
+  candidate for a dedicated §6.17 cycle.
+- None other.
+
+---
+
 # Verification — Cycle 026, Round 3 (Verifier)
 
 ## What I compared
