@@ -50,3 +50,10 @@ fn discard_call_result(x: i32) {
 fn discard_block_expr() {
     { 42 };
 }
+
+// FLS §8.2 + §6.4.3: Named block expression as a statement. `'l: { 42 }` is
+// a NamedBlock whose tail is `42`; the statement discards the block's value.
+// infer_natural_ty recurses into the named block's tail for the same reason.
+fn discard_named_block_expr() {
+    'l: { 42 };
+}
