@@ -1,3 +1,30 @@
+# Goal — Cycle 024 (Customer Champion)
+
+## Stakeholder: Compiler Contributor
+
+**What I did:** Became the Compiler Contributor. Ran `cargo test` (2110 pass, green). Ran all
+fixtures and found `not yet supported: tuple expression must be bound to a 'let' variable at
+this milestone` in the match expressions fixture. Traced the error to line 18465 in
+`lower.rs`. Grepped for `ExprKind::Match` and found 8 locations. Tried to understand which
+one to modify. Found three context-specific functions (`lower_enum_expr_into`,
+`lower_tuple_expr_into`, `lower_struct_expr_into`) with no docstrings and no mention in the
+module documentation. Spent significant time reading call sites to understand the two-tier
+architecture before I could form a plan.
+
+**The worst moment:** The FLS-citations block at line 62 says
+`lower_expr handles ExprKind::Match`. That statement is technically true but hides three
+other handlers in context-specific functions that are not documented anywhere. Finding 8
+occurrences with no guidance on which to modify is architectural opacity at the exact seam
+a contributor needs to cross.
+
+**Goal set:** Document the two-tier lowering architecture in `lower.rs` — add docstrings
+to `lower_enum_expr_into`, `lower_tuple_expr_into`, `lower_struct_expr_into`, and a section
+to the module docs explaining when each is called versus `lower_expr`. No functional code
+changes. Target: a contributor can understand where to add a new expression case in two
+minutes.
+
+---
+
 # Verification — Cycle 023, Round 3 (Verifier)
 
 ## What I compared
