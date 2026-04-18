@@ -547,35 +547,38 @@ The parser must not confuse the two uses of `&`.
 
 **Gap:** The FLS states "the shift amount is taken modulo the bit width"
 (§6.5.7) but does not specify whether this modulo is performed in the source
-language or delegated to the hardware. ARM64 `lsl`/`asr`/`lsr` already
-mask the shift amount to 6 bits (mod 64).
+language (explicit instruction) or delegated to hardware. ARM64 `lsl`/`asr`/`lsr`
+already mask the shift amount to 6 bits (mod 64) for 64-bit registers.
 
-**Galvanic's choice:** No explicit masking instruction is emitted; the ARM64
-hardware behavior (implicit mod 64) satisfies the spec requirement for
-64-bit types. For narrower types whose values are stored in 64-bit registers,
-this could produce surprising results — not yet addressed.
+**Galvanic's choice:** Galvanic emits an explicit range guard (`cmp x{rhs}, #64`
++ `b.hs _galvanic_panic`) for all shifts rather than relying on hardware mod-64
+wrapping. Shift amounts ≥ 64 (and negative amounts, which appear ≥ 2^63 when
+interpreted as unsigned) panic at runtime via `_galvanic_panic`. No `AND` masking
+instruction is emitted; the guard either panics or lets the in-range value flow
+directly to the shift instruction.
 
-**Source:** `src/codegen.rs:594`, `src/lower.rs:10639`
+**Known gap:** The guard compares against 64 regardless of the operand's declared
+type. For narrower integer types (e.g., `i32`) stored in 64-bit registers, shift
+amounts in [32, 63] pass the guard but exceed the logical bit width (32). The FLS
+requires modulo-32 behavior for `i32` shifts; galvanic does not yet enforce this,
+so shifts of `i32` in [32, 63] produce hardware mod-64 results instead of panicking.
+This is a known false negative.
+
+**Source:** `src/codegen.rs:1015`, `src/lower.rs:11044`
 
 **Minimal reproducer:**
 ```rust
 fn shl(x: i64, n: i64) -> i64 { x << n }
 ```
-Assembly signature: look for `cmp x1, #64` followed by `b.hs _galvanic_panic`
-then `lsl x2, x0, x1` — galvanic panics for shift amounts ≥ 64 rather than
-relying on hardware mod-64 wrapping. There is no `and x1, x1, #63` masking
-instruction. The ambiguity remains for shifts of narrower types stored in 64-bit
-registers, where hardware mod-64 could produce surprising results.
-
-Note: the `**Galvanic's choice**` description above is stale — galvanic now
-emits a range guard (panic if n ≥ 64), not a bare `lsl` relying on hardware
-behavior.
+Assembly signature: `cmp x1, #64` followed by `b.hs _galvanic_panic` then
+`lsl x2, x0, x1` — galvanic panics for shift amounts ≥ 64. No `and x1, x1, #63`
+masking instruction is present.
 
 ---
 
 ## §6.5.9 — Narrowing Integer Casts and Float-to-Int Casts
 
-**Two distinct gaps:**
+**Three distinct gaps:**
 
 1. **Float-to-int (`as` cast):** The spec says narrowing integer casts
    "truncate the value" but does not specify behavior for out-of-range float
@@ -586,6 +589,13 @@ behavior.
 2. **Wrapping for integer-to-integer narrowing:** `as u8` truncates to the
    low 8 bits; `as i8` sign-extends. The spec does not enumerate which bits
    are kept.
+
+3. **Shift-amount guard false negative for narrow types:** The shift-amount
+   range guard (see §6.5.7 entry) compares against 64 for all integer types.
+   For `i32` operands, shift amounts in [32, 63] should panic (mod-32 semantics)
+   but currently pass the guard. The FLS requires modulo-`bit_width` behavior;
+   galvanic uses a fixed 64 threshold. This is a known gap shared with the
+   §6.5.7 entry.
 
 **Galvanic's choice:** Uses ARM64 `FCVTZS` (saturating) for float-to-int;
 uses `AND`/`SXTB`/`SXTH` for integer truncation/sign-extension. Matches

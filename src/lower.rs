@@ -11041,9 +11041,11 @@ impl<'src> LowerCtx<'src> {
             //
             // FLS §6.5.7: For signed integer types, `>>` is arithmetic shift
             // (sign-extending). The shift amount is taken modulo the bit width.
-            // FLS §6.5.7 AMBIGUOUS: the spec says the shift amount is taken modulo
-            // the bit width, but does not specify the exact register width used for
-            // the modulo (ARM64 uses 6 bits of the shift register for 64-bit shifts).
+            // FLS §6.5.7 AMBIGUOUS: the spec requires shift amount taken modulo the
+            // bit width. Galvanic emits an explicit range guard (cmp + b.hs panic) for
+            // amounts ≥ 64, but checks against 64 for all integer types. For narrower
+            // types (e.g., i32), amounts in [32, 63] should panic but currently pass
+            // the guard — see refs/fls-ambiguities.md §6.5.7 and §6.5.9 (gap 3).
             //
             // FLS §6.1.2:37–45: All these operators emit runtime instructions —
             // no constant folding even when both operands are literals.
