@@ -36063,3 +36063,40 @@ fn lazy_or_branches_cite_fls_6_5_8() {
     let asm = compile_to_asm("fn or_test(a: i32, b: i32) -> i32 { if a != 0 || b != 0 { 1 } else { 0 } }\nfn main() -> i32 { or_test(0, 1) }\n");
     assert!(asm.contains("§6.5.8"), "expected §6.5.8 citation on || short-circuit branches, got:\n{asm}");
 }
+
+/// let-else control-flow instructions must cite §8.1 (Let Statements), not §6.17.
+///
+/// FLS §8.1: A let statement with an else block — `let PAT = EXPR else { BLOCK }` —
+/// is a statement form, not an if expression. The CondBranch (pattern mismatch check),
+/// Branch (skip-else), and Label (else entry / end) instructions that implement
+/// let-else control flow belong to §8.1, not §6.17 (If / If Let Expressions).
+///
+/// Previously, the OR-pattern and @-binding variants in let-else lowering emitted
+/// `fls: "§6.17"` on these instructions — the same misclassification that was fixed
+/// for loop constructs (§6.15.x) and match arms (§6.18) in earlier rounds.
+#[test]
+fn let_else_or_pattern_branches_cite_fls_8_1() {
+    // A function with only an OR-pattern let-else — no if expressions.
+    // The assembly must contain §8.1 (from the CondBranch / Branch / Label
+    // emitted for the OR pattern match) and must NOT contain §6.17.
+    let asm = compile_to_asm(
+        "fn f(x: i32) -> i32 { let n @ (1 | 5) = x else { return 0 }; n }\n\
+         fn main() -> i32 { f(1) }\n",
+    );
+    assert!(asm.contains("§8.1"), "expected §8.1 citation on let-else OR-pattern branches, got:\n{asm}");
+    assert!(!asm.contains("§6.17"), "let-else OR-pattern must have no §6.17 citations; found in:\n{asm}");
+}
+
+/// let-else @-binding control-flow instructions must cite §8.1, not §6.17.
+///
+/// The @-binding variant (`let n @ PAT = EXPR else { ... }`) uses a CondBranch
+/// after the sub-pattern match — this belongs to §8.1, not §6.17.
+#[test]
+fn let_else_bound_pattern_branches_cite_fls_8_1() {
+    let asm = compile_to_asm(
+        "fn f(x: i32) -> i32 { let n @ 1..=5 = x else { return 0 }; n }\n\
+         fn main() -> i32 { f(3) }\n",
+    );
+    assert!(asm.contains("§8.1"), "expected §8.1 citation on let-else @-binding branches, got:\n{asm}");
+    assert!(!asm.contains("§6.17"), "let-else @-binding must have no §6.17 citations; found in:\n{asm}");
+}

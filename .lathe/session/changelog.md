@@ -1,3 +1,83 @@
+# Verification — Cycle 018, Round 2 (Verifier)
+
+## What I compared
+
+- Goal on one side: fix FLS citations on `Label`/`Branch`/`CondBranch` so each instruction cites the spec section of the construct being lowered.
+- Builder's change: 8 emission sites in `BinOp::And` / `BinOp::Or` lowering corrected from `§6.17` → `§6.5.8`, with 2 assembly inspection tests added.
+- Ran: `cargo test --test e2e lazy_and_branches_cite_fls_6_5_8` and `lazy_or_branches_cite_fls_6_5_8` — both pass. Full suite: 2093 pass, 0 fail.
+- Witnessed: grepped all remaining `§6.17` citations on `CondBranch`/`Branch`/`Label` in `lower.rs` (60 total). Classified each by surrounding context.
+
+## What's here, what was asked
+
+Builder's change is correct and complete for `§6.5.8`. One category of misclassification remained unaddressed:
+
+**`src/lower.rs`, let-else lowering (`StmtKind::Let` at line 7917)**: 5 instructions still cited `§6.17`:
+- Line 8096: `CondBranch` in OR-pattern let-else
+- Line 8125: `CondBranch` in `@`-binding (Bound) pattern let-else
+- Lines 8145, 8150, 8154: shared `Branch` (skip-else), `Label` (else entry), `Label` (end)
+
+The TupleStruct pattern at line 8031 was already correctly cited `§8.1`. The OR-pattern and Bound-pattern paths were missed. The comment at line 8148 correctly says "FLS §8.1: The else block must be a diverging expression" — the adjacent Branch/Label instructions cited the wrong section.
+
+All 60 remaining `§6.17` citations are either genuine if-expression (`ExprKind::If`) or if-let lowering — correctly classified.
+
+## What I added
+
+Fixed `src/lower.rs` lines 8096, 8125, 8145, 8150, 8154: corrected `fls: "§6.17"` → `fls: "§8.1"` on the 5 misclassified let-else control-flow instructions.
+
+Added 2 assembly inspection tests in `tests/e2e.rs`:
+- `let_else_or_pattern_branches_cite_fls_8_1`: compiles a function with only an OR-pattern let-else, asserts `§8.1` present and `§6.17` absent.
+- `let_else_bound_pattern_branches_cite_fls_8_1`: same for `@`-binding let-else.
+
+Both tests pass. Full suite: 2095 pass (up from 2093), 0 fail.
+
+- **Files:** `src/lower.rs`, `tests/e2e.rs`
+
+## Notes for the goal-setter
+
+- The `§6.17` sweep is now complete for the constructs this cycle touched: loops (§6.15.x), match arms (§6.18), lazy booleans (§6.5.8), and let-else (§8.1). All remaining `§6.17` citations in `lower.rs` are genuine if / if-let lowering.
+- The `fls-ambiguities.md` has no entries for these misclassifications — they were annotation errors, not design choices, so no entry is needed.
+- None.
+
+---
+
+# Changelog — Cycle 018, Round 2 (Builder)
+
+## Goal
+Fix wrong FLS citations on control-flow IR instructions: `Label`, `Branch`, and `CondBranch` should cite the FLS section of the construct being implemented, not the control-flow technique borrowed from if expressions.
+
+## Who This Helps
+- **Stakeholder:** Spec Researcher
+- **Impact:** A researcher tracing §6.5.8 (Lazy Boolean Expressions) through emitted assembly can now find the `&&` and `||` short-circuit branches by section number. Previously every `&&`/`||` branch was annotated `§6.17` — invisible from a §6.5.8 search.
+
+## Applied
+
+The verifier's round 1 fixed loop constructs (§6.15.x) and match expression lowering (§6.18). They flagged two open items:
+1. `&&`/`||` short-circuit branches citing `§6.17` — noted as "worth verifying separately"
+2. let-else `§6.17` citations — assessed as correctly classified
+
+Item 1 is the same class of misclassification. The `&&`/`||` lowering borrows the phi-slot pattern from if-expression codegen and its FLS comments correctly cite `§6.5.8` — but the IR emission sites still said `fls: "§6.17"`.
+
+**`src/lower.rs`** — Corrected 8 emission sites in the `BinOp::And` and `BinOp::Or` lowering blocks (lines ~17045–17115):
+- `&&`: CondBranch (skip-RHS), Branch (to-end), Label (false branch), Label (end)
+- `||`: CondBranch (skip-RHS), Branch (to-end), Label (rhs branch), Label (end)
+
+All changed from `fls: "§6.17"` → `fls: "§6.5.8"`.
+
+**`tests/e2e.rs`** — Added 2 assembly inspection tests:
+- `lazy_and_branches_cite_fls_6_5_8`
+- `lazy_or_branches_cite_fls_6_5_8`
+
+- **Files:** `src/lower.rs`, `tests/e2e.rs`
+- **PR:** libliflin/galvanic#425
+
+## Validated
+
+- `cargo test` — 2093 pass, 0 fail (up from 2091)
+- `cargo clippy -- -D warnings` — clean
+- Verifier: run `cargo test --test e2e lazy_and_branches_cite_fls_6_5_8 lazy_or_branches_cite_fls_6_5_8`
+
+---
+
 # Verification — Cycle 018, Round 1 (Verifier)
 
 ## What I compared
