@@ -272,3 +272,33 @@ fn lower_error_includes_fls_citation() {
         }
     }
 }
+
+#[test]
+fn lower_source_all_unsupported_strings_cite_fls() {
+    // Static invariant: every non-comment line in src/lower.rs containing
+    // "not yet supported" must also contain "(FLS §" on the same line.
+    // This complements the runtime smoke test by catching new uncited strings
+    // before they reach an exercised code path. The Display impl format string
+    // (`write!(f, "not yet supported: {msg}")`) is excluded — it is the prefix
+    // machinery, not a message payload.
+    let src = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/lower.rs"),
+    )
+    .expect("failed to read src/lower.rs");
+
+    let mut violations = Vec::new();
+    for (i, line) in src.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("//") || trimmed.starts_with('*') || trimmed.contains("write!(f,") {
+            continue;
+        }
+        if trimmed.contains("not yet supported") && !trimmed.contains("(FLS §") {
+            violations.push(format!("lower.rs:{}: {trimmed}", i + 1));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "lower.rs has 'not yet supported' strings without FLS citations:\n{}",
+        violations.join("\n")
+    );
+}
