@@ -35644,6 +35644,74 @@ fn main() -> i32 { let r = make_rect(10); r.bottom_right.x + r.label }\n";
     );
 }
 
+/// Claim: if-expression as nested struct field in function-return position emits
+/// runtime branch instructions — not a compile-time fold.
+///
+/// FLS §6.11: Field initializers are arbitrary expressions; §6.17: if-expressions
+/// evaluate the condition at runtime. The `flag > 0` test must appear as `cmp`/`cbz`
+/// in the assembly, not as a precomputed constant.
+#[test]
+fn fls_6_11_nested_struct_fn_return_if_emits_branch() {
+    let src = "\
+struct Inner { a: i32, b: i32 }\n\
+struct Outer { inner: Inner, c: i32 }\n\
+fn make_outer(flag: i32) -> Outer {\n\
+    Outer { inner: if flag > 0 { Inner { a: 1, b: 2 } } else { Inner { a: 3, b: 4 } }, c: 5 }\n\
+}\n\
+fn main() -> i32 { let o = make_outer(1); o.inner.a }\n";
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("cmp"),
+        "expected cmp instruction for runtime condition: {asm}"
+    );
+    assert!(
+        asm.contains("cbz"),
+        "expected cbz branch for if-expression: {asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #1\n") || asm.contains("cmp"),
+        "must not constant-fold if-expression: {asm}"
+    );
+}
+
+/// Claim: match expression as nested struct field in function-return position emits
+/// runtime comparison instructions — not a compile-time fold.
+///
+/// FLS §6.11: Field initializers are arbitrary expressions; §6.18: match expressions
+/// evaluate the scrutinee at runtime. `match flag { 0 => ..., _ => ... }` must emit
+/// `cmp`/`cbz` in the assembly, with both arm immediates visible.
+#[test]
+fn fls_6_11_nested_struct_fn_return_match_emits_cmp() {
+    let src = "\
+struct Inner { a: i32 }\n\
+struct Outer { inner: Inner, c: i32 }\n\
+fn make_outer(flag: i32) -> Outer {\n\
+    Outer { inner: match flag { 0 => Inner { a: 10 }, _ => Inner { a: 30 } }, c: 5 }\n\
+}\n\
+fn main() -> i32 { let o = make_outer(0); o.inner.a }\n";
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("cmp"),
+        "expected cmp instruction for runtime match scrutinee: {asm}"
+    );
+    assert!(
+        asm.contains("cbz"),
+        "expected cbz branch for match arm: {asm}"
+    );
+    assert!(
+        asm.contains("#10"),
+        "expected arm immediate #10 in assembly: {asm}"
+    );
+    assert!(
+        asm.contains("#30"),
+        "expected arm immediate #30 in assembly: {asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #10\n") || asm.contains("cmp"),
+        "must not constant-fold match expression: {asm}"
+    );
+}
+
 // ── Claim 4l: §6.18 match exhaustiveness check ─────────────────────────────────
 
 /// Claim 4l: non-exhaustive integer match rejected at compile time.
