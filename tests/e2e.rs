@@ -35582,6 +35582,68 @@ fn main() -> i32 {\n\
     );
 }
 
+/// Claim: deeply nested structs (A inside B inside C) in function-return position
+/// all emit runtime calls through the recursively dispatched store_nested_struct_lit
+/// path in lower_struct_expr_into.
+///
+/// FLS §6.11: Field initializers are arbitrary expressions. Three levels of nesting
+/// means `make_c` calls `make_b` which calls `make_a` — all three `bl` instructions
+/// must appear.
+#[test]
+fn fls_6_11_nested_struct_fn_return_deep_nesting_emits_calls() {
+    let src = "\
+struct A { x: i32 }\n\
+struct B { a: A, y: i32 }\n\
+struct C { b: B, z: i32 }\n\
+fn make_a(n: i32) -> A { A { x: n } }\n\
+fn make_b(n: i32) -> B { B { a: make_a(n), y: n + 1 } }\n\
+fn make_c(n: i32) -> C { C { b: make_b(n), z: n + 2 } }\n\
+fn main() -> i32 { let c = make_c(5); c.b.a.x }\n";
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("bl      make_a"),
+        "expected bl make_a in assembly (deeply nested call): {asm}"
+    );
+    assert!(
+        asm.contains("bl      make_b"),
+        "expected bl make_b in assembly (nested call): {asm}"
+    );
+    assert!(
+        asm.contains("bl      make_c"),
+        "expected bl make_c in assembly (outer call): {asm}"
+    );
+}
+
+/// Claim: struct with two nested struct fields in function-return position emits
+/// separate runtime calls for each nested field.
+///
+/// FLS §6.11: Each field initializer is evaluated independently. `Rect { top_left:
+/// origin(), bottom_right: corner(n), label: n }` must emit `bl origin` and
+/// `bl corner` — both nested fields dispatched through store_nested_struct_lit.
+#[test]
+fn fls_6_11_nested_struct_fn_return_two_nested_fields_emits_both_calls() {
+    let src = "\
+struct Point { x: i32, y: i32 }\n\
+struct Rect { top_left: Point, bottom_right: Point, label: i32 }\n\
+fn origin() -> Point { Point { x: 0, y: 0 } }\n\
+fn corner(n: i32) -> Point { Point { x: n, y: n + 1 } }\n\
+fn make_rect(n: i32) -> Rect { Rect { top_left: origin(), bottom_right: corner(n), label: n } }\n\
+fn main() -> i32 { let r = make_rect(10); r.bottom_right.x + r.label }\n";
+    let asm = compile_to_asm(src);
+    assert!(
+        asm.contains("bl      origin"),
+        "expected bl origin for first nested field: {asm}"
+    );
+    assert!(
+        asm.contains("bl      corner"),
+        "expected bl corner for second nested field: {asm}"
+    );
+    assert!(
+        !asm.contains("mov     x0, #20"),
+        "must not constant-fold make_rect(10) result: {asm}"
+    );
+}
+
 // ── Claim 4l: §6.18 match exhaustiveness check ─────────────────────────────────
 
 /// Claim 4l: non-exhaustive integer match rejected at compile time.
