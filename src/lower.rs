@@ -10689,6 +10689,12 @@ impl<'src> LowerCtx<'src> {
                 Some(tail) => self.infer_natural_ty(tail),
                 None => IrTy::Unit,
             },
+            // FLS §6.4.3: Named block expressions (`'label: { ... }`) also yield
+            // their tail value. `'l: { 42 };` should infer I32 from `42`, not Unit.
+            ExprKind::NamedBlock { body, .. } => match &body.tail {
+                Some(tail) => self.infer_natural_ty(tail),
+                None => IrTy::Unit,
+            },
             // Single-segment path (variable reference): check float locals first.
             ExprKind::Path(segs) if segs.len() == 1 => {
                 let name = segs[0].text(self.source);
@@ -10700,7 +10706,7 @@ impl<'src> LowerCtx<'src> {
                     IrTy::I32
                 }
             }
-            // Calls, method calls, compound-assign, if, loop, match, named block,
+            // Calls, method calls, compound-assign, if, loop, match,
             // return, break, continue, etc.: these were already handled
             // correctly with IrTy::Unit. Preserve that default here so their
             // existing `lower_expr` handlers are unaffected.

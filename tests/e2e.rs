@@ -36473,3 +36473,18 @@ fn fls_8_2_block_expr_stmt_emits_runtime_instr() {
         "expected runtime `mov #42` from block tail in `block_stmt`; got:\n{asm}"
     );
 }
+
+#[test]
+// FLS §8.2 + §6.4.3: Named block expression as a statement — `'l: { 42 };`.
+// infer_natural_ty recurses into the NamedBlock's tail so `ret_ty` is I32.
+fn fls_8_2_named_block_expr_stmt_emits_runtime_instr() {
+    let asm = compile_to_asm("fn named_block_stmt() { 'l: { 42 }; }\nfn main() -> i32 { 0 }\n");
+    assert!(
+        asm.contains("named_block_stmt:"),
+        "expected `named_block_stmt` function in assembly; got:\n{asm}"
+    );
+    assert!(
+        asm.contains("#42"),
+        "expected runtime `mov #42` from named block tail in `named_block_stmt`; got:\n{asm}"
+    );
+}
