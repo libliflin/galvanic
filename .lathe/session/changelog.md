@@ -1,3 +1,118 @@
+# Verification — Cycle 026, Round 1 (Verifier)
+
+## What I compared
+
+- **Goal:** Fix §8.2 expression statement lowering so `42;` and `x + 1;` lower successfully with runtime instructions, not the uninformative "integer literal with non-integer type" error.
+- **Builder's diff:** `infer_natural_ty` on `LowerCtx`, `StmtKind::Expr` updated, two e2e tests, new fixture, parse acceptance test, smoke test updated.
+- **What I ran:**
+  - `cargo test` — 2113 pass, 0 fail ✓
+  - `cargo clippy -- -D warnings` — clean ✓
+  - `cargo run -- tests/fixtures/fls_9_functions.rs` → clean emission, 0 failures ✓ (was 1 failed)
+  - `cargo run -- tests/fixtures/fls_8_2_expression_statements.rs` → clean emission ✓
+  - `cargo test --test e2e fls_8_2 -- --nocapture` → both tests pass ✓
+  - Read emitted assembly for `discard_integer_literal`: `mov x0, #42` present ✓
+  - Read emitted assembly for `discard_binary_expr`: `add` present, no constant fold ✓
+  - Probed edge case: `{ 42 };` (block expression as statement) — **failed** with same error class
+
+## What's here, what was asked
+
+The goal as stated is met: `42;` and `x + 1;` lower cleanly. Gap found at the boundary: `{ 42 };` (block expression as a statement, FLS §6.4 tail expression in §8.2 context) triggered the same "integer literal with non-integer type" failure. `infer_natural_ty` returned `IrTy::Unit` for `ExprKind::Block`, which propagated to the block's tail `42` via `lower_block_to_value`. This is the same class of bug, one expression-kind deeper.
+
+## What I added
+
+**`src/lower.rs` — block expression case in `infer_natural_ty`:**
+Added `ExprKind::Block(block) | ExprKind::UnsafeBlock(block)` arm that recurses into `block.tail` (if present) to propagate the tail's natural type, rather than returning `IrTy::Unit`. This closes the same failure for `{ 42 };`, `{ x + 1 };`, etc.
+
+**`tests/e2e.rs` — `fls_8_2_block_expr_stmt_emits_runtime_instr`:**
+Assembly inspection test asserting that `fn block_stmt() { { 42 }; }` emits `block_stmt:` and `#42` in the output.
+
+**`tests/fixtures/fls_8_2_expression_statements.rs` — `discard_block_expr`:**
+Added `fn discard_block_expr() { { 42 }; }` as the boundary case just beyond the direct-literal case.
+
+- Files: `src/lower.rs`, `tests/e2e.rs`, `tests/fixtures/fls_8_2_expression_statements.rs`
+- `cargo test` after additions: **2114 pass, 0 fail** (was 2113; 1 new test added)
+
+## Notes for the goal-setter
+
+- **Named blocks as statements:** `'label: { 42 };` falls to `_ => IrTy::Unit` in `infer_natural_ty`. The `ExprKind::NamedBlock` variant is not yet covered. Same fix would apply (recurse into the named block's tail). Scope is narrow — worth a future goal if named-block statements appear in fixtures.
+- **Parenthesized expressions as statements:** `(42);` — the `ExprKind::Paren` (if one exists) or however the parser represents it also falls to `_ => IrTy::Unit`. Low priority since parenthesized expression statements are uncommon.
+- The `#42` e2e assertion is sound — witnessed `mov x0, #42` in the emitted assembly for `discard_integer_literal`. No false-positive risk.
+
+---
+
+# Changelog — Cycle 026, Round 1 (Builder)
+
+## Goal
+Fix expression statement lowering (FLS §8.2) so that any expression can
+appear as a statement. `fn returns_unit() { 42; }` and `fn foo(x: i32) { x + 1; }`
+must lower successfully, emitting runtime instructions for the discarded
+expressions without folding.
+
+## Who This Helps
+- **Stakeholder:** Lead Researcher
+- **Impact:** `fls_9_functions.rs` — the spine-of-the-spec fixture — now lowers
+  20 of 20 functions cleanly. Previously it was 19 of 20, with `returns_unit()`
+  failing on a message that gave no FLS citation and no navigable context. The
+  wall is gone.
+
+## Applied
+**Root cause fixed:** `StmtKind::Expr` in `src/lower.rs` was calling
+`lower_expr(expr, &IrTy::Unit)` for all expression statements. The `LitInt`
+arm in `lower_expr` dispatches on `ret_ty` and has no case for `IrTy::Unit`,
+so integer literals as statements hit the catch-all:
+`Err("integer literal with non-integer type")` — no FLS citation, no context.
+The same issue affected any binary expression whose leftmost leaf is a literal.
+
+**Structural fix:** Added `fn infer_natural_ty(&self, expr: &Expr) -> IrTy` on
+`LowerCtx` (at `src/lower.rs:10638`). This method returns the natural type of
+an expression for use in statement position:
+- `LitInt` → `IrTy::I32` (Rust default for unsuffixed integer literals)
+- `LitFloat` with `f32`/`_f32` suffix → `IrTy::F32`; otherwise `IrTy::F64`
+- `LitBool` → `IrTy::Bool`
+- `LitChar` → `IrTy::U32`
+- `LitStr` → `IrTy::I32` (length)
+- `Binary { op: Assign }` → `IrTy::Unit` (assignment is unit-typed)
+- `Binary` (arithmetic/bitwise) → recurse into left operand
+- `Unary` → recurse into operand
+- `Path` (single segment) → `IrTy::F64` if in `float_locals`, `IrTy::F32` if
+  in `float32_locals`, else `IrTy::I32`
+- Everything else (if, loop, return, break, continue, call, match, …) →
+  `IrTy::Unit` — these were already working with `IrTy::Unit` and must
+  continue to use it
+
+Updated `StmtKind::Expr` to call `infer_natural_ty` and pass that type to
+`lower_expr`, replacing the unconditional `IrTy::Unit`.
+
+Updated `tests/smoke.rs`: `lower_error_names_failing_item` was using
+`fls_9_functions.rs` expecting a lower error. Since that fixture now lowers
+cleanly, updated the test to use `fls_4_14_where_clauses_on_types.rs` which
+still has unsupported constructs (method calls on primitive types).
+
+**Files changed:**
+- `src/lower.rs` — `infer_natural_ty` method + updated `StmtKind::Expr`
+- `tests/fixtures/fls_8_2_expression_statements.rs` — new §8.2 fixture
+- `tests/fls_fixtures.rs` — `fls_8_2_expression_statements` parse acceptance test
+- `tests/e2e.rs` — two assembly inspection tests:
+  `fls_8_2_integer_literal_stmt_emits_runtime_instr`,
+  `fls_8_2_binary_expr_stmt_emits_runtime_instr`
+- `tests/smoke.rs` — updated `lower_error_names_failing_item` fixture reference
+
+## Validated
+- `cargo test` — **2113 pass, 0 fail** (was 2110; 3 new tests added)
+- `cargo clippy -- -D warnings` — clean
+- `cargo run -- tests/fixtures/fls_9_functions.rs` → `galvanic: emitted fls_9_functions.s`
+  (no errors; was `lowered 19 of 20 functions (1 failed)`)
+- PR: libliflin/galvanic#458
+
+**Where the verifier should look:**
+- `src/lower.rs:10638` — `infer_natural_ty` method
+- `src/lower.rs` near line 10545 — updated `StmtKind::Expr`
+- `tests/e2e.rs` end-of-file — `fls_8_2_integer_literal_stmt_emits_runtime_instr`
+  and `fls_8_2_binary_expr_stmt_emits_runtime_instr`
+- `cargo run -- tests/fixtures/fls_9_functions.rs` — clean output is the moment
+
+---
+
 # Cycle 026 — Customer Champion
 
 ## Stakeholder
