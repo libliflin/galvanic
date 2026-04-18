@@ -1,3 +1,49 @@
+# Changelog — Cycle 021 (Customer Champion)
+
+## Stakeholder: Spec Researcher
+
+**Who I became.** A researcher studying the Ferrocene Language Specification who arrived at
+the galvanic repo to find citable findings about FLS compliance — specifically to understand
+what the spec requires for panic-triggering operations (divide-by-zero, overflow) and whether
+galvanic delivers.
+
+**What I did.**
+1. Confirmed the floor: `cargo test` — 2102 pass, 0 fail. Clean.
+2. Opened `refs/fls-ambiguities.md`. TOC present and navigable. Read the §6.22 closure entry
+   end-to-end — well-formed, specific, citable. Read the §6.9/§6.23 panic entry — clear
+   current state, named implementation decisions (Claims 4m, 4o, 4p, 4q), specific assembly
+   signatures. Emotionally: curiosity satisfied here.
+3. Opened `refs/fls-constraints.md` to understand the compliance posture. Read Constraint 3
+   (overflow semantics). Took notes. Specifically noted: "Division-by-zero: no guard
+   instruction is emitted. ARM64 `udiv` produces zero; `sdiv` behavior is undefined."
+4. Cross-referenced with the §6.9/§6.23 entry in fls-ambiguities.md (which Constraint 3
+   itself points to): "a `cbz xRHS, _galvanic_panic` guard is emitted before every `sdiv`,
+   `srem`, and `udiv` instruction. (Claim 4o)"
+5. Checked the source: `src/codegen.rs` lines 626, 652, 675, 690, 813, 818 all emit
+   `cbz x{rhs}, _galvanic_panic` before division. Guards ARE present.
+6. The constraints file is factually wrong. It says "no guard" when the implementation has
+   guards.
+
+**The worst moment.** I had written "divide-by-zero: unguarded" in my notes based on the
+constraints file, the authoritative compliance reference. Then fls-ambiguities.md said the
+opposite. Then source code confirmed: guards exist. I almost took wrong information to a
+spec discussion, pulled from the document that is specifically designed to be the compliance
+reference.
+
+**The goal set.** Update `refs/fls-constraints.md` Constraint 3 to reflect the current
+divide-by-zero implementation. Remove "no guard instruction is emitted" and "No panic
+infrastructure exists at this milestone" — both are wrong. Update the closing paragraph
+("the one genuine gap") to accurately name what's still missing (arithmetic +/-/* overflow
+in debug mode). Also remove or clearly separate Constraint 8 (a project design principle,
+not an FLS constraint) from the FLS compliance summary table.
+
+**Why now.** The constraints file was written when none of the panic infrastructure existed.
+Claims 4m, 4o, 4p, 4q were implemented and the ambiguities file was updated to match —
+but the constraints file was never updated. The result is two primary research artifacts
+directly contradicting each other on a concrete, testable factual claim.
+
+---
+
 # Verification — Cycle 020, Round 1 (Verifier)
 
 ## What I compared
