@@ -36488,3 +36488,62 @@ fn fls_8_2_named_block_expr_stmt_emits_runtime_instr() {
         "expected runtime `mov #42` from named block tail in `named_block_stmt`; got:\n{asm}"
     );
 }
+
+// ── §2.4 literals fixture: valid ARM64 register names ────────────────────────
+
+/// FLS §2.4 — The benchmark fixture `fls_2_4_literals.rs` has 41 let-bindings.
+///
+/// Virtual registers 31–40 (for bindings 31–41) must not be formatted as ARM64
+/// physical register names: x31 = sp/xzr (not a writable GPR), x32+ do not
+/// exist. Codegen uses x9 (scratch) for all virtual registers >= 31.
+///
+/// This test verifies that the emitted assembly contains no invalid registers
+/// (x31+) and that `aarch64-linux-gnu-as` accepts the output when available.
+///
+/// Cycle 031 goal: Cache-line Performance Researcher sees hollow discovery —
+/// the benchmark fixture produces invalid ARM64 for the 41-variable main().
+#[test]
+fn fls_2_4_literals_emits_valid_arm64_registers() {
+    let fixture = include_str!("fixtures/fls_2_4_literals.rs");
+    let asm = compile_to_asm(fixture);
+
+    // No ARM64 instruction should reference a register that doesn't exist.
+    // ARM64 GPRs are x0–x30; x31 is sp/xzr (not a writable GPR); x32+ do not exist.
+    //
+    // We check for " x{N}" (space-prefixed) to distinguish register operands
+    // from hex literals like `0x40400000` that contain substrings such as "x40".
+    // In GAS syntax, every register operand is preceded by whitespace or a comma.
+    for reg in 31u32..=64 {
+        let as_operand = format!(" x{reg}");
+        let as_comma_operand = format!(",x{reg}");
+        assert!(
+            !asm.contains(&as_operand) && !asm.contains(&as_comma_operand),
+            "assembly references invalid ARM64 register x{reg}:\n{asm}"
+        );
+    }
+
+    // When the cross-assembler is available, verify the output actually assembles.
+    if !tool_available("aarch64-linux-gnu-as") {
+        eprintln!("e2e: skipping assembly check — aarch64-linux-gnu-as not available");
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let asm_path = dir.path().join("fls_2_4_literals.s");
+    let obj_path = dir.path().join("fls_2_4_literals.o");
+    std::fs::write(&asm_path, &asm).expect("write .s");
+
+    let status = Command::new("aarch64-linux-gnu-as")
+        .args([
+            asm_path.to_str().unwrap(),
+            "-o",
+            obj_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("failed to invoke aarch64-linux-gnu-as");
+
+    assert!(
+        status.success(),
+        "aarch64-linux-gnu-as rejected assembly for fls_2_4_literals.rs — invalid register names"
+    );
+}
