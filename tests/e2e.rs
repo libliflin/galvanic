@@ -714,6 +714,51 @@ fn runtime_while_emits_cmp_cset_cbz_and_b() {
     );
 }
 
+/// Assembly inspection: back-edge branch carries loop body cache-line footprint.
+///
+/// Goal cycle 023: at back-edge branches (unconditional `b` whose target label
+/// precedes it in the instruction stream), galvanic emits a comment of the form:
+///   "back-edge — cache: loop body = N instr × 4 B = K B, spans M cache line(s)"
+///
+/// This makes the loop body's instruction-cache footprint verifiable from the
+/// assembly alone — the same standard the prologue commentary already meets.
+///
+/// The while loop below has one variable `x`.  Its loop body from `.L0:` to `b .L0`
+/// is: ldr + mov(#5) + cmp + cset [BinOp Lt = 2] + cbz + ldr + mov(#1) +
+/// add + cmp + b.ne [BinOp Add i32 = 3] + str + b(back-edge) = 12 ARM64 instructions.
+/// 12 × 4 B = 48 B — fits within one 64-byte cache line (ceil(48/64) = 1).
+///
+/// Two-variable loops (accumulator + counter) have larger bodies that span two
+/// cache lines — see the while_loop fixture in tests/fixtures/fls_6_15_loop_expressions.s.
+///
+/// FLS §6.15.3: While loop back-edge branch.
+#[test]
+fn fls_6_15_back_edge_branch_carries_cache_line_annotation() {
+    let asm = compile_to_asm(
+        "fn main() -> i32 { let mut x = 0; while x < 5 { x = x + 1; } x }\n",
+    );
+    assert!(
+        asm.contains("back-edge — cache: loop body ="),
+        "expected back-edge cache-line annotation on while loop back-edge branch, got:\n{asm}"
+    );
+    // The specific count for this single-variable while loop: 12 instructions, 48 bytes, 1 cache line.
+    assert!(
+        asm.contains("loop body = 12 instr × 4 B = 48 B, spans 1 cache line(s)"),
+        "expected loop body = 12 instr × 4 B = 48 B, spans 1 cache line(s), got:\n{asm}"
+    );
+    // Forward branches (non-back-edge) must NOT carry the annotation.
+    // The while exit `cbz` goes forward to the exit label — not annotated as a back-edge.
+    assert!(
+        asm.contains("cbz"),
+        "expected cbz forward exit branch (no back-edge annotation), got:\n{asm}"
+    );
+    // The back-edge `b` annotation must not appear on the forward `cbz`.
+    assert!(
+        !asm.contains("cbz     x3, .L1                     // FLS §6.15.3: back-edge"),
+        "forward cbz must not be annotated as back-edge, got:\n{asm}"
+    );
+}
+
 // ── Milestone 8: loop / break / continue ─────────────────────────────────────
 //
 // FLS §6.15.2: Infinite loop expressions. A `loop` block executes indefinitely
