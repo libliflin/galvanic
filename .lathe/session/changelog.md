@@ -1,3 +1,101 @@
+# Verification — Cycle 026, Round 2 (Verifier)
+
+## What I compared
+
+- **Goal:** Fix expression statement lowering (FLS §8.2) so that any expression can appear
+  as a statement. Specifically `fn returns_unit() { 42; }` and `fn foo(x: i32) { x + 1; }`
+  must lower successfully. The named-block variant `'l: { 42 };` was the remaining gap
+  after round 1.
+- **Builder's change:** Added `ExprKind::NamedBlock { body, .. }` arm to `infer_natural_ty`
+  mirroring the existing `Block`/`UnsafeBlock` arm; corrected the fallthrough comment.
+  Added fixture function `discard_named_block_expr()` and e2e test
+  `fls_8_2_named_block_expr_stmt_emits_runtime_instr`.
+
+**What I ran:**
+- `cargo test` — 2115 pass, 0 fail ✓
+- `cargo clippy -- -D warnings` — clean ✓
+- `cargo run -- tests/fixtures/fls_8_2_expression_statements.rs` → 8 items, 0 failures ✓
+- `cargo run -- tests/fixtures/fls_9_functions.rs` → 19 items, 0 failures (was 19 of 20 at
+  cycle start — the original wall is gone) ✓
+- `cargo test --test e2e fls_8_2 -- --nocapture` → 4 tests, all pass ✓
+- Adversarial probe: `named_block_with_param(x: i32) { 'l: { x + 1 }; }`,
+  `named_block_nested() { 'outer: { 'inner: { 42 }; }; }`,
+  `named_block_no_tail() { 'l: { let _x = 1; }; }` — all compile and emit runtime
+  instructions (not folded constants) ✓
+- Inspected `infer_natural_ty` (lower.rs:10664–10714): Block, UnsafeBlock, NamedBlock all
+  handled; fallthrough comment is now accurate ✓
+
+## What's here, what was asked
+
+Matches. The work holds up against the goal from my comparative lens.
+
+- `fls_9_functions.rs` (the opening scenario) now compiles cleanly: 19 items, 0 failures.
+- All three block-like expression kinds (`Block`, `UnsafeBlock`, `NamedBlock`) recurse into
+  their tail in `infer_natural_ty`.
+- The adversarial probe (parameter in named block) emits a runtime `ldr`/`add` sequence —
+  no constant folding.
+- The fallthrough comment no longer names "named block" as a kind handled by `IrTy::Unit`.
+- 2115 tests pass; clippy clean.
+
+## What I added
+
+Nothing this round — the work holds up against the goal from my lens.
+
+## Notes for the goal-setter
+
+- One related gap surfaced during adversarial probing: `if` expressions used as statements
+  (`fn foo(x: i32) { if x > 0 { 42 } else { 0 }; }`) still hit "not yet supported:
+  integer literal with non-integer type". The root cause is the same class — `lower_expr`
+  receives the `if` with `IrTy::Unit`, and the literal arms inside the branches fail. This
+  is a pre-existing gap, not introduced this cycle. A future goal could extend
+  `infer_natural_ty` to cover `ExprKind::If` (recurse into the then-branch tail), but the
+  fix is deeper: `lower_expr`'s `if` handler would need to pass the inferred type to both
+  branch bodies. That's a new lowering path, not a one-liner.
+- None other.
+
+---
+
+# Changelog — Cycle 026, Round 2 (Builder)
+
+## Goal
+- Fix expression statement lowering (FLS §8.2) so any expression can appear as a statement.
+
+## Who This Helps
+- **Stakeholder:** Lead Researcher
+- **Impact:** The named-block-as-statement edge case — `'l: { 42 };` — no longer produces
+  "integer literal with non-integer type". All three block-like expression kinds now
+  propagate their tail type in `infer_natural_ty`.
+
+## Applied
+**Root cause fixed:** The verifier's round 1 addition covered `ExprKind::Block` and
+`ExprKind::UnsafeBlock` in `infer_natural_ty`. `ExprKind::NamedBlock` fell to the
+`_ => IrTy::Unit` default, producing the same error for `'l: { 42 };`.
+
+Added `ExprKind::NamedBlock { body, .. }` arm (src/lower.rs, adjacent to the Block arm)
+that recurses into `body.tail` when present, returning `IrTy::Unit` when the body has
+no tail. This mirrors the Block arm exactly.
+
+Also corrected the comment at the `_` fallthrough that incorrectly named "named block"
+as one of the kinds "already handled correctly with IrTy::Unit".
+
+**Files changed:**
+- `src/lower.rs` — `NamedBlock` arm in `infer_natural_ty` + corrected fallthrough comment
+- `tests/fixtures/fls_8_2_expression_statements.rs` — added `discard_named_block_expr()`
+- `tests/e2e.rs` — added `fls_8_2_named_block_expr_stmt_emits_runtime_instr`
+
+## Validated
+- `cargo test` — **2115 pass, 0 fail** (was 2114; 1 new test added)
+- `cargo clippy -- -D warnings` — clean
+- `cargo run -- tests/fixtures/fls_8_2_expression_statements.rs` → 8 items, 0 failures
+- PR: libliflin/galvanic#460
+
+**Where the verifier should look:**
+- `src/lower.rs:10692` — `NamedBlock` arm in `infer_natural_ty`
+- `tests/e2e.rs` near end — `fls_8_2_named_block_expr_stmt_emits_runtime_instr`
+- `cargo run -- tests/fixtures/fls_8_2_expression_statements.rs` — clean is the signal
+
+---
+
 # Verification — Cycle 026, Round 1 (Verifier)
 
 ## What I compared
