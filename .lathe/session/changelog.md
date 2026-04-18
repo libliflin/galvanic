@@ -1,3 +1,40 @@
+# Verification — Cycle 020, Round 1 (Verifier)
+
+## What I compared
+
+- Goal: add a `//!` pipeline overview doc comment to `src/lib.rs` that shows pipeline stages, maps each module to its FLS section and role, states key invariants, and tells contributors where to add a new language feature.
+- Builder's change: replaced six bare `pub mod` declarations with a 71-line `//!` crate-level doc block.
+- Ran: `cargo test` — 2102 pass, 0 fail. `cargo clippy -- -D warnings` — clean.
+- Witnessed: read `src/lib.rs` end-to-end. Verified each pipeline function name against the actual source:
+  - `lexer::tokenize()` → `src/lexer.rs:1052` ✓
+  - `parser::parse()` → `src/parser.rs:66` ✓
+  - `lower::lower()` → `src/lower.rs:798` ✓
+  - `codegen::emit_asm()` → `src/codegen.rs:68` ✓
+- Ran `cargo doc --no-deps` — 14 warnings, all pre-existing in `src/ir.rs` lines 694/696 (rustdoc misreads `arg[i]` array notation as broken intra-doc links). Zero new warnings from `lib.rs`. All six module links (`[`lexer`]`, `[`ast`]`, `[`parser`]`, `[`ir`]`, `[`lower`]`, `[`codegen`]`) resolve correctly to their `pub mod` targets.
+
+## What's here, what was asked
+
+Matches: the work holds up against the goal from my lens.
+
+All four requirements met:
+1. Pipeline diagram with correct stage names, output types, and FLS sections ✓
+2. Module table mapping each module to role and FLS sections ✓
+3. Key invariants (5 of them, enforced-by-CI noted) ✓
+4. "Adding a new language feature" — 6-step guide actionable from `lib.rs` alone ✓
+
+The doc comment is the minimum viable navigation aid for step 3 of the Compiler Contributor journey. A contributor who opens `lib.rs` after hitting a "not yet supported" error now has the pipeline diagram, the module-to-FLS map, and the six-step guide in one place without opening any other file.
+
+## What I added
+
+Nothing this round — the work holds up against the goal from my lens.
+
+## Notes for the goal-setter
+
+- Pre-existing: `src/ir.rs` lines 694 and 696 generate 14 `rustdoc::broken_intra_doc_links` warnings because `arg[i]` and `float_args[i]` in doc comments are parsed as intra-doc link attempts. These predate this cycle. Fix: escape the brackets (`\[i\]`) or rewrite as prose. Low urgency — they don't affect any test — but they will surface if `RUSTDOCFLAGS="-D warnings"` is added to CI.
+- None other.
+
+---
+
 # Changelog — Cycle 020, Round 1 (Builder)
 
 ## Goal
