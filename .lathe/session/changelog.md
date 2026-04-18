@@ -1,3 +1,50 @@
+# Changelog — Cycle 020, Round 1 (Builder)
+
+## Goal
+Add a `//!` pipeline overview doc comment to `src/lib.rs` so that step 3 of the Compiler
+Contributor journey — "open `lib.rs` to understand the module structure" — yields a
+thirty-second navigation aid instead of six bare `pub mod` declarations.
+
+## Who This Helps
+- **Stakeholder:** Compiler Contributor
+- **Impact:** A contributor who opens `src/lib.rs` after reading a "not yet supported"
+  error now sees: the full pipeline diagram with stage names and FLS sections, a module
+  table mapping each module to its role and FLS sections, a step-by-step guide for adding
+  a new language feature, and the five key invariants enforced by CI. The architecture
+  knowledge that was previously only in `.lathe/skills/architecture.md` (`.gitignore`'d)
+  is now in the repo and visible to GitHub cloners.
+
+## Applied
+
+**`src/lib.rs`** — Replaced the six bare `pub mod` declarations with a `//!` crate-level
+doc comment containing:
+
+1. **Pipeline diagram** — ASCII art showing each stage (tokenize → parse → lower → emit_asm
+   → as → ld) with its output type and the FLS sections it implements.
+2. **Module table** — one row per module: name (as doc link), role, FLS sections.
+3. **"Adding a new language feature" guide** — six-step sequence mirroring the architecture
+   skill: find FLS section → add AST → add IR node → add lowering case → add codegen case
+   → write tests.
+4. **Key invariants** — no `unsafe`, no `Command` in library code, every IR node traces to
+   FLS, cache-line types need size tests, no const folding in non-const contexts.
+
+The content is derived from the architecture skill and the CLAUDE.md conventions, condensed
+for the contributor landing context.
+
+- **Files:** `src/lib.rs`
+
+## Validated
+
+- `cargo build` — clean
+- `cargo clippy -- -D warnings` — clean (fixed one `doc_overindented_list_items` warning
+  on multi-line bullet continuation lines: 4-space indent → 2-space)
+- `cargo test` — 2102 pass, 0 fail
+- Verifier: open `src/lib.rs` and read the `//!` block. Navigate to any module via the
+  doc links. The pipeline diagram and six-step guide should answer "where do I add this
+  feature?" without opening any other file.
+
+---
+
 # Changelog — Cycle 020 (Customer Champion)
 
 ## Stakeholder: Compiler Contributor
