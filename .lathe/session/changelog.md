@@ -1,58 +1,55 @@
-# Changelog — Cycle 022, Round 1 (Builder)
+# Verification — Cycle 022, Round 1 (Verifier)
 
-## Goal
-When `main` fails to lower but other functions succeed, emit the partial assembly
-(without `_start`), annotated "inspection-only — no fn main; this assembly has no
-entry point." Exit code stays non-zero. Successful lowerings are never silently
-discarded. The only case where zero assembly is emitted is when zero functions lowered.
+## What I compared
 
-## Who This Helps
-- **Stakeholder:** Lead Researcher
-- **Impact:** Running `cargo run -- tests/fixtures/fls_5_patterns.rs` now produces a
-  `.s` file covering 20 functions and 10 FLS §5 subsections, instead of printing
-  "no assembly emitted" and discarding all 20 successful lowerings. The Lead Researcher
-  gets an artifact to inspect — cache-line notes, FLS citations, runtime instructions —
-  for every function that lowered successfully, regardless of whether `main` compiled.
+- **Goal:** When `main` fails but other functions succeed, emit partial assembly annotated "inspection-only — no fn main; this assembly has no entry point." Exit code stays non-zero. Zero assembly only when zero functions lowered.
+- **Builder's change:** `src/codegen.rs` — refactored `emit_asm` into `emit_asm_impl(module, include_entrypoint: bool)`; added `emit_asm_inspection_only(module)` calling `emit_asm_impl(module, false)`. `src/main.rs` — split the "no fn main" path: `had_lower_errors && !module.fns.is_empty()` → call `emit_asm_inspection_only`, write `.s`, exit 1. `tests/smoke.rs` — one new smoke test `partial_lower_no_main_emits_inspection_assembly`.
 
-## Applied
-
-**`src/codegen.rs`** — Refactored `emit_asm` to extract shared logic into a private
-`emit_asm_impl(module, include_entrypoint: bool)` function:
-
-- `emit_asm` (unchanged signature): asserts `has_main`, calls `emit_asm_impl(module, true)`.
-- New `emit_asm_inspection_only(module)`: calls `emit_asm_impl(module, false)`.
-- `emit_asm_impl`: all existing emit logic; when `!include_entrypoint`, prepends the
-  `// inspection-only — no fn main; this assembly has no entry point` annotation and
-  skips the `emit_start` call. Data sections (`.data`, `.rodata`, vtables) and the
-  `_galvanic_panic` handler are still emitted when needed — inspection-only functions
-  may reference statics, float constants, or division guards.
-
-**`src/main.rs`** — Split the "no fn main" early-return into two paths:
-
-- `had_lower_errors && !module.fns.is_empty()` → call `emit_asm_inspection_only`,
-  write the `.s` file, print the inspection-only annotation, return 1.
-- Clean compile with no `main` (library file) → existing "no assembly emitted" path,
-  exit 0.
-
-**`tests/smoke.rs`** — Added `partial_lower_no_main_emits_inspection_assembly`:
-- Uses `tests/fixtures/fls_5_patterns.rs` (20 of 21 functions lower, `main` fails).
-- Asserts: non-zero exit, "inspection-only" and "no fn main" and "no entry point" in
-  stdout, `.s` file exists, `.s` file contains the annotation comment.
-- Cleans up the `.s` file after the assertion.
-
-- **Files:** `src/codegen.rs`, `src/main.rs`, `tests/smoke.rs`
-
-## Validated
-
-- `cargo test` — 2103 pass, 0 fail (up from 2102; +1 new smoke test)
-- `cargo clippy -- -D warnings` — clean
+**What I ran:**
+- `cargo test` — 2103 pass, 0 fail ✓
+- `cargo clippy -- -D warnings` — clean ✓
 - `cargo run -- tests/fixtures/fls_5_patterns.rs`:
-  - stderr: `error: lower failed in 'main': not yet supported: ...`
-  - stderr: `lowered 20 of 21 functions (1 failed)`
-  - stdout: `galvanic: emitted tests/fixtures/fls_5_patterns.s (inspection-only — no fn main; this assembly has no entry point)`
-  - exit code: 1
-  - `head -2 tests/fixtures/fls_5_patterns.s` → `// inspection-only — no fn main; this assembly has no entry point`
-- Existing `no_main_prints_lowered_note` (clean compile, no lower errors) still passes.
-- Verifier: run `cargo test --test smoke -- partial_lower_no_main_emits_inspection_assembly`
-  and then `cargo run -- tests/fixtures/fls_5_patterns.rs && head -5 tests/fixtures/fls_5_patterns.s`
-  to witness the annotation and presence of 20 function bodies.
+  - stderr: `error: lower failed in 'main': not yet supported: expected struct literal \`Inner { .. }\` for nested struct field (FLS §6.11, §5.10.2)`
+  - stderr: `lowered 20 of 21 functions (1 failed)` ✓
+  - stdout: `galvanic: emitted tests/fixtures/fls_5_patterns.s (inspection-only — no fn main; this assembly has no entry point)` ✓
+  - exit code: 1 ✓
+- `head -5 tests/fixtures/fls_5_patterns.s` — annotation on first line ✓
+- `grep "_start" tests/fixtures/fls_5_patterns.s` — empty output ✓ (no `_start`)
+- `grep "^_galvanic_panic:" tests/fixtures/fls_5_patterns.s` — present ✓ (panic handler emitted because functions use arithmetic)
+- Verified existing `fls_9_functions.rs` partial-success path still emits `(partial — some functions failed)` — no regression ✓
+
+**Boundary case reviewed:**
+
+When `had_lower_errors && module.fns.is_empty()` (main is the only function and it failed): the code falls through to `"lowered 0 function(s) — no fn main, no assembly emitted"` with `exit 1`. Correct per goal: "The only case where zero assembly is emitted is when zero functions lowered."
+
+## What's here, what was asked
+
+**Gap found — two missing assertions in the smoke test:**
+
+The builder's smoke test verifies the annotation comment, stdout message, and that the `.s` file exists. It does NOT assert:
+1. That `_start` is absent from the emitted assembly (the critical correctness guarantee — a researcher who assembles this output should not get a corrupted entry point)
+2. That function bodies are actually present (the file could be just the annotation + `.text` header with zero functions)
+
+**Gap found — no direct unit test of `emit_asm_inspection_only`:**
+
+The smoke test goes through the CLI. `emit_asm_inspection_only` is a public API with no test calling it directly via `LowerErrors::partial_module`. A test at this level confirms the function contract independently of CLI argument parsing.
+
+## What I added
+
+**`tests/smoke.rs`** — Extended `partial_lower_no_main_emits_inspection_assembly` with two additional assertions:
+- `!asm.contains("_start")` — inspection-only output must never contain `_start`
+- Count function labels (lines ending `:`, non-`.`, non-`//`, not `_galvanic_panic`) — asserts ≥20 function bodies present, confirming successful lowerings were not discarded
+
+**`tests/e2e.rs`** — Added cycle 022 section with:
+- `compile_to_asm_inspection_only(source)` helper: calls `lower()`, extracts `LowerErrors::partial_module`, calls `emit_asm_inspection_only` directly
+- `inspection_only_asm_has_annotation_and_no_start`: uses a minimal fixture (structs `Inner`/`Outer`, helpers `add` and `helper`, `main` that fails on non-literal nested struct field) to exercise the inspection-only path directly; asserts annotation comment present, `_start` absent, helper function labels present
+
+Full suite after additions: **2104 pass, 0 fail** (up from 2103). Clippy clean.
+
+- **Files:** `tests/e2e.rs`, `tests/smoke.rs`
+- **PR:** libliflin/galvanic#440
+
+## Notes for the goal-setter
+
+- The "main fails, zero other functions lowered" case (`had_lower_errors && module.fns.is_empty()`) produces the pre-existing "no fn main, no assembly emitted" message with exit 1. This is correct per the goal but untested. If a future cycle wants to distinguish "main failed with nothing else to show" from "library file with no errors," a test and possibly a distinct message would serve the Lead Researcher well.
+- None other.
