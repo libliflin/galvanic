@@ -17042,22 +17042,22 @@ impl<'src> LowerCtx<'src> {
                 let lhs_reg = self.val_to_reg(lhs_val)?;
 
                 // Short-circuit: if LHS is false (0), skip RHS entirely.
-                self.instrs.push(Instr::CondBranch { reg: lhs_reg, label: false_label, fls: "§6.17" });
+                self.instrs.push(Instr::CondBranch { reg: lhs_reg, label: false_label, fls: "§6.5.8" });
 
                 // ── LHS is true: evaluate RHS and use it as the result ────────────
                 let rhs_val = self.lower_expr(rhs, &IrTy::I32)?;
                 let rhs_reg = self.val_to_reg(rhs_val)?;
                 self.instrs.push(Instr::Store { src: rhs_reg, slot: phi_slot });
-                self.instrs.push(Instr::Branch { target: end_label, fls: "§6.17" });
+                self.instrs.push(Instr::Branch { target: end_label, fls: "§6.5.8" });
 
                 // ── LHS was false: result = 0 ─────────────────────────────────────
-                self.instrs.push(Instr::Label { id: false_label, fls: "§6.17" });
+                self.instrs.push(Instr::Label { id: false_label, fls: "§6.5.8" });
                 let zero_reg = self.alloc_reg()?;
                 self.instrs.push(Instr::LoadImm(zero_reg, 0));
                 self.instrs.push(Instr::Store { src: zero_reg, slot: phi_slot });
 
                 // ── End: load and return result ───────────────────────────────────
-                self.instrs.push(Instr::Label { id: end_label, fls: "§6.17" });
+                self.instrs.push(Instr::Label { id: end_label, fls: "§6.5.8" });
                 let result_reg = self.alloc_reg()?;
                 self.instrs.push(Instr::Load { dst: result_reg, slot: phi_slot });
                 Ok(IrValue::Reg(result_reg))
@@ -17099,20 +17099,20 @@ impl<'src> LowerCtx<'src> {
                 let lhs_reg = self.val_to_reg(lhs_val)?;
 
                 // Short-circuit: if LHS is false (0), must evaluate RHS.
-                self.instrs.push(Instr::CondBranch { reg: lhs_reg, label: rhs_label, fls: "§6.17" });
+                self.instrs.push(Instr::CondBranch { reg: lhs_reg, label: rhs_label, fls: "§6.5.8" });
 
                 // ── LHS is true: result = LHS (which is 1) ───────────────────────
                 self.instrs.push(Instr::Store { src: lhs_reg, slot: phi_slot });
-                self.instrs.push(Instr::Branch { target: end_label, fls: "§6.17" });
+                self.instrs.push(Instr::Branch { target: end_label, fls: "§6.5.8" });
 
                 // ── LHS was false: evaluate RHS and use it as result ──────────────
-                self.instrs.push(Instr::Label { id: rhs_label, fls: "§6.17" });
+                self.instrs.push(Instr::Label { id: rhs_label, fls: "§6.5.8" });
                 let rhs_val = self.lower_expr(rhs, &IrTy::I32)?;
                 let rhs_reg = self.val_to_reg(rhs_val)?;
                 self.instrs.push(Instr::Store { src: rhs_reg, slot: phi_slot });
 
                 // ── End: load and return result ───────────────────────────────────
-                self.instrs.push(Instr::Label { id: end_label, fls: "§6.17" });
+                self.instrs.push(Instr::Label { id: end_label, fls: "§6.5.8" });
                 let result_reg = self.alloc_reg()?;
                 self.instrs.push(Instr::Load { dst: result_reg, slot: phi_slot });
                 Ok(IrValue::Reg(result_reg))

@@ -36039,3 +36039,27 @@ fn match_arm_branches_cite_fls_6_18() {
     let count_617 = classify_asm.matches("§6.17").count();
     assert_eq!(count_617, 0, "match-only function must have no §6.17 citations, found {count_617} in classify:\n{classify_asm}");
 }
+
+/// Lazy boolean `&&` short-circuit branches must cite §6.5.8, not §6.17.
+///
+/// FLS §6.5.8: The lazy boolean AND operator short-circuits — the right
+/// operand is only evaluated if the left evaluates to true. The CondBranch,
+/// Branch, and Label instructions emitted to implement this belong to §6.5.8,
+/// not §6.17 (if expressions), which is the structural technique borrowed
+/// but not the FLS construct being implemented.
+#[test]
+fn lazy_and_branches_cite_fls_6_5_8() {
+    let asm = compile_to_asm("fn and_test(a: i32, b: i32) -> i32 { if a != 0 && b != 0 { 1 } else { 0 } }\nfn main() -> i32 { and_test(1, 1) }\n");
+    assert!(asm.contains("§6.5.8"), "expected §6.5.8 citation on && short-circuit branches, got:\n{asm}");
+}
+
+/// Lazy boolean `||` short-circuit branches must cite §6.5.8, not §6.17.
+///
+/// FLS §6.5.8: The lazy boolean OR operator short-circuits — the right
+/// operand is only evaluated if the left evaluates to false. The CondBranch,
+/// Branch, and Label instructions emitted to implement this belong to §6.5.8.
+#[test]
+fn lazy_or_branches_cite_fls_6_5_8() {
+    let asm = compile_to_asm("fn or_test(a: i32, b: i32) -> i32 { if a != 0 || b != 0 { 1 } else { 0 } }\nfn main() -> i32 { or_test(0, 1) }\n");
+    assert!(asm.contains("§6.5.8"), "expected §6.5.8 citation on || short-circuit branches, got:\n{asm}");
+}
