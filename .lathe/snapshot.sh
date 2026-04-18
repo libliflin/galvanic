@@ -1,85 +1,107 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# macOS-compatible timeout wrapper
+# macOS compatibility: prefer gtimeout (coreutils) over timeout
 if command -v gtimeout &>/dev/null; then
   TO=gtimeout
 elif command -v timeout &>/dev/null; then
   TO=timeout
 else
-  TO="env"  # no-op fallback: just run without timeout
+  TO=""
 fi
+run() { ${TO:+$TO "$1"} "${@:2}"; }
 
 echo "# Project Snapshot"
-echo "Timestamp: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+echo "Generated: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 echo
 
-# ── Git status ────────────────────────────────────────────────────────────────
+# --- Git status ---
 echo "## Git Status"
 git status --short
 echo
 
-# ── Recent commits ────────────────────────────────────────────────────────────
+# --- Recent commits ---
 echo "## Recent Commits"
 git log --oneline -10
 echo
 
-# ── Build ─────────────────────────────────────────────────────────────────────
+# --- Build ---
 echo "## Build"
-BUILD_OUT=$($TO 60 cargo build 2>&1) && BUILD_OK=true || BUILD_OK=false
+BUILD_OUT=$(run 120 cargo build 2>&1) && BUILD_OK=true || BUILD_OK=false
 if $BUILD_OK; then
   echo "OK — builds clean"
 else
-  echo "FAILED"
+  echo "FAIL"
+  echo '```'
   echo "$BUILD_OUT" | grep -E '^error' | head -10
+  echo '```'
 fi
 echo
 
-# ── Tests ─────────────────────────────────────────────────────────────────────
+# --- Tests ---
 echo "## Tests"
-TEST_OUT=$($TO 120 cargo test -- --color never 2>&1) || true
-
-# Sum pass/fail across all test binaries (format: "N passed; N failed; N ignored;")
-PASSED=$(echo "$TEST_OUT" | grep -E '^test result:' | grep -oE '[0-9]+ passed' | awk '{s+=$1} END{print s+0}')
-FAILED=$(echo "$TEST_OUT" | grep -E '^test result:' | grep -oE '[0-9]+ failed' | awk '{s+=$1} END{print s+0}')
-IGNORED=$(echo "$TEST_OUT" | grep -E '^test result:' | grep -oE '[0-9]+ ignored' | awk '{s+=$1} END{print s+0}')
-
+TEST_OUT=$(run 120 cargo test 2>&1) && TEST_OK=true || TEST_OK=false
+PASSED=$(echo "$TEST_OUT" | grep -E '^test .+ \.\.\. ok$' | wc -l | tr -d ' ')
+FAILED=$(echo "$TEST_OUT" | grep -E '^test .+ \.\.\. FAILED$' | wc -l | tr -d ' ')
+IGNORED=$(echo "$TEST_OUT" | grep -E '^test .+ \.\.\. ignored$' | wc -l | tr -d ' ')
 echo "Pass: $PASSED | Fail: $FAILED | Ignored: $IGNORED"
-
-if [ "$FAILED" -gt 0 ]; then
-  echo "### Failures"
-  echo "$TEST_OUT" | grep -E '^(FAILED|test .* FAILED)' | head -10
-  echo "$TEST_OUT" | grep -A5 'FAILED' | head -30
+if ! $TEST_OK; then
+  echo '```'
+  echo "$TEST_OUT" | grep -E '^(test .+ \.\.\. FAILED|FAILED|thread .+ panicked|error\[)' | head -15
+  echo '```'
 fi
 echo
 
-# ── Clippy ────────────────────────────────────────────────────────────────────
+# --- Clippy ---
 echo "## Clippy"
-CLIPPY_OUT=$($TO 60 cargo clippy -- -D warnings 2>&1) && CLIPPY_OK=true || CLIPPY_OK=false
+CLIPPY_OUT=$(run 120 cargo clippy -- -D warnings 2>&1) && CLIPPY_OK=true || CLIPPY_OK=false
 if $CLIPPY_OK; then
-  echo "OK"
+  echo "OK — no warnings"
 else
   WARN_COUNT=$(echo "$CLIPPY_OUT" | grep -c '^error' || true)
-  echo "FAILED — $WARN_COUNT error(s)"
-  echo "$CLIPPY_OUT" | grep -E '^error' | head -8
+  echo "FAIL — $WARN_COUNT error(s)"
+  echo '```'
+  echo "$CLIPPY_OUT" | grep -E '^error' | head -10
+  echo '```'
 fi
 echo
 
-# ── Unsafe audit ──────────────────────────────────────────────────────────────
-echo "## Unsafe Audit"
+# --- Audit (unsafe / Command / network deps) ---
+echo "## Audit"
 UNSAFE=$(grep -rn 'unsafe\s*{\|unsafe\s*fn\b\|unsafe\s*impl\b' src/ | grep -Ev ':[0-9]+:[[:space:]]*//' || true)
-if [[ -z "$UNSAFE" ]]; then
-  echo "OK — no unsafe blocks"
-else
-  echo "WARNING — unsafe code detected:"
+CMD_LEAK=$(grep -rn 'std::process::Command\|process::Command' src/ | grep -v '^src/main\.rs:' || true)
+NET_DEPS=$(grep -E '^(reqwest|hyper|tokio|async-std|surf)\b' Cargo.toml || true)
+AUDIT_CLEAN=true
+if [[ -n "$UNSAFE" ]]; then
+  echo "FAIL: unsafe code in src/"
   echo "$UNSAFE" | head -5
+  AUDIT_CLEAN=false
+fi
+if [[ -n "$CMD_LEAK" ]]; then
+  echo "FAIL: Command usage outside main.rs"
+  echo "$CMD_LEAK" | head -5
+  AUDIT_CLEAN=false
+fi
+if [[ -n "$NET_DEPS" ]]; then
+  echo "FAIL: network crate in Cargo.toml"
+  echo "$NET_DEPS"
+  AUDIT_CLEAN=false
+fi
+if $AUDIT_CLEAN; then
+  echo "OK — no unsafe, no Command leak, no network deps"
 fi
 echo
 
-# ── CI config ─────────────────────────────────────────────────────────────────
+# --- CI ---
 echo "## CI"
-if ls .github/workflows/*.yml &>/dev/null 2>&1; then
-  echo "Workflows: $(ls .github/workflows/*.yml | xargs -n1 basename | tr '\n' ' ')"
+if [[ -d .github/workflows ]]; then
+  ls .github/workflows/*.yml 2>/dev/null | xargs -I{} basename {} | sed 's/^/- /' || true
 else
-  echo "No CI workflows found"
+  echo "No CI config found"
 fi
+echo
+
+# --- FLS fixture coverage ---
+echo "## FLS Fixtures"
+FIXTURE_COUNT=$(ls tests/fixtures/fls_*.rs 2>/dev/null | wc -l | tr -d ' ')
+echo "$FIXTURE_COUNT fixture files in tests/fixtures/"

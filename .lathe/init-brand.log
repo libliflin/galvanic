@@ -1,12 +1,15 @@
 `.lathe/brand.md` is written. Here's what the evidence said:
 
-**Identity:** Research instrument, working-researcher voice. Claims are anchored to FLS sections, counts, or concrete resolutions. Partial success is always named as partial — structurally, not just stylistically.
+**Identity:** Named after a galvanic sacrificial anode — a thing designed to be consumed so something more important isn't. The README names this explicitly. The brand follows from it: honest about what it is, untroubled by what it isn't.
 
-**Three signals to preserve:**
-1. The count (`lowered N of M functions (K failed)`) — exact numbers, not vague verdicts
-2. The `FLS §X.Y AMBIGUOUS:` format with all three parts: section, gap, galvanic's resolution
-3. "Not yet supported" over "unsupported" — honest about the project's developmental state
+**Four signals drove the character read:**
 
-**The one thing galvanic would never do:** Let a partial success look like a clean one. The `had_lower_errors` flag threading through `main.rs:87–155` exists precisely to make that guarantee structural, not just conventional.
+1. **Refusals are citable.** Every "not yet supported" message includes an FLS section (lower.rs:8322, etc.). The CI enforces this as a hard invariant. A refusal without a citation is a bug.
 
-The brand is a readable match for the researcher-first emotional signals in goal.md, but it's project-voiced rather than stakeholder-voiced — it describes how galvanic speaks across every interaction, not what each stakeholder should feel.
+2. **Partial output is never discarded silently.** main.rs:88–109 is the most distinctive behavior in the codebase — the compiler emits all errors *and* the assembly that succeeded, labeled honestly. This is deliberate design, commented as such.
+
+3. **Comments explain why, not just what.** codegen.rs cache-line notes give the full arithmetic. lexer.rs explains the 8-bytes-per-token choice at the struct definition. The voice is pedagogical without being verbose.
+
+4. **Commit messages carry the brand too.** 30+ cycles of lowercase, FLS-section-first, action-led commit subjects. Consistent enough that it reads as style, not habit.
+
+The "thing we'd never do" and "signals to preserve" sections are written for the builder — concrete enough to catch drift without being a style guide.

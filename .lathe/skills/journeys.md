@@ -1,91 +1,94 @@
 # Stakeholder Journeys
 
-Concrete step-by-step journeys the customer champion walks each cycle. One per stakeholder. These are the paths to walk — not describe abstractly, but actually execute — when inhabiting each person.
+Concrete first-encounter journeys for each stakeholder. Walk one of these each cycle. The steps here are durable — current-state friction belongs in the snapshot, not here.
 
 ---
 
 ## Lead Researcher
 
-**Emotional signal:** Momentum — each run tells them something new, and the output is always trustworthy.
+**Emotional signal:** Momentum — "another FLS section is conquered."
 
-**The journey:**
+**First ten minutes:**
+1. `cargo build` — expect OK in under 60s
+2. `cargo test` — note which tests pass, which fail, which are ignored
+3. `cargo clippy -- -D warnings` — should be clean
+4. Pick a fixture targeting the FLS section they care about:
+   `ls tests/fixtures/fls_*.rs` to see what's available
+5. `cargo run -- tests/fixtures/fls_<section>_<topic>.rs`
+6. Read stdout/stderr:
+   - All functions lowered + emits `.s` → read the assembly file
+   - Partial lower → read the "lowered N of M" summary and the errors
+   - Error → read the FLS citation and fix-site hint
+7. If a `.s` file was emitted, open it: look for cache-line commentary, proper ARM64 patterns, `_galvanic_panic` for bounds checks
+8. Check `refs/fls-ambiguities.md` — is the observed gap documented?
 
-1. `git pull && cargo test` — watch for any red. If red, the whole session is about fixing it.
-2. Pick an FLS fixture from `tests/fixtures/`. Either use an existing one or write a new program from a spec section not yet covered.
-3. `cargo run -- tests/fixtures/<fixture>.rs` and read the output.
-   - Green path: `galvanic: emitted <fixture>.s`. Open the `.s` file. Check that the assembly has runtime instructions (not folded immediates), that register usage matches the AAPCS64 ABI, and that cache-line-critical structs are laid out as documented.
-   - Partial path: `lowered N of M functions (K failed)`. Check whether each failing function is named in stderr. Check whether the failing construct is named specifically (e.g., "not yet supported: TupleExpr in match scrutinee"). Ask: given this error, do I know where to look next?
-   - Full failure: No assembly emitted. Is the error message specific enough to navigate to the relevant FLS section and source location?
-4. If a new ambiguity surfaced during the run, check `refs/fls-ambiguities.md`. Is there already an entry? Is the entry accurate? Does it name galvanic's resolution?
-5. Try the exact same program with one value replaced by a parameter (e.g., `fn main() -> i32 { 42 }` → `fn foo(x: i32) -> i32 { x }`). The output should use a register, not a constant. If it doesn't, const-folding has leaked into non-const context.
+**Where momentum dies:** An error with no FLS citation. A gap that's in the ambiguity registry but the entry is out of section order and hard to find. A fixture that produces wrong assembly silently (no error, wrong code).
 
-**What to watch for:**
-- Any "not yet supported" error that doesn't name the FLS section and the specific construct.
-- A partial failure where the failing function count in the summary doesn't match the number of error lines in stderr.
-- An emitted `.s` file that folds a constant that should be a runtime computation.
-- An ambiguity entry in `refs/fls-ambiguities.md` that says "see the code" without stating the resolution.
+**Where momentum lives:** "lowered 12 of 12 functions" for a fixture that used to fail. A new entry in `refs/fls-ambiguities.md` with a minimal reproducer they can run. An error that names the function, the FLS section, and the fix site.
 
 ---
 
 ## Spec Researcher
 
-**Emotional signal:** Curiosity satisfied — "I found a citable finding in under two minutes."
+**Emotional signal:** Confidence — "this finding is specific, real, and citable."
 
-**The journey:**
+**First ten minutes:**
+1. Find the repo (GitHub, FLS community, Ferrocene discussions)
+2. Read `README.md` — understand what galvanic is ("sacrificial anode") and the two research questions
+3. Open `refs/fls-ambiguities.md`
+4. Check for a table of contents — can they jump to their FLS section without reading 800 lines?
+5. Navigate to their target section (e.g., §6.5 for float semantics, §4.13 for dyn Trait)
+6. Read: Gap description, galvanic's choice, minimal reproducer
+7. Run the minimal reproducer: `cargo run -- /tmp/reproducer.rs` then inspect the `.s` file
+8. Verify the assembly signature matches what the entry claims
+9. Record the finding with the FLS section, galvanic's choice, and the assembly signature
 
-1. Land on the repo. Read the README. Note the two research questions the project is answering.
-2. Open `refs/fls-ambiguities.md`. Find the table of contents. Try to navigate to a specific section — say, §6.22 (Closures) or §6.18 (Match expressions).
-3. Read one finding end-to-end. Does it clearly state: (a) what the FLS says, (b) what the FLS leaves unspecified, (c) what galvanic chose to do, and (d) where in the source to find the annotation?
-4. Try to find *all* findings related to a topic. Example: everything about floating-point (§6.5.3, §6.5.5). Can you find them all without reading the whole file?
-5. Open `refs/fls-constraints.md`. Try to understand one constraint end-to-end — the FLS citation, the status, and the litmus test.
+**Where confidence dies:** No TOC → must scroll 800 lines. Entries not in section order → misses related entries. A reproducer labeled "not demonstrable" with no alternative path. An assembly signature that doesn't match what the compiler actually emits.
 
-**What to watch for:**
-- Missing TOC, or TOC entries that are out of sync with the body.
-- Entries in body order that doesn't match section number order.
-- A finding that describes the spec gap but doesn't state galvanic's resolution.
-- A constraint entry where the "status" field says something like "partially" without explaining what's missing.
-- Inconsistency between `fls-ambiguities.md` entries and the actual code annotations.
+**Where confidence lives:** TOC with anchor links. Entries sorted by FLS section. A minimal reproducer that runs in under 10 seconds and produces the claimed output. The "galvanic's choice" section explains *why*, not just *what*.
 
 ---
 
 ## Compiler Contributor
 
-**Emotional signal:** Confidence — "I know exactly where to make this change."
+**Emotional signal:** Clarity — "I know exactly where to start."
 
-**The journey:**
+**First ten minutes:**
+1. Read `src/lib.rs` header — understand the pipeline and the "Adding a new language feature" guide
+2. Write a fixture: `tests/fixtures/fls_<section>_<topic>.rs` targeting the construct they want to implement
+3. `cargo run -- tests/fixtures/fls_<section>_<topic>.rs`
+4. Read the error:
+   - Should contain: function name that failed, FLS section, construct name, fix-site hint
+   - e.g., `error: lower failed in 'my_fn': not yet supported: tuple scrutinee match (FLS §6.18 — see enum_base_slot/struct_base_slot in lower.rs)`
+5. Look up the FLS section — the citation should map to `refs/fls-constraints.md` or the spec directly
+6. Find the fix site in the source:
+   - For new syntax: `src/ast.rs` + `src/parser.rs`
+   - For new runtime behavior: `src/ir.rs` (add variant with FLS comment + size test)
+   - For lowering: `src/lower.rs` (the AMBIGUOUS annotation marks where to add the case)
+   - For codegen: `src/codegen.rs` (comment register usage and cache-line reasoning)
+7. Run `cargo test` — new fixture test should pass
 
-1. Clone the repo. `cargo build`. `cargo test`. Confirm green.
-2. Find a feature that produces "not yet supported." Example: run `galvanic` on a program that uses a construct not yet implemented. Read the error.
-3. Open `lib.rs` to understand the module structure.
-4. Trace the error back through the source: which module produced the "not yet supported" message? Which FLS section does the comment cite?
-5. Open `lower.rs` or `codegen.rs`. Find the match arm where a new case would go. Look for an existing similar case to pattern-match from.
-6. Add the new case. Write a fixture in `tests/fixtures/`. Add a test in `tests/fls_fixtures.rs`. Run the tests.
-7. Try to write the PR description. Ask: can you describe what you changed, which FLS section it covers, and why the approach is correct — without looking anything up?
+**Where clarity dies:** "not yet supported" with no FLS section and no fix-site hint. `lower.rs` is 18,000+ lines with no navigation to the right place. A size test is missing for a new IR type that has cache-line commentary.
 
-**What to watch for:**
-- A place in the pipeline where the module seam is invisible — you can't tell from the code which module "owns" a transformation.
-- An IR node added without an FLS traceability comment.
-- A fixture in `tests/fixtures/` that doesn't have a corresponding test in `fls_fixtures.rs`.
-- A "not yet supported" error in the CLI that doesn't identify the FLS section or specific construct.
-- An architecture decision that's implied by the code but never documented — especially around the IR's role as the bridge between FLS semantics and machine instructions.
+**Where clarity lives:** Three-hop navigation: error → FLS section → AMBIGUOUS annotation → fix location. Every "not yet supported" string carries `(FLS §X.Y)`. The `lower_source_all_unsupported_strings_cite_fls` test enforces this invariant.
 
 ---
 
-## Cache-Line Performance Researcher
+## Cache-line Performance Researcher
 
-**Emotional signal:** Verifiable — "the claim is documented, tested, and visible in the output."
+**Emotional signal:** Discovery — "I can see the effect."
 
-**The journey:**
+**First ten minutes:**
+1. `cargo bench --bench throughput -- --warm-up-time 2 --measurement-time 3`
+2. Note throughput numbers (tokens/sec for the lexer, the primary cache-line-aware stage)
+3. Read `src/lexer.rs` — find the `Token` size assertion and the 8-bytes-per-token rationale
+4. Run a fixture: `cargo run -- tests/fixtures/fls_2_4_numeric_literals.rs`
+5. Open the emitted `.s` file — look for patterns that reflect cache-line decisions:
+   - Stack frame alignment to 16 bytes (`sub sp, sp, #N` where N is a multiple of 16)
+   - Struct fields accessed at offsets that fit in cache lines
+6. Read `src/ir.rs` for IR types with `cache_line` fields or size assertions
+7. Check `refs/arm64-abi.md` for the ABI context that informs codegen layout decisions
 
-1. Read the README. Find the cache-line claim ("cache-line alignment as a first-class concern").
-2. `cargo bench` — look at the throughput numbers.
-3. Find the size assertion tests: `cargo test --lib -- --exact lexer::tests::token_is_eight_bytes`. Do they pass? Are there similar tests for other cache-critical types?
-4. Compile a test program: `galvanic tests/fixtures/fls_2_4_literals.rs`. Open the emitted `.s` file. Find where a token-stream loop would be. Is the data structure laid out as claimed?
-5. Find the cache-line comment in `src/lexer.rs` (Token is 8 bytes, 8 per cache line). Find the corresponding test. Can you trace the full argument: claim → code → test → benchmark?
-6. Look for a recently added IR node or data structure. Does it have a cache-line note consistent with the rest of the codebase?
+**Where discovery dies:** Benchmark numbers exist but there's no way to attribute them to specific cache-line decisions. Cache-line rationale is in comments but no corresponding assembly pattern makes it observable.
 
-**What to watch for:**
-- A cache-line claim in a comment that has no corresponding size test.
-- A new struct added in a recent commit without a cache-line note, in a file where all other structs have them.
-- Benchmark output that doesn't report throughput (bytes/sec or tokens/sec) — only raw time is hard to interpret for cache analysis.
-- An emitted `.s` file where the layout of a cache-critical struct differs from the documented layout.
+**Where discovery lives:** Size assertions in tests that enforce cache-line sizing. Assembly output with clear, consistent stack alignment. A benchmark that measures the thing the cache-line discipline was meant to improve.

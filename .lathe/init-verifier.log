@@ -1,9 +1,11 @@
-`.lathe/verifier.md` written.
+`.lathe/agents/verifier.md` written. Here's what it encodes:
 
-**Shape detected: Service / CLI.** Galvanic is a Rust compiler binary with no deploy target — changes are witnessed by running `cargo run -- <fixture.rs>` and confirming the output.
+**Shape detected: Service / CLI.** Galvanic is a compiler binary — no registry publish, no deploy environment, no dev server. Witnessing means building the binary and exercising the changed command path directly.
 
-The verifier is built around three durable axes:
+**What's in the file:**
 
-1. **Comparative scrutiny** — goal vs. diff, stakeholder moment vs. what actually happens when you run it
-2. **Five verification themes** specific to galvanic: FLS section alignment, pipeline stage coverage, cache-line discipline, the three-part ambiguity entry, and the constant-fold prohibition (FLS §6.1.2:37–45)
-3. **Concrete playbook** — distinct witness paths for lowering/codegen changes (assembly inspection via `compile_to_asm`), CLI error message changes (smoke tests), parse acceptance (fls_fixtures), and size assertions — with a note that runtime e2e tests are Linux-only and CI is authoritative when on macOS
+- **Comparative scrutiny posture** — reads goal and code side by side, asks what's missing, commits code (not verdicts)
+- **Verification Playbook** — concrete `cargo` commands, `/tmp/` fixture patterns, and guidance for witnessing new language features, new error messages, new assembly output, and pure refactors. No placeholders — all commands are the real ones from this repo.
+- **Project-specific scrutiny checklist** — the recurring gaps most likely to slip past the builder: FLS traceability comments, cache-line size assertions, the no-const-folding invariant, pipeline completeness (AST node with no lowering case = runtime crash), audit invariants, and partial-output behavior.
+- **Test layer clarity** — the verifier knows exactly which of the three test layers (`fls_fixtures.rs`, `smoke.rs`, `e2e.rs`) a given kind of addition belongs in.
+- **Convergence signal** — no VERDICT, no gate. The cycle ends when a round passes with neither agent committing.

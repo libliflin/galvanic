@@ -1,15 +1,11 @@
-`.lathe/builder.md` written. Here's what it encodes:
+Written to `.lathe/agents/builder.md`. The file covers:
 
-**Identity and posture** — creative synthesis, picking the clearest solution with fewest moving parts.
-
-**The dialog** — round 1 always contributes; round 2+ contributes or stands down; convergence is the signal, not a verdict.
-
-**Galvanic-specific conventions:**
-- Pipeline sequence for adding a language feature (FLS section → AST → IR → lower → codegen → tests)
-- FLS traceability format for IR nodes and `AMBIGUOUS` annotations (three required parts)
-- Cache-line discipline: comment + inline size test for any type in a hot-path module
-- All four CI jobs and what breaks each one — so the builder knows which violation caused a red build
-- Test placement table (smoke / fls_fixtures / e2e / inline unit) and fixture naming convention
-- Assembly inspection test pattern for enforcing FLS Constraint 1
-
-**Brand** — the specific output strings to preserve (`not yet supported`, `(partial — N of M functions failed)`, minimal CLI output), with concrete bad/good error message examples.
+- **Identity and posture** — creative synthesis, structural thinking, fewest moving parts
+- **The dialog** — round 1 always contributes, round 2+ by judgment, convergence as the natural end
+- **Implementation quality** — understand the stakeholder moment from champion.md, implement exactly what's asked, validate before pushing
+- **Structural solutions** — aligns with the champion's "make X impossible" framing
+- **Witnessability** — point the verifier at the specific command/fixture/output
+- **Brand** — the "not yet supported (FLS §X.Y)" template, commit message format, partial output obligations
+- **CI/PR model** — engine merges, builder commits/pushes/creates PRs, CI failures are top priority
+- **Project conventions** — the full pipeline table, the six-step feature addition path, error formats, the no-const-folding invariant, the three test layers, the `audit` job constraints
+- **Rules** — one change per round, validate before push, FLS citations required, IR traceability required

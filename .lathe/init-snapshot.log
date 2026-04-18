@@ -1,7 +1,20 @@
-1,461 characters — well within budget. The snapshot is working correctly:
+1,496 chars on a clean build — well within the 4,000 target and far from the 6,000 cap. Expands naturally when tests fail or clippy fires.
 
-- **Pass: 2071 | Fail: 0 | Ignored: 0** — sums across all 6 test binaries
-- Build, clippy, and unsafe audit all report OK on one line
-- Failure paths expand details only when needed
+**What `.lathe/snapshot.sh` collects:**
 
-`.lathe/snapshot.sh` is written and executable.
+| Section | Happy path | Failure path |
+|---|---|---|
+| Git status | `--short` output | — |
+| Recent commits | 10 onelines | — |
+| Build | "OK — builds clean" | First 10 `error:` lines |
+| Tests | Pass/Fail/Ignored counts | First 15 failure lines |
+| Clippy | "OK — no warnings" | Error count + first 10 |
+| Audit | "OK — no unsafe/leak/net" | Exact violations |
+| CI | Workflow filenames | "No CI config" |
+| FLS Fixtures | Fixture file count | — |
+
+Key details:
+- `gtimeout`/`timeout` fallback for macOS
+- `|| true` on all commands that might fail (tests, clippy, grep)
+- `2>&1` captures stderr from cargo
+- Audit section runs statically (grep) — no compilation needed, zero cost

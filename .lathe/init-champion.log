@@ -1,0 +1,22 @@
+Done. Here's what was written and why each decision was made:
+
+---
+
+## Files written
+
+**`.lathe/agents/champion.md`** — The playbook. Four stakeholders identified from the code, not from templates:
+
+1. **Lead Researcher** (the author) — uses the compiler daily to test FLS coverage, reads assembly. Emotional signal: momentum.
+2. **Spec Researcher** — external, arrived for `refs/fls-ambiguities.md`, wants citable findings. Emotional signal: confidence.
+3. **Compiler Contributor** — adding FLS sections, follows the guide in `lib.rs`. Emotional signal: clarity.
+4. **Cache-line Performance Researcher** — studying codegen discipline, runs benchmarks. Emotional signal: discovery.
+
+The ranking section uses the two-source model explicitly — CI floor, then lived experience — and names the urge to write a numbered ladder so the runtime agent can recognize and resist it.
+
+**`.lathe/skills/journeys.md`** — Concrete first-encounter journeys for each stakeholder. The actual commands they'd run, the actual moments where the experience turns. These are what the champion walks each cycle.
+
+**`.lathe/skills/architecture.md`** — Pipeline, module roles, invariants enforced by CI, the three partial-output paths, the error message architecture. What a builder needs to know to work safely in the codebase.
+
+**`.lathe/skills/testing.md`** — How this project tests: test suite structure, what each suite checks, how to add tests, CI job table, fixture naming convention.
+
+**`.lathe/alignment-summary.md`** — For the user: stakeholder list, emotional signals, tensions, security posture, and honest "what could be wrong" including that brand.md is absent and Cache-line Researcher is lightly grounded.
