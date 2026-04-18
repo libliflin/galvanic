@@ -17,9 +17,14 @@
 //!
 //! # Cache-line note
 //!
-//! `Instr` and `IrValue` are small enums. At this milestone they fit
-//! comfortably in a single cache line per instruction. The representation
-//! will be revisited when the instruction set grows.
+//! `IrValue` is 8 bytes — eight values fit in one 64-byte cache line.
+//! `StaticValue` is 16 bytes — four values fit in one 64-byte cache line.
+//! `Instr` is 80 bytes — the `Call`/`ClosureCall`/`TraitCall` variants carry
+//! `String` and `Vec<u8>` fields that push the enum past one cache line.
+//! The heap-allocated payloads are separate allocations; the 80-byte inline
+//! header is what sits in `Vec<Instr>` contiguous storage. Sizes are enforced
+//! by `ir::tests::{ir_value_is_eight_bytes, static_value_is_sixteen_bytes,
+//! instr_size_is_documented}`.
 
 #![allow(dead_code)]
 
@@ -1766,4 +1771,59 @@ pub enum IrTy {
     ///
     /// Cache-line note: identical register/slot footprint to `IrTy::I32`.
     Addr,
+}
+
+// ── Size tests ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::mem::size_of;
+
+    /// `StaticValue` is a small enum: discriminant (1 byte) + max payload
+    /// f64 (8 bytes), padded to 8-byte alignment → 16 bytes total.
+    ///
+    /// Cache-line claim: "The enum fits in 16 bytes" (module-level docs).
+    /// Four `StaticValue`s fit in a single 64-byte data cache line.
+    #[test]
+    fn static_value_is_sixteen_bytes() {
+        assert_eq!(size_of::<StaticValue>(), 16);
+    }
+
+    /// `IrValue` is a small discriminated union: the largest variant is
+    /// `I32(i32)` (4 bytes), discriminant (1 byte) padded to 4-byte
+    /// alignment → 8 bytes total.
+    ///
+    /// Cache-line claim: "IrValue fit comfortably in a single cache line"
+    /// (module-level docs). Eight `IrValue`s fit in one 64-byte cache line.
+    #[test]
+    fn ir_value_is_eight_bytes() {
+        assert_eq!(size_of::<IrValue>(), 8);
+    }
+
+    /// `Instr` is the primary IR node. Its size is recorded here so that
+    /// contributors who add a new variant with a large payload see a test
+    /// failure and must make a deliberate choice about the tradeoff.
+    ///
+    /// Size history:
+    /// - Milestone 1: small unit variants only → fits in one 64-byte cache line.
+    /// - Current: 80 bytes. The `Call`/`ClosureCall`/`TraitCall` variants carry
+    ///   `String` (24 bytes) and `Vec<u8>` (24 bytes) fields. The heap-allocated
+    ///   metadata pushes the enum to 80 bytes — larger than a single cache line.
+    ///   The heap-allocated bodies are separate allocations; each `Instr` in a
+    ///   `Vec<Instr>` occupies 80 bytes of contiguous storage with the header
+    ///   (name pointer + length + capacity) inline.
+    ///
+    /// To update: change `INSTR_SIZE` and update the size history above.
+    /// Never let growth pass silently — this test is the enforcement point.
+    #[test]
+    fn instr_size_is_documented() {
+        const INSTR_SIZE: usize = 80;
+        assert_eq!(
+            size_of::<Instr>(),
+            INSTR_SIZE,
+            "Instr grew past its documented size ({INSTR_SIZE}) — update \
+             INSTR_SIZE and the size history comment if growth is intentional"
+        );
+    }
 }
