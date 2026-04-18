@@ -8005,27 +8005,53 @@ impl<'src> LowerCtx<'src> {
                         LowerError::Unsupported(format!("unknown struct `{actual_name}` (FLS §3, §4)"))
                     })?
                     .clone();
+                // FLS §6.11: Structs with nested struct fields use non-sequential slot
+                // offsets (e.g., a `Point { x, y }` field at index 0 occupies slots 0 and 1,
+                // so the next field is at slot 2, not slot 1). Use struct_field_offsets to
+                // map field_idx → slot offset, and struct_field_types to detect nested structs.
+                let field_offsets =
+                    self.struct_field_offsets.get(actual_name).cloned().unwrap_or_default();
+                let field_types =
+                    self.struct_field_types.get(actual_name).cloned().unwrap_or_default();
                 for (field_idx, field_name) in field_names.iter().enumerate() {
-                    let slot = base_slot + field_idx as u8;
+                    let field_offset =
+                        field_offsets.get(field_idx).copied().unwrap_or(field_idx);
+                    let slot = base_slot + field_offset as u8;
                     if let Some(field_init) = lit_fields
                         .iter()
                         .find(|(f, _)| f.text(self.source) == field_name.as_str())
                     {
-                        // Explicitly provided field initializer.
-                        let val = self.lower_expr(&field_init.1, &IrTy::I32)?;
-                        let src = self.val_to_reg(val)?;
-                        // FLS §4.1, §6.23: Normalise narrow-typed fields before
-                        // storing. Without this, `S { x: a_u16 + b_u16 }` where
-                        // the sum overflows stores the raw i32 value; subsequent
-                        // comparisons against the field see the unwrapped result.
-                        match self.field_narrow_ty(actual_name, field_idx) {
-                            Some(IrTy::U8) => self.instrs.push(Instr::TruncU8 { dst: src, src }),
-                            Some(IrTy::I8) => self.instrs.push(Instr::SextI8 { dst: src, src }),
-                            Some(IrTy::U16) => self.instrs.push(Instr::TruncU16 { dst: src, src }),
-                            Some(IrTy::I16) => self.instrs.push(Instr::SextI16 { dst: src, src }),
-                            _ => {}
+                        let nested_ty = field_types.get(field_idx).cloned().flatten();
+                        if let Some(nested_type_name) = nested_ty {
+                            // FLS §6.11: Nested struct field — route through
+                            // store_nested_struct_lit so any expression form (struct
+                            // literal, variable, call, block, if, match) is accepted.
+                            self.store_nested_struct_lit(&field_init.1, slot, &nested_type_name)?;
+                        } else {
+                            // Scalar field initializer.
+                            let val = self.lower_expr(&field_init.1, &IrTy::I32)?;
+                            let src = self.val_to_reg(val)?;
+                            // FLS §4.1, §6.23: Normalise narrow-typed fields before
+                            // storing. Without this, `S { x: a_u16 + b_u16 }` where
+                            // the sum overflows stores the raw i32 value; subsequent
+                            // comparisons against the field see the unwrapped result.
+                            match self.field_narrow_ty(actual_name, field_idx) {
+                                Some(IrTy::U8) => {
+                                    self.instrs.push(Instr::TruncU8 { dst: src, src });
+                                }
+                                Some(IrTy::I8) => {
+                                    self.instrs.push(Instr::SextI8 { dst: src, src });
+                                }
+                                Some(IrTy::U16) => {
+                                    self.instrs.push(Instr::TruncU16 { dst: src, src });
+                                }
+                                Some(IrTy::I16) => {
+                                    self.instrs.push(Instr::SextI16 { dst: src, src });
+                                }
+                                _ => {}
+                            }
+                            self.instrs.push(Instr::Store { src, slot });
                         }
-                        self.instrs.push(Instr::Store { src, slot });
                     } else if let Some(base_expr) = update_base.as_deref() {
                         // FLS §6.11: Struct update syntax — copy this field from base.
                         let base_var = match &base_expr.kind {

@@ -275,6 +275,11 @@ fn fls_6_11_nested_struct_match() {
 }
 
 #[test]
+fn fls_6_11_nested_struct_fn_return() {
+    assert_galvanic_accepts("fls_6_11_nested_struct_fn_return.rs");
+}
+
+#[test]
 fn fls_6_14_closure_expressions() {
     assert_galvanic_accepts("fls_6_14_closure_expressions.rs");
 }
