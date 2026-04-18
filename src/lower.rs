@@ -18424,8 +18424,9 @@ impl<'src> LowerCtx<'src> {
                 // ARM64: ldr x{ptr}, [sp, #{ptr_slot*8}]; lsl x{off}, x{i}, #3;
                 //        add x{addr}, x{ptr}, x{off}; ldr x{dst}, [x{addr}]
                 //
-                // FLS §4.9 AMBIGUOUS: The FLS does not specify bounds checking.
-                // Galvanic omits bounds checking at this milestone.
+                // FLS §6.9 AMBIGUOUS: Slice parameters carry a runtime length, but
+                // galvanic does not yet use it for bounds checking here (deferred —
+                // see §6.9 AMBIGUOUS note at the top of this match arm for details).
                 // FLS §6.1.2:37–45: All four instructions are runtime.
                 //
                 // Cache-line note: 4 instructions (16 bytes) — same cost as 2D

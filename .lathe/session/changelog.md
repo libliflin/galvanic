@@ -1,60 +1,48 @@
-# Verification — Cycle 017, Round 3 (Verifier)
+# Verification — Cycle 017, Round 4 (Verifier)
 
 ## What I compared
 
-- Goal: Fix the stale §4.9 entry so a Spec Researcher reads a clean, citable finding.
-  Builder's Round 3 addressed `StoreIndexed` in `ir.rs` and `codegen.rs` — the parallel
-  defect to the `LoadIndexed` fixes from Rounds 1–2.
-- Code: `src/ir.rs` (`StoreIndexed` AMBIGUOUS comment), `src/codegen.rs` (StoreIndexed block),
-  and a scan of all four files that carry §6.9 annotations: `ast.rs`, `ir.rs`, `lower.rs`, `codegen.rs`.
+- Goal: Four-file consistency for §6.9 AMBIGUOUS annotations (ast.rs / ir.rs / lower.rs / codegen.rs) — the Spec Researcher reads a clean, citable finding about bounds checking.
+- Builder's Round 3 fixed `StoreIndexed` in `ir.rs` and `codegen.rs`. Verifier's Round 3 fixed `ast.rs`.
 - Ran: `cargo test` (2084 pass), `cargo clippy -- -D warnings` (clean).
-- Witnessed: grepped `FLS §6.9 AMBIGUOUS` across `src/`. Found the builder's changes in
-  `ir.rs:788` and `codegen.rs:1179` — both correctly state the `cmp`/`b.hs` resolution with
-  the deferred-slice caveat. Confirmed `lower.rs` was already current.
+- Witnessed: grepped `FLS §4.9 AMBIGUOUS` and `FLS §6.9 AMBIGUOUS` across all four source files.
 
 ## What's here, what was asked
 
-Builder's changes match the goal for `ir.rs` and `codegen.rs`. One instance missed:
+The four fixes from Rounds 1–3 are all present and correct. One additional defect found:
 
-`src/ast.rs:1385–1388` still read:
-> "Bounds checking is not yet emitted — this is FLS §6.9 AMBIGUOUS: the spec does not
-> specify the panic mechanism for out-of-bounds access without the standard library."
+`src/lower.rs:18427–18428` read:
+> "FLS §4.9 AMBIGUOUS: The FLS does not specify bounds checking. Galvanic omits bounds checking at this milestone."
 
-This is the same stale-claim defect the builder fixed in `ir.rs` (Round 1). `ast.rs` is the
-AST definition file; a Compiler Contributor reading it before touching `lower.rs` or
-`codegen.rs` would hit the identical wall the Spec Researcher hit in the original
-`fls-ambiguities.md` entry. Four files carry §6.9 annotations; three were updated; one remained.
+Every other `§4.9 AMBIGUOUS` annotation in `lower.rs` (six sites) is about the `&[T]` fat-pointer ABI (two-register representation). A Spec Researcher tracking `§4.9` entries would encounter a bounds-checking note mixed in with ABI notes — it doesn't belong there thematically. And a Spec Researcher tracking `§6.9` entries would miss this code path's deferred bounds check entirely (since it cited `§4.9`).
+
+The site is in the `local_slice_slots` branch — the code path that handles slice parameter indexing. `lower.rs:18341–18347` already carries a correct `§6.9 AMBIGUOUS` note describing this deferred case at the top of the match arm; the comment at 18427 was a redundant, mislabeled copy.
 
 ## What I added
 
-Fixed `src/ast.rs:1385–1388`: replaced "Bounds checking is not yet emitted" with the
-resolution-form comment consistent with `ir.rs`, `lower.rs`, and `codegen.rs`:
+Fixed `src/lower.rs:18427–18429`: corrected `§4.9` → `§6.9` and updated the comment to match the resolution pattern used by all other `§6.9 AMBIGUOUS` entries, with a cross-reference to the canonical note at the top of the match arm.
 
 **Before:**
 ```
-/// At this milestone the index is treated as an `i32` (runtime value).
-/// Bounds checking is not yet emitted — this is
-/// FLS §6.9 AMBIGUOUS: the spec does not specify the panic mechanism for
-/// out-of-bounds access without the standard library.
+// FLS §4.9 AMBIGUOUS: The FLS does not specify bounds checking.
+// Galvanic omits bounds checking at this milestone.
+// FLS §6.1.2:37–45: All four instructions are runtime.
 ```
 
 **After:**
 ```
-/// At this milestone the index is treated as an `i32` (runtime value).
-/// FLS §6.9 AMBIGUOUS: The spec requires a panic on out-of-bounds access
-/// but does not specify the panic mechanism. Galvanic's resolution: codegen
-/// emits `cmp x{index}, #{len}; b.hs _galvanic_panic` before each indexed
-/// load/store when the array length is statically known (`len > 0`).
-/// Slice parameters with unknown length receive no check (deferred).
+// FLS §6.9 AMBIGUOUS: Slice parameters carry a runtime length, but
+// galvanic does not yet use it for bounds checking here (deferred —
+// see §6.9 AMBIGUOUS note at the top of this match arm for details).
+// FLS §6.1.2:37–45: All four instructions are runtime.
 ```
 
-- **Files:** `src/ast.rs`
+- **Files:** `src/lower.rs`
 - All tests pass (2084), clippy clean.
+- All `§4.9 AMBIGUOUS` entries in `lower.rs` now exclusively address the `&[T]` fat-pointer ABI. Both `§6.9 AMBIGUOUS` entries address bounds checking. Thematic consistency holds.
 
 ## Notes for the goal-setter
 
-- The four-file consistency (ast.rs / ir.rs / lower.rs / codegen.rs) for §6.9 AMBIGUOUS
-  now holds across all sites. The builder's three-file check (ir.rs / codegen.rs /
-  fls-ambiguities.md) was the right scope; `ast.rs` was the one site not in scope.
-- The "at this milestone" sweep (§4.14, §5.1.3, §6.22) flagged in earlier rounds remains
-  a candidate for the next Spec Researcher cycle.
+- The §6.9 AMBIGUOUS sweep is now complete across all five annotation sites in the four source files.
+- The "at this milestone" sweep (§4.14, §5.1.3, §6.22) flagged in earlier rounds remains a candidate for the next Spec Researcher cycle.
+- None of the `§4.9 AMBIGUOUS` entries (fat-pointer ABI) have been touched; they are a separate ambiguity category and consistent with each other.
