@@ -702,9 +702,19 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
         // comparisons (cmp x{reg}, ...) produce correct signed results for
         // large negative i32 values (e.g., -100000 → 0xFFFFFFFFFFFE7960).
         //
+        // ARM64 physical register limit: x0–x30 are general-purpose; x31 is
+        // sp/xzr (context-dependent, not a writable GPR); x32+ do not exist.
+        // Virtual register numbers in the IR are an abstraction — they must not
+        // be formatted blindly as ARM64 physical register names. When the virtual
+        // register index exceeds 30, use x9 (the designated intra-function scratch
+        // per refs/arm64-abi.md:52). LoadImm is always immediately followed by a
+        // Store to a stack slot for high-numbered let-binding temporaries, so x9
+        // is safe to reuse across sequential LoadImm+Store pairs.
+        //
         // Cache-line note: small immediates = 4 bytes (1 slot); large = 12 bytes (3 slots).
         Instr::LoadImm(reg, n) => {
-            emit_imm32(out, *reg as usize, *n)?;
+            let phys = if *reg >= 31 { 9 } else { *reg as usize };
+            emit_imm32(out, phys, *n)?;
         }
 
         // FLS §7.2: Load from a static variable in the data section.
@@ -1222,11 +1232,16 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
         // ARM64: `str x{src}, [sp, #{offset}]` — offset = slot * 8.
         // Cache-line note: 8-byte slots keep stores naturally aligned;
         // two slots fill one 16-byte aligned pair.
+        //
+        // High virtual registers (>= 31) use x9 (scratch) as their physical
+        // register, matching the LoadImm partner that always precedes them.
+        // See the LoadImm handler above for the rationale.
         Instr::Store { src, slot } => {
             let offset = *slot as u32 * 8;
+            let phys_src = if *src >= 31 { 9 } else { *src as usize };
             writeln!(
                 out,
-                "    str     x{src}, [sp, #{offset:<15}] // FLS §8.1: store slot {slot}"
+                "    str     x{phys_src}, [sp, #{offset:<15}] // FLS §8.1: store slot {slot}"
             )?;
         }
 
