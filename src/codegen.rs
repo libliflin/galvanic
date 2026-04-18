@@ -567,8 +567,11 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
                         "    add     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: add"
                     )?;
                     if *ty == IrTy::I32 {
-                        writeln!(out, "    sxtw    x9, w{dst}                      // FLS §6.23: sign-extend for overflow check")?;
-                        writeln!(out, "    cmp     x{dst}, x9                      // FLS §6.23: 64-bit vs sign-extended 32-bit")?;
+                        // Compare 64-bit result against its low-32-bit sign-extension. If they
+                        // differ, the i32 overflowed. ARM64's `cmp Xn, Wm, sxtw` does the
+                        // sign-extend in-place so we need no scratch register — using x9
+                        // would collide with the register allocator (virtual reg N → xN).
+                        writeln!(out, "    cmp     x{dst}, w{dst}, sxtw            // FLS §6.23: i32 overflow check")?;
                         writeln!(out, "    b.ne    _galvanic_panic                  // FLS §6.23: i32 overflow → panic")?;
                     }
                 }
@@ -578,8 +581,11 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
                         "    sub     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: sub"
                     )?;
                     if *ty == IrTy::I32 {
-                        writeln!(out, "    sxtw    x9, w{dst}                      // FLS §6.23: sign-extend for overflow check")?;
-                        writeln!(out, "    cmp     x{dst}, x9                      // FLS §6.23: 64-bit vs sign-extended 32-bit")?;
+                        // Compare 64-bit result against its low-32-bit sign-extension. If they
+                        // differ, the i32 overflowed. ARM64's `cmp Xn, Wm, sxtw` does the
+                        // sign-extend in-place so we need no scratch register — using x9
+                        // would collide with the register allocator (virtual reg N → xN).
+                        writeln!(out, "    cmp     x{dst}, w{dst}, sxtw            // FLS §6.23: i32 overflow check")?;
                         writeln!(out, "    b.ne    _galvanic_panic                  // FLS §6.23: i32 overflow → panic")?;
                     }
                 }
@@ -589,8 +595,11 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
                         "    mul     x{dst}, x{lhs}, x{rhs}          // FLS §6.5.5: mul"
                     )?;
                     if *ty == IrTy::I32 {
-                        writeln!(out, "    sxtw    x9, w{dst}                      // FLS §6.23: sign-extend for overflow check")?;
-                        writeln!(out, "    cmp     x{dst}, x9                      // FLS §6.23: 64-bit vs sign-extended 32-bit")?;
+                        // Compare 64-bit result against its low-32-bit sign-extension. If they
+                        // differ, the i32 overflowed. ARM64's `cmp Xn, Wm, sxtw` does the
+                        // sign-extend in-place so we need no scratch register — using x9
+                        // would collide with the register allocator (virtual reg N → xN).
+                        writeln!(out, "    cmp     x{dst}, w{dst}, sxtw            // FLS §6.23: i32 overflow check")?;
                         writeln!(out, "    b.ne    _galvanic_panic                  // FLS §6.23: i32 overflow → panic")?;
                     }
                 }

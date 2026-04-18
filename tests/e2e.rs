@@ -1988,11 +1988,10 @@ fn claim_4r_ushr_emits_cmp_shift_guard() {
 // ── Claim 4s: §6.23 signed i32 overflow guard for +, -, * ────────────────────
 //
 // FLS §6.23: Signed integer arithmetic overflow panics in debug mode.
-// Galvanic emits a 3-instruction guard after each i32 add/sub/mul:
+// Galvanic emits a 2-instruction guard after each i32 add/sub/mul:
 //
 //   add     x{dst}, x{lhs}, x{rhs}
-//   sxtw    x9, w{dst}                // sign-extend 32-bit result to 64 bits
-//   cmp     x{dst}, x9                // compare 64-bit result to sign-extended
+//   cmp     x{dst}, w{dst}, sxtw      // compare 64-bit result to its sign-extended 32-bit form
 //   b.ne    _galvanic_panic            // overflow if they differ
 //
 // The guard fires when the 64-bit arithmetic result does not equal its 32-bit
@@ -2019,9 +2018,9 @@ fn claim_4s_add_emits_overflow_guard() {
         asm.contains("b.ne    _galvanic_panic"),
         "i32 add must emit b.ne overflow guard; got:\n{asm}"
     );
-    // Guard ordering: sxtw must appear after the add
+    // Guard ordering: sxtw (in the cmp) must appear after the add
     let add_pos = asm.find("    add ").unwrap_or(0);
-    let sxtw_pos = asm.find("    sxtw").unwrap_or(0);
+    let sxtw_pos = asm.find("sxtw").unwrap_or(0);
     assert!(
         add_pos < sxtw_pos,
         "sxtw guard must appear after add; add={add_pos}, sxtw={sxtw_pos}:\n{asm}"
@@ -2044,7 +2043,7 @@ fn claim_4s_mul_emits_overflow_guard() {
         "i32 mul must emit b.ne overflow guard; got:\n{asm}"
     );
     let mul_pos = asm.find("    mul ").unwrap_or(0);
-    let sxtw_pos = asm.find("    sxtw").unwrap_or(0);
+    let sxtw_pos = asm.find("sxtw").unwrap_or(0);
     assert!(
         mul_pos < sxtw_pos,
         "sxtw guard must appear after mul; mul={mul_pos}, sxtw={sxtw_pos}:\n{asm}"
