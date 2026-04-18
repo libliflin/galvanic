@@ -11711,6 +11711,151 @@ impl<'src> LowerCtx<'src> {
                     } else {
                         None
                     };
+                // FLS §6.17, §5.10.3: Tuple pattern in if-let — when the scrutinee is a
+                // known tuple variable, bind element slots directly from the source variable.
+                //
+                // Design: `if let (a, b) = my_tuple { ... }` where `my_tuple` is a previously
+                // bound tuple variable (registered in `local_tuple_lens`). Each sub-pattern is:
+                //   Pat::Wildcard — no check, no binding.
+                //   Pat::Ident    — alias the source element slot; no instructions emitted.
+                //   Pat::LitInt / Pat::NegLitInt / Pat::LitBool — equality check, CondBranch
+                //                  to else_label on mismatch.
+                //
+                // FLS §6.1.2:37–45: All comparison instructions are runtime.
+                // Cache-line note: 3 instructions per literal element check (ldr + mov + cmp).
+                if let Pat::Tuple(sub_pats) = pat {
+                    // Scrutinee must be a path to a known tuple variable.
+                    let (tuple_base_slot, tuple_n_elems) = if let ExprKind::Path(segs) = &scrutinee.kind
+                        && segs.len() == 1
+                    {
+                        let var_name = segs[0].text(self.source);
+                        let base = *self.locals.get(var_name).ok_or_else(|| {
+                            LowerError::Unsupported(format!(
+                                "undefined variable `{var_name}` in if-let tuple pattern \
+                                 (FLS §6.17, §5.10.3)"
+                            ))
+                        })?;
+                        let n = *self.local_tuple_lens.get(&base).ok_or_else(|| {
+                            LowerError::Unsupported(format!(
+                                "variable `{var_name}` is not a known tuple \
+                                 (FLS §6.17, §5.10.3)"
+                            ))
+                        })?;
+                        (base, n)
+                    } else {
+                        return Err(LowerError::Unsupported(
+                            "tuple pattern in if-let requires a simple tuple variable \
+                             scrutinee (FLS §6.17, §5.10.3)"
+                                .into(),
+                        ));
+                    };
+                    if sub_pats.len() != tuple_n_elems {
+                        return Err(LowerError::Unsupported(format!(
+                            "if-let tuple pattern has {} elements but scrutinee has \
+                             {tuple_n_elems} (FLS §5.10.3)",
+                            sub_pats.len()
+                        )));
+                    }
+
+                    let else_label_t = self.alloc_label();
+                    let end_label_t = self.alloc_label();
+                    let mut bound_tuple: Vec<&str> = Vec::new();
+
+                    // Emit element-level checks and install ident bindings.
+                    for (i, sub_pat) in sub_pats.iter().enumerate() {
+                        let elem_slot = tuple_base_slot + i as u8;
+                        match sub_pat {
+                            Pat::Wildcard => {}
+                            Pat::Ident(span) => {
+                                let name = span.text(self.source);
+                                self.locals.insert(name, elem_slot);
+                                bound_tuple.push(name);
+                            }
+                            Pat::LitInt(n) => {
+                                let s = self.alloc_reg()?;
+                                self.instrs.push(Instr::Load { dst: s, slot: elem_slot });
+                                let p = self.alloc_reg()?;
+                                self.instrs.push(Instr::LoadImm(p, *n as i32));
+                                let c = self.alloc_reg()?;
+                                self.instrs.push(Instr::BinOp {
+                                    op: IrBinOp::Eq, dst: c, lhs: s, rhs: p,
+                                    ty: IrTy::Bool,
+                                });
+                                self.instrs.push(Instr::CondBranch { reg: c, label: else_label_t, fls: "§6.17" });
+                            }
+                            Pat::NegLitInt(n) => {
+                                let s = self.alloc_reg()?;
+                                self.instrs.push(Instr::Load { dst: s, slot: elem_slot });
+                                let p = self.alloc_reg()?;
+                                self.instrs.push(Instr::LoadImm(p, -(*n as i32)));
+                                let c = self.alloc_reg()?;
+                                self.instrs.push(Instr::BinOp {
+                                    op: IrBinOp::Eq, dst: c, lhs: s, rhs: p,
+                                    ty: IrTy::Bool,
+                                });
+                                self.instrs.push(Instr::CondBranch { reg: c, label: else_label_t, fls: "§6.17" });
+                            }
+                            Pat::LitBool(b) => {
+                                let s = self.alloc_reg()?;
+                                self.instrs.push(Instr::Load { dst: s, slot: elem_slot });
+                                let p = self.alloc_reg()?;
+                                self.instrs.push(Instr::LoadImm(p, *b as i32));
+                                let c = self.alloc_reg()?;
+                                self.instrs.push(Instr::BinOp {
+                                    op: IrBinOp::Eq, dst: c, lhs: s, rhs: p,
+                                    ty: IrTy::Bool,
+                                });
+                                self.instrs.push(Instr::CondBranch { reg: c, label: else_label_t, fls: "§6.17" });
+                            }
+                            other => return Err(LowerError::Unsupported(format!(
+                                "unsupported sub-pattern in if-let tuple pattern \
+                                 (FLS §6.17, §5.10.3): {other:?}"
+                            ))),
+                        }
+                    }
+
+                    // Then block + else (mirrors regular if-let ret_ty dispatch).
+                    match ret_ty {
+                        IrTy::I32 | IrTy::I8 | IrTy::I16 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::U16 | IrTy::FnPtr => {
+                            let phi_slot = self.alloc_slot()?;
+                            let then_val = self.lower_block_to_value(then_block, ret_ty)?;
+                            for name in &bound_tuple { self.locals.remove(*name); }
+                            let then_reg = self.val_to_reg(then_val)?;
+                            self.instrs.push(Instr::Store { src: then_reg, slot: phi_slot });
+                            self.instrs.push(Instr::Branch { target: end_label_t, fls: "§6.17" });
+                            self.instrs.push(Instr::Label { id: else_label_t, fls: "§6.17" });
+                            let else_val = match else_expr {
+                                Some(e) => self.lower_expr(e, ret_ty)?,
+                                None => return Err(LowerError::Unsupported(
+                                    "if-let tuple pattern without else in non-unit context \
+                                     (FLS §6.17, §5.10.3)".into(),
+                                )),
+                            };
+                            let else_reg = self.val_to_reg(else_val)?;
+                            self.instrs.push(Instr::Store { src: else_reg, slot: phi_slot });
+                            self.instrs.push(Instr::Label { id: end_label_t, fls: "§6.17" });
+                            let result_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst: result_reg, slot: phi_slot });
+                            return Ok(IrValue::Reg(result_reg));
+                        }
+                        IrTy::Unit => {
+                            self.lower_block_to_value(then_block, &IrTy::Unit)?;
+                            for name in &bound_tuple { self.locals.remove(*name); }
+                            self.instrs.push(Instr::Branch { target: end_label_t, fls: "§6.17" });
+                            self.instrs.push(Instr::Label { id: else_label_t, fls: "§6.17" });
+                            if let Some(e) = else_expr {
+                                self.lower_expr(e, &IrTy::Unit)?;
+                            }
+                            self.instrs.push(Instr::Label { id: end_label_t, fls: "§6.17" });
+                            return Ok(IrValue::Unit);
+                        }
+                        _ => return Err(LowerError::Unsupported(
+                            "if-let tuple pattern in non-scalar context not yet supported \
+                             (FLS §6.17, §5.10.3)".into(),
+                        )),
+                    }
+                }
+
                 // Infer scrutinee type from the pattern (bool literal → Bool, else I32).
                 let scrut_ty = match pat {
                     Pat::LitBool(_) => IrTy::Bool,
@@ -12139,8 +12284,11 @@ impl<'src> LowerCtx<'src> {
                         }
                     }
                     Pat::Tuple(_) => {
+                        // Unreachable in practice: Pat::Tuple is handled before scrut_val
+                        // lowering (early return above). This arm remains for exhaustiveness.
                         return Err(LowerError::Unsupported(
-                            "tuple pattern in if-let not yet supported (FLS §6.17, §5.10.3)".into(),
+                            "tuple pattern in if-let with non-variable scrutinee \
+                             not yet supported (FLS §6.17, §5.10.3)".into(),
                         ));
                     }
                     Pat::Slice(_) => {
@@ -12511,17 +12659,203 @@ impl<'src> LowerCtx<'src> {
                         None
                     };
 
-                // FLS §6.18, §6.10: Tuple scrutinee early detection.
-                // Detect a tuple expression scrutinee (e.g. `match (x, y) { ... }`)
-                // here, beside the enum_base_slot / struct_base_slot detection blocks,
-                // so the error names the right FLS sections and guides contributors to
-                // extend *this* handler — not the generic ExprKind::Tuple fallback.
-                if matches!(scrutinee.kind, ExprKind::Tuple(_)) {
-                    return Err(LowerError::Unsupported(
-                        "tuple scrutinee in match not yet supported (FLS §6.18, §6.10); \
-                         extend enum_base_slot / struct_base_slot detection in lower_expr"
-                            .into(),
-                    ));
+                // FLS §6.18, §6.10: Tuple scrutinee — lower each element to a
+                // separate stack slot, then match each arm's Pat::Tuple sub-patterns.
+                //
+                // Design: when the scrutinee is a tuple literal `(e0, e1, …)`, each
+                // element is lowered and spilled to its own slot. Arm patterns may be:
+                //   Pat::Wildcard  — always matches all elements; no checks
+                //   Pat::Tuple(sub_pats) — match each element individually:
+                //     Pat::Wildcard   — skip check, no binding
+                //     Pat::Ident      — skip check, bind element slot by name
+                //     Pat::LitInt / Pat::NegLitInt / Pat::LitBool — equality check
+                //
+                // Guards are allowed on any arm including the last.
+                // If the last arm's pattern/guard fails, phi_slot is uninitialized
+                // (undefined behavior per FLS §16); galvanic defers exhaustiveness.
+                //
+                // FLS §6.4:14: Elements evaluated left-to-right.
+                // FLS §6.1.2:37–45: All instructions are runtime.
+                // Cache-line note: N element stores + 3×M check instructions per arm
+                // (M = number of literal sub-patterns; 12 bytes per literal check).
+                if let ExprKind::Tuple(scrut_elems) = &scrutinee.kind {
+                    let n_elems = scrut_elems.len();
+                    let mut elem_slots: Vec<u8> = Vec::with_capacity(n_elems);
+                    for elem in scrut_elems.iter() {
+                        let val = self.lower_expr(elem, &IrTy::I32)?;
+                        let reg = self.val_to_reg(val)?;
+                        let slot = self.alloc_slot()?;
+                        self.instrs.push(Instr::Store { src: reg, slot });
+                        elem_slots.push(slot);
+                    }
+
+                    let (checked_arms, last_arm_slice) = arms.split_at(arms.len() - 1);
+                    let last_arm = &last_arm_slice[0];
+                    let exit_label = self.alloc_label();
+
+                    // Inline macro: emit element checks for one tuple arm pattern.
+                    // On sub-pattern mismatch, branches to $fail_lbl.
+                    // Ident sub-patterns install a binding alias into self.locals and
+                    // push the name into $bound (caller removes them after the arm).
+                    macro_rules! lower_tuple_arm_pat {
+                        ($arm_pat:expr, $fail_lbl:expr, $bound:expr) => {
+                            match $arm_pat {
+                                Pat::Wildcard => {}
+                                Pat::Tuple(sub_pats) => {
+                                    if sub_pats.len() != n_elems {
+                                        return Err(LowerError::Unsupported(format!(
+                                            "tuple pattern has {} elements but scrutinee \
+                                             has {n_elems} (FLS §6.18, §5.10.3)",
+                                            sub_pats.len()
+                                        )));
+                                    }
+                                    for (i, sub_pat) in sub_pats.iter().enumerate() {
+                                        let elem_slot = elem_slots[i];
+                                        match sub_pat {
+                                            Pat::Wildcard => {}
+                                            Pat::Ident(span) => {
+                                                let name = span.text(self.source);
+                                                self.locals.insert(name, elem_slot);
+                                                $bound.push(name);
+                                            }
+                                            Pat::LitInt(n) => {
+                                                let s = self.alloc_reg()?;
+                                                self.instrs.push(Instr::Load { dst: s, slot: elem_slot });
+                                                let p = self.alloc_reg()?;
+                                                self.instrs.push(Instr::LoadImm(p, *n as i32));
+                                                let c = self.alloc_reg()?;
+                                                self.instrs.push(Instr::BinOp {
+                                                    op: IrBinOp::Eq, dst: c, lhs: s, rhs: p,
+                                                    ty: IrTy::Bool,
+                                                });
+                                                self.instrs.push(Instr::CondBranch {
+                                                    reg: c, label: $fail_lbl, fls: "§6.18",
+                                                });
+                                            }
+                                            Pat::NegLitInt(n) => {
+                                                let s = self.alloc_reg()?;
+                                                self.instrs.push(Instr::Load { dst: s, slot: elem_slot });
+                                                let p = self.alloc_reg()?;
+                                                self.instrs.push(Instr::LoadImm(p, -(*n as i32)));
+                                                let c = self.alloc_reg()?;
+                                                self.instrs.push(Instr::BinOp {
+                                                    op: IrBinOp::Eq, dst: c, lhs: s, rhs: p,
+                                                    ty: IrTy::Bool,
+                                                });
+                                                self.instrs.push(Instr::CondBranch {
+                                                    reg: c, label: $fail_lbl, fls: "§6.18",
+                                                });
+                                            }
+                                            Pat::LitBool(b) => {
+                                                let s = self.alloc_reg()?;
+                                                self.instrs.push(Instr::Load { dst: s, slot: elem_slot });
+                                                let p = self.alloc_reg()?;
+                                                self.instrs.push(Instr::LoadImm(p, *b as i32));
+                                                let c = self.alloc_reg()?;
+                                                self.instrs.push(Instr::BinOp {
+                                                    op: IrBinOp::Eq, dst: c, lhs: s, rhs: p,
+                                                    ty: IrTy::Bool,
+                                                });
+                                                self.instrs.push(Instr::CondBranch {
+                                                    reg: c, label: $fail_lbl, fls: "§6.18",
+                                                });
+                                            }
+                                            other => return Err(LowerError::Unsupported(format!(
+                                                "unsupported sub-pattern in tuple match \
+                                                 (FLS §6.18, §5.10.3): {other:?}"
+                                            ))),
+                                        }
+                                    }
+                                }
+                                other => return Err(LowerError::Unsupported(format!(
+                                    "unsupported pattern for tuple-scrutinee match \
+                                     (FLS §6.18, §6.10): {other:?}"
+                                ))),
+                            }
+                        };
+                    }
+
+                    match ret_ty {
+                        IrTy::I32 | IrTy::I8 | IrTy::I16 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::U16 | IrTy::FnPtr => {
+                            let phi_slot = self.alloc_slot()?;
+
+                            for arm in checked_arms {
+                                let next_label = self.alloc_label();
+                                let mut bound: Vec<&str> = Vec::new();
+                                lower_tuple_arm_pat!(&arm.pat, next_label, bound);
+                                if let Some(guard) = &arm.guard {
+                                    let gv = self.lower_expr(guard, &IrTy::Bool)?;
+                                    let gr = self.val_to_reg(gv)?;
+                                    self.instrs.push(Instr::CondBranch { reg: gr, label: next_label, fls: "§6.18" });
+                                }
+                                let body_val = self.lower_expr(&arm.body, ret_ty)?;
+                                let body_reg = self.val_to_reg(body_val)?;
+                                self.instrs.push(Instr::Store { src: body_reg, slot: phi_slot });
+                                self.instrs.push(Instr::Branch { target: exit_label, fls: "§6.18" });
+                                for name in &bound { self.locals.remove(*name); }
+                                self.instrs.push(Instr::Label { id: next_label, fls: "§6.18" });
+                            }
+
+                            // Last arm: pattern/guard failure branches to exit_label
+                            // (UB — phi_slot uninitialized); galvanic defers exhaustiveness.
+                            // FLS §6.18 AMBIGUOUS: non-exhaustive match result is undefined
+                            // per FLS §16. See refs/fls-ambiguities.md §6.18.
+                            let mut bound_last: Vec<&str> = Vec::new();
+                            lower_tuple_arm_pat!(&last_arm.pat, exit_label, bound_last);
+                            if let Some(guard) = &last_arm.guard {
+                                let gv = self.lower_expr(guard, &IrTy::Bool)?;
+                                let gr = self.val_to_reg(gv)?;
+                                self.instrs.push(Instr::CondBranch { reg: gr, label: exit_label, fls: "§6.18" });
+                            }
+                            let body_val = self.lower_expr(&last_arm.body, ret_ty)?;
+                            let body_reg = self.val_to_reg(body_val)?;
+                            self.instrs.push(Instr::Store { src: body_reg, slot: phi_slot });
+                            for name in &bound_last { self.locals.remove(*name); }
+
+                            self.instrs.push(Instr::Label { id: exit_label, fls: "§6.18" });
+                            let result_reg = self.alloc_reg()?;
+                            self.instrs.push(Instr::Load { dst: result_reg, slot: phi_slot });
+                            return Ok(IrValue::Reg(result_reg));
+                        }
+                        IrTy::Unit => {
+                            for arm in checked_arms {
+                                let next_label = self.alloc_label();
+                                let mut bound: Vec<&str> = Vec::new();
+                                lower_tuple_arm_pat!(&arm.pat, next_label, bound);
+                                if let Some(guard) = &arm.guard {
+                                    let gv = self.lower_expr(guard, &IrTy::Bool)?;
+                                    let gr = self.val_to_reg(gv)?;
+                                    self.instrs.push(Instr::CondBranch { reg: gr, label: next_label, fls: "§6.18" });
+                                }
+                                self.lower_expr(&arm.body, &IrTy::Unit)?;
+                                self.instrs.push(Instr::Branch { target: exit_label, fls: "§6.18" });
+                                for name in &bound { self.locals.remove(*name); }
+                                self.instrs.push(Instr::Label { id: next_label, fls: "§6.18" });
+                            }
+
+                            // Last arm (unit return).
+                            // FLS §6.18 AMBIGUOUS: guard failure on last arm → UB.
+                            let mut bound_last: Vec<&str> = Vec::new();
+                            lower_tuple_arm_pat!(&last_arm.pat, exit_label, bound_last);
+                            if let Some(guard) = &last_arm.guard {
+                                let gv = self.lower_expr(guard, &IrTy::Bool)?;
+                                let gr = self.val_to_reg(gv)?;
+                                self.instrs.push(Instr::CondBranch { reg: gr, label: exit_label, fls: "§6.18" });
+                            }
+                            self.lower_expr(&last_arm.body, &IrTy::Unit)?;
+                            for name in &bound_last { self.locals.remove(*name); }
+
+                            self.instrs.push(Instr::Label { id: exit_label, fls: "§6.18" });
+                            return Ok(IrValue::Unit);
+                        }
+                        IrTy::F64 | IrTy::F32 => {
+                            return Err(LowerError::Unsupported(
+                                "match with tuple scrutinee producing float type \
+                                 not yet supported (FLS §4.2, §6.18)".into(),
+                            ));
+                        }
+                        IrTy::Addr => unreachable!("IrTy::Addr cannot be a match result type"),
+                    }
                 }
 
                 let scrut_val = self.lower_expr(scrutinee, &scrut_ty)?;
@@ -13212,15 +13546,12 @@ impl<'src> LowerCtx<'src> {
                             self.instrs.push(Instr::Label { id: next_label, fls: "§6.18" });
                         }
 
-                        // Default arm — unconditional (guard on last arm is not yet supported).
-                        // FLS §6.18 AMBIGUOUS: If the last arm has a guard that fails, the
-                        // match is non-exhaustive. Galvanic defers this check to a future
-                        // exhaustiveness pass.
-                        if default_arm[0].guard.is_some() {
-                            return Err(LowerError::Unsupported(
-                                "guard on last match arm (exhaustiveness deferred; use `_` without guard as last arm)".into(),
-                            ));
-                        }
+                        // Default arm — the last arm; if it has a guard, the guard is emitted
+                        // after any pattern bindings. On guard failure we branch to exit_label,
+                        // leaving phi_slot uninitialized (UB per FLS §16, non-exhaustive match).
+                        // Galvanic defers exhaustiveness checking to a future pass.
+                        // FLS §6.18 AMBIGUOUS: guard on last arm — spec requires exhaustiveness
+                        // but does not specify the checking algorithm. See refs/fls-ambiguities.md §6.18.
 
                         // FLS §5.1.4: If the default arm has an identifier pattern,
                         // bind the scrutinee to the name before lowering the body.
@@ -13355,6 +13686,13 @@ impl<'src> LowerCtx<'src> {
                             }
                             _ => vec![],
                         };
+                        // Guard check for last arm — emitted after bindings so the guard
+                        // expression can reference bound names (FLS §6.18).
+                        if let Some(guard) = &default_arm[0].guard {
+                            let gv = self.lower_expr(guard, &IrTy::Bool)?;
+                            let gr = self.val_to_reg(gv)?;
+                            self.instrs.push(Instr::CondBranch { reg: gr, label: exit_label, fls: "§6.18" });
+                        }
                         let body_val = self.lower_expr(&default_arm[0].body, ret_ty)?;
                         for name in &default_bindings {
                             self.locals.remove(*name);
@@ -13851,12 +14189,9 @@ impl<'src> LowerCtx<'src> {
                             self.instrs.push(Instr::Label { id: next_label, fls: "§6.18" });
                         }
 
-                        // Default arm — unconditional (guard on last arm not yet supported).
-                        if default_arm[0].guard.is_some() {
-                            return Err(LowerError::Unsupported(
-                                "guard on last match arm (exhaustiveness deferred)".into(),
-                            ));
-                        }
+                        // Default arm — last arm; guard allowed (see scalar branch above).
+                        // FLS §6.18 AMBIGUOUS: guard on last arm — guard failure is UB (unit return).
+                        // See refs/fls-ambiguities.md §6.18.
 
                         // FLS §5.1.4: If the default arm has an identifier or @ binding pattern, bind.
                         // FLS §5.4 + §15: TupleStruct default arm installs field bindings.
@@ -13981,6 +14316,12 @@ impl<'src> LowerCtx<'src> {
                             }
                             _ => vec![],
                         };
+                        // Guard check for last arm (unit return) — see scalar branch comment.
+                        if let Some(guard) = &default_arm[0].guard {
+                            let gv = self.lower_expr(guard, &IrTy::Bool)?;
+                            let gr = self.val_to_reg(gv)?;
+                            self.instrs.push(Instr::CondBranch { reg: gr, label: exit_label, fls: "§6.18" });
+                        }
                         self.lower_expr(&default_arm[0].body, &IrTy::Unit)?;
                         for name in &default_bindings_unit {
                             self.locals.remove(*name);
