@@ -33,6 +33,11 @@ fn fls_2_4_literals() {
 }
 
 #[test]
+fn fls_2_4_large_immediates() {
+    assert_galvanic_accepts("fls_2_4_large_immediates.rs");
+}
+
+#[test]
 fn fls_6_expressions() {
     assert_galvanic_accepts("fls_6_expressions.rs");
 }

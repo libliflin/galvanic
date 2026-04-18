@@ -10761,19 +10761,22 @@ impl<'src> LowerCtx<'src> {
                         Ok(IrValue::Reg(r))
                     }
                     // FLS §4.1: Unsigned integer literal (u16/u32/u64/usize).
-                    // Reuses LoadImm(i32) so the value must fit in i32 range at
-                    // this milestone. Values in (i32::MAX, u32::MAX] require
-                    // MOVZ+MOVK and are deferred (FLS §2.4.4.1 AMBIGUOUS).
+                    // Values in [0, i32::MAX] use LoadImm(i32) (fits in a single
+                    // `mov` or MOVZ+MOVK+sxtw sequence from emit_imm32).
+                    // Values in (i32::MAX, u64::MAX] use LoadImm64(u64): MOVZ + up
+                    // to three MOVK instructions, no sign-extension (FLS §2.4.4.1).
                     IrTy::U32 => {
-                        if *n > i32::MAX as u128 {
+                        if *n > u64::MAX as u128 {
                             return Err(LowerError::Unsupported(format!(
-                                "unsigned literal {n} > {}: MOVZ+MOVK not yet supported (FLS §2.4.4.1)",
-                                i32::MAX
+                                "unsigned literal {n} exceeds u64::MAX (FLS §2.4.4.1)"
                             )));
                         }
-                        let n = *n as i32;
                         let r = self.alloc_reg()?;
-                        self.instrs.push(Instr::LoadImm(r, n));
+                        if *n <= i32::MAX as u128 {
+                            self.instrs.push(Instr::LoadImm(r, *n as i32));
+                        } else {
+                            self.instrs.push(Instr::LoadImm64(r, *n as u64));
+                        }
                         Ok(IrValue::Reg(r))
                     }
                     // FLS §4.1: u8 literal. Values 0..=255 fit in a LoadImm.

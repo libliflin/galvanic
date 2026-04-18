@@ -399,7 +399,7 @@ fn int_vr_uses_defs(instr: &Instr) -> (Vec<u8>, Vec<u8>) {
     match instr {
         Ret(IrValue::Reg(r)) => (vec![*r], vec![]),
         Ret(_) => (vec![], vec![]),
-        LoadImm(dst, _) => (vec![], vec![*dst]),
+        LoadImm(dst, _) | LoadImm64(dst, _) => (vec![], vec![*dst]),
         BinOp { dst, lhs, rhs, .. } => (vec![*lhs, *rhs], vec![*dst]),
         Store { src, .. } => (vec![*src], vec![]),
         Load { dst, .. } => (vec![], vec![*dst]),
@@ -596,6 +596,7 @@ fn rewrite_int_vr_in_instr(instr: Instr, phys: &[u8]) -> Instr {
     match instr {
         Ret(IrValue::Reg(reg)) => Ret(IrValue::Reg(rr(reg))),
         LoadImm(dst, n) => LoadImm(rr(dst), n),
+        LoadImm64(dst, n) => LoadImm64(rr(dst), n),
         BinOp { op, dst, lhs, rhs, ty } => BinOp { op, dst: rr(dst), lhs: rr(lhs), rhs: rr(rhs), ty },
         Store { src, slot } => Store { src: rr(src), slot },
         Load { dst, slot } => Load { dst: rr(dst), slot },
@@ -914,6 +915,24 @@ fn machine_instr_count(instr: &Instr) -> u32 {
             }
         }
 
+        // LoadImm64: 1 MOVZ for the first non-zero 16-bit chunk, then 1 MOVK per
+        // additional non-zero chunk. Values ≤ 0xFFFF use a single movz.
+        // Matches emit_imm64's branching.
+        Instr::LoadImm64(_, n) => {
+            if *n <= 0xFFFF {
+                1
+            } else {
+                let chunks = [
+                    n & 0xFFFF,
+                    (n >> 16) & 0xFFFF,
+                    (n >> 32) & 0xFFFF,
+                    (n >> 48) & 0xFFFF,
+                ];
+                let non_zero = chunks.iter().filter(|&&c| c != 0).count() as u32;
+                non_zero.max(1)
+            }
+        }
+
         // Indexed load/store: base add + ldr/str = 2; with bounds check adds cmp + b.hs = 4.
         Instr::LoadIndexed { len, .. }
         | Instr::StoreIndexed { len, .. }
@@ -1082,6 +1101,14 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
         Instr::LoadImm(reg, n) => {
             let phys = if *reg >= 31 { 9 } else { *reg as usize };
             emit_imm32(out, phys, *n)?;
+        }
+
+        // FLS §2.4.4.1: Large unsigned immediate — u32 > i32::MAX or u64 values.
+        // Uses MOVZ + MOVK sequence; no sxtw because the value is unsigned.
+        // Cache-line note: 1–4 instructions (4–16 bytes); fits in one cache line.
+        Instr::LoadImm64(reg, n) => {
+            let phys = if *reg >= 31 { 9 } else { *reg as usize };
+            emit_imm64(out, phys, *n)?;
         }
 
         // FLS §7.2: Load from a static variable in the data section.
@@ -2512,6 +2539,48 @@ fn emit_imm32(out: &mut String, reg: usize, n: i32) -> Result<(), CodegenError> 
     Ok(())
 }
 
+/// Emit ARM64 instructions to load a 64-bit unsigned immediate into register `x{reg}`.
+///
+/// ARM64 encoding:
+/// - Values ≤ 0xFFFF: single `movz x{reg}, #{n}`.
+/// - Larger values: one MOVZ for the first non-zero 16-bit chunk, then one
+///   MOVK per additional non-zero chunk (lsl #16, #32, #48). Zero chunks are
+///   skipped since MOVZ zeroes all bits not covered by the shift.
+///
+/// Unlike `emit_imm32`, no `sxtw` is emitted: the value is unsigned and the
+/// full 64-bit register holds the correct zero-extended unsigned bit pattern.
+///
+/// FLS §2.4.4.1: Integer literal materialization for values > i32::MAX.
+/// Cache-line note: 1–4 instructions (4–16 bytes); a 4-instruction sequence
+/// fits within one 64-byte cache line.
+fn emit_imm64(out: &mut String, reg: usize, n: u64) -> Result<(), CodegenError> {
+    if n <= 0xFFFF {
+        writeln!(out, "    movz    x{reg}, #{n:<19} // FLS §2.4.4.1: load imm {n}")?;
+        return Ok(());
+    }
+    let chunks: [(u64, u32); 4] = [
+        (n & 0xFFFF, 0),
+        ((n >> 16) & 0xFFFF, 16),
+        ((n >> 32) & 0xFFFF, 32),
+        ((n >> 48) & 0xFFFF, 48),
+    ];
+    // Find the index of the first non-zero chunk to emit as MOVZ.
+    // If all chunks are zero the value is 0, already handled by the ≤ 0xFFFF branch.
+    let first = chunks.iter().position(|&(c, _)| c != 0).unwrap_or(0);
+    let (cv, cs) = chunks[first];
+    if cs == 0 {
+        writeln!(out, "    movz    x{reg}, #0x{cv:04x}           // FLS §2.4.4.1: load imm {n} (bits 0–15)")?;
+    } else {
+        writeln!(out, "    movz    x{reg}, #0x{cv:04x}, lsl #{cs:<2}  // FLS §2.4.4.1: load imm {n} (bits {cs}–{})", cs + 15)?;
+    }
+    for &(chunk_val, shift) in chunks[first + 1..].iter() {
+        if chunk_val != 0 {
+            writeln!(out, "    movk    x{reg}, #0x{chunk_val:04x}, lsl #{shift:<2}  // FLS §2.4.4.1: load imm {n} (bits {shift}–{})", shift + 15)?;
+        }
+    }
+    Ok(())
+}
+
 /// Emit instructions that place `value` into `x0` for return.
 ///
 /// FLS §2.4.4.1: Integer literals.
@@ -2794,6 +2863,9 @@ mod tests {
         check(&Instr::LoadImm(0, 42));
         check(&Instr::LoadImm(0, -1));
         check(&Instr::LoadImm(0, 0));
+        // LoadImm64: value ≤ 0xFFFF → 1 instruction (single movz).
+        check(&Instr::LoadImm64(0, 0));
+        check(&Instr::LoadImm64(0, 0xFFFF));
 
         // ── Two-instruction ──────────────────────────────────────────────────
         check(&Instr::LoadFnAddr { dst: 1, name: "foo".to_string() });
@@ -2826,6 +2898,16 @@ mod tests {
         // LoadImm: large value with lo16 ≠ 0 — movz + movk + sxtw = 3.
         check(&Instr::LoadImm(0, 100_000));   // 0x0001_86A0: lo16 = 0x86A0 ≠ 0
         check(&Instr::LoadImm(0, -100_000));  // also large
+        // LoadImm64: one non-zero 16-bit chunk (bits 16-31 only) → 1 instruction (movz lsl#16).
+        check(&Instr::LoadImm64(0, 0x0001_0000));   // chunk0=0, chunk1=1 → movz lsl#16
+        check(&Instr::LoadImm64(0, 0x8000_0000));   // chunk0=0, chunk1=0x8000 → movz lsl#16
+        // LoadImm64: two non-zero chunks → 2 instructions (movz + movk).
+        check(&Instr::LoadImm64(0, 0x1_86A0));      // chunk0=0x86A0, chunk1=1 → movz + movk
+        check(&Instr::LoadImm64(0, 0xFFFF_FFFF));   // chunk0=0xFFFF, chunk1=0xFFFF
+        // LoadImm64: three non-zero chunks → 3 instructions.
+        check(&Instr::LoadImm64(0, 0x0001_0002_0003)); // chunks 0,1,2 non-zero
+        // LoadImm64: four non-zero chunks → 4 instructions.
+        check(&Instr::LoadImm64(0, 0x1234_5678_9ABC_DEF0));
         // BinOp(Add/I32): arith + cmp sxtw + b.ne = 3.
         check(&Instr::BinOp { op: IrBinOp::Add, ty: IrTy::I32, dst: 2, lhs: 0, rhs: 1 });
         check(&Instr::BinOp { op: IrBinOp::Sub, ty: IrTy::I32, dst: 2, lhs: 0, rhs: 1 });
