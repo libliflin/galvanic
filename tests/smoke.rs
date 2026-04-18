@@ -274,6 +274,63 @@ fn lower_error_includes_fls_citation() {
 }
 
 #[test]
+fn partial_lower_no_main_emits_inspection_assembly() {
+    // When fn main fails to lower but other functions succeed, galvanic must
+    // emit a partial .s file annotated "inspection-only" so the Lead Researcher
+    // has an artifact to inspect. Exit code must be non-zero (lower errors occurred).
+    //
+    // Uses fls_5_patterns.rs: 20 of 21 functions lower, main fails on a nested
+    // struct pattern (§5.10.2). Before this cycle, all 20 successful lowerings
+    // were silently discarded.
+    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/fls_5_patterns.rs");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_galvanic"))
+        .arg(&fixture)
+        .output()
+        .expect("failed to run galvanic");
+
+    assert!(
+        !output.status.success(),
+        "expected non-zero exit when lower errors occurred, got {:?}",
+        output.status
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("inspection-only"),
+        "expected 'inspection-only' annotation in stdout, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("no fn main"),
+        "expected 'no fn main' in stdout, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("no entry point"),
+        "expected 'no entry point' in stdout, got: {stdout}"
+    );
+
+    // The .s file must actually exist alongside the fixture.
+    let asm_path = fixture.with_extension("s");
+    assert!(
+        asm_path.exists(),
+        "expected .s file to be written at {}, but it was not",
+        asm_path.display()
+    );
+
+    // The assembly content must carry the inspection-only annotation comment.
+    let asm = std::fs::read_to_string(&asm_path).expect("failed to read .s file");
+    assert!(
+        asm.contains("inspection-only"),
+        "expected 'inspection-only' comment in emitted assembly, got first 200 chars: {}",
+        &asm[..asm.len().min(200)]
+    );
+
+    // Clean up the .s file so the fixture directory stays pristine.
+    let _ = std::fs::remove_file(&asm_path);
+}
+
+#[test]
 fn lower_source_all_unsupported_strings_cite_fls() {
     // Static invariant: every non-comment line in src/lower.rs containing
     // "not yet supported" must also contain "(FLS §" on the same line.
