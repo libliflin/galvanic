@@ -24,7 +24,7 @@ annotations for full context.
 - [§4.13 — `dyn Trait` Vtable Layout and Fat Pointer Return ABI](#413--dyn-trait-vtable-layout-and-fat-pointer-return-abi)
 - [§4.14 — Where-Clause Bounds: When Are They Checked?](#414--where-clause-bounds-when-are-they-checked)
 - [§4.14 — Parenthesized Trait Bound Syntax: Restricted to Fn Traits?](#414--parenthesized-trait-bound-syntax-restricted-to-fn-traits)
-- [§5.1.4 — Pattern Binding and Or-Patterns: Evaluation Order](#514--pattern-binding-and-or-patterns-evaluation-order)
+- [§5.1.4 — Pattern Binding and Or-Patterns: Two Evaluation Order Gaps](#514--pattern-binding-and-or-patterns-two-evaluation-order-gaps)
 - [§5.1.8 — Rest Patterns (`..`) Inside Slice Patterns](#518--rest-patterns--inside-slice-patterns)
 - [§6.1.2 — Overflow in Const Contexts](#612--overflow-in-const-contexts)
 - [§6.4.2 — Const Block: Permitted Expression Forms](#642--const-block-permitted-expression-forms)
@@ -353,7 +353,9 @@ confirming the closure dispatch path is exercised at runtime.
 
 ---
 
-## §5.1.4 — Pattern Binding and Or-Patterns: Evaluation Order
+## §5.1.4 — Pattern Binding and Or-Patterns: Two Evaluation Order Gaps
+
+### Gap 1: Or-pattern alternative evaluation order
 
 **Gap:** The FLS does not specify the order in which alternatives in an
 or-pattern are evaluated, or whether identically-named bindings in different
@@ -376,6 +378,38 @@ Assembly signature: look for two separate comparisons (`cmp x0, #1` then
 `cmp x0, #2`) in the `classify:` section before the `mov x0, #10` branch —
 confirms left-to-right alternative evaluation with a separate branch for each
 alternative.
+
+### Gap 2: `@`-binding evaluation order
+
+**Gap:** FLS §5.1.4 specifies the syntax of `name @ subpat` and states that
+`name` is bound to the matched value, but does not specify *when* the binding
+occurs relative to the sub-pattern test. Both orderings are semantically
+observable: "bind first" would make `name` available on the mismatch path
+(relevant for cleanup in a hypothetical borrow-checker or drop-flag
+implementation); "check first" means the binding only exists when the pattern
+succeeded, which matches the observable Rust semantics enforced by `rustc`'s
+borrow checker (the binding is not in scope on the else branch).
+
+**Galvanic's choice:** Check sub-pattern first; bind `name` only on success.
+On the mismatch path, no store to the binding slot is emitted and `name` is
+not inserted into the locals map. This matches `rustc` behavior and eliminates
+dead stores on the mismatch path.
+
+**Source:** `src/lower.rs:8881` (AMBIGUOUS annotation inside `lower_sub_pat`
+method, `Pat::Bound` arm)
+
+**Minimal reproducer:**
+```rust
+fn classify(x: i32) -> i32 {
+    match x { n @ 1..=10 => n, _ => 0 }
+}
+fn main() -> i32 { classify(5) }
+```
+Assembly signature: in `classify:`, the range check (`cmp x0, #1` /
+`b.lt` / `cmp x0, #10` / `b.gt`) appears *before* the binding store
+(`str x0, [sp, #N]`) — confirms check-first ordering. The mismatch path
+(value outside 1..=10) falls to the wildcard arm with no store to the
+binding slot.
 
 ---
 
@@ -1570,4 +1604,4 @@ confirmed by assembly content alone.
 
 ---
 
-*Last updated: 2026-04-18. Source annotation count at time of writing: ~155 `AMBIGUOUS` markers across 6 source files. 49 entries, sorted by FLS section number, with linked table of contents. Most minimal reproducers include `fn main` and produce assembly when run as published; entries that document parse-time rejections (e.g., §12.1/§4.14 lifetime parameters) produce cited error output rather than assembly — the rejection itself is the observable finding. §4.9 register corrected (`cmp x0, #3`, not `cmp x1, #3`).*
+*Last updated: 2026-04-18. Source annotation count at time of writing: ~155 `AMBIGUOUS` markers across 6 source files. 50 entries, sorted by FLS section number, with linked table of contents. Most minimal reproducers include `fn main` and produce assembly when run as published; entries that document parse-time rejections (e.g., §12.1/§4.14 lifetime parameters) produce cited error output rather than assembly — the rejection itself is the observable finding. §4.9 register corrected (`cmp x0, #3`, not `cmp x1, #3`). §5.1.4 expanded to cover both or-pattern ordering and `@`-binding ordering.*
