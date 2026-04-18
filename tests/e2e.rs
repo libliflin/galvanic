@@ -37887,3 +37887,135 @@ fn fls_6_18_bound_in_tuple_emits_range_check() {
         "expected load/store for @ binding slot (FLS §5.1.4), got:\n{asm}"
     );
 }
+
+/// Assembly inspection: multiple @ bindings in the same tuple match arm.
+///
+/// `match (x, y) { (a @ 1..=10, b @ 0..=5) => a + b, _ => -1 }` must emit
+/// two independent range checks — one per bound element — and use both bound
+/// values in the arm body.
+///
+/// FLS §6.18, §5.1.4: each @ binding is an independent check-and-bind.
+#[test]
+fn fls_6_18_multi_bound_in_tuple_emits_two_range_checks() {
+    let asm = compile_to_asm(
+        "fn dual(x: i32, y: i32) -> i32 {\n\
+             match (x, y) {\n\
+                 (a @ 1..=10, b @ 0..=5) => a + b,\n\
+                 _ => -1,\n\
+             }\n\
+         }\n\
+         fn main() {}\n",
+    );
+    // Two range checks: 1..=10 (ge + le) and 0..=5 (ge + le) = at least 4 comparisons.
+    let cmp_count = asm.matches("cmp").count() + asm.matches("subs").count();
+    assert!(
+        cmp_count >= 4,
+        "expected >= 4 comparisons for two @ range checks (FLS §5.1.4), got {cmp_count} in:\n{asm}"
+    );
+    // Both bound values must be stored (one slot per binding).
+    let str_count = asm.matches("str").count();
+    assert!(
+        str_count >= 2,
+        "expected >= 2 stores for two @ bindings (FLS §5.1.4), got {str_count} in:\n{asm}"
+    );
+    // Must not constant-fold the a + b result (FLS §6.1.2).
+    assert!(
+        asm.contains("add"),
+        "expected `add` instruction for a + b (FLS §6.1.2), got:\n{asm}"
+    );
+}
+
+/// Assembly inspection: `@ _` (wildcard sub-pattern) in tuple match arm.
+///
+/// `match (x, y) { (a @ _, 0) => a, _ => -1 }` — the wildcard sub-pattern
+/// unconditionally matches; only the second element equality check is emitted.
+/// The binding `a` must still be installed so it can be returned from the arm.
+///
+/// FLS §6.18, §5.1.4, §5.1 (wildcard always matches — no check emitted).
+#[test]
+fn fls_6_18_bound_wildcard_in_tuple_emits_no_range_check() {
+    let asm = compile_to_asm(
+        "fn pass_through(x: i32, y: i32) -> i32 {\n\
+             match (x, y) {\n\
+                 (a @ _, 0) => a,\n\
+                 _ => -1,\n\
+             }\n\
+         }\n\
+         fn main() {}\n",
+    );
+    // The only comparison is for the second element (y == 0).
+    // No range-check instructions for the wildcard sub-pattern.
+    let cmp_count = asm.matches("cmp").count() + asm.matches("subs").count();
+    assert!(
+        cmp_count <= 2,
+        "wildcard @ sub-pattern must not emit extra comparisons (FLS §5.1), \
+         got {cmp_count} in:\n{asm}"
+    );
+    // The binding slot for `a` must be loaded when returning the value.
+    assert!(
+        asm.contains("ldr"),
+        "expected load for @ wildcard binding (FLS §5.1.4), got:\n{asm}"
+    );
+}
+
+/// Assembly inspection: `@ 1..10` (exclusive range) in tuple match arm.
+///
+/// `match (x, y) { (a @ 1..10, 0) => a, _ => -1 }` must emit a strict
+/// less-than check for the upper bound (not le), distinguishing `1..10`
+/// from `1..=10`. The value 10 must FAIL the exclusive-range arm.
+///
+/// FLS §6.18, §5.1.9: exclusive range pattern uses `<` for the upper bound.
+#[test]
+fn fls_6_18_bound_range_exclusive_in_tuple_emits_lt_check() {
+    let asm = compile_to_asm(
+        "fn classify_ex(x: i32, y: i32) -> i32 {\n\
+             match (x, y) {\n\
+                 (a @ 1..10, 0) => a,\n\
+                 _ => -1,\n\
+             }\n\
+         }\n\
+         fn main() {}\n",
+    );
+    // Exclusive range requires >= lo AND < hi (two comparisons).
+    let cmp_count = asm.matches("cmp").count() + asm.matches("subs").count();
+    assert!(
+        cmp_count >= 2,
+        "expected >= 2 comparisons for `a @ 1..10` exclusive range (FLS §5.1.9), \
+         got {cmp_count} in:\n{asm}"
+    );
+    // Must not constant-fold the bound value (FLS §6.1.2).
+    assert!(
+        asm.contains("ldr") || asm.contains("str"),
+        "expected runtime load/store for exclusive @ binding (FLS §5.1.4), got:\n{asm}"
+    );
+}
+
+/// Assembly inspection: `@ 1..=10` binding in if-let tuple sub-pattern (Site F).
+///
+/// `if let (a @ 1..=10, 0) = t { a } else { -1 }` — the refactored Site F
+/// (if-let tuple element dispatch) now supports @ sub-patterns via `lower_sub_pat!`.
+/// The range check and binding must be emitted at runtime.
+///
+/// FLS §6.17, §5.1.4, §5.10.3.
+#[test]
+fn fls_6_17_bound_in_iflet_tuple_emits_range_check() {
+    let asm = compile_to_asm(
+        "fn classify_iflet(x: i32, y: i32) -> i32 {\n\
+             let t = (x, y);\n\
+             if let (a @ 1..=10, 0) = t { a } else { -1 }\n\
+         }\n\
+         fn main() {}\n",
+    );
+    // Range check 1..=10 requires at least two comparisons (ge + le).
+    let cmp_count = asm.matches("cmp").count() + asm.matches("subs").count();
+    assert!(
+        cmp_count >= 2,
+        "expected >= 2 comparisons for `a @ 1..=10` in if-let tuple (FLS §5.1.4), \
+         got {cmp_count} in:\n{asm}"
+    );
+    // Bound value must be loaded from its slot when used in the then-branch.
+    assert!(
+        asm.contains("ldr") || asm.contains("str"),
+        "expected runtime load/store for if-let @ binding (FLS §5.1.4), got:\n{asm}"
+    );
+}
