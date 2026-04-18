@@ -1,3 +1,44 @@
+# Changelog — Cycle 029 (Customer Champion)
+
+## Stakeholder: Spec Researcher
+
+**Who I became.** Someone studying the FLS who arrived at the galvanic repo via a link in a
+spec discussion thread. Looking for citable findings about galvanic's implementation
+decisions — specifically around runtime panic behavior.
+
+**Floor check:** 2116 tests, 0 failures, clean build, clean Clippy. Proceeding.
+
+**Journey walked:**
+
+1. Read the README — correct voice: one sentence, two research questions. Minimal and right.
+2. Opened `refs/fls-ambiguities.md`. Found the TOC immediately: 48 entries in section order.
+3. Set a two-minute clock. Navigated to §6.9/§6.23 (Panic Mechanism) — central topic.
+4. Read the entry header: "**Galvanic's choice (updated — Claims 4m, 4o, 4p, 4q):**"
+   Paused. Searched for a claims index: none in the document. Searched the repo: no
+   claims registry document. Each bullet ends with "(Claim 4m)", "(Claim 4o)", etc.
+   The actual descriptions are inline and correct — but the labels signal a missing
+   companion document.
+5. Found the same labels in §4.9 (Claims 4m/4p) and §6.21 (Claim 4n).
+   Also found "Claims 4m, 4o, 4q" in `refs/fls-constraints.md`.
+6. Read the footer: "46 entries." Counted 48 in the TOC. Stale count.
+
+**Hollowest moment:** Reading "Claims 4m, 4o, 4p, 4q" in a document I came to as a
+trusted research artifact. The information is there; the labels are noise that signals
+"you're missing something" when you're not. These are internal CI verification tracking
+labels from lathe cycles 007–021 that were incorporated into the live document but never
+explained publicly.
+
+**Goal set.** Remove the "Claim 4m / 4n / 4o / 4p / 4q" labels from the three affected
+entries in `refs/fls-ambiguities.md` and from `refs/fls-constraints.md`. Update the stale
+footer count (46→48). Content stays; only the opaque labels go.
+
+**Why now.** The Claims labels are the most immediate friction in the Spec Researcher's
+journey. They appear in 3 entries and the constraints doc, block the "curiosity satisfied"
+emotional signal by signaling an unexplained reference system, and make three well-described
+entries look like they're missing a companion document they're not.
+
+---
+
 # Verification — Cycle 028, Round 1 (Verifier)
 
 ## What I compared
