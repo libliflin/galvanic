@@ -771,6 +771,96 @@ fn where_clause_lifetime_lhs_parses_cleanly() {
 }
 
 #[test]
+fn struct_lifetime_param_parse_error_cites_fls() {
+    // FLS §12.1, §4.14: `struct Foo<'a>` — lifetime parameter in struct definition.
+    // Before this fix: opaque "expected type parameter name or `>`, found Lifetime".
+    // After: cited error naming FLS §12.1, §4.14 and the fix site.
+    let mut tmp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
+    write!(tmp, "struct Foo<'a> {{ x: i32 }}\nfn main() {{}}\n").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_galvanic"))
+        .arg(tmp.path())
+        .output()
+        .expect("failed to run galvanic");
+
+    assert!(
+        !output.status.success(),
+        "expected non-zero exit for struct with lifetime param"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FLS §12.1"),
+        "expected FLS §12.1 citation in error, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("lifetime"),
+        "expected 'lifetime' in error message, got: {stderr}"
+    );
+}
+
+#[test]
+fn enum_lifetime_param_parse_error_cites_fls() {
+    // FLS §12.1, §4.14: `enum Foo<'a>` — lifetime parameter in enum definition.
+    // Before this fix: infinite loop (parser hung on unrecognized Lifetime token
+    // in the while loop, since neither the Ident nor Comma branches advanced).
+    // After: cited error + clean exit.
+    let mut tmp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
+    write!(tmp, "enum Bar<'a> {{ X }}\nfn main() {{}}\n").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_galvanic"))
+        .arg(tmp.path())
+        .output()
+        .expect("failed to run galvanic");
+
+    assert!(
+        !output.status.success(),
+        "expected non-zero exit for enum with lifetime param"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FLS §12.1"),
+        "expected FLS §12.1 citation in error, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("lifetime"),
+        "expected 'lifetime' in error message, got: {stderr}"
+    );
+}
+
+#[test]
+fn impl_lifetime_param_parse_error_cites_fls() {
+    // FLS §12.1, §4.14: `impl<'a> Foo` — lifetime parameter in impl block.
+    // Before this fix: opaque "expected type parameter name or `>` in impl generic
+    // params, found Lifetime" with no FLS citation.
+    // After: cited error naming FLS §12.1, §4.14 and the fix site.
+    let mut tmp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
+    write!(
+        tmp,
+        "struct Baz {{ x: i32 }}\nimpl<'a> Baz {{}}\nfn main() {{}}\n"
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_galvanic"))
+        .arg(tmp.path())
+        .output()
+        .expect("failed to run galvanic");
+
+    assert!(
+        !output.status.success(),
+        "expected non-zero exit for impl with lifetime param"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FLS §12.1"),
+        "expected FLS §12.1 citation in error, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("lifetime"),
+        "expected 'lifetime' in error message, got: {stderr}"
+    );
+}
+
+#[test]
 fn lower_source_all_unsupported_strings_cite_fls() {
     // Static invariant: every LowerError::Unsupported( call site in src/lower.rs
     // must supply a message string that contains "(FLS §". This ensures every

@@ -552,9 +552,21 @@ impl<'src> Parser<'src> {
                     self.advance(); // eat `>`
                     break;
                 }
+                if self.peek_kind() == TokenKind::Lifetime {
+                    // FLS §12.1, §4.14: Lifetime parameters ('a) are valid Rust but
+                    // not yet implemented in galvanic. The fix site is
+                    // `parse_impl_def()` in `src/parser.rs`, the impl generic param loop.
+                    return Err(self.error(
+                        "lifetime parameters not yet supported (FLS §12.1, §4.14) — \
+                         galvanic handles type parameters (`impl<T>`) but not lifetime \
+                         annotations (`impl<'a>`); remove the lifetime parameters to \
+                         continue"
+                            .to_owned(),
+                    ));
+                }
                 if self.peek_kind() != TokenKind::Ident {
                     return Err(self.error(format!(
-                        "expected type parameter name or `>` in impl generic params, found {:?}",
+                        "expected type parameter name or `>` in impl generic params, found {:?} (FLS §12.1)",
                         self.peek_kind()
                     )));
                 }
@@ -1225,9 +1237,21 @@ impl<'src> Parser<'src> {
                     self.advance(); // eat `>`
                     break;
                 }
+                if self.peek_kind() == TokenKind::Lifetime {
+                    // FLS §12.1, §4.14: Lifetime parameters ('a) are valid Rust but
+                    // not yet implemented in galvanic. The fix site is
+                    // `parse_struct_def()` in `src/parser.rs`, the struct generic param loop.
+                    return Err(self.error(
+                        "lifetime parameters not yet supported (FLS §12.1, §4.14) — \
+                         galvanic handles type parameters (`struct Foo<T>`) but not \
+                         lifetime annotations (`struct Foo<'a>`); remove the lifetime \
+                         parameters to continue"
+                            .to_owned(),
+                    ));
+                }
                 if self.peek_kind() != TokenKind::Ident {
                     return Err(self.error(format!(
-                        "expected type parameter name or `>`, found {:?}",
+                        "expected type parameter name or `>`, found {:?} (FLS §12.1)",
                         self.peek_kind()
                     )));
                 }
@@ -1323,6 +1347,18 @@ impl<'src> Parser<'src> {
         if self.peek_kind() == TokenKind::Lt {
             self.advance(); // eat `<`
             while self.peek_kind() != TokenKind::Gt && self.peek_kind() != TokenKind::Eof {
+                if self.peek_kind() == TokenKind::Lifetime {
+                    // FLS §12.1, §4.14: Lifetime parameters ('a) are valid Rust but
+                    // not yet implemented in galvanic. The fix site is
+                    // `parse_enum_def()` in `src/parser.rs`, the enum generic param loop.
+                    return Err(self.error(
+                        "lifetime parameters not yet supported (FLS §12.1, §4.14) — \
+                         galvanic handles type parameters (`enum Foo<T>`) but not \
+                         lifetime annotations (`enum Foo<'a>`); remove the lifetime \
+                         parameters to continue"
+                            .to_owned(),
+                    ));
+                }
                 if self.peek_kind() == TokenKind::Ident {
                     generic_params.push(self.current_span());
                     self.advance();
