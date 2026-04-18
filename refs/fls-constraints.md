@@ -78,12 +78,14 @@ and-link) runtime call instruction rather than a folded immediate.
 - Wrap-on-overflow for narrow types (u8, u16, i8, i16) is implemented. The tests
   `runtime_u8_add_emits_and_truncation`, `runtime_i8_add_emits_sxtb_sign_extension`,
   and related tests verify this.
-- Debug-mode panic-on-overflow is not yet implemented. No panic infrastructure
-  exists at this milestone. This means galvanic currently behaves like release mode
-  for overflow (wrapping), not debug mode (panicking). This is a known deviation.
-- Division-by-zero: no guard instruction is emitted. ARM64 `udiv` produces zero;
-  `sdiv` behavior is undefined. This is a known gap tracked in
-  `refs/fls-ambiguities.md` (§6.9/§6.23 — Panic Mechanism).
+- Debug-mode panic-on-overflow for arithmetic (+, -, *) is not yet implemented.
+  Galvanic currently behaves like release mode for these operators (wrapping), not
+  debug mode (panicking). This is a known deviation.
+- Division-by-zero: guards ARE emitted. A `cbz xRHS, _galvanic_panic` guard is
+  emitted before every `sdiv`, `srem`, and `udiv` instruction. Literal zero divisors
+  are rejected by the lowering pass before any IR is produced. The `i32::MIN / -1`
+  overflow case is also guarded. Full details in `refs/fls-ambiguities.md`
+  (§6.9/§6.23 — Panic Mechanism, Claims 4m, 4o, 4q).
 
 ---
 
@@ -157,16 +159,23 @@ because they never execute at compile time.
 |---|---|
 | 1. No const eval outside const context | **Satisfied** (1,700+ asm inspection tests) |
 | 2. `const fn` runs normally in non-const context | **Satisfied** (`runtime_const_fn_runtime_call_emits_bl_not_folded`) |
-| 3. Overflow semantics differ by context | **Partial** (wrap implemented; panic-on-overflow deferred) |
+| 3. Overflow semantics differ by context | **Partial** (div-by-zero guarded; +/-/* overflow panic deferred) |
 | 4. Left-to-right evaluation order | **Satisfied** (source-order lowering; short-circuit tests) |
 | 5. Variables are memory locations | **Satisfied** (`runtime_let_binding_emits_str_and_ldr`) |
 | 6. `const` substituted; `static` has identity | **Satisfied** (`runtime_const_emits_load_imm_not_stack_load`, `runtime_static_emits_adrp_add_ldr`) |
 | 7. No spec-mandated iteration limit | **N/A** (non-const loops are runtime code) |
-| 8. Use Rust types to prevent invalid IR states | **Not satisfied** (bare `u8`, untyped `BinOp`) |
 
-The one genuine gap — panic infrastructure for overflow and bounds checking — is
-tracked in `refs/fls-ambiguities.md` (§6.9/§6.23). Everything else is verified
-at the assembly level.
+The one genuine FLS gap: debug-mode panic-on-overflow for arithmetic operators
+(+, -, *). Division-by-zero and bounds-check panics are implemented. The full
+panic mechanism is documented in `refs/fls-ambiguities.md` (§6.9/§6.23).
+
+---
+
+## Note: Constraint 8 is a design principle, not an FLS requirement
+
+The entry below is about compiler correctness, not FLS conformance. It is kept
+here because the violation caused a real CI incident, but it does not belong in
+the FLS compliance summary table above.
 
 ---
 
