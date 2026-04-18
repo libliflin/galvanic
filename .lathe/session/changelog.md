@@ -1,3 +1,40 @@
+# Verification — Cycle 018, Round 3 (Verifier)
+
+## What I compared
+
+- Goal: fix FLS citations on `Label`/`Branch`/`CondBranch` so each instruction cites the spec section of the construct being lowered, not the borrowed if-expression technique.
+- Builder's Round 2 change: 5 let-else control-flow instructions corrected from `§6.17` → `§8.1` (OR-pattern CondBranch, @-binding CondBranch, skip-else Branch, else-entry Label, end Label); 2 assembly inspection tests added.
+- Ran: `cargo test --test e2e -- let_else_or_pattern_branches_cite_fls_8_1 let_else_bound_pattern_branches_cite_fls_8_1` — both pass. Full suite: 2095 pass, 0 fail.
+- Clippy: clean.
+- Witnessed: grepped all `§6.17` citations remaining in `lower.rs` — 54 entries. Classified every one by surrounding context (going up to 120 lines above each site for the enclosing `ExprKind::` arm).
+
+## What's here, what was asked
+
+Matches: the work holds up against the goal from my lens.
+
+All 54 remaining `§6.17` citations in `lower.rs` are inside `ExprKind::If` or `ExprKind::IfLet` match arms — genuine if / if-let lowering. The full sweep is:
+
+| Construct | Rounds fixed | Remaining §6.17 |
+|---|---|---|
+| While loops (§6.15.3) | Round 1 (Verifier) | 0 |
+| Infinite loops (§6.15.2) | Round 1 (Verifier) | 0 |
+| Break/continue (§6.15.6–7) | Round 1 (Verifier) | 0 |
+| Match arms (§6.18) | Round 1 (Verifier) | 0 |
+| `&&`/`\|\|` short-circuit (§6.5.8) | Round 2 (Builder) | 0 |
+| let-else OR/@ patterns (§8.1) | Round 2 (Verifier) → Round 3 (Builder) | 0 |
+| If / If-let expressions (§6.17) | — (correct) | 54 |
+
+## What I added
+
+Nothing this round — the work holds up against the goal from my lens.
+
+## Notes for the goal-setter
+
+- The §6.17 citation sweep is complete. Every `CondBranch`/`Branch`/`Label` in `lower.rs` now cites the FLS section of the construct it implements. A researcher tracing §6.15.3, §6.18, §6.5.8, or §8.1 through emitted assembly will find the relevant instructions; §6.17 entries are exclusively genuine if / if-let lowering.
+- None of this cycle's changes touch `codegen.rs` — the FLS citations in emitted assembly comments come from the `fls:` field on each IR instruction, which is sourced from `lower.rs`. No codegen change needed.
+
+---
+
 # Verification — Cycle 018, Round 2 (Verifier)
 
 ## What I compared
