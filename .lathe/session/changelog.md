@@ -1,3 +1,24 @@
+# Changelog — Cycle 016 (Customer Champion)
+
+## Stakeholder: Compiler Contributor
+
+**Who I became.** A Rust programmer, comfortable with compilers, who found galvanic interesting and wants to contribute. They're not the primary author. They have a feature target in mind and are tracing the pipeline to find where to add it.
+
+**What I did.**
+1. Confirmed the floor: `cargo test` — 2082 tests, all green. Build clean. Clippy clean.
+2. Ran the patterns fixture to find a live "not yet supported" error: `cargo run -- tests/fixtures/fls_5_patterns.rs`. Got: "not yet supported: expected struct literal `Inner { .. }` for nested struct field" (function: main).
+3. Searched for the error string in source — found it at `lower.rs:6406` inside `store_nested_struct_lit`. The function has FLS commentary in its docstring but the error string itself cites no FLS section.
+4. Ran `grep -c "not yet supported.*FLS" src/lower.rs` — returned 3. Total "not yet supported" count: 42. 39 error messages violate the documented invariant.
+5. Confirmed the architecture doc explicitly promises: "it emits an error naming the failing function, the FLS section, and the specific construct." The implementation delivers the function and the construct, but omits the FLS section in 93% of cases.
+
+**The worst moment.** Getting "not yet supported: complex let pattern not yet supported" — a message that describes *what* failed but gives zero spec anchor. To find the FLS section I had to read the surrounding code, locate a nearby comment, cross-reference the FLS TOC. A Contributor who doesn't know the FLS well (which is the whole point — they're new to this) is stuck.
+
+**The goal set.** Add FLS section citations to the "not yet supported" error strings in `src/lower.rs` — specifically the `LowerError::Unsupported(...)` call site strings — to fulfill the documented architecture invariant. Three messages already do this (`(FLS §6.5.9)`, etc.); apply the same pattern to the remaining 39, prioritizing hot-path errors (let patterns, if-let, while-let, match patterns, @ binding, nested struct, method errors).
+
+**Why now.** The Compiler Contributor has been absent four cycles. The architecture doc makes a specific, testable promise about error message format. The implementation breaks it systematically. Every Compiler Contributor who reads an error and tries to navigate to the spec hits this wall. The fix is low-risk (string edits), high-signal (makes the invariant enforceable by reading), and makes a wrong state (FLS-free error messages) visible to reviewers going forward.
+
+---
+
 # Verification — Cycle 015, Round 1 (Verifier)
 
 ## What I compared
