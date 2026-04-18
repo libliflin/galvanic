@@ -2721,7 +2721,7 @@ fn collect_tuple_param_leaves(pats: &[Pat]) -> Result<Vec<Option<&crate::ast::Sp
             _ => {
                 return Err(LowerError::Unsupported(
                     "only identifier, wildcard, and nested tuple patterns are \
-                     supported inside tuple parameter patterns"
+                     supported inside tuple parameter patterns (FLS §5.1.3, §9)"
                         .into(),
                 ));
             }
@@ -2906,7 +2906,7 @@ fn lower_fn(
                                 (IrTy::Unit, None, Some(ret_name.to_owned()), None)
                             } else {
                                 return Err(LowerError::Unsupported(format!(
-                                    "return type `{ret_name}` (not a known struct, enum, or primitive)"
+                                    "return type `{ret_name}` (not a known struct, enum, or primitive) (FLS §9, §4)"
                                 )));
                             }
                         } else {
@@ -2935,7 +2935,7 @@ fn lower_fn(
                                 (IrTy::Unit, Some(sname.to_owned()), None, None)
                             } else {
                                 return Err(LowerError::Unsupported(format!(
-                                    "impl Trait return: tail struct `{sname}` is not a known struct"
+                                    "impl Trait return: tail struct `{sname}` is not a known struct (FLS §9, §11)"
                                 )));
                             }
                         } else {
@@ -2954,7 +2954,7 @@ fn lower_fn(
     let body = match &fn_def.body {
         None => {
             return Err(LowerError::Unsupported(
-                "extern / bodyless functions".into(),
+                "extern / bodyless functions (FLS §9)".into(),
             ));
         }
         Some(block) => block,
@@ -3021,7 +3021,7 @@ fn lower_fn(
                     .count();
                 if reg_idx + n_int_fields > 8 || freg_idx + n_float_fields > 8 {
                     return Err(LowerError::Unsupported(
-                        "self fields exceed ARM64 register window".into(),
+                        "self fields exceed ARM64 register window (FLS §9, AAPCS64 §5.4.1)".into(),
                     ));
                 }
                 let base_slot = ctx.alloc_slot()?;
@@ -3086,7 +3086,7 @@ fn lower_fn(
             let regs_needed = 1 + max_fields;
             if reg_idx + regs_needed > 8 {
                 return Err(LowerError::Unsupported(
-                    "enum self exceeds ARM64 register window".into(),
+                    "enum self exceeds ARM64 register window (FLS §9, AAPCS64 §5.4.1)".into(),
                 ));
             }
             let base_slot = ctx.alloc_slot()?;
@@ -3134,7 +3134,7 @@ fn lower_fn(
                 let n_float_fields = float_field_tys.iter().filter(|t| t.is_some()).count();
                 if reg_idx + n_int_fields > 8 || freg_idx + n_float_fields > 8 {
                     return Err(LowerError::Unsupported(
-                        "tuple struct self fields exceed ARM64 register window".into(),
+                        "tuple struct self fields exceed ARM64 register window (FLS §9, AAPCS64 §5.4.1)".into(),
                     ));
                 }
                 let base_slot = ctx.alloc_slot()?;
@@ -3187,7 +3187,7 @@ fn lower_fn(
             }
         } else {
             return Err(LowerError::Unsupported(format!(
-                "impl for unknown type `{type_name}`"
+                "impl for unknown type `{type_name}` (FLS §11)"
             )));
         }
     }
@@ -3210,7 +3210,7 @@ fn lower_fn(
             let leaves = collect_tuple_param_leaves(pats)?;
             if reg_idx + leaves.len() > 8 {
                 return Err(LowerError::Unsupported(
-                    "tuple parameter exceeds ARM64 register window (>8 total registers)".into(),
+                    "tuple parameter exceeds ARM64 register window (>8 total registers) (FLS §9, AAPCS64 §5.4.1)".into(),
                 ));
             }
             for leaf in &leaves {
@@ -3242,7 +3242,7 @@ fn lower_fn(
                 let n_slots = struct_sizes.get(type_name).copied().unwrap_or(field_names.len());
                 if n_slots > 0 && reg_idx + n_slots > 8 {
                     return Err(LowerError::Unsupported(
-                        "struct pattern parameter exceeds ARM64 register window (>8 total registers)".into(),
+                        "struct pattern parameter exceeds ARM64 register window (>8 total registers) (FLS §9, AAPCS64 §5.4.1)".into(),
                     ));
                 }
                 // Allocate consecutive stack slots for all fields.
@@ -3332,7 +3332,7 @@ fn lower_fn(
             let n_flt = float_field_tys.iter().filter(|t| t.is_some()).count();
             if n_fields > 0 && (reg_idx + n_int > 8 || freg_idx + n_flt > 8) {
                 return Err(LowerError::Unsupported(
-                    "tuple struct parameter exceeds ARM64 register window (>8 total registers)"
+                    "tuple struct parameter exceeds ARM64 register window (>8 total registers) (FLS §9, AAPCS64 §5.4.1)"
                         .into(),
                 ));
             }
@@ -3405,7 +3405,7 @@ fn lower_fn(
                 let regs_needed = n_slots.max(1);
                 if n_slots > 0 && reg_idx + n_slots > 8 {
                     return Err(LowerError::Unsupported(
-                        "impl Trait struct parameter exceeds ARM64 register window (>8 total registers)".into(),
+                        "impl Trait struct parameter exceeds ARM64 register window (>8 total registers) (FLS §9, §11, AAPCS64 §5.4.1)".into(),
                     ));
                 }
                 let base_slot = ctx.alloc_slot()?;
@@ -3452,7 +3452,7 @@ fn lower_fn(
             let trait_name = trait_span.text(source).to_owned();
             if reg_idx + 2 > 8 {
                 return Err(LowerError::Unsupported(
-                    "&dyn Trait parameter exceeds ARM64 register window (>8 registers)".into(),
+                    "&dyn Trait parameter exceeds ARM64 register window (>8 registers) (FLS §9, AAPCS64 §5.4.1)".into(),
                 ));
             }
             let data_slot = ctx.alloc_slot()?;
@@ -3526,7 +3526,7 @@ fn lower_fn(
                 let regs_needed = n_slots.max(1); // unit structs use 0 slots but need 1 slot allocated
                 if n_slots > 0 && reg_idx + n_slots > 8 {
                     return Err(LowerError::Unsupported(
-                        "struct parameter exceeds ARM64 register window (>8 total registers)".into(),
+                        "struct parameter exceeds ARM64 register window (>8 total registers) (FLS §9, AAPCS64 §5.4.1)".into(),
                     ));
                 }
                 let base_slot = ctx.alloc_slot()?;
@@ -3571,7 +3571,7 @@ fn lower_fn(
                 let regs_needed = 1 + max_fields;
                 if reg_idx + regs_needed > 8 {
                     return Err(LowerError::Unsupported(
-                        "enum parameter exceeds ARM64 register window (>8 total registers)".into(),
+                        "enum parameter exceeds ARM64 register window (>8 total registers) (FLS §9, AAPCS64 §5.4.1)".into(),
                     ));
                 }
                 let base_slot = ctx.alloc_slot()?;
@@ -3615,7 +3615,7 @@ fn lower_fn(
                     let n_flt = float_field_tys.iter().filter(|t| t.is_some()).count();
                     if reg_idx + n_int > 8 || freg_idx + n_flt > 8 {
                         return Err(LowerError::Unsupported(
-                            "tuple struct parameter exceeds ARM64 register window (>8 total registers)".into(),
+                            "tuple struct parameter exceeds ARM64 register window (>8 total registers) (FLS §9, AAPCS64 §5.4.1)".into(),
                         ));
                     }
                     let base_slot = ctx.alloc_slot()?;
@@ -3674,7 +3674,7 @@ fn lower_fn(
             let n = *len;
             if n > 0 && reg_idx + n > 8 {
                 return Err(LowerError::Unsupported(
-                    "array parameter exceeds ARM64 register window (>8 total registers)".into(),
+                    "array parameter exceeds ARM64 register window (>8 total registers) (FLS §9, AAPCS64 §5.4.1)".into(),
                 ));
             }
             let base_slot = ctx.alloc_slot()?;
@@ -3701,7 +3701,7 @@ fn lower_fn(
         if param_ty == IrTy::F64 {
             if freg_idx >= 8 {
                 return Err(LowerError::Unsupported(
-                    "functions with more than 8 float parameters (exceeds ARM64 float register window)".into(),
+                    "functions with more than 8 float parameters (exceeds ARM64 float register window) (FLS §9, AAPCS64 §5.4.1)".into(),
                 ));
             }
             let slot = ctx.alloc_slot()?;
@@ -3716,7 +3716,7 @@ fn lower_fn(
         if param_ty == IrTy::F32 {
             if freg_idx >= 8 {
                 return Err(LowerError::Unsupported(
-                    "functions with more than 8 float parameters (exceeds ARM64 float register window)".into(),
+                    "functions with more than 8 float parameters (exceeds ARM64 float register window) (FLS §9, AAPCS64 §5.4.1)".into(),
                 ));
             }
             let slot = ctx.alloc_slot()?;
@@ -3750,7 +3750,7 @@ fn lower_fn(
         {
             if reg_idx + 2 > 8 {
                 return Err(LowerError::Unsupported(
-                    "&[T] / &mut [T] parameter exceeds ARM64 register window (needs 2 registers)".into(),
+                    "&[T] / &mut [T] parameter exceeds ARM64 register window (needs 2 registers) (FLS §9, AAPCS64 §5.4.1)".into(),
                 ));
             }
             let ptr_slot = ctx.alloc_slot()?;
@@ -3772,7 +3772,7 @@ fn lower_fn(
         // FLS §9: i32 and bool parameters — one register each.
         if reg_idx >= 8 {
             return Err(LowerError::Unsupported(
-                "functions with more than 8 parameters (exceeds ARM64 register window)".into(),
+                "functions with more than 8 parameters (exceeds ARM64 register window) (FLS §9, AAPCS64 §5.4.1)".into(),
             ));
         }
         // FLS §4.3: bool is passed as a 32-bit integer register on ARM64.
@@ -3781,7 +3781,7 @@ fn lower_fn(
         // parameters. Each uses one 64-bit ARM64 register (x0–x7).
         if !matches!(param_ty, IrTy::I32 | IrTy::I8 | IrTy::I16 | IrTy::Bool | IrTy::U32 | IrTy::U8 | IrTy::U16 | IrTy::FnPtr) {
             return Err(LowerError::Unsupported(
-                "parameter type other than i32/bool/u32/i64/u64/usize/isize/i8/i16/u8/u16/fn ptr/f64/f32".into(),
+                "parameter type other than i32/bool/u32/i64/u64/usize/isize/i8/i16/u8/u16/fn ptr/f64/f32 (FLS §9, §4.1)".into(),
             ));
         }
         let slot = ctx.alloc_slot()?;
@@ -3898,7 +3898,7 @@ fn lower_fn(
         let n_fields = struct_defs.get(struct_name.as_str())
             .map(|f| f.len())
             .or_else(|| tuple_struct_defs.get(struct_name.as_str()).copied())
-            .ok_or_else(|| LowerError::Unsupported(format!("unknown struct `{struct_name}`")))?;
+            .ok_or_else(|| LowerError::Unsupported(format!("unknown struct `{struct_name}` (FLS §3, §4)")))?;
 
         // Lower all statements.
         for stmt in &body.stmts {
@@ -4144,7 +4144,7 @@ fn parse_float_value(text: &str) -> Result<f64, LowerError> {
     // Strip underscores used as digit separators.
     let cleaned: String = nosuffix.chars().filter(|&c| c != '_').collect();
     cleaned.parse::<f64>().map_err(|_| {
-        LowerError::Unsupported(format!("cannot parse float literal: `{text}`"))
+        LowerError::Unsupported(format!("cannot parse float literal: `{text}` (FLS §2.4.4.2)"))
     })
 }
 
@@ -4162,7 +4162,7 @@ fn parse_float32_value(text: &str) -> Result<f32, LowerError> {
         .unwrap_or(text);
     let cleaned: String = nosuffix.chars().filter(|&c| c != '_').collect();
     cleaned.parse::<f32>().map_err(|_| {
-        LowerError::Unsupported(format!("cannot parse f32 literal: `{text}`"))
+        LowerError::Unsupported(format!("cannot parse f32 literal: `{text}` (FLS §2.4.4.2)"))
     })
 }
 
@@ -4180,13 +4180,13 @@ fn parse_char_value(text: &str) -> Result<u32, LowerError> {
         .strip_prefix('\'')
         .and_then(|s| s.strip_suffix('\''))
         .ok_or_else(|| {
-            LowerError::Unsupported(format!("malformed char/byte literal: {text}"))
+            LowerError::Unsupported(format!("malformed char/byte literal: {text} (FLS §2.4.5, §2.4.1)"))
         })?;
 
     if !inner.starts_with('\\') {
         // Plain (non-escaped) character — the source text contains the raw Unicode char.
         let ch = inner.chars().next().ok_or_else(|| {
-            LowerError::Unsupported(format!("empty char literal: {text}"))
+            LowerError::Unsupported(format!("empty char literal: {text} (FLS §2.4.5)"))
         })?;
         return Ok(ch as u32);
     }
@@ -4206,33 +4206,33 @@ fn parse_char_value(text: &str) -> Result<u32, LowerError> {
             // FLS §2.4.5: `\xNN` — ASCII code point in [0x00, 0x7F].
             // The two hex digits always follow immediately after `x`.
             let hex = escaped.get(1..3).ok_or_else(|| {
-                LowerError::Unsupported(format!("malformed \\x escape in char literal: {text}"))
+                LowerError::Unsupported(format!("malformed \\x escape in char literal: {text} (FLS §2.4.5)"))
             })?;
             u32::from_str_radix(hex, 16).map_err(|_| {
-                LowerError::Unsupported(format!("malformed \\x hex value in char literal: {text}"))
+                LowerError::Unsupported(format!("malformed \\x hex value in char literal: {text} (FLS §2.4.5)"))
             })
         }
         Some('u')  => {
             // FLS §2.4.5: `\u{N..}` — Unicode code point, 1–6 hex digits.
             let braced = escaped.get(1..).ok_or_else(|| {
-                LowerError::Unsupported(format!("malformed \\u escape in char literal: {text}"))
+                LowerError::Unsupported(format!("malformed \\u escape in char literal: {text} (FLS §2.4.5)"))
             })?;
             let hex = braced
                 .strip_prefix('{')
                 .and_then(|s| s.strip_suffix('}'))
                 .ok_or_else(|| {
                     LowerError::Unsupported(format!(
-                        "malformed \\u{{}} escape in char literal: {text}"
+                        "malformed \\u{{}} escape in char literal: {text} (FLS §2.4.5)"
                     ))
                 })?;
             u32::from_str_radix(hex, 16).map_err(|_| {
                 LowerError::Unsupported(format!(
-                    "malformed \\u{{}} code point in char literal: {text}"
+                    "malformed \\u{{}} code point in char literal: {text} (FLS §2.4.5)"
                 ))
             })
         }
         other => Err(LowerError::Unsupported(format!(
-            "unknown escape sequence \\{other:?} in char literal: {text}"
+            "unknown escape sequence \\{other:?} in char literal: {text} (FLS §2.4.5)"
         ))),
     }
 }
@@ -4268,7 +4268,7 @@ fn parse_str_byte_len(text: &str) -> Result<usize, LowerError> {
         let inner_start = 1 + hashes; // skip opening '"'
         let inner_end = rest.len() - 1 - hashes; // strip closing '"' + hashes
         let inner = rest.get(inner_start..inner_end).ok_or_else(|| {
-            LowerError::Unsupported(format!("malformed raw string literal: {text}"))
+            LowerError::Unsupported(format!("malformed raw string literal: {text} (FLS §2.4.6.2)"))
         })?;
         // FLS §2.4.6.2: Raw string — no escape processing.  Count UTF-8 bytes directly.
         return Ok(inner.len());
@@ -4279,7 +4279,7 @@ fn parse_str_byte_len(text: &str) -> Result<usize, LowerError> {
         .strip_prefix('"')
         .and_then(|s| s.strip_suffix('"'))
         .ok_or_else(|| {
-            LowerError::Unsupported(format!("malformed string literal: {text}"))
+            LowerError::Unsupported(format!("malformed string literal: {text} (FLS §2.4.6)"))
         })?;
 
     let mut bytes = 0usize;
@@ -4328,12 +4328,12 @@ fn parse_str_byte_len(text: &str) -> Result<usize, LowerError> {
             }
             Some(other) => {
                 return Err(LowerError::Unsupported(format!(
-                    "unknown escape \\{other} in string literal: {text}"
+                    "unknown escape \\{other} in string literal: {text} (FLS §2.4.6)"
                 )));
             }
             None => {
                 return Err(LowerError::Unsupported(format!(
-                    "unterminated escape in string literal: {text}"
+                    "unterminated escape in string literal: {text} (FLS §2.4.6)"
                 )));
             }
         }
@@ -4418,7 +4418,7 @@ fn lower_ty(
                     if let Some(&irt) = type_aliases.get(name) {
                         return Ok(irt);
                     }
-                    Err(LowerError::Unsupported(format!("type `{name}`")))
+                    Err(LowerError::Unsupported(format!("type `{name}` (FLS §4)")))
                 }
             }
         }
@@ -4455,7 +4455,7 @@ fn lower_ty(
         // the pointer half as I32 (same as any 64-bit integer register).
         // The parameter spilling path handles `&[T]` specially (two slots).
         TyKind::Slice { .. } => Ok(IrTy::I32),
-        _ => Err(LowerError::Unsupported("complex type".into())),
+        _ => Err(LowerError::Unsupported("complex type (FLS §4)".into())),
     }
 }
 
@@ -5826,7 +5826,7 @@ impl<'src> LowerCtx<'src> {
     fn alloc_reg(&mut self) -> Result<u8, LowerError> {
         let r = self.next_reg;
         self.next_reg = self.next_reg.checked_add(1).ok_or_else(|| {
-            LowerError::Unsupported("exceeded 256 virtual registers".into())
+            LowerError::Unsupported("exceeded 256 virtual registers (FLS §9, galvanic implementation limit)".into())
         })?;
         Ok(r)
     }
@@ -5837,7 +5837,7 @@ impl<'src> LowerCtx<'src> {
     fn alloc_slot(&mut self) -> Result<u8, LowerError> {
         let s = self.next_slot;
         self.next_slot = self.next_slot.checked_add(1).ok_or_else(|| {
-            LowerError::Unsupported("exceeded 256 stack slots".into())
+            LowerError::Unsupported("exceeded 256 stack slots (FLS §8.1, galvanic implementation limit)".into())
         })?;
         Ok(s)
     }
@@ -6459,7 +6459,7 @@ impl<'src> LowerCtx<'src> {
             .struct_defs
             .get(struct_name)
             .ok_or_else(|| {
-                LowerError::Unsupported(format!("unknown struct type `{struct_name}`"))
+                LowerError::Unsupported(format!("unknown struct type `{struct_name}` (FLS §3, §4)"))
             })?
             .clone();
 
@@ -6628,7 +6628,7 @@ impl<'src> LowerCtx<'src> {
             .get(struct_name)
             .ok_or_else(|| {
                 LowerError::Unsupported(format!(
-                    "unknown struct type `{struct_name}` in function argument"
+                    "unknown struct type `{struct_name}` in function argument (FLS §3, §4)"
                 ))
             })?
             .clone();
@@ -6686,7 +6686,7 @@ impl<'src> LowerCtx<'src> {
             .get(struct_name)
             .cloned()
             .ok_or_else(|| {
-                LowerError::Unsupported(format!("unknown struct type `{struct_name}`"))
+                LowerError::Unsupported(format!("unknown struct type `{struct_name}` (FLS §3, §4)"))
             })?;
         let offsets = self
             .struct_field_offsets
@@ -6804,7 +6804,7 @@ impl<'src> LowerCtx<'src> {
                 })?;
 
                 let field_names = self.struct_defs.get(&type_name).ok_or_else(|| {
-                    LowerError::Unsupported(format!("unknown struct type `{type_name}`"))
+                    LowerError::Unsupported(format!("unknown struct type `{type_name}` (FLS §3, §4)"))
                 })?;
                 let field_idx = field_names
                     .iter()
@@ -7658,7 +7658,7 @@ impl<'src> LowerCtx<'src> {
                 let field_names = self.struct_defs
                     .get(actual_name)
                     .ok_or_else(|| {
-                        LowerError::Unsupported(format!("unknown struct `{actual_name}`"))
+                        LowerError::Unsupported(format!("unknown struct `{actual_name}` (FLS §3, §4)"))
                     })?
                     .clone();
                 for (field_idx, field_name) in field_names.iter().enumerate() {
@@ -8621,7 +8621,7 @@ impl<'src> LowerCtx<'src> {
                             .cloned()
                             .ok_or_else(|| {
                                 LowerError::Unsupported(format!(
-                                    "unknown struct type `{struct_name}`"
+                                    "unknown struct type `{struct_name}` (FLS §3, §4)"
                                 ))
                             })?;
                         let offsets = self
@@ -8935,7 +8935,7 @@ impl<'src> LowerCtx<'src> {
                         let field_names = self.struct_defs
                             .get(&struct_name)
                             .ok_or_else(|| {
-                                LowerError::Unsupported(format!("unknown struct `{struct_name}`"))
+                                LowerError::Unsupported(format!("unknown struct `{struct_name}` (FLS §3, §4)"))
                             })?
                             .clone();
                         let n_fields = field_names.len();
@@ -8999,7 +8999,7 @@ impl<'src> LowerCtx<'src> {
                             n
                         } else {
                             return Err(LowerError::Unsupported(format!(
-                                "unknown struct `{struct_name}` from free fn `{fn_name}`"
+                                "unknown struct `{struct_name}` from free fn `{fn_name}` (FLS §3, §4)"
                             )));
                         };
 
@@ -9205,7 +9205,7 @@ impl<'src> LowerCtx<'src> {
                             .get(struct_name)
                             .ok_or_else(|| {
                                 LowerError::Unsupported(format!(
-                                    "unknown struct type `{struct_name}`"
+                                    "unknown struct type `{struct_name}` (FLS §3, §4)"
                                 ))
                             })?
                             .clone();
@@ -12169,7 +12169,7 @@ impl<'src> LowerCtx<'src> {
                                 .get(struct_name)
                                 .cloned()
                                 .ok_or_else(|| LowerError::Unsupported(format!(
-                                    "unknown struct `{struct_name}`"
+                                    "unknown struct `{struct_name}` (FLS §3, §4)"
                                 )))?;
                             // No CondBranch — plain struct patterns are irrefutable.
                             for (fname_span, fp) in pat_fields.iter() {
@@ -13240,7 +13240,7 @@ impl<'src> LowerCtx<'src> {
                                             .get(struct_name)
                                             .cloned()
                                             .ok_or_else(|| LowerError::Unsupported(format!(
-                                                "unknown struct `{struct_name}`"
+                                                "unknown struct `{struct_name}` (FLS §3, §4)"
                                             )))?;
                                         // No CondBranch — plain struct patterns are irrefutable.
                                         for (fname_span, fp) in pat_fields.iter() {
@@ -13665,7 +13665,7 @@ impl<'src> LowerCtx<'src> {
                                         .get(struct_name)
                                         .cloned()
                                         .ok_or_else(|| LowerError::Unsupported(format!(
-                                            "unknown struct `{struct_name}`"
+                                            "unknown struct `{struct_name}` (FLS §3, §4)"
                                         )))?;
                                     for (fname_span, fp) in pat_fields.iter() {
                                         let fname = fname_span.text(self.source);
@@ -14000,7 +14000,7 @@ impl<'src> LowerCtx<'src> {
                                             .get(struct_name)
                                             .cloned()
                                             .ok_or_else(|| LowerError::Unsupported(format!(
-                                                "unknown struct `{struct_name}`"
+                                                "unknown struct `{struct_name}` (FLS §3, §4)"
                                             )))?;
                                         for (fname_span, fp) in pat_fields.iter() {
                                             let fname = fname_span.text(self.source);
@@ -14295,7 +14295,7 @@ impl<'src> LowerCtx<'src> {
                                         .get(struct_name)
                                         .cloned()
                                         .ok_or_else(|| LowerError::Unsupported(format!(
-                                            "unknown struct `{struct_name}`"
+                                            "unknown struct `{struct_name}` (FLS §3, §4)"
                                         )))?;
                                     for (fname_span, fp) in pat_fields.iter() {
                                         let fname = fname_span.text(self.source);
@@ -14595,7 +14595,7 @@ impl<'src> LowerCtx<'src> {
 
                 if args.len() > 8 {
                     return Err(LowerError::Unsupported(
-                        "call with more than 8 arguments (exceeds ARM64 register window)".into(),
+                        "call with more than 8 arguments (exceeds ARM64 register window) (FLS §6.12.1, AAPCS64 §5.4.1)".into(),
                     ));
                 }
 
@@ -16367,7 +16367,7 @@ impl<'src> LowerCtx<'src> {
                                 .get(struct_name)
                                 .cloned()
                                 .ok_or_else(|| LowerError::Unsupported(format!(
-                                    "unknown struct `{struct_name}`"
+                                    "unknown struct `{struct_name}` (FLS §3, §4)"
                                 )))?;
                             // No CondBranch — plain struct patterns are irrefutable.
                             for (fname_span, fp) in pat_fields.iter() {
@@ -18259,7 +18259,7 @@ impl<'src> LowerCtx<'src> {
                             .get(&struct_name)
                             .ok_or_else(|| {
                                 LowerError::Unsupported(format!(
-                                    "unknown struct `{struct_name}` from free fn `{fn_name}`"
+                                    "unknown struct `{struct_name}` from free fn `{fn_name}` (FLS §3, §4)"
                                 ))
                             })?
                             .clone();
@@ -18750,7 +18750,7 @@ impl<'src> LowerCtx<'src> {
 
                 if arg_regs.len() > 8 {
                     return Err(LowerError::Unsupported(
-                        "method call with more than 8 total arguments (exceeds ARM64 register window)".into(),
+                        "method call with more than 8 total arguments (exceeds ARM64 register window) (FLS §6.12.2, AAPCS64 §5.4.1)".into(),
                     ));
                 }
 
