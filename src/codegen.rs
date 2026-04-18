@@ -971,30 +971,33 @@ fn emit_instr(out: &mut String, instr: &Instr, frame_size: u32, saves_lr: bool, 
             )?;
         }
 
-        // FLS §6.17: Branch target label.
-        // Emits `.L{n}:` — a GAS local label. No machine code is emitted;
+        // Branch target label.
+        // Emits `.L{id}:` — a GAS local label. No machine code is emitted;
         // the label resolves to the address of the next instruction.
+        // `fls` carries the originating FLS section (e.g., §6.15.3 for while headers).
         // Cache-line note: labels have zero instruction footprint.
-        Instr::Label(n) => {
-            writeln!(out, ".L{n}:                              // FLS §6.17: branch target")?;
+        Instr::Label { id, fls } => {
+            writeln!(out, ".L{id}:                              // FLS {fls}: branch target")?;
         }
 
-        // FLS §6.17: Unconditional branch.
-        // ARM64: `b .L{n}` — a 4-byte PC-relative branch instruction.
+        // Unconditional branch.
+        // ARM64: `b .L{target}` — a 4-byte PC-relative branch instruction.
+        // `fls` carries the originating FLS section (e.g., §6.15.6 for break).
         // Cache-line note: ARM64 `b` is 4 bytes — one instruction slot.
-        Instr::Branch(n) => {
-            writeln!(out, "    b       .L{n:<24} // FLS §6.17: branch to end")?;
+        Instr::Branch { target, fls } => {
+            writeln!(out, "    b       .L{target:<24} // FLS {fls}: branch")?;
         }
 
-        // FLS §6.17: Conditional branch on zero (false condition).
+        // Conditional branch on zero (false condition).
         // ARM64: `cbz x{reg}, .L{label}` — branches if reg == 0 (condition is false).
         // `cbz` ("compare and branch if zero") is a single 4-byte instruction that
         // combines the compare and branch, avoiding a separate `cmp` instruction.
+        // `fls` carries the originating FLS section (e.g., §6.18 for match checks).
         // Cache-line note: ARM64 `cbz` is 4 bytes — same footprint as `b`.
-        Instr::CondBranch { reg, label } => {
+        Instr::CondBranch { reg, label, fls } => {
             writeln!(
                 out,
-                "    cbz     x{reg}, .L{label:<21} // FLS §6.17: branch if false"
+                "    cbz     x{reg}, .L{label:<21} // FLS {fls}: branch if false"
             )?;
         }
 
