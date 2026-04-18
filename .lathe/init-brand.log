@@ -1,15 +1,13 @@
-`.lathe/brand.md` is written. Here's what the evidence said:
+`.lathe/brand.md` is written. Here's the read of what it found:
 
-**Identity:** Named after a galvanic sacrificial anode — a thing designed to be consumed so something more important isn't. The README names this explicitly. The brand follows from it: honest about what it is, untroubled by what it isn't.
+**Identity:** Precise research instrument. Every claim anchored to a FLS section; every spec silence named rather than papered over. The README's "sacrificial anode" framing is the sharpest brand signal — anti-adoption, research-first, honest about scope.
 
-**Four signals drove the character read:**
+**Three edge cases that anchored it:**
 
-1. **Refusals are citable.** Every "not yet supported" message includes an FLS section (lower.rs:8322, etc.). The CI enforces this as a hard invariant. A refusal without a citation is a bug.
+- *When we say no:* "Do not use this to compile anything you care about." Direct, no apology, reason given.
+- *When we fail:* `"not yet supported: {msg}"` chained with `"in '{item}': {inner}"`. A spec gap is a finding to log, not a failure to hide.
+- *When we report progress:* `"galvanic: emitted {path} (partial — some functions failed)"` — honest about partial success, no exclamation marks.
 
-2. **Partial output is never discarded silently.** main.rs:88–109 is the most distinctive behavior in the codebase — the compiler emits all errors *and* the assembly that succeeded, labeled honestly. This is deliberate design, commented as such.
+**The thing we'd never do:** Leave a spec gap as an implicit choice. The `AMBIGUOUS` annotation pattern in `src/lower.rs` and `refs/fls-ambiguities.md` is load-bearing to the project's identity. Undocumented codegen decisions are a category violation.
 
-3. **Comments explain why, not just what.** codegen.rs cache-line notes give the full arithmetic. lexer.rs explains the 8-bytes-per-token choice at the struct definition. The voice is pedagogical without being verbose.
-
-4. **Commit messages carry the brand too.** 30+ cycles of lowercase, FLS-section-first, action-led commit subjects. Consistent enough that it reads as style, not habit.
-
-The "thing we'd never do" and "signals to preserve" sections are written for the builder — concrete enough to catch drift without being a style guide.
+**Signals to preserve:** FLS section citations in error messages, lowercase imperative commit prefixes (`fix:`, `verify:`, `goal:`), and flat progress narration — held consistently across the happy path and the error path.

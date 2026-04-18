@@ -1,4 +1,8 @@
-# Architecture
+# Architecture — Galvanic
+
+Key architectural decisions visible in the code. Read this before touching any pipeline stage.
+
+---
 
 ## Pipeline
 
@@ -24,60 +28,118 @@ aarch64-linux-gnu-as  →  .o object file
 aarch64-linux-gnu-ld  →  ELF binary (Linux ARM64)
 ```
 
-Each stage has one job and a clean boundary. Nothing earlier in the pipeline knows about later stages. The IR is the contract between `lower` and `codegen`.
+Each stage has one job and a clean boundary. Nothing earlier in the pipeline knows about later stages. The IR is the contract between language semantics (`lower`) and machine instructions (`codegen`).
 
-`src/main.rs` is the only module that shells out to external processes (assembler, linker). The library (everything else) is pure Rust with no `unsafe` and no network deps.
+Only `src/main.rs` shells out to external processes. All library code (`lexer`, `parser`, `ast`, `ir`, `lower`, `codegen`) is pure Rust with no I/O.
 
-## Key Invariants (enforced by CI)
+---
 
-- **No unsafe code** anywhere in `src/`. The `audit` job enforces this.
-- **No `Command` in library code.** Only `src/main.rs` may shell out.
-- **Every IR node traces to an FLS section.** Format: `// FLS §X.Y — <description>`.
-- **Cache-line-critical types have size tests.** Types in `lexer` and `ir` with cache-line commentary must have `assert_eq!(size_of::<T>(), N)`.
-- **No const folding in non-const contexts.** A regular `fn` body must emit runtime instructions even when all values are statically known. Assembly inspection tests in `tests/e2e.rs` enforce this.
-- **Every "not yet supported" error cites an FLS section.** `lower_source_all_unsupported_strings_cite_fls` in `tests/smoke.rs` enforces this statically.
+## Module responsibilities
 
-## Module Roles
+| Module | Job | FLS sections |
+|--------|-----|--------------|
+| `lexer` | Source text → `Vec<Token>`. Each `Token` is exactly 8 bytes (8 per 64-byte cache line). | §2 |
+| `ast` | AST type definitions only — no logic. Structs for `Item`, `Expr`, `Pat`, `Ty`, etc. | §5, §6, §7–§14 |
+| `parser` | `Vec<Token>` → `SourceFile` (AST). Recursive descent. | §5, §6, §7–§14, §18 |
+| `ir` | IR type definitions: `Module`, `IrFn`, `Instr`, `IrValue`, `IrTy`. Every node carries an FLS traceability comment. | §4, §6.19, §8, §9 |
+| `lower` | AST → IR. All FLS semantic rules live here. Emits runtime IR for non-const code (never const-folds). | All language semantics |
+| `codegen` | IR → ARM64 GAS assembly. Cache-line discipline lives here. | ARM64 ISA, AAPCS64 |
+| `main` | CLI driver. Reads source file, runs pipeline, shells out to assembler/linker. The only module that uses `std::process::Command`. | — |
 
-| Module | Role | Size |
-|--------|------|------|
-| `lexer` | Source text → `Vec<Token>`. Token is 8 bytes (8 per cache line). | ~500 lines |
-| `ast` | AST type definitions — no logic, just types. | ~1,700 lines |
-| `parser` | `Vec<Token>` → `SourceFile`. Recursive descent. | ~3,800 lines |
-| `ir` | IR type definitions. Every node traces to FLS. | ~1,200 lines |
-| `lower` | AST → IR. All FLS semantic rules. | ~18,000 lines (the engine) |
-| `codegen` | IR → ARM64 GAS. Cache-line discipline lives here. | ~1,600 lines |
+---
 
-## Error Message Architecture
+## Two-tier lowering
 
-When `lower()` fails, galvanic prints:
-1. One line per failing function: `error: lower failed in '<name>': not yet supported: <construct> (FLS §X.Y)`
-2. A summary line: `lowered N of M functions (K failed)` (only when fn_count > 0)
-3. If some functions succeeded, emit their assembly anyway (partial output, non-zero exit)
+`lower.rs` uses two paths depending on what the function returns:
 
-This design serves the Lead Researcher: they see the full error landscape in one run, and partial output is never silently discarded.
+**Tier 1 — scalar path (`lower_expr`):** For expressions producing a single scalar (`i32`, `bool`, `f32`, `f64`, pointer types). Returns an `IrValue` (register or constant). This is the default.
 
-## Partial Output Paths
+**Tier 2 — composite path (`lower_*_expr_into`):** For expressions inside functions whose return type is a composite (struct, enum, tuple). Writes into pre-allocated stack slots instead of returning a value — implements galvanic's register-packing calling convention.
 
-Three distinct outcomes when `fn main` is involved:
-- **All functions succeed + main present:** emit `.s`, exit 0
-- **Some functions fail + main succeeds:** emit `.s` (partial, with "partial" in stdout), exit 1
-- **Main fails + some other functions succeed:** emit `.s` annotated "inspection-only" (no `_start`), exit 1
-- **Main fails + no other functions succeed:** no `.s`, exit 1
+| Function | When called |
+|---|---|
+| `lower_struct_expr_into` | Return type is a named struct (FLS §9, §6.11) |
+| `lower_enum_expr_into`   | Return type is a named enum (FLS §9, §15) |
+| `lower_tuple_expr_into`  | Return type is a tuple (FLS §9, §6.10) |
 
-## Ambiguity Registry
+Decision point: `lower_fn` inspects the function's declared return type and routes to one of the four paths. Adding a new expression case for a composite-returning function → add a match arm in the relevant `lower_*_expr_into`. Adding a new case for scalar-returning functions → add a match arm in `lower_expr`.
 
-`refs/fls-ambiguities.md` is the Spec Researcher's primary artifact. Each entry:
-- Names the FLS section and the specific gap
-- Documents galvanic's chosen resolution (what galvanic does and why)
-- Provides a minimal reproducer with a specific assembly signature the researcher can verify
-- Must be sorted by FLS section number with a navigable TOC
+---
 
-AMBIGUOUS annotations in source (`// AMBIGUOUS: §X.Y`) are the source of truth; the registry aggregates them.
+## FLS traceability convention
 
-## Platform Targets
+Every IR node (`Instr` variant, `IrTy` variant, significant `IrValue` usage) must carry a traceability comment:
 
-- ARM64 only for codegen output (macOS, Linux, BSDs)
-- The compiler itself runs on any Rust-supported platform
-- Assembly targets Linux ELF format by default; macOS and BSD variants are noted in `refs/arm64-platform-abi.md`
-- Cross-compilation toolchain: `aarch64-linux-gnu-as` + `aarch64-linux-gnu-ld`; emulation via `qemu-aarch64` for testing on non-ARM64 hosts
+```rust
+// FLS §6.5.6 — Arithmetic expressions: add
+Instr::BinOp { op: IrBinOp::Add, .. }
+```
+
+When the spec is ambiguous or silent:
+```rust
+// FLS §6.10: AMBIGUOUS — spec does not define the ABI for tuple returns
+```
+
+Missing traceability is a code smell. Every new IR variant should have the citation at its definition site in `ir.rs`.
+
+---
+
+## Cache-line discipline
+
+ARM64 instructions are 4 bytes each; 16 instructions fill one 64-byte cache line.
+
+- `Token` is exactly 8 bytes → 8 tokens per cache line (enforced by size assertion test).
+- `Span` is exactly 8 bytes → same.
+- Every IR type with a cache-line note in `ir.rs` must have a corresponding `assert_eq!(size_of::<T>(), N)` test. This is enforced by the `bench` CI job.
+- When adding a new IR type, add the cache-line commentary AND the size assertion immediately — don't defer.
+
+The codegen is cache-line-aware in instruction selection (minimize instruction count), not just in data layout. Assembly output comments document register choices and cache-line reasoning.
+
+---
+
+## No unsafe rule
+
+`src/` contains zero `unsafe` blocks, `unsafe fn`, or `unsafe impl`. This is enforced by the `audit` CI job and by `cargo clippy`. If you think you need `unsafe`, you're wrong — find the safe Rust alternative.
+
+---
+
+## Adding a new language feature (checklist)
+
+1. Find the FLS section. Check `refs/fls-ambiguities.md` for known gaps.
+2. **New syntax?** → `src/ast.rs` (type), `src/parser.rs` (parse case).
+3. **New runtime behavior?** → `src/ir.rs` (new `Instr` or `IrValue` variant with FLS citation and cache-line note + size test).
+4. **Lowering** → `src/lower.rs` (translate AST node to IR using FLS semantic rule; error must name function, FLS section, and construct).
+5. **Codegen** → `src/codegen.rs` (translate IR to ARM64; comment register usage and cache-line reasoning).
+6. **Tests:**
+   - Fixture: `tests/fixtures/fls_<section>_<topic>.rs`
+   - Parse acceptance: `tests/fls_fixtures.rs`
+   - Assembly inspection: `tests/e2e.rs` using `compile_to_asm` (mandatory for anything that could be const-folded)
+   - Full e2e: `compile_and_run` in `tests/e2e.rs` when applicable
+
+---
+
+## Domain boundaries
+
+This project spans three authority domains. Bugs are often misattributed between them.
+
+| Domain | Covers | Authoritative source |
+|--------|--------|---------------------|
+| FLS (Ferrocene Language Specification) | Rust language semantics: what constructs are valid, how they evaluate, type rules, ownership rules | `refs/fls-pointer.md` → https://rust-lang.github.io/fls/ |
+| ARM64 ISA / AAPCS64 | Instruction encoding, calling conventions, register allocation, stack layout, system call ABI | `refs/arm64-abi.md`; AAPCS64 spec |
+| Platform ABI (Linux / macOS / BSDs) | Binary format (ELF vs Mach-O), syscall numbers, dynamic linking | `refs/arm64-platform-abi.md` |
+
+**Common confusion:** "The spec doesn't say how to encode large integers" → that's a domain boundary moment: FLS is silent (language domain), but AAPCS64 + ARM64 ISA provides the answer (machine domain). Document the gap in `refs/fls-ambiguities.md` and cite the ARM64 source in the codegen.
+
+**Another common confusion:** "Should this behavior differ on macOS vs Linux?" → that's a platform ABI question, not a language semantics question. The FLS covers language semantics; macOS/Linux differences live in the platform ABI domain.
+
+---
+
+## Partial output on lowering failure
+
+When lowering fails for some functions but succeeds for others, galvanic emits assembly for the successful functions (inspection-only, no entry point) and exits non-zero. This is intentional — a partial success must not be silently discarded. The Lead Researcher needs the artifact to inspect even when the program can't be run.
+
+Exit code semantics:
+- `0` — fully successful compile with `fn main` and no errors
+- `0` — no errors, no `fn main` (library-only file)
+- `1` — any error (lower fail, codegen fail, missing file, etc.)
+- Non-zero on any lowering error even when partial assembly was emitted

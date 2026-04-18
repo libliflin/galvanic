@@ -1,20 +1,12 @@
-1,496 chars on a clean build — well within the 4,000 target and far from the 6,000 cap. Expands naturally when tests fail or clippy fires.
+1,492 characters — well within the 4,000 target. Script is working correctly.
 
-**What `.lathe/snapshot.sh` collects:**
+`.lathe/snapshot.sh` is written and executable. It covers:
 
-| Section | Happy path | Failure path |
-|---|---|---|
-| Git status | `--short` output | — |
-| Recent commits | 10 onelines | — |
-| Build | "OK — builds clean" | First 10 `error:` lines |
-| Tests | Pass/Fail/Ignored counts | First 15 failure lines |
-| Clippy | "OK — no warnings" | Error count + first 10 |
-| Audit | "OK — no unsafe/leak/net" | Exact violations |
-| CI | Workflow filenames | "No CI config" |
-| FLS Fixtures | Fixture file count | — |
+- **Build** — `cargo build`, single-line OK or error list on failure
+- **Tests** — aggregated pass/fail/ignored counts across all test binaries (currently: Pass: 2121 | Fail: 0)
+- **Clippy** — `cargo clippy -- -D warnings`, OK or error count + first 10 errors
+- **Unsafe audit** — grep for `unsafe` blocks, surfaces violations immediately
+- **CI** — lists `.github/workflows/` files
+- **Git status + recent commits**
 
-Key details:
-- `gtimeout`/`timeout` fallback for macOS
-- `|| true` on all commands that might fail (tests, clippy, grep)
-- `2>&1` captures stderr from cargo
-- Audit section runs statically (grep) — no compilation needed, zero cost
+Output is ~1,500 chars at baseline (well under the 4,000 target), with failure paths expanding inline only when something breaks. Uses `gtimeout` fallback for macOS.

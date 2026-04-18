@@ -1,42 +1,33 @@
 # Brand
 
-## Identity
-
-Precise, research-honest, technically dry — named after a thing that exists to be consumed. "Galvanic" refers to galvanic corrosion protection: a sacrificial anode corrodes so that the structure it protects doesn't. The README makes this explicit: "It's a sacrificial anode — it exists to find ambiguities in the spec and to explore what 'dumb but cache-aware' codegen can do. Nobody needs to use this. Value comes from what we learn." (README.md line 15.)
-
-Not self-deprecating as a posture. Self-aware as a fact. The project knows what it is and isn't bothered by what it isn't.
+**Identity.** Precise, self-aware research instrument — the voice of a compiler that knows exactly what it is, what it isn't, and where the spec ran out. Every claim is anchored to a FLS section; every silence is named rather than papered over. From `Cargo.toml` description: "Clean-room ARM64 Rust compiler built from the Ferrocene Language Specification with cache-line-aware codegen" — functional, technical, zero marketing. From `README.md`: "It's a sacrificial anode — it exists to find ambiguities in the spec and to explore what 'dumb but cache-aware' codegen can do. Nobody needs to use this. Value comes from what we learn."
 
 ---
 
-## How We Speak
+## How we speak
 
-**When we say no:**
-Name the thing we don't support, cite the FLS section, don't apologize. "not yet supported: nested tuple pattern not yet supported (FLS §5.10.3, §8.1)" (lower.rs:8322). The project refuses features without drama — each refusal is specific enough to navigate from. A "no" without an FLS citation is off-brand.
+**When we say no:** Direct and explicit about scope. "Do not use this to compile anything you care about" (`README.md`, "What this is not" section). No softening, no apology. Refusals come with a reason — the reason here is "this is a research instrument, not a production tool." The CI enforces its own refusals with the same grammar: `No unsafe code`, `No Command in library code` (`src/lib.rs:53–56`). The refusal names the rule, not a judgment.
 
-**When we fail:**
-Emit what succeeded. Never discard partial work silently. From main.rs:88–109, the comment reads: "the goal of partial output: a partial success should not be entirely silent." When some functions lowered and some didn't, the compiler prints all the errors *and* emits assembly for the functions that worked, labeled honestly: "emitted {} (partial — some functions failed)". The partial label is explicit; the work is never quietly thrown away.
+**When we fail:** Flat, factual, located. `"not yet supported: {msg}"` (`src/lower.rs`, `LowerError::Unsupported`). Errors chain to their source: `"in '{item}': {inner}"` — you know what function failed before you see the inner cause. When the spec is silent on the right answer, the code says so explicitly: `// FLS §6.9 AMBIGUOUS: Out-of-bounds access must panic; the spec does not...` (`src/lower.rs`). A gap in the spec is not a failure to hide; it's a finding to log.
 
-**When we explain:**
-Tight technical prose that includes *why*, not just *what*. Comments name the ratio, the reasoning, the tradeoff. From codegen.rs:217–219: "each static occupies 8 bytes (.quad). Eight statics fill one 64-byte data cache line. We align each static to 8 bytes (.align 3) to prevent two statics from sharing a single alignment unit." No hand-waving — the number is there, the derivation is there.
+**When we explain:** Thorough but structured. `src/lib.rs` module-level docs use tables, ASCII pipeline diagrams, and numbered steps. The voice is declarative: "Each stage has one job and a clean boundary. Nothing earlier in the pipeline knows about later stages. The IR is the contract between language semantics and machine instructions." (`src/lib.rs:31–33`). Long explanations earn their length with tables and headers; they don't sprawl.
 
-**When we onboard a new user:**
-Blunt, not cold. README.md line 17: "Do not use this to compile anything you care about." Not softened. But the next line gives them the actual value proposition clearly. The usage line is flat: "usage: galvanic <source.rs> [-o <output>]" (main.rs:38). No cheerful welcome, no feature list — just the shape of the command.
+**When we onboard a new contributor:** Sequential and complete. "Find the FLS section → add AST types → add IR variant with FLS traceability comment → add lowering case → add codegen case → write tests." (`src/lib.rs`, "Adding a new language feature"). The sequence is exhaustive by design — if you follow it, you won't miss a step. The invariants are named before the sequence, so you know the rules of the road before you drive.
 
-**When something compiles successfully:**
-Plain statement of what happened. "galvanic: emitted {path}" (main.rs:174). No congratulations, no color. The assembly file is the output; the message just names where it went. Success is a fact, not a moment.
+**When we report progress:** Terse status narration, no celebration. `"galvanic: compiling {filename}"`, `"galvanic: emitted {path}"`, `"galvanic: emitted {path} (partial — some functions failed)"` (`src/main.rs:54,173,171`). The partial-success case is still reported — honestly, without hiding the failure count. No exclamation marks, no emoji, no fanfare.
 
 ---
 
-## The Thing We'd Never Do
+## The thing we'd never do
 
-Emit a vague error. Galvanic never produces a bare "not yet supported" without an FLS section cite — the CI audit enforces this via `lower_source_all_unsupported_strings_cite_fls`. (Established in the test suite and referenced in champion.md.) A "not yet supported" without a section number and affected construct is not an error message — it's a dead end. The project treats dead ends as bugs.
+We'd never leave a spec gap as an implicit choice. Every place where the FLS is silent and galvanic had to pick something gets an `AMBIGUOUS` annotation and an entry in `refs/fls-ambiguities.md` — the finding, galvanic's resolution, the source location, and a minimal reproducer. The project's identity depends on this traceability: if a choice is undocumented, the research value evaporates. Burying a codegen decision in uncommented assembly would be a category violation, not a style preference. (See `src/lower.rs` AMBIGUOUS annotations, and `refs/fls-ambiguities.md`.)
 
 ---
 
-## Signals to Preserve
+## Signals to preserve
 
-1. **Lowercase imperative commit messages with FLS section citations.** Pattern: `fix: §8.2 named block expression as statement now infers tail type`. The section number is part of the subject, not the body. The message is action-first, no capitalization. (git log, consistent across 30+ cycles.)
+1. **FLS section citations in error messages.** Format: `(FLS §X.Y)` or `(FLS §X.Y, §Z)`. Every `not yet supported` error in `lower.rs` that names a spec section is doing the project's job — it turns a compile failure into a finding. Strip the citation and you strip the research signal.
 
-2. **"not yet supported (FLS §X.Y, §Z)" as the standard refusal form.** Specific section, specific construct, parenthetical citation. Lower.rs:124 defines the format; individual error strings fill in the detail. When someone adds a new "not yet supported" message, this is the template.
+2. **Lowercase imperative commit prefixes.** `fix:`, `verify:`, `docs:`, `goal:`, `bench:` — action-first, section-cited where applicable: `"fix: §6.13 tuple index access now cites §6.10..."` (`git log`). The convention is load-bearing: `verify:` means CI checked it; `goal:` means the champion named it. These are not cosmetic.
 
-3. **Partial output is always emitted with an honest label.** The label names the limitation — "inspection-only — no fn main; this assembly has no entry point" (main.rs:132), "partial — some functions failed" (main.rs:171). The label is an obligation, not optional copy.
+3. **Flat progress narration.** CLI output is `"galvanic: <verb> <noun>"` — no decoration, no hedging, no excitement markers. Partial success says "partial." Failure says so. The tone holds across the happy path and the error path equally.

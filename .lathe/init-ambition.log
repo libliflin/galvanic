@@ -1,0 +1,17 @@
+Done. Here's what was written and why:
+
+---
+
+**`.lathe/ambition.md`** — full destination sheet, ~600 words.
+
+**Destination** (from README lines 7–11 and 15): Galvanic answers two explicit research questions — FLS implementability and cache-line-first codegen — with evidence across `no_std` Rust. The destination is the *learning*, not a shipping product.
+
+**Four concrete gaps cited from code:**
+1. `codegen.rs:716` — `x9` scratch workaround for virtual registers ≥31. Any program exceeding 30 live variables compiles incorrectly. This is the structural ceiling on "real programs," which is exactly what research question 2 needs.
+2. `lower.rs:10770` — MOVZ+MOVK not implemented, blocking FLS §2.4.4.1 compliance.
+3. `lower.rs:12140, 12518, 12240, 13140, 13795` — tuple scrutinee, match guards, nested patterns all "not yet supported," blocking ordinary Rust idioms.
+4. `refs/fls-ambiguities.md` TOC ends at §14; parser covers through §18 — §15+ is open territory.
+
+**On-ambition texture**: A real register allocator closes the structural gap. Another x9 patch extends the workaround. The distinction is explicit so the champion can apply it each cycle.
+
+**`alignment-summary.md`** — Ambition section appended with destination, gaps, and honest uncertainties (the README never names a target program; the §15+ gap is inferred from the registry TOC).

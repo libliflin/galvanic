@@ -1,22 +1,19 @@
-Done. Here's what was written and why each decision was made:
+All four files are written. Here's what was produced:
 
 ---
 
-## Files written
+**`.lathe/agents/champion.md`** — The runtime playbook. Three stakeholders grounded in what the code actually shows:
 
-**`.lathe/agents/champion.md`** — The playbook. Four stakeholders identified from the code, not from templates:
+- **Lead Researcher** — drives the frontier, emotional signal is *momentum*
+- **Spec Researcher** — navigates `refs/fls-ambiguities.md`, emotional signal is *confidence and authority*
+- **Compiler Contributor** — extends the pipeline, emotional signal is *clarity*
 
-1. **Lead Researcher** (the author) — uses the compiler daily to test FLS coverage, reads assembly. Emotional signal: momentum.
-2. **Spec Researcher** — external, arrived for `refs/fls-ambiguities.md`, wants citable findings. Emotional signal: confidence.
-3. **Compiler Contributor** — adding FLS sections, follows the guide in `lib.rs`. Emotional signal: clarity.
-4. **Cache-line Performance Researcher** — studying codegen discipline, runs benchmarks. Emotional signal: discovery.
+The ranking model: CI floor first (red build → no journey, fix the build), then lived experience above the floor. No layer ladder — the `How to Rank` section names the two sources explicitly and flags the anti-pattern by name.
 
-The ranking section uses the two-source model explicitly — CI floor, then lived experience — and names the urge to write a numbered ladder so the runtime agent can recognize and resist it.
+**`.lathe/skills/journeys.md`** — Concrete first-encounter journeys per stakeholder, with harder journeys for when the easy path completes. The Lead Researcher's journey pushes until the compile actually fails on something real; the Spec Researcher's harder journey requires finding *all* findings for a section without scanning the full file.
 
-**`.lathe/skills/journeys.md`** — Concrete first-encounter journeys for each stakeholder. The actual commands they'd run, the actual moments where the experience turns. These are what the champion walks each cycle.
+**`.lathe/skills/testing.md`** — How galvanic tests: unit (inline), smoke (CLI-level binary), FLS fixtures (parse acceptance), assembly inspection (the critical invariant for const-folding detection), e2e (QEMU execution), benchmarks. Includes the full CI job table and the "no compile-time results in e2e tests" gotcha.
 
-**`.lathe/skills/architecture.md`** — Pipeline, module roles, invariants enforced by CI, the three partial-output paths, the error message architecture. What a builder needs to know to work safely in the codebase.
+**`.lathe/skills/architecture.md`** — Pipeline, two-tier lowering, FLS traceability convention, cache-line discipline, domain boundaries (FLS vs ARM64 ISA vs platform ABI), partial-output semantics.
 
-**`.lathe/skills/testing.md`** — How this project tests: test suite structure, what each suite checks, how to add tests, CI job table, fixture naming convention.
-
-**`.lathe/alignment-summary.md`** — For the user: stakeholder list, emotional signals, tensions, security posture, and honest "what could be wrong" including that brand.md is absent and Cache-line Researcher is lightly grounded.
+**`.lathe/alignment-summary.md`** — For you. Key items flagged: `ambition.md` is missing (champion falls back to journey-only maturation until you write it), `brand.md` is missing, default branch protection was not verified, potential prompt injection surface noted.

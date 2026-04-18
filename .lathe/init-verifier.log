@@ -1,11 +1,13 @@
-`.lathe/agents/verifier.md` written. Here's what it encodes:
+Written to `.lathe/agents/verifier.md`.
 
-**Shape detected: Service / CLI.** Galvanic is a compiler binary — no registry publish, no deploy environment, no dev server. Witnessing means building the binary and exercising the changed command path directly.
+**What I encoded and why:**
 
-**What's in the file:**
+**Shape detected: Service / CLI.** Galvanic is a compiler binary — no registry publish, no web frontend, no preview deploys. The witness is running the binary against source files and inspecting assembly output.
 
-- **Comparative scrutiny posture** — reads goal and code side by side, asks what's missing, commits code (not verdicts)
-- **Verification Playbook** — concrete `cargo` commands, `/tmp/` fixture patterns, and guidance for witnessing new language features, new error messages, new assembly output, and pure refactors. No placeholders — all commands are the real ones from this repo.
-- **Project-specific scrutiny checklist** — the recurring gaps most likely to slip past the builder: FLS traceability comments, cache-line size assertions, the no-const-folding invariant, pipeline completeness (AST node with no lowering case = runtime crash), audit invariants, and partial-output behavior.
-- **Test layer clarity** — the verifier knows exactly which of the three test layers (`fls_fixtures.rs`, `smoke.rs`, `e2e.rs`) a given kind of addition belongs in.
-- **Convergence signal** — no VERDICT, no gate. The cycle ends when a round passes with neither agent committing.
+**The Verification Playbook** follows the project's actual commands: `cargo build`, `cargo test`, `cargo test --test e2e -- --nocapture`, `cargo clippy -- -D warnings`, and the `cargo test --lib -- token_is_eight_bytes` size assertion. I resolved every placeholder to real commands found in CI and the test files.
+
+**Assembly inspection as the core witness.** The project's most important verification tool is `compile_to_asm` — it's the only way to confirm runtime codegen rather than compile-time constant folding (FLS §6.1.2). The playbook makes this concrete: check what instruction form appears, not just whether it compiled.
+
+**Ambition-aware scrutiny.** The verifier knows the four named gaps in `ambition.md` and is instructed to name workarounds explicitly, commit the adversarial test that exposes the boundary, and write the structural description in the whiteboard so the builder can decide whether to tear out the patch next round.
+
+**Invariants checklist** covers everything CI enforces: no `unsafe`, no `Command` in library code, FLS traceability comments, cache-line size assertions, no const folding, error message format, clippy clean.

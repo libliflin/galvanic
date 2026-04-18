@@ -1,11 +1,13 @@
-Written to `.lathe/agents/builder.md`. The file covers:
+`.lathe/agents/builder.md` written. Here's what it encodes:
 
-- **Identity and posture** — creative synthesis, structural thinking, fewest moving parts
-- **The dialog** — round 1 always contributes, round 2+ by judgment, convergence as the natural end
-- **Implementation quality** — understand the stakeholder moment from champion.md, implement exactly what's asked, validate before pushing
-- **Structural solutions** — aligns with the champion's "make X impossible" framing
-- **Witnessability** — point the verifier at the specific command/fixture/output
-- **Brand** — the "not yet supported (FLS §X.Y)" template, commit message format, partial output obligations
-- **CI/PR model** — engine merges, builder commits/pushes/creates PRs, CI failures are top priority
-- **Project conventions** — the full pipeline table, the six-step feature addition path, error formats, the no-const-folding invariant, the three test layers, the `audit` job constraints
-- **Rules** — one change per round, validate before push, FLS citations required, IR traceability required
+**Identity and posture** — creative synthesis, structural over patch, ambition-aware scoping. Aligned with the champion's advocacy framing so the builder understands who benefits from each goal.
+
+**Project-specific conventions:**
+- The six-module pipeline and the exact feature-addition sequence (AST → IR with FLS traceability + cache-line note → lowering → codegen → tests)
+- Two-tier lowering architecture (`lower_expr` for scalars, `lower_*_expr_into` for composites) — knowing this prevents a common confusion when adding expression cases
+- All four CI-enforced invariants: no unsafe, no Command in library, FLS traceability on every IR node, cache-line size tests
+- Three test files and when to use each (`fls_fixtures.rs` for parse acceptance, `e2e.rs` for assembly inspection + full pipeline, `smoke.rs` for CLI behavior)
+
+**Brand and ambition** scoped correctly — brand on user-visible surfaces only; ambition applied when choosing between implementation approaches, with the four named gaps called out explicitly so the builder recognizes on-ambition vs. off-ambition paths.
+
+**Commit convention** (`fix:`, `verify:`, `docs:`, `goal:`, `bench:` with FLS section citations) documented as load-bearing, not cosmetic.
