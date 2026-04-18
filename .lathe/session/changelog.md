@@ -1,3 +1,51 @@
+# Verification — Cycle 026, Round 3 (Verifier)
+
+## What I compared
+
+- **Goal:** Fix expression statement lowering (FLS §8.2) so any expression can appear as a
+  statement. The named-block variant `'l: { 42 };` was the remaining gap coming into this
+  round, addressed by the builder in round 2.
+- **Builder's change (round 2):** `ExprKind::NamedBlock` arm added to `infer_natural_ty` in
+  `src/lower.rs`, mirroring the existing `Block`/`UnsafeBlock` arm. Fallthrough comment
+  corrected. Fixture function `discard_named_block_expr()` added.
+  E2e test `fls_8_2_named_block_expr_stmt_emits_runtime_instr` added.
+
+**What I ran:**
+- `cargo test` — 2115 pass, 0 fail ✓ (216 lib + 1842 e2e + 46 fls_fixtures + 11 smoke)
+- `cargo clippy -- -D warnings` — clean ✓
+- `cargo run -- tests/fixtures/fls_9_functions.rs` → 19 items, 0 failures ✓ (wall from
+  cycle start is gone — `returns_unit()` now lowers cleanly)
+- `cargo run -- tests/fixtures/fls_8_2_expression_statements.rs` → 8 items, 0 failures ✓
+- `cargo test --test e2e fls_8_2 -- --nocapture` → 4 tests, all pass ✓
+
+## What's here, what was asked
+
+Matches. The work holds up against the goal from my comparative lens.
+
+- All three block-like expression kinds (`Block`, `UnsafeBlock`, `NamedBlock`) recurse into
+  their tail in `infer_natural_ty` — the structural symmetry is complete.
+- The original goal scenario (`fn returns_unit() { 42; }`) compiles without error.
+- 4 e2e tests cover the four expression-statement shapes: integer literal, binary expr,
+  plain block, named block — all assert runtime instruction emission (no const folding).
+- Fixture file has 8 functions, all lowering cleanly.
+- The `if`-expression-as-statement gap (noted in round 2 findings) is pre-existing and
+  out of scope for this cycle. No regression introduced.
+
+## What I added
+
+Nothing this round — the work holds up against the goal from my lens.
+
+## Notes for the goal-setter
+
+- The `if`-expression-as-statement gap remains: `fn foo(x: i32) { if x > 0 { 42 } else { 0 }; }`
+  still fails with "integer literal with non-integer type". Root cause: `lower_expr` passes
+  `IrTy::Unit` into the `if` branches; `infer_natural_ty` would need an `If` arm, and the
+  `if` lowering path would need to pass the inferred type into both branch bodies. A deeper
+  fix than a one-liner — good candidate for a dedicated §6.17 cycle.
+- None other.
+
+---
+
 # Verification — Cycle 026, Round 2 (Verifier)
 
 ## What I compared
