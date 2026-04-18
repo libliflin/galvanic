@@ -6442,62 +6442,175 @@ impl<'src> LowerCtx<'src> {
     /// Cache-line note: N scalar fields in the nested struct emit N `str` instructions
     /// (4 bytes each); the slots are consecutive so consecutive stores touch the same
     /// 64-byte cache lines as non-nested structs.
+    /// Store a composite (struct-typed) field initializer expression into
+    /// consecutive stack slots starting at `base_slot`.
+    ///
+    /// FLS §6.11: Field initializers are arbitrary expressions — not restricted
+    /// to struct literals. The three supported forms are:
+    ///
+    /// - **Struct literal** `S { field: expr, ... }`: store each field in
+    ///   declaration order, recursing for doubly-nested struct fields.
+    /// - **Variable path** `p`: copy N scalar slots from `p`'s stack base.
+    ///   FLS §6.3, §7.1 — value semantics; Copy assumed for struct fields.
+    /// - **Struct-returning call** `make_point(x, y)`: emit `CallMut` with
+    ///   `write_back_slot = base_slot` so the callee's `RetFields` values
+    ///   land directly in the parent struct's pre-allocated slots.
+    ///   FLS §6.12.1, §9: the write-back convention is galvanic's calling
+    ///   convention for struct-returning functions (see `struct_return_free_fns`).
+    ///
+    /// FLS §6.11 AMBIGUOUS: The spec says field initializers are expressions
+    /// but does not specify evaluation order when initializers have side effects.
+    /// Galvanic evaluates them left-to-right in source order (same as scalars).
+    /// See refs/fls-ambiguities.md §6.11.
+    ///
+    /// FLS §6.1.2:37–45: All stores are runtime instructions — no const folding.
+    ///
+    /// Cache-line note: N scalar fields emit N `str` instructions (4 bytes each).
+    /// A call form adds bl + N stores = N+1 instructions on top.
     fn store_nested_struct_lit(
         &mut self,
         expr: &Expr,
         base_slot: u8,
         struct_name: &str,
     ) -> Result<(), LowerError> {
-        // The initializer must be a struct literal for the same type.
-        let ExprKind::StructLit { fields: lit_fields, .. } = &expr.kind else {
-            return Err(LowerError::Unsupported(format!(
-                "expected struct literal `{struct_name} {{ .. }}` for nested struct field (FLS §6.11, §5.10.2)"
-            )));
-        };
+        match &expr.kind {
+            // FLS §6.11: Struct literal `S { field: expr, ... }`.
+            // Store each field in declaration order; recurse for doubly-nested structs.
+            ExprKind::StructLit { fields: lit_fields, .. } => {
+                let field_names = self
+                    .struct_defs
+                    .get(struct_name)
+                    .ok_or_else(|| {
+                        LowerError::Unsupported(format!(
+                            "unknown struct type `{struct_name}` (FLS §3, §4)"
+                        ))
+                    })?
+                    .clone();
+                let field_offsets = self
+                    .struct_field_offsets
+                    .get(struct_name)
+                    .cloned()
+                    .unwrap_or_default();
+                let field_types = self
+                    .struct_field_types
+                    .get(struct_name)
+                    .cloned()
+                    .unwrap_or_default();
 
-        let field_names = self
-            .struct_defs
-            .get(struct_name)
-            .ok_or_else(|| {
-                LowerError::Unsupported(format!("unknown struct type `{struct_name}` (FLS §3, §4)"))
-            })?
-            .clone();
+                for (field_idx, field_name) in field_names.iter().enumerate() {
+                    let field_offset = field_offsets.get(field_idx).copied().unwrap_or(field_idx);
+                    let dst_slot = base_slot + field_offset as u8;
 
-        let field_offsets = self
-            .struct_field_offsets
-            .get(struct_name)
-            .cloned()
-            .unwrap_or_default();
-        let field_types = self
-            .struct_field_types
-            .get(struct_name)
-            .cloned()
-            .unwrap_or_default();
+                    let field_init = lit_fields
+                        .iter()
+                        .find(|(f, _)| f.text(self.source) == field_name.as_str())
+                        .ok_or_else(|| {
+                            LowerError::Unsupported(format!(
+                                "missing field `{field_name}` in nested `{struct_name}` literal"
+                            ))
+                        })?;
 
-        for (field_idx, field_name) in field_names.iter().enumerate() {
-            let field_offset = field_offsets.get(field_idx).copied().unwrap_or(field_idx);
-            let dst_slot = base_slot + field_offset as u8;
+                    let nested_ty = field_types.get(field_idx).cloned().flatten();
+                    if let Some(nested_type_name) = nested_ty {
+                        // Doubly-nested struct: recurse (handles any expression form).
+                        self.store_nested_struct_lit(&field_init.1, dst_slot, &nested_type_name)?;
+                    } else {
+                        let val = self.lower_expr(&field_init.1, &IrTy::I32)?;
+                        let src = self.val_to_reg(val)?;
+                        self.instrs.push(Instr::Store { src, slot: dst_slot });
+                    }
+                }
+                Ok(())
+            }
 
-            let field_init = lit_fields
-                .iter()
-                .find(|(f, _)| f.text(self.source) == field_name.as_str())
-                .ok_or_else(|| {
+            // FLS §6.3, §7.1, §6.11: Variable path — copy N slots from source variable.
+            //
+            // For `Rect { top_left: p, ... }` where `p: Point`, emit N Load+Store
+            // pairs to copy Point's fields from p's stack base to base_slot..base_slot+N-1.
+            //
+            // Cache-line note: 2N instructions (N loads + N stores); consecutive slots
+            // typically share cache lines.
+            ExprKind::Path(segs) if segs.len() == 1 => {
+                let var_name = segs[0].text(self.source);
+                let src_base = *self.locals.get(var_name).ok_or_else(|| {
                     LowerError::Unsupported(format!(
-                        "missing field `{field_name}` in nested `{struct_name}` literal"
+                        "nested struct field `{struct_name}`: undefined variable `{var_name}` (FLS §6.11)"
                     ))
                 })?;
-
-            let nested_ty = field_types.get(field_idx).cloned().flatten();
-            if let Some(nested_type_name) = nested_ty {
-                // Doubly-nested struct: recurse.
-                self.store_nested_struct_lit(&field_init.1, dst_slot, &nested_type_name)?;
-            } else {
-                let val = self.lower_expr(&field_init.1, &IrTy::I32)?;
-                let src = self.val_to_reg(val)?;
-                self.instrs.push(Instr::Store { src, slot: dst_slot });
+                let n = self
+                    .struct_defs
+                    .get(struct_name)
+                    .ok_or_else(|| {
+                        LowerError::Unsupported(format!(
+                            "unknown struct type `{struct_name}` (FLS §3, §4)"
+                        ))
+                    })?
+                    .len();
+                for i in 0..n as u8 {
+                    let tmp = self.alloc_reg()?;
+                    self.instrs.push(Instr::Load { dst: tmp, slot: src_base + i });
+                    self.instrs.push(Instr::Store { src: tmp, slot: base_slot + i });
+                }
+                Ok(())
             }
+
+            // FLS §6.12.1, §9, §6.11: Struct-returning function call.
+            //
+            // For `Rect { top_left: make_point(x, y), ... }` where `make_point`
+            // is registered in `struct_return_free_fns`, emit CallMut with
+            // `write_back_slot = base_slot` so the callee's RetFields values
+            // land directly in the parent struct's pre-allocated slots for this field.
+            //
+            // FLS §6.11 AMBIGUOUS: field initializer evaluation order — galvanic
+            // evaluates left-to-right. See refs/fls-ambiguities.md §6.11.
+            //
+            // Cache-line note: arg moves + bl + N stores = N+1 instructions.
+            ExprKind::Call { callee, args }
+                if matches!(&callee.kind, ExprKind::Path(segs) if segs.len() == 1) =>
+            {
+                let fn_name = if let ExprKind::Path(segs) = &callee.kind {
+                    segs[0].text(self.source)
+                } else {
+                    unreachable!()
+                };
+                if self.struct_return_free_fns.contains_key(fn_name) {
+                    let n = self
+                        .struct_defs
+                        .get(struct_name)
+                        .ok_or_else(|| {
+                            LowerError::Unsupported(format!(
+                                "unknown struct type `{struct_name}` (FLS §3, §4)"
+                            ))
+                        })?
+                        .len();
+                    let fn_name = fn_name.to_owned();
+                    let mut arg_regs = Vec::with_capacity(args.len());
+                    for arg_expr in args.iter() {
+                        let val = self.lower_expr(arg_expr, &IrTy::I32)?;
+                        let reg = self.val_to_reg(val)?;
+                        arg_regs.push(reg);
+                    }
+                    self.has_calls = true;
+                    // FLS §9: CallMut writes x0..x{N-1} (callee's RetFields) into
+                    // base_slot..base_slot+N-1 (parent struct's pre-allocated slots).
+                    self.instrs.push(Instr::CallMut {
+                        name: fn_name,
+                        args: arg_regs,
+                        write_back_slot: base_slot,
+                        n_fields: n as u8,
+                    });
+                    Ok(())
+                } else {
+                    Err(LowerError::Unsupported(format!(
+                        "nested struct field `{struct_name}`: `{fn_name}` is not a struct-returning function (FLS §6.11)"
+                    )))
+                }
+            }
+
+            _ => Err(LowerError::Unsupported(format!(
+                "nested struct field `{struct_name}`: expected struct literal, variable, or struct-returning call (FLS §6.11)"
+            ))),
         }
-        Ok(())
     }
 
     /// Expand a (possibly nested) tuple literal into leaf argument registers.
@@ -7950,40 +8063,69 @@ impl<'src> LowerCtx<'src> {
                 Ok(())
             }
 
-            // FLS §14.2, §6.12.1: Tuple struct constructor `Foo(expr, ...)` in
-            // return position. The callee returns the struct by packing field
-            // values into x0..x{N-1} via RetFields. This arm stores each field
-            // argument into the consecutive return slots before RetFields fires.
+            // FLS §14.2, §6.12.1, §9, §6.11: Call expression in return position.
             //
-            // FLS §4.1, §6.23: Narrow-typed fields (u8/i8/u16/i16) are
-            // normalised with TruncU8/SextI8/TruncU16/SextI16 before Store,
-            // identical to the tuple-struct-constructor-in-let path.
+            // Two supported sub-forms:
             //
-            // Cache-line note: N argument lowers + N stores = 2N instructions;
-            // same density as the StructLit arm for named structs.
+            // (a) Tuple struct constructor `Foo(expr, ...)`: store each field
+            //     argument into the consecutive return slots before RetFields fires.
+            //     FLS §4.1, §6.23: narrow-typed fields are normalised.
+            //
+            // (b) Struct-returning free function `make_foo(args...)`: emit CallMut
+            //     with `write_back_slot = base_slot` so the callee's RetFields values
+            //     land in the function's own return slots. Use case: a function that
+            //     returns a struct by delegating to another struct-returning function.
+            //     FLS §9: write-back calling convention (see struct_return_free_fns).
+            //
+            // Cache-line note: (a) 2N instructions; (b) arg moves + bl + N stores.
             ExprKind::Call { callee, args } => {
                 if let ExprKind::Path(segs) = &callee.kind
                     && segs.len() == 1
-                    && self.tuple_struct_defs.contains_key(segs[0].text(self.source))
                 {
-                    let ctor_name = segs[0].text(self.source);
-                    for (i, arg_expr) in args.iter().enumerate() {
-                        let val = self.lower_expr(arg_expr, &IrTy::I32)?;
-                        let src = self.val_to_reg(val)?;
-                        // FLS §4.1, §6.23: Normalise narrow-typed fields.
-                        match self.tuple_struct_field_narrow_ty(ctor_name, i) {
-                            Some(IrTy::U8) => self.instrs.push(Instr::TruncU8 { dst: src, src }),
-                            Some(IrTy::I8) => self.instrs.push(Instr::SextI8 { dst: src, src }),
-                            Some(IrTy::U16) => self.instrs.push(Instr::TruncU16 { dst: src, src }),
-                            Some(IrTy::I16) => self.instrs.push(Instr::SextI16 { dst: src, src }),
-                            _ => {}
+                    let fn_name = segs[0].text(self.source);
+
+                    // (a) Tuple struct constructor.
+                    if self.tuple_struct_defs.contains_key(fn_name) {
+                        let ctor_name = fn_name;
+                        for (i, arg_expr) in args.iter().enumerate() {
+                            let val = self.lower_expr(arg_expr, &IrTy::I32)?;
+                            let src = self.val_to_reg(val)?;
+                            // FLS §4.1, §6.23: Normalise narrow-typed fields.
+                            match self.tuple_struct_field_narrow_ty(ctor_name, i) {
+                                Some(IrTy::U8) => self.instrs.push(Instr::TruncU8 { dst: src, src }),
+                                Some(IrTy::I8) => self.instrs.push(Instr::SextI8 { dst: src, src }),
+                                Some(IrTy::U16) => self.instrs.push(Instr::TruncU16 { dst: src, src }),
+                                Some(IrTy::I16) => self.instrs.push(Instr::SextI16 { dst: src, src }),
+                                _ => {}
+                            }
+                            self.instrs.push(Instr::Store { src, slot: base_slot + i as u8 });
                         }
-                        self.instrs.push(Instr::Store { src, slot: base_slot + i as u8 });
+                        return Ok(());
                     }
-                    return Ok(());
+
+                    // (b) Struct-returning free function.
+                    if self.struct_return_free_fns.contains_key(fn_name) {
+                        let fn_name = fn_name.to_owned();
+                        let mut arg_regs = Vec::with_capacity(args.len());
+                        for arg_expr in args.iter() {
+                            let val = self.lower_expr(arg_expr, &IrTy::I32)?;
+                            let reg = self.val_to_reg(val)?;
+                            arg_regs.push(reg);
+                        }
+                        self.has_calls = true;
+                        // FLS §9: CallMut writes callee's RetFields into
+                        // base_slot..base_slot+N-1 (this function's return slots).
+                        self.instrs.push(Instr::CallMut {
+                            name: fn_name,
+                            args: arg_regs,
+                            write_back_slot: base_slot,
+                            n_fields: n_fields as u8,
+                        });
+                        return Ok(());
+                    }
                 }
                 Err(LowerError::Unsupported(format!(
-                    "struct return (`{struct_name}`): unsupported call expression form",
+                    "struct return (`{struct_name}`): unsupported call expression form (FLS §6.11)",
                 )))
             }
 

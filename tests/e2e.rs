@@ -35116,6 +35116,74 @@ fn main() -> i32 { update_syntax(Point { x: 10, y: 20 }, 5) }\n",
     );
 }
 
+/// FLS §6.11, §9: A nested struct field initializer that is a struct-returning
+/// function call must emit `bl` (the function call) and `str` (field stores).
+///
+/// `Rect { top_left: make_point(3, 4), width: 10, height: 5 }` — `top_left`
+/// is of type `Point`. Its initializer is a call to `make_point`. Galvanic
+/// must emit a `bl make_point` and then write the returned fields into the
+/// Rect's stack slots. No constant-folding may occur.
+///
+/// FLS §6.1.2:37–45: All instructions are runtime.
+/// FLS §6.11: Field initializers are arbitrary expressions.
+#[test]
+fn fls_6_11_nested_struct_field_call_emits_bl() {
+    let asm = compile_to_asm(
+        "struct Point { x: i32, y: i32 }\n\
+struct Rect { top_left: Point, width: i32, height: i32 }\n\
+fn make_point(x: i32, y: i32) -> Point { Point { x, y } }\n\
+fn main() -> i32 {\n\
+    let r = Rect { top_left: make_point(3, 4), width: 10, height: 5 };\n\
+    r.top_left.x + r.top_left.y\n\
+}\n",
+    );
+    // The call to make_point must be present — not elided.
+    // Assembly uses variable whitespace: `bl      make_point`.
+    assert!(
+        asm.contains("bl") && asm.contains("make_point"),
+        "expected 'bl make_point' for nested struct field call, got:\n{asm}"
+    );
+    // Field stores must be present — runtime str instructions.
+    assert!(
+        asm.contains("str"),
+        "expected 'str' instructions for struct field storage, got:\n{asm}"
+    );
+    // Result must not be constant-folded to 3 + 4 = 7.
+    assert!(
+        !asm.contains("mov     x0, #7"),
+        "result must not be constant-folded to #7 (3 + 4): {asm}"
+    );
+}
+
+/// FLS §6.11, §6.3: A nested struct field initializer that is a variable path
+/// must emit Load+Store pairs to copy the variable's slots into the parent.
+///
+/// `Rect { top_left: p, width: 10, height: 5 }` where `p: Point` must copy
+/// p's fields via ldr/str pairs — not inline p's values as constants.
+#[test]
+fn fls_6_11_nested_struct_field_variable_emits_ldr() {
+    let asm = compile_to_asm(
+        "struct Point { x: i32, y: i32 }\n\
+struct Rect { top_left: Point, width: i32, height: i32 }\n\
+fn compose(px: i32, py: i32) -> i32 {\n\
+    let p = Point { x: px, y: py };\n\
+    let r = Rect { top_left: p, width: 10, height: 5 };\n\
+    r.top_left.x + r.top_left.y\n\
+}\n\
+fn main() -> i32 { compose(2, 3) }\n",
+    );
+    // Field copy must use runtime ldr.
+    assert!(
+        asm.contains("ldr"),
+        "expected 'ldr' for variable copy into nested struct field, got:\n{asm}"
+    );
+    // Result must not be constant-folded to 2 + 3 = 5.
+    assert!(
+        !asm.contains("mov     x0, #5"),
+        "result must not be constant-folded to #5 (2 + 3): {asm}"
+    );
+}
+
 // ── Claim 4l: §6.18 match exhaustiveness check ─────────────────────────────���─
 
 /// Claim 4l: non-exhaustive integer match rejected at compile time.
@@ -36546,16 +36614,16 @@ fn compile_to_asm_inspection_only(source: &str) -> String {
 /// FLS §18.1: Programs require `main`; inspection-only output intentionally omits it.
 #[test]
 fn inspection_only_asm_has_annotation_and_no_start() {
-    // main fails: passes a variable (not a struct literal) as a nested struct field.
-    // add and helper lower successfully.
+    // main fails: uses an if-expression as a nested struct field initializer,
+    // which is not yet supported in store_nested_struct_lit. add and helper lower successfully.
     let src = "\
 struct Inner { a: i32, b: i32 }\n\
 struct Outer { inner: Inner, c: i32 }\n\
 fn add(x: i32, y: i32) -> i32 { x + y }\n\
 fn helper(x: i32) -> i32 { x + 1 }\n\
 fn main() -> i32 {\n\
-    let x = Inner { a: 1, b: 2 };\n\
-    let o = Outer { inner: x, c: 3 };\n\
+    let flag = 1;\n\
+    let o = Outer { inner: if flag > 0 { Inner { a: 1, b: 2 } } else { Inner { a: 3, b: 4 } }, c: 3 };\n\
     o.c\n\
 }\n";
     let asm = compile_to_asm_inspection_only(src);

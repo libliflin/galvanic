@@ -256,22 +256,33 @@ fn lower_error_includes_fls_citation() {
     // directly to the spec without reading surrounding code.
     // Expected form: "not yet supported: <construct> (FLS §X.Y)"
     //
-    // This test exercises the nested-struct-field error in fls_5_patterns.rs,
-    // which was the "worst moment" identified during cycle 016 customer
-    // champion walk: a contributor hitting the error had no spec anchor.
-    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/fls_5_patterns.rs");
+    // Uses an if-expression as a nested struct field initializer — this form
+    // is not yet handled by store_nested_struct_lit and produces a cited error.
+    let mut tmp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
+    write!(
+        tmp,
+        r#"
+struct Inner {{ a: i32, b: i32 }}
+struct Outer {{ inner: Inner, c: i32 }}
+fn main() -> i32 {{
+    let flag = 1;
+    let o = Outer {{ inner: if flag > 0 {{ Inner {{ a: 1, b: 2 }} }} else {{ Inner {{ a: 3, b: 4 }} }}, c: 3 }};
+    o.c
+}}
+"#
+    )
+    .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_galvanic"))
-        .arg(&fixture)
+        .arg(tmp.path())
         .output()
         .expect("failed to run galvanic");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    // At least one "not yet supported" error is expected from this fixture.
+    // At least one "not yet supported" error is expected.
     assert!(
         stderr.contains("not yet supported"),
-        "expected at least one unsupported error from patterns fixture, got: {stderr}"
+        "expected at least one unsupported error, got: {stderr}"
     );
     // Every "not yet supported" line must carry a FLS section citation.
     for line in stderr.lines() {
@@ -362,14 +373,28 @@ fn partial_lower_no_main_emits_inspection_assembly() {
     // emit a partial .s file annotated "inspection-only" so the Lead Researcher
     // has an artifact to inspect. Exit code must be non-zero (lower errors occurred).
     //
-    // Uses fls_5_patterns.rs: 20 of 21 functions lower, main fails on a nested
-    // struct pattern (§5.10.2). Before this cycle, all 20 successful lowerings
-    // were silently discarded.
-    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/fls_5_patterns.rs");
+    // Uses an inline program: add and helper lower cleanly; main fails because
+    // it uses an if-expression as a nested struct field initializer (not yet supported).
+    // This exercises the inspection-only path independent of fixture evolution.
+    let mut tmp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
+    write!(
+        tmp,
+        r#"
+struct Inner {{ a: i32, b: i32 }}
+struct Outer {{ inner: Inner, c: i32 }}
+fn add(x: i32, y: i32) -> i32 {{ x + y }}
+fn helper(x: i32) -> i32 {{ x + 1 }}
+fn main() -> i32 {{
+    let flag = 1;
+    let o = Outer {{ inner: if flag > 0 {{ Inner {{ a: 1, b: 2 }} }} else {{ Inner {{ a: 3, b: 4 }} }}, c: 3 }};
+    o.c
+}}
+"#
+    )
+    .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_galvanic"))
-        .arg(&fixture)
+        .arg(tmp.path())
         .output()
         .expect("failed to run galvanic");
 
@@ -393,8 +418,8 @@ fn partial_lower_no_main_emits_inspection_assembly() {
         "expected 'no entry point' in stdout, got: {stdout}"
     );
 
-    // The .s file must actually exist alongside the fixture.
-    let asm_path = fixture.with_extension("s");
+    // The .s file must actually exist.
+    let asm_path = tmp.path().with_extension("s");
     assert!(
         asm_path.exists(),
         "expected .s file to be written at {}, but it was not",
@@ -415,27 +440,15 @@ fn partial_lower_no_main_emits_inspection_assembly() {
         "inspection-only assembly must not contain _start; it would produce a binary with no entry point"
     );
 
-    // The 20 successfully lowered function bodies must be present.
-    // Count label lines (lines matching "^<ident>:") as a proxy for function count.
-    let fn_labels: Vec<&str> = asm
-        .lines()
-        .filter(|l| {
-            let t = l.trim();
-            t.ends_with(':')
-                && !t.starts_with('.')
-                && !t.starts_with("//")
-                && t != "_galvanic_panic:"
-        })
-        .collect();
+    // The helper functions must appear in the assembly.
     assert!(
-        fn_labels.len() >= 20,
-        "expected ≥20 function labels in inspection-only assembly (one per successfully lowered fn), found {}: {:?}",
-        fn_labels.len(),
-        &fn_labels[..fn_labels.len().min(5)]
+        asm.contains("add:"),
+        "expected helper function 'add' in inspection-only assembly; got:\n{asm}"
     );
-
-    // Clean up the .s file so the fixture directory stays pristine.
-    let _ = std::fs::remove_file(&asm_path);
+    assert!(
+        asm.contains("helper:"),
+        "expected helper function 'helper' in inspection-only assembly; got:\n{asm}"
+    );
 }
 
 /// When `main` is the only function and it fails to lower, no assembly is emitted
@@ -446,7 +459,7 @@ fn partial_lower_no_main_emits_inspection_assembly() {
 #[test]
 fn main_only_fails_emits_no_assembly() {
     // A file with struct defs and only fn main, where main fails to lower.
-    // Outer { inner: x } uses a variable for a nested struct field — not yet supported.
+    // If-expression as nested struct field initializer — not yet supported.
     let mut tmp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
     write!(
         tmp,
@@ -454,8 +467,8 @@ fn main_only_fails_emits_no_assembly() {
 struct Inner {{ a: i32 }}
 struct Outer {{ inner: Inner }}
 fn main() -> i32 {{
-    let x = Inner {{ a: 1 }};
-    let o = Outer {{ inner: x }};
+    let flag = 1;
+    let o = Outer {{ inner: if flag > 0 {{ Inner {{ a: 1 }} }} else {{ Inner {{ a: 2 }} }} }};
     o.inner.a
 }}
 "#
