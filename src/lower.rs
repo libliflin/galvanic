@@ -6927,6 +6927,7 @@ impl<'src> LowerCtx<'src> {
     /// - Enum variable path `x` (where x is a local enum variable) — copies all slots
     /// - If-else expression — handles each branch recursively
     /// - Block expression — lowers stmts then handles tail
+    /// - Match expression — handles each arm body recursively
     ///
     /// FLS §6.1.2:37–45: All stores are runtime instructions.
     /// FLS §15 AMBIGUOUS: The spec does not define a calling convention for
@@ -7344,6 +7345,7 @@ impl<'src> LowerCtx<'src> {
     /// FLS §6.10: Tuple expressions evaluate each element left-to-right.
     /// FLS §6.17: If/else expressions where both branches produce tuples.
     /// FLS §6.4: Block expressions whose tail produces a tuple.
+    /// FLS §6.18: Match expressions where each arm body produces a tuple.
     fn lower_tuple_expr_into(
         &mut self,
         expr: &Expr,
@@ -7604,6 +7606,7 @@ impl<'src> LowerCtx<'src> {
     /// - If-else expression — each branch stores into the same slots
     /// - Block expression — lowers statements then handles tail
     /// - Variable path `x` (where x is a local of struct type) — copies all N slots
+    /// - Match expression — handles each arm body recursively
     ///
     /// FLS §6.11: Struct expression field initializers are evaluated in source order,
     /// stored in declaration order for layout stability.
