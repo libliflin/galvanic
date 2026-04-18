@@ -749,7 +749,9 @@ pub enum Instr {
     ///
     /// FLS §6.9 AMBIGUOUS: The spec requires bounds checking (panic on
     /// out-of-bounds access), but does not specify the panic mechanism.
-    /// Galvanic does not emit bounds checks at this milestone.
+    /// Galvanic's resolution: when `len > 0`, codegen emits `cmp x{index_reg},
+    /// #{len}; b.hs _galvanic_panic` before the load. Slice parameters that
+    /// lack a static length (`len == 0`) receive no bounds check (deferred).
     ///
     /// ARM64 LDR addressing: `[xB, xI, lsl #3]` reads from address `xB + xI*8`.
     /// The `lsl #3` extension is encoded in the instruction and has zero extra cost.
