@@ -1,27 +1,33 @@
 # Brand
 
-## Identity
+**Identity.** A research instrument that speaks like the researcher using it. Precise about scope, honest about limits, obsessive about traceability. Every claim is anchored — to an FLS section, a count, a concrete resolution. When something partially works, galvanic says so and shows you what it got. When the spec is silent, galvanic names the silence and documents the choice it made.
 
-Precise, researcher-voiced, disarmingly honest about its own limits. Galvanic speaks the way a careful scientist writes lab notes — it names the section number, states the constraint, and tells you what it chose and why. It does not perform confidence it doesn't have. The README calls the project "a sacrificial anode" and tells you not to use it on anything you care about (README lines 14–15: "Nobody needs to use this. Value comes from what we learn."). That's the register: exact, unpretentious, oriented toward what can be learned rather than what can be shipped.
+The project describes itself as "a sacrificial anode — it exists to find ambiguities in the spec and to explore what 'dumb but cache-aware' codegen can do. Nobody needs to use this. Value comes from what we learn." (README.md:14–15) That sentence — blunt, research-framed, dismissive of production pretension — is the voice.
+
+---
 
 ## How we speak
 
-**When we say no:** We name the boundary exactly — which construct, which context, which spec section defines the limit. From `lower.rs:79`, the error pattern is `"not yet supported: {msg}"`. The message names what's missing, not what broke. Example at `lower.rs:2677–2681`: `"only identifier, wildcard, and nested tuple patterns are supported inside tuple parameter patterns"` — that's a refusal that doubles as a map: this is what *is* supported.
+**When we say no:** We name what the spec doesn't say, document what we chose anyway, and move on. Not "unsupported" — "not yet supported," with the implicit acknowledgment that the scope is deliberate and bounded. The `AMBIGUOUS` annotation format (`FLS §X.Y AMBIGUOUS: ...`) appears dozens of times across the codebase, always with the gap described and galvanic's resolution recorded. We say no to whole categories of production-compiler behavior in one line: "Do not use this to compile anything you care about." (README.md:17)
 
-**When we fail:** We show the full error landscape in one pass, not just the first failure. From `main.rs:88–89`: "Print every per-function error so the researcher sees the full error landscape in a single run." Partial success is never silent — `main.rs:105` states this as a rule: "a partial success should not be entirely silent." The error prefix is flat: `error: {msg}`. No stack trace unless the caller needs it.
+**When we fail:** We report everything in a single run, not just the first error. (main.rs:88–89: "Print every per-function error so the researcher sees the full error landscape in a single run (not just the first failure).") A partial success is visible and named: `galvanic: emitted fixture.s (partial — some functions failed)`. (main.rs:148) The exit code is non-zero even when partial assembly is emitted — we never let a partial success look like a clean one.
 
-**When we explain:** We cite the spec. Comments in `lower.rs` and `parser.rs` look like `// FLS §6.1.2:37–45: Non-const code emits runtime instructions` and `// Cache-line note: N × 4-byte str per self spill`. Explanation is tethered to the source of truth (the FLS) or the constraint that shaped the decision (the cache line). We don't explain what the code does; we explain why the spec requires it or why the hardware constrains it.
+**When we explain:** We cite. Every module opens with a traceability block mapping its own functions to FLS sections. Comments in the code explain the *why* of a design decision — "The litmus test: if replacing a literal with a function parameter would break the implementation, it's an interpreter, not a compiler." (lower.rs:14) Cache-line reasoning is documented inline wherever a data structure's layout is load-bearing.
 
-**When we onboard a new user:** We tell them what this is not before we tell them what it is. README structure: "What this is" / "What this is not." The second section (lines 13–15) comes immediately after the first and is unhedged: "This is not a production compiler." The last line: "Do not use this to compile anything you care about." A new user who reads past that has been told the truth.
+**When we onboard a new user:** Minimal. `usage: galvanic <source.rs> [-o <output>]`. No cheerful intro, no feature list. The README opens with a one-sentence project description, follows with two numbered research questions, and ends with `cargo build` / `cargo test`. The assumption is that you arrived because the questions interest you, not because you need a compiler.
 
-**When we succeed:** Quiet and terse. `main.rs:54`: `"galvanic: compiling {filename}"`. `main.rs:139`: `"galvanic: emitted {out_path}"`. No exclamation. Partial success gets one parenthetical: `"(partial — some functions failed)"`. The bar for celebration is the research question advancing, not the command completing.
+**When we succeed:** We name the artifact and stop. `galvanic: emitted fls_10_2_assoc_types.s`. (main.rs:150) No congratulations, no banner. If the assembly is there, the fact of its existence is the celebration.
+
+---
 
 ## The thing we'd never do
 
-We'd never hide a missing feature behind a vague error. When the catch-all in `lower_expr` fires, it includes the variant name and a comment directing contributors to grep for it (`lower.rs:18817–18822`): `"{} expression in non-const context (runtime codegen not yet implemented)"`. The error message is also a contributor affordance. Vague errors ("something went wrong," "unsupported operation") would corrupt the research value — a researcher can't cite "it didn't work."
+We'd never let a partial success be silent. The project goes out of its way — structurally, not just stylistically — to ensure that partial lowering produces both a non-zero exit code *and* a visible artifact with an explicit `(partial — some functions failed)` annotation. The implementation of `had_lower_errors` threading through main.rs (lines 87–155) exists entirely to make this guarantee structural. We'd never paper over a partial compile with a clean exit code; that's the silent wrong answer that makes the researcher leave (goal.md:30).
+
+---
 
 ## Signals to preserve
 
-- **FLS section numbers in everything** — commits, code comments, error messages, `fls-ambiguities.md` entries. The spec citation is the citation of authority; drop it and the research claim loses its grounding.
-- **`not yet supported: {specific thing}`** — the error pattern that distinguishes "this is a hard limit" from "we haven't gotten here yet." The word "yet" matters; it keeps the map honest.
-- **Structured commit messages: `type: what for {stakeholder} {signal} (cycle N)`** — the commit history is a research log. Each commit names who it serves and what it moves. This pattern keeps the log legible across hundreds of commits.
+- **The count.** When something partially fails, galvanic reports `lowered N of M functions (K failed)`. This pattern — exact counts, not vague success/failure — should carry forward to any new pipeline stage that can partially succeed.
+- **The `FLS §X.Y AMBIGUOUS:` format.** The annotation is a research artifact. It names the spec section, describes the gap, and states galvanic's resolution. These three parts are load-bearing; collapsing any of them ("see the code" instead of a resolution) breaks the Spec Researcher's journey.
+- **"Not yet supported" over "unsupported."** The phrasing is honest about the project's developmental state without being dismissive. Keep `not yet` — it's the right hedge for a research compiler in motion.

@@ -1,13 +1,17 @@
-Done. Here's what was written:
+Done. Here's what was written and why:
 
-**`.lathe/goal.md`** — The customer champion's behavioral doc. Three stakeholders (Spec Researcher, Lead Researcher, Compiler Contributor) described richly enough to inhabit, with concrete first-encounter journeys, per-stakeholder emotional signals, and tensions grounded in what the code actually shows. Ranking from two sources: CI floor then lived experience. No layer ladder.
+---
 
-**`.lathe/skills/journeys.md`** — The eight concrete steps each stakeholder walks, with specific watch-for moments and the emotional signal to track at each step. These are what the champion actually executes each cycle.
+## What was produced
 
-**`.lathe/skills/architecture.md`** — Pipeline overview, IR design philosophy, cache-line constraints, test tiers, the no-const-folding rule, no-unsafe constraint, and why the assembler/linker live only in `main.rs`.
+**`.lathe/goal.md`** — The customer champion's behavioral instructions. Identifies four real stakeholders grounded in the code (not imagined categories), gives each a concrete first-encounter journey, names the emotional signal to track when inhabiting them, documents the tensions between their needs with observable signals for resolving them, and encodes the two-source ranking: CI floor first, then lived experience. The "How to Rank" section deliberately avoids a layer ladder — it delegates the floor to the test suite and CI, and everything above it to the stakeholder journey.
 
-**`.lathe/skills/testing.md`** — The four test tiers (unit, smoke, fixture, e2e), when to use assembly inspection vs. exit-code tests, and the checklist for adding a new feature's tests.
+**`.lathe/skills/journeys.md`** — Step-by-step journeys the champion actually walks. Each journey names the commands to run and the specific moments to watch for — not just "check the docs" but "open `refs/fls-ambiguities.md`, try to find all findings about §6.15 in under two minutes, and report exactly when the search broke."
 
-**`.lathe/skills/domains.md`** — Five domains (FLS, ARM64, Platform ABI, Rust compiler conventions [excluded], Cache-line theory), their boundaries, and a confusion table mapping symptoms to the right domain authority.
+**`.lathe/skills/domains.md`** — The domain map. Galvanic spans four distinct domains (FLS semantics, ARM64 ISA, platform ABI, internal compiler design) and bugs frequently appear in one domain but trace to another. The cross-domain confusion points at the bottom of the file are the institutional knowledge that prevents a new contributor from going to the wrong layer.
 
-**`.lathe/alignment-summary.md`** — For you: stakeholder roster, emotional signals, tensions, CI security check (low injection risk, permissions are minimal), and what could be wrong (missing Spec Author stakeholder, no brand.md, e2e test friction on macOS).
+**`.lathe/skills/testing.md`** — How this project tests: four test suites with distinct purposes, the CI job matrix, and the assembly inspection pattern for enforcing FLS Constraint 1 (no compile-time folding in non-const contexts).
+
+**`.lathe/skills/architecture.md`** — Pipeline diagram, module responsibilities, the invariants CI enforces, and a step-by-step guide for adding a new language feature end-to-end.
+
+**`.lathe/alignment-summary.md`** — For you. Notes what could be wrong: the "cache-line researcher" may collapse into the Lead Researcher in practice; branch protection status is unverifiable from local files; `brand.md` is absent so brand tint is skipped.

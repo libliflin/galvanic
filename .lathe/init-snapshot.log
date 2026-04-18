@@ -1,13 +1,7 @@
-Works cleanly. Output is ~950 characters — well within the 6K cap. Here's what each section reports:
+1,461 characters — well within budget. The snapshot is working correctly:
 
-| Section | Happy path | Failure path |
-|---|---|---|
-| **Git Status** | `git status --short` (changes visible) | — |
-| **Recent Commits** | last 10 one-liners | — |
-| **Build** | `OK — builds clean` | `FAILED` + first 10 `error` lines |
-| **Tests** | `Pass: 2063 \| Fail: 0 \| Ignored: 0` | expands with failure details |
-| **Clippy** | `OK — no warnings` | error count + first 5 |
-| **CI** | lists file + job names | notes absence |
-| **Audit** | `No unsafe code — clean` | lists violations |
+- **Pass: 2071 | Fail: 0 | Ignored: 0** — sums across all 6 test binaries
+- Build, clippy, and unsafe audit all report OK on one line
+- Failure paths expand details only when needed
 
-The script uses `gtimeout`/`timeout` with a macOS fallback, `|| true` to keep running through test failures, and `2>&1` to capture stderr everywhere.
+`.lathe/snapshot.sh` is written and executable.

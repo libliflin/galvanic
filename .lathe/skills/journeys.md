@@ -1,125 +1,91 @@
 # Stakeholder Journeys
 
-Concrete first-encounter journeys for each stakeholder. These are what the customer champion walks each cycle. The journeys describe the *steps*, the *moments to watch for*, and the *emotional signal* to track. Current-state observations (what's broken right now, what's been fixed) live in the snapshot — these describe what to try.
+Concrete step-by-step journeys the customer champion walks each cycle. One per stakeholder. These are the paths to walk — not describe abstractly, but actually execute — when inhabiting each person.
 
 ---
 
-## Journey 1: The Spec Researcher
+## Lead Researcher
 
-**Emotional signal:** Confidence — "I found what I was looking for, and I trust it's complete."
+**Emotional signal:** Momentum — each run tells them something new, and the output is always trustworthy.
 
-The Spec Researcher arrives from a reference to galvanic as an FLS implementability experiment. They have a specific FLS section in mind — they're checking whether the spec is implementable, or they're looking for evidence of a gap to bring back to spec authors.
+**The journey:**
 
-### Step 1 — Land and orient
-Open the README. Read the two research questions. See that `refs/fls-ambiguities.md` is the primary research output.
+1. `git pull && cargo test` — watch for any red. If red, the whole session is about fixing it.
+2. Pick an FLS fixture from `tests/fixtures/`. Either use an existing one or write a new program from a spec section not yet covered.
+3. `cargo run -- tests/fixtures/<fixture>.rs` and read the output.
+   - Green path: `galvanic: emitted <fixture>.s`. Open the `.s` file. Check that the assembly has runtime instructions (not folded immediates), that register usage matches the AAPCS64 ABI, and that cache-line-critical structs are laid out as documented.
+   - Partial path: `lowered N of M functions (K failed)`. Check whether each failing function is named in stderr. Check whether the failing construct is named specifically (e.g., "not yet supported: TupleExpr in match scrutinee"). Ask: given this error, do I know where to look next?
+   - Full failure: No assembly emitted. Is the error message specific enough to navigate to the relevant FLS section and source location?
+4. If a new ambiguity surfaced during the run, check `refs/fls-ambiguities.md`. Is there already an entry? Is the entry accurate? Does it name galvanic's resolution?
+5. Try the exact same program with one value replaced by a parameter (e.g., `fn main() -> i32 { 42 }` → `fn foo(x: i32) -> i32 { x }`). The output should use a register, not a constant. If it doesn't, const-folding has leaked into non-const context.
 
-*Watch for:* Does the README get them to `refs/fls-ambiguities.md` in under 60 seconds? Or does it require reading the whole file before they know where the findings are?
-
-### Step 2 — Navigate to findings for their section
-Open `refs/fls-ambiguities.md`. Try to find everything galvanic says about a specific FLS section (pick one: §6.5 floating-point, §6.15 loops, §4.13 traits).
-
-*Watch for:* Is there a table of contents? Is the file sorted by section number? Can they answer "does galvanic have a finding for §X?" without reading the whole file? The hollowest moment is when the file *claims* to be organized by section but isn't.
-
-### Step 3 — Read an entry
-Find an entry for a section they care about. Read: (a) the gap description — what the spec doesn't say, (b) galvanic's chosen resolution, (c) the source annotation location.
-
-*Watch for:* Is the resolution specific ("galvanic uses modulo wrapping, same as LLVM") or vague ("behavior is implementation-defined")? Vague resolutions break confidence — the researcher can't cite what galvanic decided.
-
-### Step 4 — Verify in source (optional)
-Open the referenced source file and find the `// FLS §X.Y: AMBIGUOUS — ...` comment. Read it in context.
-
-*Watch for:* Does the source comment add context beyond the registry entry? Or does it just duplicate it? The ideal: the source comment captures the *reasoning* and the registry entry captures the *finding*.
-
-### Step 5 — Take findings
-Leave with citable evidence for spec work. The measure: did they find what they needed? Did they trust they hadn't missed anything?
-
-*The worst case:* They found 3 entries for §6.5 but aren't sure if there's a 4th they missed because the file is unsorted and long. Uncertainty about completeness destroys the value of the register.
+**What to watch for:**
+- Any "not yet supported" error that doesn't name the FLS section and the specific construct.
+- A partial failure where the failing function count in the summary doesn't match the number of error lines in stderr.
+- An emitted `.s` file that folds a constant that should be a runtime computation.
+- An ambiguity entry in `refs/fls-ambiguities.md` that says "see the code" without stating the resolution.
 
 ---
 
-## Journey 2: The Lead Researcher
+## Spec Researcher
 
-**Emotional signal:** Momentum — "Each cycle, the compiler handles one more Rust construct and the research output grows."
+**Emotional signal:** Curiosity satisfied — "I found a citable finding in under two minutes."
 
-The Lead Researcher is William, checking in on the project. This is not a first-encounter — it's an ongoing check-in. The journey reflects what a returning maintainer experiences each time they look.
+**The journey:**
 
-### Step 1 — Check CI
-Look at CI status (from snapshot or GitHub Actions). Are all jobs green? jobs: build, fuzz-smoke, audit, e2e, bench.
+1. Land on the repo. Read the README. Note the two research questions the project is answering.
+2. Open `refs/fls-ambiguities.md`. Find the table of contents. Try to navigate to a specific section — say, §6.22 (Closures) or §6.18 (Match expressions).
+3. Read one finding end-to-end. Does it clearly state: (a) what the FLS says, (b) what the FLS leaves unspecified, (c) what galvanic chose to do, and (d) where in the source to find the annotation?
+4. Try to find *all* findings related to a topic. Example: everything about floating-point (§6.5.3, §6.5.5). Can you find them all without reading the whole file?
+5. Open `refs/fls-constraints.md`. Try to understand one constraint end-to-end — the FLS citation, the status, and the litmus test.
 
-*Watch for:* Any red job immediately shifts the mood from "checking progress" to "something is broken." A red build on main means cycles have been producing code that doesn't hold up under CI.
-
-### Step 2 — Read the latest cycle
-Read the most recent cycle's goal and changelog. What did the builder implement? Did the verifier PASS? Was the goal specific to a real stakeholder moment?
-
-*Watch for:* Goals that are vague ("improve test coverage") versus specific ("at step 2 of the Spec Researcher journey, entry discovery takes too long because entries are unsorted"). Vague goals produce low-value cycles.
-
-### Step 3 — Try the boundary
-Write a Rust snippet that exercises the most recently added feature. Compile it through galvanic. Confirm it works. Then write a snippet one step beyond — add a variable, a branch, a function call — and see where the compiler stops.
-
-```
-galvanic source.rs
-```
-
-*Watch for:* The error message when galvanic can't compile something. Is it useful ("not yet implemented: while loops") or confusing ("lower failed: unknown expression kind")? The Lead Researcher reads these errors as research signals.
-
-### Step 4 — Check the research output
-Open `refs/fls-ambiguities.md`. Did the last few cycles add new entries? Are existing entries well-organized enough to scan?
-
-*Watch for:* Cycles that advance the compiler without adding ambiguity findings (missed research opportunity). Cycles that add findings without organizing them (register grows but becomes harder to use).
-
-### Step 5 — Check test quality
-Scan `tests/e2e.rs` for recent additions. Are new features tested with assembly inspection (`assert!(asm.contains("add"))`) or only exit-code tests (`assert_eq!(exit_code, 0)`)?
-
-*Watch for:* Exit-code-only tests for arithmetic or control flow are a red flag — they can pass even if galvanic is const-folding at compile time, which violates FLS §6.1.2:37–45. The constraint is what makes the research valid.
+**What to watch for:**
+- Missing TOC, or TOC entries that are out of sync with the body.
+- Entries in body order that doesn't match section number order.
+- A finding that describes the spec gap but doesn't state galvanic's resolution.
+- A constraint entry where the "status" field says something like "partially" without explaining what's missing.
+- Inconsistency between `fls-ambiguities.md` entries and the actual code annotations.
 
 ---
 
-## Journey 3: The Compiler Contributor
+## Compiler Contributor
 
-**Emotional signal:** Clarity — "I know exactly where to add this feature, how to test it, and what the FLS says about it."
+**Emotional signal:** Confidence — "I know exactly where to make this change."
 
-The Compiler Contributor is someone new to this codebase who wants to implement a Rust language feature. They understand Rust. They may be a student, compiler enthusiast, or researcher.
+**The journey:**
 
-### Step 1 — Clone and build
-```
-git clone <repo>
-cargo build
-cargo test
-```
+1. Clone the repo. `cargo build`. `cargo test`. Confirm green.
+2. Find a feature that produces "not yet supported." Example: run `galvanic` on a program that uses a construct not yet implemented. Read the error.
+3. Open `lib.rs` to understand the module structure.
+4. Trace the error back through the source: which module produced the "not yet supported" message? Which FLS section does the comment cite?
+5. Open `lower.rs` or `codegen.rs`. Find the match arm where a new case would go. Look for an existing similar case to pattern-match from.
+6. Add the new case. Write a fixture in `tests/fixtures/`. Add a test in `tests/fls_fixtures.rs`. Run the tests.
+7. Try to write the PR description. Ask: can you describe what you changed, which FLS section it covers, and why the approach is correct — without looking anything up?
 
-*Watch for:* Any build failure or confusing warning. The first 30 seconds are the trust calibration. A clean build is the minimum bar for "I can contribute here."
+**What to watch for:**
+- A place in the pipeline where the module seam is invisible — you can't tell from the code which module "owns" a transformation.
+- An IR node added without an FLS traceability comment.
+- A fixture in `tests/fixtures/` that doesn't have a corresponding test in `fls_fixtures.rs`.
+- A "not yet supported" error in the CLI that doesn't identify the FLS section or specific construct.
+- An architecture decision that's implied by the code but never documented — especially around the IR's role as the bridge between FLS semantics and machine instructions.
 
-### Step 2 — Read the README
-Read the two research questions. Understand: galvanic is clean-room (no rustc internals), targets ARM64, implements `no_std` core Rust. Read the "what this is not" section.
+---
 
-*Watch for:* Is the mission clear enough that the contributor knows what kind of PRs are welcome? Does the README point them toward the pipeline?
+## Cache-Line Performance Researcher
 
-### Step 3 — Understand the pipeline
-Open `src/lib.rs`. See the six modules. Open `src/main.rs`. Read the pipeline: lex → parse → lower → codegen → assemble/link.
+**Emotional signal:** Verifiable — "the claim is documented, tested, and visible in the output."
 
-*Watch for:* Is the pipeline linear? Is there hidden coupling between stages? The pipeline should be readable top-to-bottom with no surprises.
+**The journey:**
 
-### Step 4 — Pick a feature and find the FLS section
-Decide what to add (e.g., `while` loop). Find the FLS section number (`refs/.lathe/fls-pointer.md` has the TOC). Read that section.
+1. Read the README. Find the cache-line claim ("cache-line alignment as a first-class concern").
+2. `cargo bench` — look at the throughput numbers.
+3. Find the size assertion tests: `cargo test --lib -- --exact lexer::tests::token_is_eight_bytes`. Do they pass? Are there similar tests for other cache-critical types?
+4. Compile a test program: `galvanic tests/fixtures/fls_2_4_literals.rs`. Open the emitted `.s` file. Find where a token-stream loop would be. Is the data structure laid out as claimed?
+5. Find the cache-line comment in `src/lexer.rs` (Token is 8 bytes, 8 per cache line). Find the corresponding test. Can you trace the full argument: claim → code → test → benchmark?
+6. Look for a recently added IR node or data structure. Does it have a cache-line note consistent with the rest of the codebase?
 
-*Watch for:* Does the FLS section help them understand what to implement? Or is it one of the ambiguous sections where the spec doesn't say enough? If ambiguous, do they know to add an entry to `refs/fls-ambiguities.md`?
-
-### Step 5 — Find where to add it
-Read the source file for the relevant pipeline stage. Find a similar, already-implemented construct to follow as a pattern.
-
-*Watch for:* Is the FLS annotation convention (`// FLS §X.Y: ...`) consistently applied? Can the contributor find a clear prior example to follow? The hollowest moment is when every source file looks different and there's no pattern to copy.
-
-### Step 6 — Write a test
-Decide: parse acceptance (use `tests/fls_fixtures.rs`) or full pipeline (use `tests/e2e.rs`). Write the test first.
-
-*Watch for:* Is the distinction between test tiers clear? A contributor who doesn't know when to use assembly inspection vs. exit-code testing will write a weaker test — or write it in the wrong file.
-
-### Step 7 — Implement and iterate
-Write the feature. Follow the FLS citation convention. Run `cargo test`. See what passes.
-
-*Watch for:* Does `cargo clippy -- -D warnings` pass cleanly? Are there confusing error messages from Clippy that weren't documented anywhere?
-
-### Step 8 — Submit
-Push and open a PR. CI runs. Does it pass?
-
-*Watch for:* Does CI give actionable feedback when it fails? A failure in the e2e job with no context is harder to debug than a failure with the assembly output printed.
+**What to watch for:**
+- A cache-line claim in a comment that has no corresponding size test.
+- A new struct added in a recent commit without a cache-line note, in a file where all other structs have them.
+- Benchmark output that doesn't report throughput (bytes/sec or tokens/sec) — only raw time is hard to interpret for cache analysis.
+- An emitted `.s` file where the layout of a cache-critical struct differs from the documented layout.

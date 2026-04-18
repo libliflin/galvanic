@@ -1,58 +1,51 @@
-# Alignment Summary — Galvanic Customer Champion Init
+# Alignment Summary
 
-For the project maintainer. Plain-English summary of the decisions made during init.
-
----
-
-## Who This Serves
-
-**Spec Researcher** — A person studying or contributing to the Ferrocene Language Specification. They use galvanic to find documented evidence of where the spec is silent or ambiguous. Their primary artifact is `refs/fls-ambiguities.md`. They may be a spec author, language committee member, or academic researcher.
-
-**Lead Researcher (William)** — The project's author and runner. Asking two research questions: (1) Is the FLS implementable by an independent party? (2) What does "cache-line-aware from the start" actually produce? Checks in periodically, watches the compiler boundary advance, reviews cycle changelogs for substance.
-
-**Compiler Contributor** — Someone who wants to extend galvanic to handle more Rust. Needs to understand the pipeline, find the right place to add a feature, follow FLS citation conventions, and write a test in the right tier.
+Plain-English summary of the customer champion setup for human review. This file is for you, not the runtime agent.
 
 ---
 
-## Emotional Signal Per Stakeholder
+## Who this serves
 
-**Spec Researcher → Confidence.** "I found what I was looking for and I trust it's complete." The anti-signal is doubt about completeness — "did I miss an entry for this section?"
-
-**Lead Researcher → Momentum.** "Each cycle the compiler handles one more Rust construct and the research output grows." The anti-signal is stagnation — cycles that polish without advancing the boundary or the register.
-
-**Compiler Contributor → Clarity.** "I know exactly where to add this feature, how to test it, and what the FLS says about it." The anti-signal is confusion — unclear pipeline, no obvious test pattern to follow.
-
----
-
-## Key Tensions
-
-**Research completeness vs. implementation momentum.** Organizing `fls-ambiguities.md` serves the Spec Researcher; implementing new language features serves the Lead Researcher. Both are real value. The signal for prioritization: check which has gone 4+ cycles without attention, and whether the register's size has outgrown its navigability.
-
-**Coverage vs. correctness.** Adding language feature support is valuable, but the FLS constraint on const-folding (§6.1.2:37–45) is absolute. Exit-code-only tests can mask const-folding. Assembly inspection tests are the enforcement mechanism. Coverage without assembly inspection tests is suspect.
-
-**Navigability vs. raw completeness in the ambiguity register.** A long, unsorted file with more entries is harder to use than a shorter, organized one. The tipping point is around 20+ entries — after that, structure matters as much as content.
+- **Lead Researcher** — the primary driver of the project. Runs galvanic against FLS fixture programs, studies compiler output, discovers ambiguities, advances FLS coverage. This is likely the project owner.
+- **Spec Researcher** — external. Opens `refs/fls-ambiguities.md` and `refs/fls-constraints.md` looking for citable findings to take to spec discussions. Does not run the compiler.
+- **Compiler Contributor** — wants to implement a new FLS section inside galvanic. Needs to understand the pipeline architecture and find the right place to add code.
+- **Cache-Line Performance Researcher** — studies whether cache-aware codegen produces measurable differences. Uses benchmarks and inspects emitted assembly.
 
 ---
 
-## Repository Security (for autonomous operation)
+## Emotional signal per stakeholder
 
-Checked during init:
-
-- **CI triggers:** `.github/workflows/ci.yml` uses `push: branches: [main]` and `pull_request: branches: [main]`. Neither `pull_request_target` nor `issue_comment` is used. **Low prompt-injection risk** — lathe cannot be triggered by external actors through issue comments or fork PRs.
-- **CI permissions:** `permissions: contents: read` — minimal. No write permissions granted to workflows.
-- **Repo visibility:** The README references `libliflin/galvanic` — this appears to be a public repo. Lathe will feed CI metadata and PR content into agent prompts. PR descriptions from external contributors (if any) are an injection surface, though low-risk given the project's research scope.
-- **Default branch protection:** Not verified during init (requires GitHub API access). **Recommended action:** Confirm main is protected (require PR + CI pass before merge) to prevent direct pushes from the lathe builder.
+- **Lead Researcher** — Momentum. Each run tells them something new and the output is always trustworthy. The worst feeling is ambiguity: an error that doesn't name what failed, or an `.s` file that might be wrong.
+- **Spec Researcher** — Curiosity satisfied. "I found a concrete, citable finding in under two minutes." The worst feeling is a finding that raises more questions than it answers.
+- **Compiler Contributor** — Confidence. "I know exactly where to make this change." The worst feeling is architectural opacity — not knowing whether a new feature belongs in the IR, the lowering pass, or the codegen.
+- **Cache-Line Researcher** — Verifiable. "The claim is documented, tested, and visible in the output." The worst feeling is a cache-line argument with no corresponding test.
 
 ---
 
-## What Could Be Wrong
+## Key tensions
 
-**Missing stakeholder — the Spec Author.** I identified "Spec Researcher" as a consumer of galvanic's findings, but the actual Ferrocene spec team (the people who *write* the FLS) might be a distinct stakeholder with different needs. A spec author wants to know "which section produced the most ambiguities" or "what wording change would close gap X" — a more actionable frame than a researcher reading findings. If the project gets attention from Ferrocene contributors, this stakeholder should be added.
+**Breadth vs. depth.** Covering more FLS sections (breadth) serves the Lead Researcher's research goals. Making each covered section's findings thorough and citable (depth) serves the Spec Researcher. Signal: if `refs/fls-ambiguities.md` entries say "see the code" without stating galvanic's resolution, depth wins. If whole FLS chapters have no entries, breadth wins.
 
-**Lead Researcher and Compiler Contributor may collapse into one.** In this project, William is likely both. If they're the same person, the tension between "advance the compiler" (Contributor) and "run the experiment" (Researcher) may be lower than documented. The champion should notice when cycling between these two produces no real rotation and consolidate them if needed.
+**Research artifact quality vs. implementation velocity.** Making the research artifacts (fls-ambiguities.md, fls-constraints.md) more navigable is time not spent extending the compiler. Signal: if multiple consecutive cycles have been implementation-only without touching research artifacts, the Spec Researcher is being under-served.
 
-**Ambiguity register may already be the dominant priority.** The most recent goal (the one in the project root at init time) was entirely about the Spec Researcher — adding a TOC and sorting `fls-ambiguities.md`. The 15 prior cycles heavily favored the Lead Researcher. This suggests the register-navigability tension is already live and the champion should be aware of where in that cycle they are.
+**Contributor clarity vs. feature momentum.** Adding features without updating architecture docs erodes the Compiler Contributor experience. Signal: walk a new contributor through adding a feature using only existing docs and comments. If you hit an ambiguous step, that's the friction to fix.
 
-**No brand.md.** Galvanic is a research project with a distinctive voice (the README's "sacrificial anode" framing, the two-question mission). That voice should inform which fixes feel right. Brand.md doesn't exist yet, so the champion falls back to stakeholder emotional signal. When the project has more cycles of output to read, a brand.md derived from the actual commit history would strengthen the champion's direction-choosing.
+**Cache-line discipline vs. implementation speed.** New types added without cache-line notes slip the discipline the project is built on. Signal: check whether types added in recent commits have cache-line commentary consistent with the rest of the codebase.
 
-**E2E test dependencies on macOS.** The e2e tests require `aarch64-linux-gnu-as` and `qemu-aarch64`. These skip gracefully locally but always run on CI. A Compiler Contributor on macOS may not see e2e failures until after pushing. This is a Contributor journey friction point worth watching.
+---
+
+## What could be wrong
+
+**Missing stakeholder: downstream academic/industry readers.** The project's research questions are interesting beyond the immediate development team. There may be an audience of compiler researchers, language designers, or Rust users who would benefit from the findings but aren't captured in the current four stakeholders. If the project ever publishes a paper or a blog post, that audience appears.
+
+**"Cache-Line Performance Researcher" may be the same person as Lead Researcher.** In practice, these might not be different people — the Lead Researcher may be the only one who ever uses the benchmarks. If so, the champion shouldn't rotate to this stakeholder separately; treat cache-line concerns as part of the Lead Researcher's journey instead. Verify by looking at who actually uses `cargo bench`.
+
+**Spec Researcher journey assumes `refs/fls-ambiguities.md` is navigable.** The existing goal.md in the repo root (from cycle 013 or so) was specifically written to fix a navigability problem in that file — out-of-order entries, no TOC. If that work has been merged, the Spec Researcher's journey now starts from a working TOC. The champion should check the actual state of the file each cycle rather than assuming it's broken or fixed.
+
+**No branch protection visible.** Whether the default branch is protected (required reviews, required CI) is not visible from the local repo. This affects how much the autonomous agent loop can modify the repository without human review. The CI workflow has `permissions: contents: read` which is restrictive — but that only applies to the workflow itself, not to force pushes or direct commits.
+
+**Repository security.** The CI workflow triggers on `push` to main and `pull_request` to main — not on `pull_request_target` or `issue_comment`, which are the high-risk trigger types for prompt injection attacks. The repo appears to be public. Prompt injection risk exists if external PR titles, issue bodies, or commit messages are fed verbatim into agent prompts — which lathe may do via its snapshot. The agent should treat CI metadata from external PRs as potentially adversarial.
+
+**brand.md is absent.** The `.lathe/brand.md` file was deleted (per git status). The champion should treat brand as in emergent mode and skip the brand tint, falling back to stakeholder emotional signal only.
+
+**Unverified assumption: FLS coverage is partial.** The architecture and test structure suggest galvanic supports a meaningful subset of Rust (functions, closures, structs, enums, generics, traits, some pattern forms, static items) but not the full language. The champion's maturation judgment (not yet working / core works / battle-tested) needs to be made fresh each cycle from the snapshot and from walking the journey — this document can't tell the agent where the current frontier is.

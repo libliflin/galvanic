@@ -1,15 +1,9 @@
-`.lathe/verifier.md` is written. Here's what shaped it:
+`.lathe/verifier.md` written.
 
-**Project shape detected: Service / CLI compiler** — no registry publish, no deploy environment, no web UI. Galvanic is witnessed by running the binary and exercising the changed code path via `cargo test`.
+**Shape detected: Service / CLI.** Galvanic is a Rust compiler binary with no deploy target — changes are witnessed by running `cargo run -- <fixture.rs>` and confirming the output.
 
-**Key decisions:**
+The verifier is built around three durable axes:
 
-- **The Hard Constraint section is front-and-center.** FLS §6.1.2:37–45 (no constant-folding in runtime contexts) is the research claim galvanic exists to prove. The verifier's primary lens is: does this change uphold it? The dual `assert!(contains) / assert!(!contains)` pattern is called out as non-negotiable — an exit-code-only test is explicitly named as insufficient.
-
-- **Verification Playbook is concrete and immediately runnable.** Five steps with actual commands: `cargo test`, `cargo clippy -- -D warnings`, suite-specific test invocations, manual CLI exercise, and the Token size invariant check. No placeholders.
-
-- **The playbook covers all three test tiers** from the builder's instructions — fixture acceptance, assembly inspection e2e, and CLI smoke — with the right command for each.
-
-- **`refs/fls-ambiguities.md` verification is explicit.** When a change requires an implementation choice the FLS doesn't specify, the verifier checks that the ambiguity was recorded, sorted correctly, and resolves specifically (not vaguely).
-
-- **"Never weaken an assembly inspection test"** is a verifier rule, mirroring the builder's identical rule — so both agents are guarding this invariant independently.
+1. **Comparative scrutiny** — goal vs. diff, stakeholder moment vs. what actually happens when you run it
+2. **Five verification themes** specific to galvanic: FLS section alignment, pipeline stage coverage, cache-line discipline, the three-part ambiguity entry, and the constant-fold prohibition (FLS §6.1.2:37–45)
+3. **Concrete playbook** — distinct witness paths for lowering/codegen changes (assembly inspection via `compile_to_asm`), CLI error message changes (smoke tests), parse acceptance (fls_fixtures), and size assertions — with a note that runtime e2e tests are Linux-only and CI is authoritative when on macOS

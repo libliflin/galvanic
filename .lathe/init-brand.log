@@ -1,10 +1,12 @@
-`.lathe/brand.md` is written. Here's what the evidence showed:
+`.lathe/brand.md` is written. Here's what the evidence said:
 
-**Identity:** Researcher-voiced, disarmingly honest. The "sacrificial anode" line and "do not use this on anything you care about" (README:14–15) set the register — this project speaks like a scientist keeping lab notes, not a product making claims.
+**Identity:** Research instrument, working-researcher voice. Claims are anchored to FLS sections, counts, or concrete resolutions. Partial success is always named as partial — structurally, not just stylistically.
 
-**Three signals that define the voice:**
-1. FLS section citations everywhere — commits, comments, error messages, the ambiguity register. The spec is the authority; everything traces back to it.
-2. `"not yet supported: {specific thing}"` — the error pattern (lower.rs:79) names the boundary precisely and keeps the "yet" in scope. Vague errors corrupt the research value.
-3. Structured commits (`type: what for {stakeholder} (cycle N)`) — the git log is a research journal, not a change log.
+**Three signals to preserve:**
+1. The count (`lowered N of M functions (K failed)`) — exact numbers, not vague verdicts
+2. The `FLS §X.Y AMBIGUOUS:` format with all three parts: section, gap, galvanic's resolution
+3. "Not yet supported" over "unsupported" — honest about the project's developmental state
 
-The anti-pattern (the thing we'd never do): vague errors. The catch-all in `lower_expr` (lower.rs:18817–22) includes the variant name and a comment pointing contributors to the right grep. An error that can't be cited is useless to a researcher.
+**The one thing galvanic would never do:** Let a partial success look like a clean one. The `had_lower_errors` flag threading through `main.rs:87–155` exists precisely to make that guarantee structural, not just conventional.
+
+The brand is a readable match for the researcher-first emotional signals in goal.md, but it's project-voiced rather than stakeholder-voiced — it describes how galvanic speaks across every interaction, not what each stakeholder should feel.
