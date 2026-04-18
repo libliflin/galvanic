@@ -2730,6 +2730,141 @@ fn collect_tuple_param_leaves(pats: &[Pat]) -> Result<Vec<Option<&crate::ast::Sp
     Ok(leaves)
 }
 
+// FLS §5.1 — Sub-pattern dispatch helper.
+//
+// Emits a runtime check for a single pattern element against the value at a
+// stack slot, branching to `$fail_lbl` on mismatch. Called from:
+//   §6.18 match — tuple scrutinee element checks and @ binding sub-patterns
+//   §6.17 if-let — tuple element and @ binding sub-patterns
+//   §6.15.4 while-let — @ binding sub-patterns
+//
+// The `$fls` parameter carries the calling context's FLS section string so
+// CondBranch instructions in the emitted assembly carry correct provenance.
+//
+// Parameters:
+//   $self    — &mut LowerCtx
+//   $sub_pat — &Pat (the pattern to check against the value at $slot)
+//   $slot    — u8 stack slot holding the value under test
+//   $fail_lbl — u32 branch target on pattern mismatch
+//   $bound   — Vec<&str> accumulator; newly-bound names are pushed here
+//              (caller is responsible for removing them from self.locals)
+//   $fls     — &'static str FLS section for CondBranch/CondBranch provenance
+//
+// On match: fall through; any new Ident/Bound bindings are in $bound.
+// On mismatch: branch to $fail_lbl; $bound and self.locals are unchanged.
+//
+// Cache-line note: literal equality = 3 instructions (ldr + mov + cmp = 12 B);
+// range check = 7 instructions (ldr + 2×mov + 2×cmp + and + cbz = 28 B);
+// binding = 2 instructions (ldr + str = 8 B).
+macro_rules! lower_sub_pat {
+    ($self:expr, $sub_pat:expr, $slot:expr, $fail_lbl:expr, $bound:expr, $fls:expr) => {
+        match $sub_pat {
+            // FLS §5.1: Wildcard — always matches, no check, no binding.
+            Pat::Wildcard => {}
+            // FLS §5.1.4: Identifier pattern — always matches; aliases slot (no copy).
+            Pat::Ident(span) => {
+                let name = span.text($self.source);
+                $self.locals.insert(name, $slot);
+                $bound.push(name);
+            }
+            // FLS §5.2: Integer literal equality check.
+            Pat::LitInt(n) => {
+                let s = $self.alloc_reg()?;
+                $self.instrs.push(Instr::Load { dst: s, slot: $slot });
+                let p = $self.alloc_reg()?;
+                $self.instrs.push(Instr::LoadImm(p, *n as i32));
+                let c = $self.alloc_reg()?;
+                $self.instrs.push(Instr::BinOp {
+                    op: IrBinOp::Eq, dst: c, lhs: s, rhs: p, ty: IrTy::Bool,
+                });
+                $self.instrs.push(Instr::CondBranch { reg: c, label: $fail_lbl, fls: $fls });
+            }
+            // FLS §5.2: Negative integer literal equality check.
+            Pat::NegLitInt(n) => {
+                let s = $self.alloc_reg()?;
+                $self.instrs.push(Instr::Load { dst: s, slot: $slot });
+                let p = $self.alloc_reg()?;
+                $self.instrs.push(Instr::LoadImm(p, -(*n as i32)));
+                let c = $self.alloc_reg()?;
+                $self.instrs.push(Instr::BinOp {
+                    op: IrBinOp::Eq, dst: c, lhs: s, rhs: p, ty: IrTy::Bool,
+                });
+                $self.instrs.push(Instr::CondBranch { reg: c, label: $fail_lbl, fls: $fls });
+            }
+            // FLS §5.2: Boolean literal equality check.
+            Pat::LitBool(b) => {
+                let s = $self.alloc_reg()?;
+                $self.instrs.push(Instr::Load { dst: s, slot: $slot });
+                let p = $self.alloc_reg()?;
+                $self.instrs.push(Instr::LoadImm(p, *b as i32));
+                let c = $self.alloc_reg()?;
+                $self.instrs.push(Instr::BinOp {
+                    op: IrBinOp::Eq, dst: c, lhs: s, rhs: p, ty: IrTy::Bool,
+                });
+                $self.instrs.push(Instr::CondBranch { reg: c, label: $fail_lbl, fls: $fls });
+            }
+            // FLS §5.1.9: Inclusive range lo..=hi → (value >= lo) & (value <= hi).
+            Pat::RangeInclusive { lo, hi } => {
+                let s = $self.alloc_reg()?;
+                $self.instrs.push(Instr::Load { dst: s, slot: $slot });
+                let lo_r = $self.alloc_reg()?;
+                $self.instrs.push(Instr::LoadImm(lo_r, *lo as i32));
+                let cmp1 = $self.alloc_reg()?;
+                $self.instrs.push(Instr::BinOp {
+                    op: IrBinOp::Ge, dst: cmp1, lhs: s, rhs: lo_r, ty: IrTy::Bool,
+                });
+                let hi_r = $self.alloc_reg()?;
+                $self.instrs.push(Instr::LoadImm(hi_r, *hi as i32));
+                let cmp2 = $self.alloc_reg()?;
+                $self.instrs.push(Instr::BinOp {
+                    op: IrBinOp::Le, dst: cmp2, lhs: s, rhs: hi_r, ty: IrTy::Bool,
+                });
+                let matched = $self.alloc_reg()?;
+                $self.instrs.push(Instr::BinOp {
+                    op: IrBinOp::BitAnd, dst: matched, lhs: cmp1, rhs: cmp2, ty: IrTy::Bool,
+                });
+                $self.instrs.push(Instr::CondBranch { reg: matched, label: $fail_lbl, fls: $fls });
+            }
+            // FLS §5.1.9: Exclusive range lo..hi → (value >= lo) & (value < hi).
+            Pat::RangeExclusive { lo, hi } => {
+                let s = $self.alloc_reg()?;
+                $self.instrs.push(Instr::Load { dst: s, slot: $slot });
+                let lo_r = $self.alloc_reg()?;
+                $self.instrs.push(Instr::LoadImm(lo_r, *lo as i32));
+                let cmp1 = $self.alloc_reg()?;
+                $self.instrs.push(Instr::BinOp {
+                    op: IrBinOp::Ge, dst: cmp1, lhs: s, rhs: lo_r, ty: IrTy::Bool,
+                });
+                let hi_r = $self.alloc_reg()?;
+                $self.instrs.push(Instr::LoadImm(hi_r, *hi as i32));
+                let cmp2 = $self.alloc_reg()?;
+                $self.instrs.push(Instr::BinOp {
+                    op: IrBinOp::Lt, dst: cmp2, lhs: s, rhs: hi_r, ty: IrTy::Bool,
+                });
+                let matched = $self.alloc_reg()?;
+                $self.instrs.push(Instr::BinOp {
+                    op: IrBinOp::BitAnd, dst: matched, lhs: cmp1, rhs: cmp2, ty: IrTy::Bool,
+                });
+                $self.instrs.push(Instr::CondBranch { reg: matched, label: $fail_lbl, fls: $fls });
+            }
+            // FLS §5.1.11: OR pattern — accumulate alternatives; branch on no match.
+            Pat::Or(alts) => {
+                let matched_reg = $self.alloc_reg()?;
+                $self.instrs.push(Instr::LoadImm(matched_reg, 0));
+                for alt in alts.iter() {
+                    $self.accum_or_alt(alt, $slot, matched_reg)?;
+                }
+                $self.instrs.push(Instr::CondBranch {
+                    reg: matched_reg, label: $fail_lbl, fls: $fls,
+                });
+            }
+            // FLS §5.1.4: Binding pattern name @ subpat — delegate to method to avoid
+            // infinite macro recursion. The method handles nested @ and all sub-pattern kinds.
+            other => $self.lower_sub_pat(other, $slot, $fail_lbl, &mut $bound, $fls)?,
+        }
+    };
+}
+
 /// Return type of `lower_fn`: the lowered function, any closure and trampoline
 /// functions it generated, the next fresh label counter, and the list of
 /// generic base names that were called and need monomorphization.
@@ -6397,6 +6532,139 @@ impl<'src> LowerCtx<'src> {
                     "unsupported pattern kind inside OR pattern alternative".into(),
                 ));
             }
+        }
+        Ok(())
+    }
+
+    /// Emit pattern-check instructions for a single sub-pattern in a structural
+    /// context (tuple element, struct field, @ binding sub-pattern, etc.).
+    ///
+    /// On match: falls through; any new bindings pushed into `bound`.
+    /// On mismatch: emits a CondBranch to `fail_lbl`; `bound` / `self.locals` unchanged.
+    ///
+    /// FLS §5.1 — pattern classification. `fls` identifies the calling context
+    /// (e.g. "§6.18" for match, "§6.17" for if-let) for CondBranch provenance.
+    fn lower_sub_pat(
+        &mut self,
+        sub_pat: &Pat,
+        slot: u8,
+        fail_lbl: u32,
+        bound: &mut Vec<&'src str>,
+        fls: &'static str,
+    ) -> Result<(), LowerError> {
+        match sub_pat {
+            // FLS §5.1: Wildcard — always matches, no check, no binding.
+            Pat::Wildcard => {}
+            // FLS §5.1.4: Identifier pattern — always matches; aliases slot (no copy).
+            Pat::Ident(span) => {
+                let name = span.text(self.source);
+                self.locals.insert(name, slot);
+                bound.push(name);
+            }
+            // FLS §5.2: Integer literal equality check.
+            Pat::LitInt(n) => {
+                let s = self.alloc_reg()?;
+                self.instrs.push(Instr::Load { dst: s, slot });
+                let p = self.alloc_reg()?;
+                self.instrs.push(Instr::LoadImm(p, *n as i32));
+                let c = self.alloc_reg()?;
+                self.instrs.push(Instr::BinOp {
+                    op: IrBinOp::Eq, dst: c, lhs: s, rhs: p, ty: IrTy::Bool,
+                });
+                self.instrs.push(Instr::CondBranch { reg: c, label: fail_lbl, fls });
+            }
+            // FLS §5.2: Negative integer literal equality check.
+            Pat::NegLitInt(n) => {
+                let s = self.alloc_reg()?;
+                self.instrs.push(Instr::Load { dst: s, slot });
+                let p = self.alloc_reg()?;
+                self.instrs.push(Instr::LoadImm(p, -(*n as i32)));
+                let c = self.alloc_reg()?;
+                self.instrs.push(Instr::BinOp {
+                    op: IrBinOp::Eq, dst: c, lhs: s, rhs: p, ty: IrTy::Bool,
+                });
+                self.instrs.push(Instr::CondBranch { reg: c, label: fail_lbl, fls });
+            }
+            // FLS §5.2: Boolean literal equality check.
+            Pat::LitBool(b) => {
+                let s = self.alloc_reg()?;
+                self.instrs.push(Instr::Load { dst: s, slot });
+                let p = self.alloc_reg()?;
+                self.instrs.push(Instr::LoadImm(p, *b as i32));
+                let c = self.alloc_reg()?;
+                self.instrs.push(Instr::BinOp {
+                    op: IrBinOp::Eq, dst: c, lhs: s, rhs: p, ty: IrTy::Bool,
+                });
+                self.instrs.push(Instr::CondBranch { reg: c, label: fail_lbl, fls });
+            }
+            // FLS §5.1.9: Inclusive range lo..=hi → (value >= lo) & (value <= hi).
+            Pat::RangeInclusive { lo, hi } => {
+                let s = self.alloc_reg()?;
+                self.instrs.push(Instr::Load { dst: s, slot });
+                let lo_r = self.alloc_reg()?;
+                self.instrs.push(Instr::LoadImm(lo_r, *lo as i32));
+                let cmp1 = self.alloc_reg()?;
+                self.instrs.push(Instr::BinOp {
+                    op: IrBinOp::Ge, dst: cmp1, lhs: s, rhs: lo_r, ty: IrTy::Bool,
+                });
+                let hi_r = self.alloc_reg()?;
+                self.instrs.push(Instr::LoadImm(hi_r, *hi as i32));
+                let cmp2 = self.alloc_reg()?;
+                self.instrs.push(Instr::BinOp {
+                    op: IrBinOp::Le, dst: cmp2, lhs: s, rhs: hi_r, ty: IrTy::Bool,
+                });
+                let matched = self.alloc_reg()?;
+                self.instrs.push(Instr::BinOp {
+                    op: IrBinOp::BitAnd, dst: matched, lhs: cmp1, rhs: cmp2, ty: IrTy::Bool,
+                });
+                self.instrs.push(Instr::CondBranch { reg: matched, label: fail_lbl, fls });
+            }
+            // FLS §5.1.9: Exclusive range lo..hi → (value >= lo) & (value < hi).
+            Pat::RangeExclusive { lo, hi } => {
+                let s = self.alloc_reg()?;
+                self.instrs.push(Instr::Load { dst: s, slot });
+                let lo_r = self.alloc_reg()?;
+                self.instrs.push(Instr::LoadImm(lo_r, *lo as i32));
+                let cmp1 = self.alloc_reg()?;
+                self.instrs.push(Instr::BinOp {
+                    op: IrBinOp::Ge, dst: cmp1, lhs: s, rhs: lo_r, ty: IrTy::Bool,
+                });
+                let hi_r = self.alloc_reg()?;
+                self.instrs.push(Instr::LoadImm(hi_r, *hi as i32));
+                let cmp2 = self.alloc_reg()?;
+                self.instrs.push(Instr::BinOp {
+                    op: IrBinOp::Lt, dst: cmp2, lhs: s, rhs: hi_r, ty: IrTy::Bool,
+                });
+                let matched = self.alloc_reg()?;
+                self.instrs.push(Instr::BinOp {
+                    op: IrBinOp::BitAnd, dst: matched, lhs: cmp1, rhs: cmp2, ty: IrTy::Bool,
+                });
+                self.instrs.push(Instr::CondBranch { reg: matched, label: fail_lbl, fls });
+            }
+            // FLS §5.1.11: OR pattern — accumulate alternatives; branch on no match.
+            Pat::Or(alts) => {
+                let matched_reg = self.alloc_reg()?;
+                self.instrs.push(Instr::LoadImm(matched_reg, 0));
+                for alt in alts.iter() {
+                    self.accum_or_alt(alt, slot, matched_reg)?;
+                }
+                self.instrs.push(Instr::CondBranch { reg: matched_reg, label: fail_lbl, fls });
+            }
+            // FLS §5.1.4: Binding pattern name @ subpat.
+            // Check sub-pattern first; if it passes, copy value to a new slot and bind name.
+            Pat::Bound { name, subpat } => {
+                self.lower_sub_pat(subpat.as_ref(), slot, fail_lbl, bound, fls)?;
+                let bind_name = name.text(self.source);
+                let bind_slot = self.alloc_slot()?;
+                let bind_reg = self.alloc_reg()?;
+                self.instrs.push(Instr::Load { dst: bind_reg, slot });
+                self.instrs.push(Instr::Store { src: bind_reg, slot: bind_slot });
+                self.locals.insert(bind_name, bind_slot);
+                bound.push(bind_name);
+            }
+            other => return Err(LowerError::Unsupported(format!(
+                "unsupported sub-pattern (FLS §5.1): {other:?}"
+            ))),
         }
         Ok(())
     }
@@ -12161,56 +12429,10 @@ impl<'src> LowerCtx<'src> {
                     let mut bound_tuple: Vec<&str> = Vec::new();
 
                     // Emit element-level checks and install ident bindings.
+                    // FLS §5.1 — delegate to shared sub-pattern dispatch.
                     for (i, sub_pat) in sub_pats.iter().enumerate() {
                         let elem_slot = tuple_base_slot + i as u8;
-                        match sub_pat {
-                            Pat::Wildcard => {}
-                            Pat::Ident(span) => {
-                                let name = span.text(self.source);
-                                self.locals.insert(name, elem_slot);
-                                bound_tuple.push(name);
-                            }
-                            Pat::LitInt(n) => {
-                                let s = self.alloc_reg()?;
-                                self.instrs.push(Instr::Load { dst: s, slot: elem_slot });
-                                let p = self.alloc_reg()?;
-                                self.instrs.push(Instr::LoadImm(p, *n as i32));
-                                let c = self.alloc_reg()?;
-                                self.instrs.push(Instr::BinOp {
-                                    op: IrBinOp::Eq, dst: c, lhs: s, rhs: p,
-                                    ty: IrTy::Bool,
-                                });
-                                self.instrs.push(Instr::CondBranch { reg: c, label: else_label_t, fls: "§6.17" });
-                            }
-                            Pat::NegLitInt(n) => {
-                                let s = self.alloc_reg()?;
-                                self.instrs.push(Instr::Load { dst: s, slot: elem_slot });
-                                let p = self.alloc_reg()?;
-                                self.instrs.push(Instr::LoadImm(p, -(*n as i32)));
-                                let c = self.alloc_reg()?;
-                                self.instrs.push(Instr::BinOp {
-                                    op: IrBinOp::Eq, dst: c, lhs: s, rhs: p,
-                                    ty: IrTy::Bool,
-                                });
-                                self.instrs.push(Instr::CondBranch { reg: c, label: else_label_t, fls: "§6.17" });
-                            }
-                            Pat::LitBool(b) => {
-                                let s = self.alloc_reg()?;
-                                self.instrs.push(Instr::Load { dst: s, slot: elem_slot });
-                                let p = self.alloc_reg()?;
-                                self.instrs.push(Instr::LoadImm(p, *b as i32));
-                                let c = self.alloc_reg()?;
-                                self.instrs.push(Instr::BinOp {
-                                    op: IrBinOp::Eq, dst: c, lhs: s, rhs: p,
-                                    ty: IrTy::Bool,
-                                });
-                                self.instrs.push(Instr::CondBranch { reg: c, label: else_label_t, fls: "§6.17" });
-                            }
-                            other => return Err(LowerError::Unsupported(format!(
-                                "unsupported sub-pattern in if-let tuple pattern \
-                                 (FLS §6.17, §5.10.3): {other:?}"
-                            ))),
-                        }
+                        lower_sub_pat!(self, sub_pat, elem_slot, else_label_t, bound_tuple, "§6.17");
                     }
 
                     // Then block + else (mirrors regular if-let ret_ty dispatch).
@@ -12701,117 +12923,9 @@ impl<'src> LowerCtx<'src> {
                     // then install the name binding. The binding is valid only inside
                     // the then block.
                     Pat::Bound { name, subpat } => {
-                        match subpat.as_ref() {
-                            Pat::LitInt(n) => {
-                                let s_reg = self.alloc_reg()?;
-                                self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
-                                let p_reg = self.alloc_reg()?;
-                                self.instrs.push(Instr::LoadImm(p_reg, *n as i32));
-                                let cmp_reg = self.alloc_reg()?;
-                                self.instrs.push(Instr::BinOp {
-                                    op: IrBinOp::Eq, dst: cmp_reg, lhs: s_reg, rhs: p_reg,
-                                    ty: IrTy::Bool,
-                                });
-                                self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: else_label, fls: "§6.17" });
-                            }
-                            Pat::NegLitInt(n) => {
-                                let s_reg = self.alloc_reg()?;
-                                self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
-                                let p_reg = self.alloc_reg()?;
-                                self.instrs.push(Instr::LoadImm(p_reg, -(*n as i32)));
-                                let cmp_reg = self.alloc_reg()?;
-                                self.instrs.push(Instr::BinOp {
-                                    op: IrBinOp::Eq, dst: cmp_reg, lhs: s_reg, rhs: p_reg,
-                                    ty: IrTy::Bool,
-                                });
-                                self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: else_label, fls: "§6.17" });
-                            }
-                            Pat::RangeInclusive { lo, hi } => {
-                                let s_reg = self.alloc_reg()?;
-                                self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
-                                let lo_reg = self.alloc_reg()?;
-                                self.instrs.push(Instr::LoadImm(lo_reg, *lo as i32));
-                                let cmp1 = self.alloc_reg()?;
-                                self.instrs.push(Instr::BinOp {
-                                    op: IrBinOp::Ge, dst: cmp1, lhs: s_reg, rhs: lo_reg,
-                                    ty: IrTy::Bool,
-                                });
-                                let hi_reg = self.alloc_reg()?;
-                                self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
-                                let cmp2 = self.alloc_reg()?;
-                                self.instrs.push(Instr::BinOp {
-                                    op: IrBinOp::Le, dst: cmp2, lhs: s_reg, rhs: hi_reg,
-                                    ty: IrTy::Bool,
-                                });
-                                let matched = self.alloc_reg()?;
-                                self.instrs.push(Instr::BinOp {
-                                    op: IrBinOp::BitAnd, dst: matched, lhs: cmp1, rhs: cmp2,
-                                    ty: IrTy::Bool,
-                                });
-                                self.instrs.push(Instr::CondBranch { reg: matched, label: else_label, fls: "§6.17" });
-                            }
-                            Pat::RangeExclusive { lo, hi } => {
-                                let s_reg = self.alloc_reg()?;
-                                self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
-                                let lo_reg = self.alloc_reg()?;
-                                self.instrs.push(Instr::LoadImm(lo_reg, *lo as i32));
-                                let cmp1 = self.alloc_reg()?;
-                                self.instrs.push(Instr::BinOp {
-                                    op: IrBinOp::Ge, dst: cmp1, lhs: s_reg, rhs: lo_reg,
-                                    ty: IrTy::Bool,
-                                });
-                                let hi_reg = self.alloc_reg()?;
-                                self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
-                                let cmp2 = self.alloc_reg()?;
-                                self.instrs.push(Instr::BinOp {
-                                    op: IrBinOp::Lt, dst: cmp2, lhs: s_reg, rhs: hi_reg,
-                                    ty: IrTy::Bool,
-                                });
-                                let matched = self.alloc_reg()?;
-                                self.instrs.push(Instr::BinOp {
-                                    op: IrBinOp::BitAnd, dst: matched, lhs: cmp1, rhs: cmp2,
-                                    ty: IrTy::Bool,
-                                });
-                                self.instrs.push(Instr::CondBranch { reg: matched, label: else_label, fls: "§6.17" });
-                            }
-                            // FLS §5.1.4 + §5.1.11: `n @ (pat1 | pat2)` — OR sub-pattern.
-                            // Accumulate alternatives into matched_reg; branch to else_label
-                            // when matched_reg == 0 (no alternative matched).
-                            // Cache-line note: cost mirrors the OR alternative costs.
-                            Pat::Or(alts) => {
-                                let matched_reg = self.alloc_reg()?;
-                                self.instrs.push(Instr::LoadImm(matched_reg, 0));
-                                for alt in alts {
-                                    self.accum_or_alt(alt, scrut_slot, matched_reg)?;
-                                }
-                                self.instrs.push(Instr::CondBranch { reg: matched_reg, label: else_label, fls: "§6.17" });
-                            }
-                            // FLS §5.1.4 + §5.1: `n @ _` — wildcard sub-pattern always matches.
-                            // No check instructions needed; just bind and continue.
-                            // Cache-line note: 0 extra check instructions (8 bytes for binding).
-                            Pat::Wildcard => {
-                                // No condition to test — wildcard always matches. Fall through.
-                            }
-                            // FLS §5.1.4 + §5.2: `n @ true` / `n @ false` — boolean literal.
-                            // Parity with match @ binding LitBool support.
-                            // Cache-line note: 3 instructions (ldr + mov + cmp + cbz = 12 bytes).
-                            Pat::LitBool(b) => {
-                                let s_reg = self.alloc_reg()?;
-                                self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
-                                let p_reg = self.alloc_reg()?;
-                                self.instrs.push(Instr::LoadImm(p_reg, *b as i32));
-                                let cmp_reg = self.alloc_reg()?;
-                                self.instrs.push(Instr::BinOp {
-                                    op: IrBinOp::Eq, dst: cmp_reg, lhs: s_reg, rhs: p_reg,
-                                    ty: IrTy::Bool,
-                                });
-                                self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: else_label, fls: "§6.17" });
-                            }
-                            other => return Err(LowerError::Unsupported(format!(
-                                "@ binding sub-pattern not yet supported in if-let (FLS §6.17, §5.1.4): {other:?}"
-                            ))),
-                        }
-                        // Install the binding (valid in then block only; removed below).
+                        // FLS §5.1 — delegate sub-pattern check to shared dispatch macro.
+                        lower_sub_pat!(self, subpat.as_ref(), scrut_slot, else_label, bound_names, "§6.17");
+                        // Install the @ binding (valid in then block only; removed below).
                         let bind_name = name.text(self.source);
                         let bind_slot = self.alloc_slot()?;
                         let bind_reg = self.alloc_reg()?;
@@ -13131,60 +13245,10 @@ impl<'src> LowerCtx<'src> {
                                     }
                                     for (i, sub_pat) in sub_pats.iter().enumerate() {
                                         let elem_slot = elem_slots[i];
-                                        match sub_pat {
-                                            Pat::Wildcard => {}
-                                            Pat::Ident(span) => {
-                                                let name = span.text(self.source);
-                                                self.locals.insert(name, elem_slot);
-                                                $bound.push(name);
-                                            }
-                                            Pat::LitInt(n) => {
-                                                let s = self.alloc_reg()?;
-                                                self.instrs.push(Instr::Load { dst: s, slot: elem_slot });
-                                                let p = self.alloc_reg()?;
-                                                self.instrs.push(Instr::LoadImm(p, *n as i32));
-                                                let c = self.alloc_reg()?;
-                                                self.instrs.push(Instr::BinOp {
-                                                    op: IrBinOp::Eq, dst: c, lhs: s, rhs: p,
-                                                    ty: IrTy::Bool,
-                                                });
-                                                self.instrs.push(Instr::CondBranch {
-                                                    reg: c, label: $fail_lbl, fls: "§6.18",
-                                                });
-                                            }
-                                            Pat::NegLitInt(n) => {
-                                                let s = self.alloc_reg()?;
-                                                self.instrs.push(Instr::Load { dst: s, slot: elem_slot });
-                                                let p = self.alloc_reg()?;
-                                                self.instrs.push(Instr::LoadImm(p, -(*n as i32)));
-                                                let c = self.alloc_reg()?;
-                                                self.instrs.push(Instr::BinOp {
-                                                    op: IrBinOp::Eq, dst: c, lhs: s, rhs: p,
-                                                    ty: IrTy::Bool,
-                                                });
-                                                self.instrs.push(Instr::CondBranch {
-                                                    reg: c, label: $fail_lbl, fls: "§6.18",
-                                                });
-                                            }
-                                            Pat::LitBool(b) => {
-                                                let s = self.alloc_reg()?;
-                                                self.instrs.push(Instr::Load { dst: s, slot: elem_slot });
-                                                let p = self.alloc_reg()?;
-                                                self.instrs.push(Instr::LoadImm(p, *b as i32));
-                                                let c = self.alloc_reg()?;
-                                                self.instrs.push(Instr::BinOp {
-                                                    op: IrBinOp::Eq, dst: c, lhs: s, rhs: p,
-                                                    ty: IrTy::Bool,
-                                                });
-                                                self.instrs.push(Instr::CondBranch {
-                                                    reg: c, label: $fail_lbl, fls: "§6.18",
-                                                });
-                                            }
-                                            other => return Err(LowerError::Unsupported(format!(
-                                                "unsupported sub-pattern in tuple match \
-                                                 (FLS §6.18, §5.10.3): {other:?}"
-                                            ))),
-                                        }
+                                        // FLS §5.1 — delegate to shared sub-pattern dispatch.
+                                        // Supports Wildcard, Ident, LitInt, NegLitInt, LitBool,
+                                        // RangeInclusive, RangeExclusive, Or, and Bound (@).
+                                        lower_sub_pat!(self, sub_pat, elem_slot, $fail_lbl, $bound, "§6.18");
                                     }
                                 }
                                 other => return Err(LowerError::Unsupported(format!(
@@ -13770,139 +13834,9 @@ impl<'src> LowerCtx<'src> {
                                 // 2 instructions for binding (ldr + str = 8 bytes).
                                 Pat::Bound { name, subpat } => {
                                     at_bind_span = Some(*name);
-                                    match subpat.as_ref() {
-                                        Pat::LitInt(n) => {
-                                            let s_reg = self.alloc_reg()?;
-                                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
-                                            let p_reg = self.alloc_reg()?;
-                                            self.instrs.push(Instr::LoadImm(p_reg, *n as i32));
-                                            let cmp_reg = self.alloc_reg()?;
-                                            self.instrs.push(Instr::BinOp {
-                                                op: IrBinOp::Eq,
-                                                dst: cmp_reg,
-                                                lhs: s_reg,
-                                                rhs: p_reg,
-                                                ty: IrTy::Bool,
-                                            });
-                                            self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label, fls: "§6.18" });
-                                        }
-                                        Pat::NegLitInt(n) => {
-                                            let s_reg = self.alloc_reg()?;
-                                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
-                                            let p_reg = self.alloc_reg()?;
-                                            self.instrs.push(Instr::LoadImm(p_reg, -(*n as i32)));
-                                            let cmp_reg = self.alloc_reg()?;
-                                            self.instrs.push(Instr::BinOp {
-                                                op: IrBinOp::Eq,
-                                                dst: cmp_reg,
-                                                lhs: s_reg,
-                                                rhs: p_reg,
-                                                ty: IrTy::Bool,
-                                            });
-                                            self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label, fls: "§6.18" });
-                                        }
-                                        Pat::LitBool(b) => {
-                                            let s_reg = self.alloc_reg()?;
-                                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
-                                            let p_reg = self.alloc_reg()?;
-                                            self.instrs.push(Instr::LoadImm(p_reg, *b as i32));
-                                            let cmp_reg = self.alloc_reg()?;
-                                            self.instrs.push(Instr::BinOp {
-                                                op: IrBinOp::Eq,
-                                                dst: cmp_reg,
-                                                lhs: s_reg,
-                                                rhs: p_reg,
-                                                ty: IrTy::Bool,
-                                            });
-                                            self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label, fls: "§6.18" });
-                                        }
-                                        Pat::RangeInclusive { lo, hi } => {
-                                            let s_reg = self.alloc_reg()?;
-                                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
-                                            let lo_reg = self.alloc_reg()?;
-                                            self.instrs.push(Instr::LoadImm(lo_reg, *lo as i32));
-                                            let cmp1 = self.alloc_reg()?;
-                                            self.instrs.push(Instr::BinOp {
-                                                op: IrBinOp::Ge,
-                                                dst: cmp1,
-                                                lhs: s_reg,
-                                                rhs: lo_reg,
-                                                ty: IrTy::Bool,
-                                            });
-                                            let hi_reg = self.alloc_reg()?;
-                                            self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
-                                            let cmp2 = self.alloc_reg()?;
-                                            self.instrs.push(Instr::BinOp {
-                                                op: IrBinOp::Le,
-                                                dst: cmp2,
-                                                lhs: s_reg,
-                                                rhs: hi_reg,
-                                                ty: IrTy::Bool,
-                                            });
-                                            let matched = self.alloc_reg()?;
-                                            self.instrs.push(Instr::BinOp {
-                                                op: IrBinOp::BitAnd,
-                                                dst: matched,
-                                                lhs: cmp1,
-                                                rhs: cmp2,
-                                                ty: IrTy::Bool,
-                                            });
-                                            self.instrs.push(Instr::CondBranch { reg: matched, label: next_label, fls: "§6.18" });
-                                        }
-                                        Pat::RangeExclusive { lo, hi } => {
-                                            let s_reg = self.alloc_reg()?;
-                                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
-                                            let lo_reg = self.alloc_reg()?;
-                                            self.instrs.push(Instr::LoadImm(lo_reg, *lo as i32));
-                                            let cmp1 = self.alloc_reg()?;
-                                            self.instrs.push(Instr::BinOp {
-                                                op: IrBinOp::Ge,
-                                                dst: cmp1,
-                                                lhs: s_reg,
-                                                rhs: lo_reg,
-                                                ty: IrTy::Bool,
-                                            });
-                                            let hi_reg = self.alloc_reg()?;
-                                            self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
-                                            let cmp2 = self.alloc_reg()?;
-                                            self.instrs.push(Instr::BinOp {
-                                                op: IrBinOp::Lt,
-                                                dst: cmp2,
-                                                lhs: s_reg,
-                                                rhs: hi_reg,
-                                                ty: IrTy::Bool,
-                                            });
-                                            let matched = self.alloc_reg()?;
-                                            self.instrs.push(Instr::BinOp {
-                                                op: IrBinOp::BitAnd,
-                                                dst: matched,
-                                                lhs: cmp1,
-                                                rhs: cmp2,
-                                                ty: IrTy::Bool,
-                                            });
-                                            self.instrs.push(Instr::CondBranch { reg: matched, label: next_label, fls: "§6.18" });
-                                        }
-                                        // FLS §5.1.4 + §5.1.11: `n @ (pat1 | pat2)` — OR sub-pattern.
-                                        // Accumulate alternatives; branch to next_label on no match.
-                                        // Cache-line note: cost mirrors the OR alternative costs.
-                                        Pat::Or(alts) => {
-                                            let matched_reg = self.alloc_reg()?;
-                                            self.instrs.push(Instr::LoadImm(matched_reg, 0));
-                                            for alt in alts {
-                                                self.accum_or_alt(alt, scrut_slot, matched_reg)?;
-                                            }
-                                            self.instrs.push(Instr::CondBranch { reg: matched_reg, label: next_label, fls: "§6.18" });
-                                        }
-                                        // FLS §5.1.4 + §5.1: `n @ _` — wildcard sub-pattern always matches.
-                                        // No check instructions needed; just bind and continue to body.
-                                        // Cache-line note: 0 extra check instructions (8 bytes for binding).
-                                        Pat::Wildcard => {
-                                            // No condition to test — wildcard always matches. Fall through.
-                                        }
-                                        other => return Err(LowerError::Unsupported(format!(
-                                            "@ binding sub-pattern not yet supported in match (FLS §6.18, §5.1.4): {other:?}"
-                                        ))),
-                                    }
+                                    // FLS §5.1 — delegate sub-pattern check to shared dispatch macro.
+                                    let mut _sub_bound: Vec<&str> = Vec::new();
+                                    lower_sub_pat!(self, subpat.as_ref(), scrut_slot, next_label, _sub_bound, "§6.18");
                                 }
                                 _ => {
                                     // Single literal pattern: load scrutinee, compare, cbz.
@@ -14511,57 +14445,9 @@ impl<'src> LowerCtx<'src> {
                                 // FLS §5.1.4: @ binding pattern (unit-returning match).
                                 Pat::Bound { name, subpat } => {
                                     at_bind_span_unit = Some(*name);
-                                    match subpat.as_ref() {
-                                        Pat::LitInt(n) => {
-                                            let s_reg = self.alloc_reg()?;
-                                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
-                                            let p_reg = self.alloc_reg()?;
-                                            self.instrs.push(Instr::LoadImm(p_reg, *n as i32));
-                                            let cmp_reg = self.alloc_reg()?;
-                                            self.instrs.push(Instr::BinOp {
-                                                op: IrBinOp::Eq, dst: cmp_reg, lhs: s_reg, rhs: p_reg,
-                                                ty: IrTy::Bool,
-                                            });
-                                            self.instrs.push(Instr::CondBranch { reg: cmp_reg, label: next_label, fls: "§6.18" });
-                                        }
-                                        Pat::RangeInclusive { lo, hi } => {
-                                            let s_reg = self.alloc_reg()?;
-                                            self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
-                                            let lo_reg = self.alloc_reg()?;
-                                            self.instrs.push(Instr::LoadImm(lo_reg, *lo as i32));
-                                            let cmp1 = self.alloc_reg()?;
-                                            self.instrs.push(Instr::BinOp {
-                                                op: IrBinOp::Ge, dst: cmp1, lhs: s_reg, rhs: lo_reg,
-                                                ty: IrTy::Bool,
-                                            });
-                                            let hi_reg = self.alloc_reg()?;
-                                            self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
-                                            let cmp2 = self.alloc_reg()?;
-                                            self.instrs.push(Instr::BinOp {
-                                                op: IrBinOp::Le, dst: cmp2, lhs: s_reg, rhs: hi_reg,
-                                                ty: IrTy::Bool,
-                                            });
-                                            let matched = self.alloc_reg()?;
-                                            self.instrs.push(Instr::BinOp {
-                                                op: IrBinOp::BitAnd, dst: matched, lhs: cmp1, rhs: cmp2,
-                                                ty: IrTy::Bool,
-                                            });
-                                            self.instrs.push(Instr::CondBranch { reg: matched, label: next_label, fls: "§6.18" });
-                                        }
-                                        // FLS §5.1.4 + §5.1.11: `n @ (pat1 | pat2)` — OR sub-pattern.
-                                        // Accumulate alternatives; branch to next_label on no match.
-                                        Pat::Or(alts) => {
-                                            let matched_reg = self.alloc_reg()?;
-                                            self.instrs.push(Instr::LoadImm(matched_reg, 0));
-                                            for alt in alts {
-                                                self.accum_or_alt(alt, scrut_slot, matched_reg)?;
-                                            }
-                                            self.instrs.push(Instr::CondBranch { reg: matched_reg, label: next_label, fls: "§6.18" });
-                                        }
-                                        other => return Err(LowerError::Unsupported(format!(
-                                            "@ binding sub-pattern not yet supported in unit match (FLS §6.18, §5.1.4): {other:?}"
-                                        ))),
-                                    }
+                                    // FLS §5.1 — delegate sub-pattern check to shared dispatch macro.
+                                    let mut _sub_bound: Vec<&str> = Vec::new();
+                                    lower_sub_pat!(self, subpat.as_ref(), scrut_slot, next_label, _sub_bound, "§6.18");
                                 }
                                 _ => {
                                     let s_reg = self.alloc_reg()?;
@@ -16891,59 +16777,8 @@ impl<'src> LowerCtx<'src> {
                     // FLS §5.1.4: @ binding pattern in while-let.
                     // Emit the sub-pattern check (exit loop on mismatch) and install binding.
                     Pat::Bound { name, subpat } => {
-                        match subpat.as_ref() {
-                            Pat::LitInt(n) => {
-                                let s_reg = self.alloc_reg()?;
-                                self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
-                                let p_reg = self.alloc_reg()?;
-                                self.instrs.push(Instr::LoadImm(p_reg, *n as i32));
-                                let eq_reg = self.alloc_reg()?;
-                                self.instrs.push(Instr::BinOp {
-                                    op: IrBinOp::Eq, dst: eq_reg, lhs: s_reg, rhs: p_reg,
-                                    ty: IrTy::Bool,
-                                });
-                                self.instrs.push(Instr::CondBranch { reg: eq_reg, label: exit_label, fls: "§6.15.4" });
-                            }
-                            Pat::RangeInclusive { lo, hi } => {
-                                let s_reg = self.alloc_reg()?;
-                                self.instrs.push(Instr::Load { dst: s_reg, slot: scrut_slot });
-                                let lo_reg = self.alloc_reg()?;
-                                self.instrs.push(Instr::LoadImm(lo_reg, *lo as i32));
-                                let cmp1 = self.alloc_reg()?;
-                                self.instrs.push(Instr::BinOp {
-                                    op: IrBinOp::Ge, dst: cmp1, lhs: s_reg, rhs: lo_reg,
-                                    ty: IrTy::Bool,
-                                });
-                                let hi_reg = self.alloc_reg()?;
-                                self.instrs.push(Instr::LoadImm(hi_reg, *hi as i32));
-                                let cmp2 = self.alloc_reg()?;
-                                self.instrs.push(Instr::BinOp {
-                                    op: IrBinOp::Le, dst: cmp2, lhs: s_reg, rhs: hi_reg,
-                                    ty: IrTy::Bool,
-                                });
-                                let matched = self.alloc_reg()?;
-                                self.instrs.push(Instr::BinOp {
-                                    op: IrBinOp::BitAnd, dst: matched, lhs: cmp1, rhs: cmp2,
-                                    ty: IrTy::Bool,
-                                });
-                                self.instrs.push(Instr::CondBranch { reg: matched, label: exit_label, fls: "§6.15.4" });
-                            }
-                            // FLS §5.1.4 + §5.1.11: `n @ (pat1 | pat2)` — OR sub-pattern.
-                            // Accumulate alternatives; branch to exit_label on no match
-                            // (exits the while-let loop when no alternative matches).
-                            // Cache-line note: cost mirrors the OR alternative costs.
-                            Pat::Or(alts) => {
-                                let matched_reg = self.alloc_reg()?;
-                                self.instrs.push(Instr::LoadImm(matched_reg, 0));
-                                for alt in alts {
-                                    self.accum_or_alt(alt, scrut_slot, matched_reg)?;
-                                }
-                                self.instrs.push(Instr::CondBranch { reg: matched_reg, label: exit_label, fls: "§6.15.4" });
-                            }
-                            other => return Err(LowerError::Unsupported(format!(
-                                "@ binding sub-pattern not yet supported in while-let (FLS §6.15.4, §5.1.4): {other:?}"
-                            ))),
-                        }
+                        // FLS §5.1 — delegate sub-pattern check to shared dispatch macro.
+                        lower_sub_pat!(self, subpat.as_ref(), scrut_slot, exit_label, bound_names, "§6.15.4");
                         let bind_name = name.text(self.source);
                         let bind_slot = self.alloc_slot()?;
                         let bind_reg = self.alloc_reg()?;
