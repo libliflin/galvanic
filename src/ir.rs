@@ -785,9 +785,11 @@ pub enum Instr {
     /// The `lsl #3` scales the index by 8 (bytes per i64 slot), matching the
     /// layout established by array literal lowering (one slot per element).
     ///
-    /// FLS §6.9 AMBIGUOUS: Out-of-bounds store must panic, but the panic
-    /// mechanism without the standard library is not specified. No bounds
-    /// check is emitted at this milestone.
+    /// FLS §6.9 AMBIGUOUS: Out-of-bounds store must panic, but the spec does
+    /// not specify the panic mechanism. Galvanic's resolution: when `len > 0`,
+    /// codegen emits `cmp x{index_reg}, #{len}; b.hs _galvanic_panic` before
+    /// the store. Slice parameters with unknown length (`len == 0`) receive no
+    /// bounds check (deferred).
     ///
     /// FLS §6.1.2:37–45: All instructions are runtime — no constant folding.
     ///
