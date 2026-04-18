@@ -1,3 +1,82 @@
+# Verification — Cycle 027, Round 1 (Verifier)
+
+## What I compared
+
+- **Goal:** Add a `full_pipeline` benchmark to `benches/throughput.rs` covering lex → parse → lower → emit_asm, reporting throughput in bytes/sec. Closes the broken claim→code→test→benchmark chain for `Instr` (80 bytes, cache-line-spanning).
+- **Builder's diff:** Two `full_pipeline` bench entries added to `bench_end_to_end` (one per fixture: `fls_functions`, `fls_expressions`), plus `use galvanic::codegen` and `use galvanic::lower` imports.
+
+**What I ran:**
+- `cargo test` — 2115 pass, 0 fail ✓ (216 lib + 1842 e2e + 46 fls_fixtures + 11 smoke)
+- `cargo clippy -- -D warnings` — clean ✓
+- `cargo bench --bench throughput -- full_pipeline` — both entries produced `thrpt:` lines:
+  - `end_to_end/full_pipeline/fls_functions`: `[102.20 MiB/s 102.50 MiB/s 102.75 MiB/s]` ✓
+  - `end_to_end/full_pipeline/fls_expressions`: `[90.240 MiB/s 90.648 MiB/s 90.978 MiB/s]` ✓
+- Checked `lower::lower` return type: `Result<Module, LowerErrors>` — `.unwrap()` is correct because both fixtures lower without errors (confirmed: `cargo run -- tests/fixtures/fls_6_expressions.rs` → 60 items, 0 failures; `fls_9_functions.rs` → 19 items, 0 failures) ✓
+- Checked `codegen::emit_asm` return type: `Result<String, CodegenError>` — `.unwrap()` correct ✓
+- Verified `Throughput::Bytes` is set in the surrounding loop before the `full_pipeline` bench — criterion reports bytes/sec automatically ✓
+
+## What's here, what was asked
+
+Matches. The work holds up against the goal from my comparative lens.
+
+- The `bench_end_to_end` group now contains both `lex_and_parse` and `full_pipeline` for each fixture — the group name is no longer a false promise.
+- `full_pipeline` runs all four pipeline stages including `lower::lower` and `codegen::emit_asm` — the codegen stage (where the cache-line thesis lives) is measured.
+- Both fixtures confirm the pipeline completes cleanly end-to-end.
+- The Cache-Line Performance Researcher can now run `cargo bench --bench throughput -- full_pipeline` and see a citable MiB/s number for the codegen stage.
+
+## What I added
+
+Nothing this round — the work holds up against the goal from my lens.
+
+## Notes for the goal-setter
+
+- The `fls_literals` fixture is used in `bench_lexer` but not in `bench_end_to_end`. If the researcher wants a literals-heavy codegen throughput number, adding it to `bench_end_to_end` would be a narrow one-line addition. Not a gap for this goal — the two existing fixtures cover the stated scope.
+- The `.unwrap()` calls in the `full_pipeline` bench will panic if a future fixture gains unsupported constructs. Standard bench practice: fixtures used in benchmarks should lower cleanly. No action needed now, but worth noting if new fixtures are added to the bench group.
+
+---
+
+# Changelog — Cycle 027, Round 1 (Builder)
+
+## Goal
+Add a `full_pipeline` benchmark to `benches/throughput.rs` that covers
+lex → parse → lower → emit_asm, reporting throughput in bytes/sec. Closes
+the broken claim→code→test→benchmark chain for `Instr` (80 bytes, cache-line-spanning).
+
+## Who This Helps
+- **Stakeholder:** Cache-Line Performance Researcher
+- **Impact:** Step 2 of the journey (`cargo bench`) now yields a number for the codegen
+  stage — the stage that embodies the cache-line thesis. Previously `end_to_end` only
+  measured `lex_and_parse`; the group name promised more than it delivered.
+
+## Applied
+Added `full_pipeline` benchmarks to `bench_end_to_end` in `benches/throughput.rs`.
+
+For each of the two existing fixtures (`fls_functions`, `fls_expressions`), a new
+`BenchmarkId::new("full_pipeline", name)` entry runs the complete pipeline:
+`lexer::tokenize` → `parser::parse` → `lower::lower` → `codegen::emit_asm`.
+`Throughput::Bytes` is already set by the surrounding loop, so criterion reports
+bytes/sec automatically.
+
+Added `use galvanic::codegen` and `use galvanic::lower` imports.
+
+**Files changed:**
+- `benches/throughput.rs` — `full_pipeline` bench entries + two new imports
+
+## Validated
+- `cargo build` — clean
+- `cargo test` — **2115 pass, 0 fail**
+- `cargo clippy -- -D warnings` — clean
+- `cargo bench --bench throughput -- full_pipeline`:
+  - `end_to_end/full_pipeline/fls_functions`: ~101 MiB/s
+  - `end_to_end/full_pipeline/fls_expressions`: ~90 MiB/s
+- PR: libliflin/galvanic#469
+
+**Where the verifier should look:**
+- `benches/throughput.rs:103–115` — the `full_pipeline` bench block inside `bench_end_to_end`
+- `cargo bench --bench throughput -- full_pipeline` — seeing a `thrpt:` line with MiB/s is the signal
+
+---
+
 # Changelog — Cycle 027 (Customer Champion)
 
 ## Stakeholder: Cache-Line Performance Researcher
