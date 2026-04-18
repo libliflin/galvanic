@@ -8093,7 +8093,7 @@ impl<'src> LowerCtx<'src> {
                                 }
                             }
                             // CondBranch: cbz branches when matched_reg == 0 (no match).
-                            self.instrs.push(Instr::CondBranch { reg: matched_reg, label: else_label, fls: "§6.17" });
+                            self.instrs.push(Instr::CondBranch { reg: matched_reg, label: else_label, fls: "§8.1" });
                             // No bindings: OR scalar/enum-unit patterns bind nothing.
                         }
                         // FLS §5.1.4 + §8.1: `@` binding pattern in let-else.
@@ -8122,7 +8122,7 @@ impl<'src> LowerCtx<'src> {
                             self.accum_or_alt(subpat, scrut_slot, matched_reg)?;
 
                             // Step 2: Branch to else on mismatch (matched_reg == 0).
-                            self.instrs.push(Instr::CondBranch { reg: matched_reg, label: else_label, fls: "§6.17" });
+                            self.instrs.push(Instr::CondBranch { reg: matched_reg, label: else_label, fls: "§8.1" });
 
                             // Step 3: Match succeeded — bind scrutinee value to name.
                             let binding_slot = self.alloc_slot()?;
@@ -8142,16 +8142,16 @@ impl<'src> LowerCtx<'src> {
                     }
 
                     // Jump over the else block (pattern matched, bindings valid).
-                    self.instrs.push(Instr::Branch { target: end_label, fls: "§6.17" });
+                    self.instrs.push(Instr::Branch { target: end_label, fls: "§8.1" });
 
                     // Else block (diverges via return/break/continue).
                     // FLS §8.1: The else block must be a diverging expression.
                     // FLS §6.19: return expressions emit Ret instructions.
-                    self.instrs.push(Instr::Label { id: else_label, fls: "§6.17" });
+                    self.instrs.push(Instr::Label { id: else_label, fls: "§8.1" });
                     let _ = self.lower_block_to_value(else_blk, &IrTy::I32)?;
 
                     // Continuation point: bindings are in scope.
-                    self.instrs.push(Instr::Label { id: end_label, fls: "§6.17" });
+                    self.instrs.push(Instr::Label { id: end_label, fls: "§8.1" });
                     return Ok(());
                 }
 
