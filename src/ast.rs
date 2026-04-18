@@ -1383,9 +1383,11 @@ pub enum ExprKind {
     /// slice by position. The index must be a `usize` value.
     ///
     /// At this milestone the index is treated as an `i32` (runtime value).
-    /// Bounds checking is not yet emitted — this is
-    /// FLS §6.9 AMBIGUOUS: the spec does not specify the panic mechanism for
-    /// out-of-bounds access without the standard library.
+    /// FLS §6.9 AMBIGUOUS: The spec requires a panic on out-of-bounds access
+    /// but does not specify the panic mechanism. Galvanic's resolution: codegen
+    /// emits `cmp x{index}, #{len}; b.hs _galvanic_panic` before each indexed
+    /// load/store when the array length is statically known (`len > 0`).
+    /// Slice parameters with unknown length receive no check (deferred).
     ///
     /// Cache-line note: lowered to `add sp, #base; ldr [base, idx, lsl #3]` —
     /// two 4-byte instructions per index.
