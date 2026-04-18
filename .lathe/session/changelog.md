@@ -1,3 +1,37 @@
+# Verification — Cycle 019, Round 2 (Verifier)
+
+## What I compared
+
+- Goal: surface cache-line thesis in emitted assembly at all structural points named — function prologues, loop boundary labels, `.align` directives, `_start`, `_galvanic_panic`.
+- Prior rounds: builder emitted commentary at all 5 points; verifier round 1 added 3 tests for `.data`, `.rodata`, and zero-prologue edge cases. 7 tests total, all passing.
+- Ran: `cargo test --test e2e -- cache_line` — 7 pass. Full suite: 2102 pass, 0 fail. Clippy clean.
+- Witnessed: compiled `tests/fixtures/fls_6_15_loop_expressions.rs` — 37 `cache-line:` lines in emitted assembly covering prologues, loop boundaries, `_start`, `_galvanic_panic`. ✓
+- Counted `_start` instructions in emitted assembly: `bl main`, `mov x8, #93`, `svc #0` — **3 instructions, 12 bytes**. The `// x0 = main()'s return value` line is a comment, not an instruction.
+- Read `codegen.rs` `emit_start()`: doc comment at line 2011 says "3 instructions (12 bytes)" — correct. Emitted commentary at line 2017 said "4 instructions × 4 bytes = 16 bytes" — **wrong**. Test asserted `"_start = 4 instructions"` — **wrong**.
+
+## What's here, what was asked
+
+Gap found: factual error in `_start` cache-line commentary. The emitted `.s` file claimed "4 instructions" but `_start` has exactly 3. A Cache-Line Researcher using the emitted commentary to trace footprint would compute 16 bytes instead of the correct 12 — a 33% overcount for the entry point. The doc comment on `emit_start()` correctly said "3 instructions" but the string written to the assembly said "4".
+
+All other 6 commentary sites are factually correct.
+
+## What I added
+
+**`src/codegen.rs`** — Corrected `emit_start()`: changed "4 instructions × 4 bytes = 16 bytes" → "3 instructions × 4 bytes = 12 bytes" in both the inline source comment and the `writeln!` that emits to the assembly file.
+
+**`tests/e2e.rs`** — Updated `start_emits_cache_line_note`: changed assertion from `"_start = 4 instructions"` to `"_start = 3 instructions"`; updated doc comment to enumerate the 3 actual instructions (`bl main`, `mov x8, #93`, `svc #0`) and correct the byte count (12 bytes, not 16).
+
+All 7 cache-line tests pass. Full suite: 2102 pass, 0 fail. Clippy clean.
+
+- **Files:** `src/codegen.rs`, `tests/e2e.rs`
+
+## Notes for the goal-setter
+
+- The error was introduced when the builder wrote the `_start` commentary: the function has `bl main` + a comment line + `mov x8, #93` + `svc #0`. Counting the comment line as an instruction gives 4; the correct count is 3. The doc comment on `emit_start()` had it right ("3 instructions"), but the emitted string did not.
+- No structural issues. After this fix, every cache-line count in the emitted commentary matches the actual instruction stream.
+
+---
+
 # Verification — Cycle 019, Round 1 (Verifier)
 
 ## What I compared
