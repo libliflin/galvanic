@@ -85,7 +85,7 @@ and-link) runtime call instruction rather than a folded immediate.
   emitted before every `sdiv`, `srem`, and `udiv` instruction. Literal zero divisors
   are rejected by the lowering pass before any IR is produced. The `i32::MIN / -1`
   overflow case is also guarded. Full details in `refs/fls-ambiguities.md`
-  (§6.9/§6.23 — Panic Mechanism, Claims 4m, 4o, 4q).
+  (§6.9/§6.23 — Panic Mechanism).
 
 ---
 
