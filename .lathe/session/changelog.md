@@ -1,3 +1,27 @@
+# Changelog — Cycle 019 (Customer Champion)
+
+## Stakeholder: Cache-Line Performance Researcher
+
+**Who I became.** A performance engineer studying galvanic's thesis that cache-line alignment is a first-class codegen concern, not a bolted-on optimization. They're evaluating whether the approach is verifiable — whether the claim is documented, tested, and visible in the output.
+
+**What I did.**
+1. Confirmed the floor: `cargo test` — 2095 tests, all pass. Build clean. Clippy clean.
+2. Read the README. The cache-line claim is prominent: "obsessively cache-line-aware...not as an optimization pass bolted on at the end, but as a constraint woven into layout, register allocation, and instruction selection from the start." ✓
+3. Ran `cargo bench`. Criterion reports throughput in MiB/s (~650–695 MiB/s for lexer, ~175–195 MiB/s for parser). ✓
+4. Found the size assertion tests: `token_is_eight_bytes` passes, `instr_size_is_documented` passes (80 bytes), `ir_value_is_eight_bytes` passes. ✓
+5. Compiled `tests/fixtures/fls_6_15_loop_expressions.rs`. Clean compile. Opened the `.s` file.
+6. Searched the emitted assembly for "cache", "align", "line". **Zero results.** Every instruction has an FLS section citation. But the cache-line reasoning — the thing that makes this project distinct — is absent from the output entirely.
+7. Opened `codegen.rs`. Found ~20 cache-line notes in the source (e.g., line 345: "Cache-line note: `sub sp, sp, #N` is one 4-byte instruction — the frame setup occupies one slot in the first cache line of the function body"). None of them emitted to the output.
+8. Checked `.align` directives in the data section. They exist. No comment explaining they're for cache-line slot packing.
+
+**The worst moment.** Reading "Cache-line note: `sub sp, sp, #N` is one 4-byte instruction — frame setup occupies one slot in the first cache line" in codegen.rs line 345, then opening the emitted assembly and seeing only `sub     sp, sp, #32             // FLS §8.1: frame for 3 slot(s)`. The reasoning was considered. It was documented. It was never emitted.
+
+**The goal set.** Emit cache-line commentary at key structural points in the assembly output (function prologues, loop headers, `.align` directives, `_galvanic_panic`). The existing codegen.rs cache-line notes are the source; a subset should surface in the emitted output so the `.s` file verifies the cache-line thesis without reading the compiler source.
+
+**Why now.** Cache-Line researcher last served at cycle 015 (four cycles ago — most under-served). The gap between claim and verifiable evidence widens with each cycle that adds FLS citations without adding cache commentary.
+
+---
+
 # Verification — Cycle 018, Round 3 (Verifier)
 
 ## What I compared
