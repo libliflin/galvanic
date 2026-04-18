@@ -1,3 +1,45 @@
+# Changelog — Cycle 028 (Customer Champion)
+
+## Stakeholder: Compiler Contributor
+
+**Who I became.** A Rust programmer who wants to contribute to galvanic by implementing
+tuple scrutinee support in match expressions (FLS §6.18). Not the primary author. Comfortable
+with compilers conceptually. Arrived because `fls_6_18_match_expressions.rs` fails on
+`match (x, y)`.
+
+**What I tried.**
+1. `cargo build` — clean. `cargo test` — 2115 pass, 0 fail.
+2. Ran all §6 expression fixtures to find "not yet supported" errors. Found one:
+   `fls_6_18_match_expressions.rs` partial failure, `match_tuple` function.
+3. Error: "lower failed in 'match_tuple': not yet supported: tuple expression must be
+   bound to a `let` variable at this milestone". No FLS section. No construct name.
+4. Opened `lib.rs` — excellent. Step 4 of the adding-a-feature checklist says "the error
+   must name the function, FLS section, and specific construct." This error does not.
+5. Grepped for the error string → `lower.rs:18645`, inside the generic `ExprKind::Tuple`
+   fallback of `lower_expr`. Comment says: "tail expression or value context." Wrong context.
+6. Found the `ExprKind::Match` handler at line 12436. Saw `enum_base_slot` (12469) and
+   `struct_base_slot` (12484) detection blocks — the models for extending scrutinee handling.
+   Then line 12497: `lower_expr(scrutinee, &scrut_ty)` called unconditionally, no tuple check.
+
+**The hollowest moment.** Standing at `lower.rs:18645` in the `ExprKind::Tuple` fallback,
+reading "This path is reached when a tuple literal appears as a tail expression or in a
+context where it's used as a value directly." My program had `match (x, y)`. Neither
+description matched. I was in the wrong place, pointed there by the error message. The right
+place — the `ExprKind::Match` handler with its `enum_base_slot` / `struct_base_slot` patterns
+— is 6,000 lines earlier, and nothing in the error pointed me there.
+
+**Goal set.** Add an early-detection check for tuple scrutinees in the `ExprKind::Match`
+handler before the `lower_expr(scrutinee, &scrut_ty)` call. The new error must name FLS
+§6.18 and §6.10, state that the fix belongs in the match handler, and appear directly beside
+the `enum_base_slot` / `struct_base_slot` patterns the contributor needs to follow. No
+functional change — error placement and message quality only.
+
+**Why now.** The lib.rs invariant says errors must name the function, FLS section, and
+specific construct. This error names only the function. The fix is one check in the right
+place — and it models the pattern for every future compound-scrutinee addition.
+
+---
+
 # Verification — Cycle 027, Round 2 (Verifier)
 
 ## What I compared
